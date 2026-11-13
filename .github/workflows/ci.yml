@@ -23,7 +23,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # rust-toolchain.toml pins the channel and components; this makes rustup
       # materialise the toolchain before the first cargo invocation.
       - run: rustup show
@@ -38,7 +38,7 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Mirrors the apt list in zed-industries/zed `script/linux`, which is the
       # authoritative set of native dependencies for GPUI on Debian-likes.
