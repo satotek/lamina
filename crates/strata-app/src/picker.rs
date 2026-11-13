@@ -380,7 +380,11 @@ impl Picker {
                 .flex()
                 .items_center()
                 .gap_2()
-                .child(Input::new(&self.input))
+                .child(
+                    // A filled field, like the main window's search, so the
+                    // picker's input reads as the same control.
+                    Input::new(&self.input).bg(design.field),
+                )
                 // The dialog's footer carries the chooser button; the path
                 // toggle belongs next to the field it switches either way.
                 .when(self.mode == Mode::Dialog, |row| {
@@ -615,13 +619,34 @@ impl Render for Picker {
                     this.leave_path_entry(window, cx);
                 }))
                 .child(
-                    TitleBar::new().child(
-                        div()
-                            .px_3()
-                            .text_size(px(11.0))
-                            .text_color(design.muted)
-                            .child("Welcome"),
-                    ),
+                    // The same 44 px chrome strip as the main window, so the
+                    // welcome screen is the same app with no repository open.
+                    TitleBar::new()
+                        .h(px(44.0))
+                        .bg(design.chrome)
+                        .border_color(design.border)
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .flex_none()
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(7.0))
+                                        .child(crate::style::app_mark(16.0))
+                                        .child(crate::style::wordmark(9.5, design.muted)),
+                                )
+                                .child(div().w(px(1.0)).h(px(18.0)).mx_1().bg(design.border))
+                                .child(
+                                    div()
+                                        .text_size(px(11.0))
+                                        .text_color(design.muted)
+                                        .child("Welcome"),
+                                ),
+                        ),
                 )
                 .child(
                     div()

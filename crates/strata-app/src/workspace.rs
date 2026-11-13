@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement, Render, Styled, Window, div, px,
+    ParentElement, Render, Styled, Subscription, Window, div, px,
 };
 use gpui_component::WindowExt as _;
 use gpui_component::dialog::DialogFooter;
@@ -40,6 +40,10 @@ pub struct Workspace {
     /// The working-tree root of the repository on screen. Canonical, so the
     /// picker can recognise the repository it is already showing.
     path: Option<PathBuf>,
+    /// `System` follows the OS. A repository view subscribes for itself; the
+    /// welcome screen has no view of its own to do that, so the workspace
+    /// keeps the subscription while it is showing one.
+    _appearance: Option<Subscription>,
 }
 
 impl Workspace {
@@ -71,6 +75,8 @@ impl Workspace {
                 Self {
                     content: Content::Repo(view),
                     path,
+                    // The repository view subscribes on its own.
+                    _appearance: None,
                 }
             }
             None => {
@@ -98,12 +104,18 @@ impl Workspace {
                         });
                     }
                 }
-                Self::welcome(window, cx)
+                Self::welcome(
+                    window.observe_window_appearance(|window, cx| {
+                        crate::settings::apply_theme(Some(window), cx)
+                    }),
+                    window,
+                    cx,
+                )
             }
         }
     }
 
-    fn welcome(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn welcome(appearance: Subscription, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let workspace = cx.entity();
         let view = cx.new(|cx| Picker::new(Mode::Page, workspace, window, cx));
         let input = view.read(cx).input().clone();
@@ -112,6 +124,7 @@ impl Workspace {
         Self {
             content: Content::Welcome(view),
             path: None,
+            _appearance: Some(appearance),
         }
     }
 

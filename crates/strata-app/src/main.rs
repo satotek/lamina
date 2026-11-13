@@ -12,6 +12,7 @@
 mod actions;
 mod autofetch;
 mod branches;
+mod component_theme;
 mod conflicts;
 mod data;
 mod debug_launch;

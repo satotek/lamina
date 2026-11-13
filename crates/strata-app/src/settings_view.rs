@@ -5,6 +5,11 @@
 //! is stored, saved in the background and visible in every window on the next
 //! frame; there is no Save button. The pages themselves are built in
 //! [`pages`], and the value rules each control applies live in [`change`].
+//!
+//! The frame follows the main window: the same 44 px chrome title bar with the
+//! app mark, the same [`Design`] sidebar surface behind the page list, and the
+//! same selected-row tint. The page widget is gpui-component's, so the rest of
+//! the palette arrives through [`crate::component_theme`].
 
 mod change;
 mod pages;
@@ -12,16 +17,18 @@ mod pages;
 use std::path::Path;
 
 use gpui::{
-    AnyWindowHandle, App, AppContext as _, Bounds, Context, FocusHandle, Global,
-    InteractiveElement as _, IntoElement, KeyBinding, ParentElement, Render, Styled,
-    TitlebarOptions, Window, WindowBounds, WindowDecorations, WindowOptions, actions, div, px,
-    size,
+    AnyWindowHandle, App, AppContext as _, Bounds, Context, FocusHandle, FontWeight, Global,
+    InteractiveElement as _, IntoElement, KeyBinding, ParentElement, Render, StyleRefinement,
+    Styled, Subscription, TitlebarOptions, Window, WindowBounds, WindowDecorations, WindowOptions,
+    actions, div, px, size,
 };
+use gpui_component::group_box::GroupBoxVariant;
 use gpui_component::setting::Settings as SettingsPages;
 use gpui_component::{ActiveTheme as _, TitleBar, h_flex, v_flex};
 
 use crate::actions::OpenSettings;
-use crate::settings;
+use crate::settings::{self, Settings};
+use crate::style::{self, Design};
 
 /// Key context of the settings window, so its close shortcuts do not fire in
 /// the main window's views.
@@ -37,10 +44,15 @@ const PLATFORM_CLOSE: &str = "cmd-w";
 const PLATFORM_CLOSE: &str = "ctrl-w";
 
 /// Size the window opens at, and the smallest it can be dragged to.
-const WIDTH: f32 = 820.0;
-const HEIGHT: f32 = 560.0;
-const MIN_WIDTH: f32 = 560.0;
-const MIN_HEIGHT: f32 = 420.0;
+const WIDTH: f32 = 900.0;
+const HEIGHT: f32 = 640.0;
+const MIN_WIDTH: f32 = 640.0;
+const MIN_HEIGHT: f32 = 460.0;
+
+/// The page list's width, and how far the divider can be dragged either way.
+const SIDEBAR_WIDTH: f32 = 200.0;
+const SIDEBAR_MIN: f32 = 176.0;
+const SIDEBAR_MAX: f32 = 280.0;
 
 /// Registers the window and the action that opens it. Call once at startup.
 pub fn bind(cx: &mut App) {
@@ -104,16 +116,50 @@ fn open(cx: &mut App) {
 
 struct SettingsView {
     focus: FocusHandle,
+    /// `System` follows the OS; this window has no other reason to hear about
+    /// an appearance change, so it keeps the subscription alive.
+    _appearance: Subscription,
 }
 
 impl SettingsView {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        Self { focus }
+        let appearance =
+            window.observe_window_appearance(|window, cx| settings::apply_theme(Some(window), cx));
+        Self {
+            focus,
+            _appearance: appearance,
+        }
     }
 
-    fn footer(&self, cx: &Context<Self>) -> impl IntoElement {
+    /// The window's title bar, built like the main window's: the app mark and
+    /// wordmark, a divider, then the name of the window.
+    fn title_bar(&self, design: &Design) -> impl IntoElement {
+        TitleBar::new()
+            .h(px(44.0))
+            .bg(design.chrome)
+            .border_color(design.border)
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .flex_none()
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(7.0))
+                            .child(style::app_mark(16.0))
+                            .child(style::wordmark(9.5, design.muted)),
+                    )
+                    .child(div().w(px(1.0)).h(px(18.0)).mx_1().bg(design.border))
+                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Settings")),
+            )
+    }
+
+    fn footer(&self, design: &Design) -> impl IntoElement {
         let path = settings::settings_file();
         let label = path.as_ref().map_or_else(
             || "No settings file: the configuration directory is unknown".to_owned(),
@@ -125,18 +171,18 @@ impl SettingsView {
             .items_center()
             .justify_between()
             .gap_3()
-            .h(px(34.0))
+            .h(px(40.0))
             .px_3()
             .border_t_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().title_bar)
-            .text_size(px(11.0))
+            .border_color(design.border)
+            .bg(design.chrome)
+            .text_size(px(design.tiny()))
             .child(
                 div()
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .text_color(cx.theme().muted_foreground)
+                    .text_color(design.muted)
                     .child(label),
             )
             .child(
@@ -156,42 +202,36 @@ impl SettingsView {
 
 impl Render for SettingsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let design = Design::new(cx.theme(), Settings::get(cx));
+        // `Sidebar` clears its own border and reads its colours from the theme
+        // tokens, so the style set here is the one that makes the page list the
+        // same surface as the main window's sidebar.
+        let sidebar_style = StyleRefinement::default()
+            .bg(design.sidebar)
+            .border_r_1()
+            .border_color(design.border);
+
         v_flex()
             .size_full()
             .key_context(SETTINGS_VIEW)
             .track_focus(&self.focus)
             .on_action(cx.listener(|_, _: &CloseSettings, window, _| window.remove_window()))
-            .bg(cx.theme().background)
-            .text_color(cx.theme().foreground)
-            .child(
-                TitleBar::new().child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_3()
-                        .min_w_0()
-                        .child(
-                            div()
-                                .text_size(px(13.0))
-                                .font_family(cx.theme().font_family.clone())
-                                .child("Strata"),
-                        )
-                        .child(
-                            div()
-                                .truncate()
-                                .text_size(px(11.0))
-                                .text_color(cx.theme().muted_foreground)
-                                .child("Settings"),
-                        ),
-                ),
-            )
+            .bg(design.background)
+            .text_color(design.text)
+            .text_size(px(design.ui))
+            .child(self.title_bar(&design))
             .child(
                 div().flex_1().min_h_0().child(
                     SettingsPages::new("settings")
-                        .sidebar_width(px(180.0))
+                        .sidebar_width(px(SIDEBAR_WIDTH))
+                        .sidebar_size_range(px(SIDEBAR_MIN)..px(SIDEBAR_MAX))
+                        .sidebar_style(&sidebar_style)
+                        // Each group is a bordered card on the page surface,
+                        // with its heading and description above it.
+                        .with_group_variant(GroupBoxVariant::Outline)
                         .pages(pages::pages()),
                 ),
             )
-            .child(self.footer(cx))
+            .child(self.footer(&design))
     }
 }

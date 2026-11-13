@@ -9,7 +9,7 @@ use gpui::{
     AnyElement, App, Hsla, IntoElement, ParentElement as _, SharedString, Styled as _, div, px, rgb,
 };
 use gpui::{Bounds, canvas, fill, point};
-use gpui_component::{ActiveTheme as _, Colorize as _, Icon, Sizable as _, Theme};
+use gpui_component::{Colorize as _, Icon, Sizable as _, Theme};
 use strata_core::ChangeKind;
 use strata_core::highlight::HighlightKind;
 
@@ -251,57 +251,12 @@ impl ButtonColors {
     }
 }
 
-/// Puts gpui-component's button palette on the [`Design`] colours.
+/// Puts gpui-component's palette on the [`Design`] colours.
 ///
-/// A component button paints its rest, hover, pressed and disabled states from
-/// the theme, so a fill set on the element itself is replaced as soon as the
-/// pointer enters it. Writing the tokens is the supported way to change them;
-/// it also keeps the dialogs, menus and inputs beside the buttons on the same
-/// palette. The guard makes the write happen once per palette, because a
-/// button renders every frame.
+/// The whole theme is written now, not only the buttons; this stays for the
+/// callers that predate [`crate::component_theme::sync`].
 pub fn sync_component_buttons(cx: &mut App) {
-    let (primary, danger) = {
-        let design = Design::new(cx.theme(), Settings::get(cx));
-        (design.primary_button(), design.danger_button())
-    };
-    let theme = cx.theme();
-    let in_sync = theme.primary == primary.background
-        && theme.primary_hover == primary.hover
-        && theme.primary_active == primary.active
-        && theme.primary_foreground == primary.foreground
-        && theme.button_primary == primary.background
-        && theme.button_primary_hover == primary.hover
-        && theme.button_primary_active == primary.active
-        && theme.button_primary_foreground == primary.foreground
-        && theme.danger == danger.background
-        && theme.danger_hover == danger.hover
-        && theme.danger_active == danger.active
-        && theme.danger_foreground == danger.foreground
-        && theme.button_danger == danger.background
-        && theme.button_danger_hover == danger.hover
-        && theme.button_danger_active == danger.active
-        && theme.button_danger_foreground == danger.foreground;
-    if in_sync {
-        return;
-    }
-    Theme::update(cx, |theme| {
-        theme.primary = primary.background;
-        theme.primary_hover = primary.hover;
-        theme.primary_active = primary.active;
-        theme.primary_foreground = primary.foreground;
-        theme.button_primary = primary.background;
-        theme.button_primary_hover = primary.hover;
-        theme.button_primary_active = primary.active;
-        theme.button_primary_foreground = primary.foreground;
-        theme.danger = danger.background;
-        theme.danger_hover = danger.hover;
-        theme.danger_active = danger.active;
-        theme.danger_foreground = danger.foreground;
-        theme.button_danger = danger.background;
-        theme.button_danger_hover = danger.hover;
-        theme.button_danger_active = danger.active;
-        theme.button_danger_foreground = danger.foreground;
-    });
+    crate::component_theme::sync(cx);
 }
 
 impl Default for Design {

@@ -336,9 +336,9 @@ pub fn apply_theme(window: Option<&mut Window>, cx: &mut App) {
         ThemeMode::Light => Theme::change(gpui_component::ThemeMode::Light, window, cx),
         ThemeMode::Dark => Theme::change(gpui_component::ThemeMode::Dark, window, cx),
     }
-    // Every theme change resets gpui-component's palette, so the filled
-    // buttons are re-pointed at the design's colours right after it.
-    crate::style::sync_component_buttons(cx);
+    // Every theme change resets gpui-component's palette, so the tokens are
+    // re-pointed at the design's colours right after it.
+    crate::component_theme::sync(cx);
 }
 
 /// Changes the settings and notifies `observe_global::<Settings>` observers at

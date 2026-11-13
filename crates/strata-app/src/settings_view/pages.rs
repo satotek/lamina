@@ -11,13 +11,14 @@ use std::path::Path;
 
 use gpui::{
     App, AppContext as _, Entity, IntoElement, ParentElement, PathPromptOptions, SharedString,
-    Styled, Subscription, Window, div, px,
+    StyleRefinement, Styled, Subscription, Window, div, px,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::setting::{
     NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage,
 };
 use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_kit_assets::IconName;
 
 use super::change::{self, Section};
 use crate::settings::{self, DateFormat, DiffLayout, Settings, ThemeMode};
@@ -25,6 +26,24 @@ use crate::settings::{self, DateFormat, DiffLayout, Settings, ThemeMode};
 /// Font families offered beside the free-text font fields.
 const UI_FONTS: &[&str] = &["Inter", "SF Pro Text", "Segoe UI"];
 const CODE_FONTS: &[&str] = &["JetBrains Mono", "Cascadia Code", "Menlo", "Consolas"];
+
+/// Width every control on the right of a settings row shares, so the right
+/// edge lines up down a page and across pages.
+const CONTROL_WIDTH: f32 = 260.0;
+
+/// The icon the sidebar shows beside a section, matching the main sidebar's
+/// use of one per list. Every name here is in the asset bundle the app embeds,
+/// so a section cannot end up with a blank space where its icon belongs.
+fn icon(section: Section) -> IconName {
+    match section {
+        Section::Appearance => IconName::Palette,
+        Section::Diff => IconName::Replace,
+        Section::History => IconName::FileText,
+        Section::Behaviour => IconName::Settings2,
+        Section::Tools => IconName::SquareTerminal,
+        Section::Privacy => IconName::EyeOff,
+    }
+}
 
 /// Every page, in the order the sidebar lists them.
 pub(super) fn pages() -> Vec<SettingPage> {
@@ -361,11 +380,15 @@ fn privacy() -> SettingPage {
         ))
 }
 
-/// The page frame every section starts from: a title, and a reset button that
-/// restores just that section.
+/// The page frame every section starts from: a title, an icon for the sidebar,
+/// and a reset button that restores just that section.
 fn shell(section: Section) -> SettingPage {
     SettingPage::new(section.title())
+        .icon(icon(section))
         .resettable(false)
+        // 24 px of padding and an 8 px gap between title, description and the
+        // first card: the window's spacing grid.
+        .header_style(&StyleRefinement::default().p(px(24.0)).gap(px(8.0)))
         .title_suffix(move |_, _cx| {
             crate::ui::button(
                 SharedString::from(format!("reset-{}", section.title().to_lowercase())),
@@ -406,6 +429,7 @@ fn theme_field() -> SettingField<SharedString> {
             settings::apply_theme(None, cx);
         },
     )
+    .w(px(CONTROL_WIDTH))
 }
 
 /// Value and label pairs for a dropdown.
@@ -438,6 +462,7 @@ fn choice(
             cx.refresh_windows();
         },
     )
+    .w(px(CONTROL_WIDTH))
 }
 
 /// A number field whose bounds are the ones [`change`] clamps to, so the two
@@ -460,6 +485,7 @@ fn number(
             cx.refresh_windows();
         },
     )
+    .w(px(CONTROL_WIDTH))
 }
 
 /// The state of a text field: the input plus the subscription that writes each
@@ -480,7 +506,7 @@ fn text_field(
         let state = text_state(key.clone(), placeholder, get, set, window, cx);
         let input = state.read(cx).input.clone();
 
-        let mut field = v_flex().gap_1().w(px(320.0)).child(
+        let mut field = v_flex().gap_1().w(px(CONTROL_WIDTH)).child(
             Input::new(&input)
                 .with_size(options.size())
                 .disabled(options.is_disabled()),
@@ -529,10 +555,10 @@ fn git_field() -> SettingField<SharedString> {
         let input = state.read(cx).input.clone();
         let error = git_executable_error(Settings::get(cx).behaviour.git_executable.as_deref());
 
-        let mut field = v_flex().gap_1().w(px(320.0)).child(
+        let mut field = v_flex().gap_1().w(px(CONTROL_WIDTH)).child(
             h_flex()
                 .gap_1()
-                .w(px(220.0))
+                .w_full()
                 .child(
                     Input::new(&input)
                         .flex_1()
