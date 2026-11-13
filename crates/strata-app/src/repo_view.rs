@@ -61,7 +61,9 @@ pub enum Launch {
     Fake { repo: Rc<FakeRepo> },
     /// A real repository, already loading in the background.
     Repo {
-        session: Session,
+        // Boxed: on macOS a Session is large enough that the other variants
+        // would carry its size for nothing.
+        session: Box<Session>,
         name: String,
         title: String,
         events: UnboundedReceiver<SessionEvent>,
@@ -105,7 +107,7 @@ impl Launch {
                 let head = session.repo().head().ok();
                 let title = data::window_title(&name, head.as_ref());
                 Self::Repo {
-                    session,
+                    session: Box::new(session),
                     name,
                     title,
                     events,
@@ -407,7 +409,7 @@ impl RepoView {
                         }
                     }
                 }));
-                view.session = Some(session);
+                view.session = Some(*session);
                 view.search.init_input(window, cx);
                 crate::autofetch::start(window.window_handle(), cx);
             }
