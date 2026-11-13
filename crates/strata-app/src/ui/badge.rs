@@ -1,5 +1,5 @@
 //! The small labels that sit in rows and headers: change-kind badges, ref
-//! badges and count pills.
+//! badges, status badges and count pills.
 //!
 //! They all paint from [`Design`](crate::style::Design) and share one type size,
 //! so a `M` badge and a `main` badge read as the same kind of thing.
@@ -68,6 +68,50 @@ pub fn ref_badge(
         .text_color(foreground)
         .child(style::glyph_icon(glyph_data, 11.0, foreground))
         .child(div().max_w(px(130.0)).truncate().child(label.into()))
+        .into_any_element()
+}
+
+/// How strongly a status badge reads.
+///
+/// A status badge names a state rather than a ref: a submodule that needs
+/// initialising, a worktree that is locked or missing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BadgeTone {
+    /// Plain information, such as a state that needs no action.
+    Neutral,
+    /// A state worth noticing, in the app's accent.
+    Accent,
+    /// Something that usually needs the user, in the tag colours.
+    Warning,
+    /// A problem, in the app's danger colour.
+    Danger,
+}
+
+/// A short state word, as a chip. Unlike [`ref_badge`] it carries no glyph: the
+/// word is the whole message.
+pub fn status_badge(
+    label: impl Into<SharedString>,
+    tone: BadgeTone,
+    design: &Design,
+) -> AnyElement {
+    let (background, foreground) = match tone {
+        BadgeTone::Neutral => (design.field, design.muted),
+        BadgeTone::Accent => (design.accent_soft, design.accent_text),
+        BadgeTone::Warning => (design.tag_background, design.tag_text),
+        BadgeTone::Danger => (design.remove_background, design.remove_text),
+    };
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .h(px(16.0))
+        .px(px(6.0))
+        .rounded_full()
+        .bg(background)
+        .text_size(px(design.tiny()))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(foreground)
+        .child(label.into())
         .into_any_element()
 }
 

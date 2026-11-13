@@ -497,6 +497,8 @@ pub mod glyph {
     pub const TAG: &[u8] = include_bytes!("../assets/icons/tag.svg");
     pub const ARCHIVE: &[u8] = include_bytes!("../assets/icons/archive.svg");
     pub const COMMIT: &[u8] = include_bytes!("../assets/icons/commit.svg");
+    pub const SUBMODULE: &[u8] = include_bytes!("../assets/icons/submodule.svg");
+    pub const WORKTREE: &[u8] = include_bytes!("../assets/icons/worktree.svg");
     /// "STRATA" as outlines; see resources/icon/wordmark.py.
     pub const WORDMARK: &[u8] = include_bytes!("../assets/icons/wordmark.svg");
 }

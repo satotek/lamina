@@ -18,6 +18,7 @@ mod sidebar;
 mod status_bar;
 mod title_bar;
 mod tree_view;
+mod worktrees;
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -31,8 +32,9 @@ use gpui::{
 };
 use gpui_component::input::InputState;
 use strata_core::git_cli::CommandRecord;
+use strata_core::repo::{SubmoduleInfo, WorktreeInfo};
 use strata_core::session::{
-    DiffOptions, DiffRequest, DiffTicket, DiffView, Operation, Session, SessionEvent,
+    DiffOptions, DiffRequest, DiffTicket, DiffView, Operation, QueryTicket, Session, SessionEvent,
     SessionOptions,
 };
 use strata_core::{FileChange, HeadInfo, Oid, RefKind};
@@ -206,6 +208,65 @@ impl DiffSlot {
     }
 }
 
+/// The submodule and worktree lists the sidebar shows.
+///
+/// Neither list is part of a [`RepoSnapshot`], so they are read through the
+/// session's query worker after every publish. A ticket only becomes the answer
+/// on screen when it is the one the latest request asked for, so a slow read of
+/// a state the user moved on from cannot replace the rows. The generation of
+/// the accepted answer is part of the sidebar's cache key, because a new answer
+/// changes rows without a new snapshot.
+#[derive(Default)]
+struct ExtraLists {
+    /// The request in flight and the snapshot generation it answers for.
+    pending: Option<(QueryTicket, u64)>,
+    /// Snapshot generation of the answer on screen.
+    generation: u64,
+    submodules: Arc<Vec<SubmoduleInfo>>,
+    worktrees: Arc<Vec<WorktreeInfo>>,
+}
+
+impl ExtraLists {
+    fn begin(&mut self, ticket: QueryTicket, generation: u64) {
+        self.pending = Some((ticket, generation));
+    }
+
+    /// Forgets the request in flight and returns its ticket, so the session can
+    /// stop the read.
+    fn cancel(&mut self) -> Option<QueryTicket> {
+        self.pending.take().map(|(ticket, _)| ticket)
+    }
+
+    fn is_current(&self, ticket: QueryTicket) -> bool {
+        matches!(self.pending, Some((pending, _)) if pending == ticket)
+    }
+
+    fn accept(
+        &mut self,
+        ticket: QueryTicket,
+        submodules: Arc<Vec<SubmoduleInfo>>,
+        worktrees: Arc<Vec<WorktreeInfo>>,
+    ) -> bool {
+        let Some((_, generation)) = self.pending.filter(|(pending, _)| *pending == ticket) else {
+            return false;
+        };
+        self.pending = None;
+        self.generation = generation;
+        self.submodules = submodules;
+        self.worktrees = worktrees;
+        true
+    }
+
+    /// Drops the request `ticket` belongs to, if it is still the current one.
+    fn fail(&mut self, ticket: QueryTicket) -> bool {
+        if !self.is_current(ticket) {
+            return false;
+        }
+        self.pending = None;
+        true
+    }
+}
+
 /// The options history diffs are compared with, from the settings.
 ///
 /// The working-tree/staging diff in `worktree_panel` deliberately keeps
@@ -237,6 +298,9 @@ pub struct RepoView {
     pub(crate) entity: WeakEntity<RepoView>,
     /// Branch sections, dialogs and the operations they started.
     pub(crate) branches: Branches,
+    /// Submodules and linked worktrees, which are not part of a snapshot and so
+    /// are re-read after every one.
+    extra_lists: ExtraLists,
     /// Fetch/pull/push state, progress and the dialogs that decide them.
     pub(crate) remote: Remote,
     /// Commit search over the loaded history, with its text field.
@@ -358,6 +422,7 @@ impl RepoView {
             worktree: WorktreePanel::default(),
             entity,
             branches: Branches::default(),
+            extra_lists: ExtraLists::default(),
             remote: Remote::default(),
             search: SearchState::default(),
             file_history: None,
@@ -487,6 +552,9 @@ impl RepoView {
                 self.sync_worktree(cx);
                 self.search_on_snapshot(cx);
                 self.file_history_on_snapshot(cx);
+                // The submodule and worktree lists sit outside the snapshot, so
+                // every publish — including a watcher refresh — re-reads them.
+                self.refresh_extra_lists();
                 cx.notify();
             }
             SessionEvent::DiffReady { ticket, view } => {
@@ -531,6 +599,11 @@ impl RepoView {
                 }
             }
             SessionEvent::QueryFailed { ticket, error } => {
+                // A failed re-read only leaves the previous lists in place; the
+                // next snapshot asks again.
+                if self.extra_lists.fail(ticket) {
+                    return;
+                }
                 if !self.search_failed(ticket, &error, cx) {
                     self.file_history_failed(ticket, &error, cx);
                 }
@@ -550,9 +623,18 @@ impl RepoView {
             SessionEvent::PathHistoryDone { ticket, generation } => {
                 self.file_history_done(ticket, generation, cx);
             }
-            // The sidebar sections and the blame view that ask for these land
-            // in later changes; nothing requests them yet.
-            SessionEvent::BlameReady { .. } | SessionEvent::SubmodulesAndWorktreesReady { .. } => {}
+            // The blame view that asks for this lands in a later change; nothing
+            // requests it yet.
+            SessionEvent::BlameReady { .. } => {}
+            SessionEvent::SubmodulesAndWorktreesReady {
+                ticket,
+                submodules,
+                worktrees,
+            } => {
+                if self.extra_lists.accept(ticket, submodules, worktrees) {
+                    cx.notify();
+                }
+            }
             SessionEvent::CommandLogged(record) => {
                 self.last_command = Some(command_line(&record));
                 cx.notify();
@@ -584,10 +666,10 @@ impl RepoView {
                         None => one_line(&error),
                     });
                 }
-                if let Some(name) = self.branches.take_force_delete() {
+                if let Some(retry) = self.branches.take_force_retry() {
                     // The offer opens from an operation result, which has no
                     // window of its own, so it is routed through the active one.
-                    crate::branches::offer_force_delete(cx.entity(), name, cx);
+                    crate::branches::offer_force(cx.entity(), retry, cx);
                 }
                 cx.notify();
             }
@@ -619,6 +701,23 @@ impl RepoView {
                 .is_some_and(|session| session.snapshot().busy.is_some())
     }
 
+    /// Re-requests the submodule and worktree lists for the snapshot just
+    /// published.
+    ///
+    /// The request it replaces is cancelled: its answer would describe a
+    /// repository state the sidebar no longer shows.
+    fn refresh_extra_lists(&mut self) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        if let Some(ticket) = self.extra_lists.cancel() {
+            session.cancel_query(ticket);
+        }
+        let generation = session.snapshot().generation;
+        let ticket = session.request_submodules_and_worktrees();
+        self.extra_lists.begin(ticket, generation);
+    }
+
     /// Runs a mutation through the session.
     ///
     /// The branch UI is disabled while an operation runs, and `--fake` has no
@@ -638,14 +737,23 @@ impl RepoView {
             return;
         };
         let label = label.into();
-        let delete = match &operation {
-            Operation::DeleteBranch { name, force } => Some((name.clone(), *force)),
+        let retry = match &operation {
+            Operation::DeleteBranch { name, force } => Some(crate::branches::Retry::DeleteBranch {
+                name: name.clone(),
+                forced: *force,
+            }),
+            Operation::WorktreeRemove { path, force } => {
+                Some(crate::branches::Retry::RemoveWorktree {
+                    path: path.clone(),
+                    forced: *force,
+                })
+            }
             _ => None,
         };
         let kind = FinishedOperation::of(&operation);
         let id = session.run(operation);
         self.in_progress.submitted(id, kind);
-        self.branches.start(id, label, delete);
+        self.branches.start(id, label, retry);
         cx.notify();
     }
 
@@ -1259,6 +1367,56 @@ mod tests {
         assert_eq!(slot.cancel(), Some(DiffTicket(7)));
         assert_eq!(slot.cancel(), None);
         assert!(!slot.fail(DiffTicket(7)), "cancelled tickets are stale");
+    }
+
+    #[test]
+    fn a_late_submodule_and_worktree_answer_for_an_old_ticket_is_ignored() {
+        let mut lists = ExtraLists::default();
+        lists.begin(QueryTicket(2), 7);
+
+        assert!(
+            !lists.accept(QueryTicket(1), Arc::new(Vec::new()), Arc::new(Vec::new())),
+            "an answer requested before the latest snapshot must not replace it"
+        );
+        assert_eq!(lists.generation, 0, "nothing was accepted");
+
+        assert!(lists.accept(QueryTicket(2), Arc::new(Vec::new()), Arc::new(Vec::new())));
+        assert_eq!(
+            lists.generation, 7,
+            "the answer carries the generation it was requested for"
+        );
+    }
+
+    #[test]
+    fn a_new_request_supersedes_the_read_in_flight() {
+        let mut lists = ExtraLists::default();
+        lists.begin(QueryTicket(1), 4);
+        assert_eq!(
+            lists.cancel(),
+            Some(QueryTicket(1)),
+            "the replaced read is cancelled, not kept"
+        );
+
+        lists.begin(QueryTicket(2), 5);
+        assert!(
+            !lists.accept(QueryTicket(1), Arc::new(Vec::new()), Arc::new(Vec::new())),
+            "the cancelled read's answer is stale too"
+        );
+        assert!(lists.accept(QueryTicket(2), Arc::new(Vec::new()), Arc::new(Vec::new())));
+        assert_eq!(lists.generation, 5);
+    }
+
+    #[test]
+    fn a_failure_only_clears_the_request_it_belongs_to() {
+        let mut lists = ExtraLists::default();
+        lists.begin(QueryTicket(3), 9);
+
+        assert!(!lists.fail(QueryTicket(2)), "an old failure is not ours");
+        assert!(lists.fail(QueryTicket(3)));
+        assert!(
+            !lists.accept(QueryTicket(3), Arc::new(Vec::new()), Arc::new(Vec::new())),
+            "a failed read cannot still answer"
+        );
     }
 
     #[test]

@@ -179,11 +179,24 @@ impl RepoView {
             Source::Repo(snapshot) => snapshot.generation,
             Source::Fake(_) => 0,
         };
+        // The submodule and worktree sections come from the view's own answer,
+        // not from the snapshot; their generation is part of the cache key.
+        let workdir = self
+            .session
+            .as_ref()
+            .and_then(|session| session.repo().workdir().map(std::path::Path::to_path_buf));
+        let extras = crate::branches::SidebarExtras {
+            submodules: self.extra_lists.submodules.as_slice(),
+            worktrees: self.extra_lists.worktrees.as_slice(),
+            current_worktree: workdir.as_deref(),
+            revision: self.extra_lists.generation,
+        };
         self.branches.render(
             data,
             revision,
             &upstreams,
             remotes,
+            &extras,
             self.session.is_some(),
             self.is_busy(),
             &colors,

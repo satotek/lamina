@@ -12,9 +12,9 @@ use gpui_component::{ActiveTheme as _, Theme, ThemeMode};
 use strata_core::{ChangeKind, RefKind};
 
 use super::{
-    BannerKind, ButtonKind, ButtonSize, Confirm, RowState, banner, button, change_badge,
+    BadgeTone, BannerKind, ButtonKind, ButtonSize, Confirm, RowState, banner, button, change_badge,
     content_button, count_pill, empty_state, icon_button, kbd, list_row, message, ref_badge,
-    section_header,
+    section_header, status_badge,
 };
 use crate::settings::Settings;
 use crate::style::{self, Design};
@@ -194,6 +194,17 @@ impl Render for Gallery {
                         .child(ref_badge(RefKind::Tag, false, "v1.2.0", &design))
                         .child(count_pill(3, &design))
                         .child(kbd("Ctrl F", &design)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_2()
+                        .child(status_badge("main", BadgeTone::Accent, &design))
+                        .child(status_badge("locked", BadgeTone::Warning, &design))
+                        .child(status_badge("missing", BadgeTone::Danger, &design))
+                        .child(status_badge("not initialised", BadgeTone::Neutral, &design)),
                 ),
         ));
 

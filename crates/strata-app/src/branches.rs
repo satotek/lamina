@@ -6,27 +6,35 @@
 //! only read the snapshot the view has already published. The helpers that do
 //! not need a window (name validation, upstream labels, remote-to-local name
 //! mapping) are unit tested without a repository.
+//!
+//! The submodule and worktree sections are flattened here too, because they are
+//! part of the same virtualised list and share its folding and scroll anchor.
+//! Their data comes from the view's last submodule/worktree answer, not from the
+//! snapshot, so the list's cache key carries that answer's generation.
 
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, FocusHandle, FontWeight, Hsla,
-    InteractiveElement, IntoElement, KeyBinding, ParentElement, Pixels, Size, Stateful,
-    StatefulInteractiveElement as _, Styled, UniformListScrollHandle, Window, actions, anchored,
-    deferred, div, hsla, point, px, uniform_list,
+    AnyElement, App, ClickEvent, ClipboardItem, Context, Div, ElementId, Entity, FocusHandle,
+    FontWeight, Hsla, InteractiveElement, IntoElement, KeyBinding, ParentElement, Pixels, Size,
+    Stateful, StatefulInteractiveElement as _, Styled, UniformListScrollHandle, Window, actions,
+    anchored, deferred, div, hsla, point, px, uniform_list,
 };
 use gpui_component::{
     Icon,
     checkbox::Checkbox,
     input::{Input, InputState},
-    menu::{ContextMenuExt as _, PopupMenuItem},
+    menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem},
+    tooltip::Tooltip,
 };
+use strata_core::repo::{SubmoduleInfo, SubmoduleStatus, WorktreeInfo};
 use strata_core::session::{HistoryScope, Operation, OperationId};
-use strata_core::{RefKind, RemoteInfo, UpstreamInfo};
+use strata_core::{HeadInfo, RefKind, RemoteInfo, UpstreamInfo};
 
 use crate::actions::REPO_VIEW;
 use crate::data::SidebarData;
@@ -88,14 +96,18 @@ enum Section {
     Remote,
     Tags,
     Stashes,
+    Submodules,
+    Worktrees,
 }
 
 impl Section {
-    const ALL: [Section; 4] = [
+    const ALL: [Section; 6] = [
         Section::Local,
         Section::Remote,
         Section::Tags,
         Section::Stashes,
+        Section::Submodules,
+        Section::Worktrees,
     ];
 
     fn index(self) -> usize {
@@ -104,6 +116,8 @@ impl Section {
             Section::Remote => 1,
             Section::Tags => 2,
             Section::Stashes => 3,
+            Section::Submodules => 4,
+            Section::Worktrees => 5,
         }
     }
 
@@ -113,6 +127,8 @@ impl Section {
             Section::Remote => "REMOTES",
             Section::Tags => "TAGS",
             Section::Stashes => "STASHES",
+            Section::Submodules => "SUBMODULES",
+            Section::Worktrees => "WORKTREES",
         }
     }
 
@@ -122,6 +138,8 @@ impl Section {
             Section::Remote => style::glyph::CLOUD,
             Section::Tags => style::glyph::TAG,
             Section::Stashes => style::glyph::ARCHIVE,
+            Section::Submodules => style::glyph::SUBMODULE,
+            Section::Worktrees => style::glyph::WORKTREE,
         }
     }
 
@@ -131,6 +149,8 @@ impl Section {
             Section::Remote => "no remotes",
             Section::Tags => "no tags",
             Section::Stashes => "no stashes",
+            Section::Submodules => "no submodules",
+            Section::Worktrees => "no linked worktrees",
         }
     }
 
@@ -141,8 +161,39 @@ impl Section {
             Section::Remote => !design.show_remote_branches,
             Section::Tags => !design.show_tags,
             Section::Stashes => !design.show_stashes,
+            Section::Submodules | Section::Worktrees => false,
         }
     }
+
+    /// Whether the repository has anything for this section.
+    ///
+    /// The submodule and worktree sections have no empty state: a repository
+    /// without submodules, or with nothing but its main worktree, hides them
+    /// instead of saying "none".
+    fn present(self, extras: &SidebarExtras<'_>) -> bool {
+        match self {
+            Section::Submodules => !extras.submodules.is_empty(),
+            Section::Worktrees => extras.worktrees.len() > 1,
+            Section::Local | Section::Remote | Section::Tags | Section::Stashes => true,
+        }
+    }
+}
+
+/// What the submodule and worktree sections list, and the generation of the
+/// answer they came from.
+///
+/// Neither list is part of a snapshot, so the caller reads them from the view's
+/// cached answer. The generation is empty for `--fake` and for the frames before
+/// the first answer arrives.
+#[derive(Default)]
+pub(crate) struct SidebarExtras<'a> {
+    pub(crate) submodules: &'a [SubmoduleInfo],
+    pub(crate) worktrees: &'a [WorktreeInfo],
+    /// This window's own worktree, marked like the HEAD branch.
+    pub(crate) current_worktree: Option<&'a Path>,
+    /// Generation of the last submodule/worktree answer; part of the list's
+    /// cache key, because a new answer changes the rows without a new snapshot.
+    pub(crate) revision: u64,
 }
 
 /// Where a new branch should start. The label is user-facing, e.g. `from main`
@@ -238,6 +289,32 @@ enum SidebarItem {
         name: String,
         index: usize,
     },
+    /// One entry of `.gitmodules` and how its checkout compares with HEAD.
+    Submodule {
+        index: usize,
+        name: String,
+        /// Repository-relative path, which is what an operation addresses.
+        path: String,
+        /// Path, URL and both commits, for the row's tooltip.
+        detail: String,
+        status: SubmoduleStatus,
+    },
+    /// One checkout registered under `worktrees/`, the main one included.
+    Worktree {
+        index: usize,
+        /// Branch name, or `detached <short id>`.
+        label: String,
+        path: String,
+        /// Path and lock reason, for the row's tooltip.
+        detail: String,
+        /// The lock reason alone, for the "locked" badge's tooltip.
+        lock_reason: Option<String>,
+        is_main: bool,
+        locked: bool,
+        prunable: bool,
+        /// This window's own worktree, drawn like the HEAD branch.
+        current: bool,
+    },
     /// "no tags", "no branches fetched yet", ...
     Placeholder {
         text: &'static str,
@@ -271,6 +348,8 @@ enum ItemKey {
     RemoteBranch(String),
     Tag(String),
     Stash(usize),
+    Submodule(String),
+    Worktree(String),
     SectionEmpty(Section),
     RemoteEmpty(String),
 }
@@ -284,6 +363,8 @@ impl SidebarItem {
             SidebarItem::RemoteBranch { name, .. } => ItemKey::RemoteBranch(name.clone()),
             SidebarItem::Tag { name, .. } => ItemKey::Tag(name.clone()),
             SidebarItem::Stash { index, .. } => ItemKey::Stash(*index),
+            SidebarItem::Submodule { path, .. } => ItemKey::Submodule(path.clone()),
+            SidebarItem::Worktree { path, .. } => ItemKey::Worktree(path.clone()),
             SidebarItem::Placeholder { place, .. } => match place {
                 PlaceholderPlace::Section(section) => ItemKey::SectionEmpty(*section),
                 PlaceholderPlace::Remote(name) => ItemKey::RemoteEmpty(name.clone()),
@@ -301,6 +382,8 @@ impl SidebarItem {
             (SidebarItem::RemoteBranch { name, .. }, ItemKey::RemoteBranch(key)) => name == key,
             (SidebarItem::Tag { name, .. }, ItemKey::Tag(key)) => name == key,
             (SidebarItem::Stash { index, .. }, ItemKey::Stash(key)) => index == key,
+            (SidebarItem::Submodule { path, .. }, ItemKey::Submodule(key)) => path == key,
+            (SidebarItem::Worktree { path, .. }, ItemKey::Worktree(key)) => path == key,
             (SidebarItem::Placeholder { place, .. }, ItemKey::SectionEmpty(key)) => {
                 matches!(place, PlaceholderPlace::Section(section) if section == key)
             }
@@ -324,6 +407,9 @@ struct ItemCache {
 struct ItemsKey {
     /// Snapshot generation; every publish bumps it.
     revision: u64,
+    /// Generation of the last submodule/worktree answer, which arrives outside
+    /// the snapshot and changes those rows on its own.
+    lists: u64,
     /// Bumped when a section or a remote group folds.
     local: u64,
     show_remote_branches: bool,
@@ -341,7 +427,7 @@ struct ScrollAnchor {
 /// Everything the branch UI owns between frames.
 #[derive(Default)]
 pub(crate) struct Branches {
-    collapsed: [bool; 4],
+    collapsed: [bool; Section::ALL.len()],
     /// Remote name -> collapsed, so each remote's branch list folds on its own.
     remote_groups: HashMap<String, bool>,
     /// The ref revealed last, drawn with the neutral tint until a commit is
@@ -361,10 +447,10 @@ pub(crate) struct Branches {
     /// `FocusHandle` needs an `App`, and reused: only one dialog is open and it
     /// is the only element tracking the handle while it lives.
     dialog_focus: Option<FocusHandle>,
-    /// A branch git refused to delete because it is not fully merged. The view
-    /// offers the forced delete through [`crate::ui::confirm`], which needs a
-    /// window the session event does not have.
-    force_delete: Option<String>,
+    /// A destructive operation git refused for a reason the stronger form can
+    /// override. The view offers it through [`crate::ui::confirm`], which needs
+    /// a window the session event does not have.
+    force_retry: Option<Retry>,
     /// The section list's scroll position, shared by the list and its scrollbar.
     scroll: UniformListScrollHandle,
     cache: RefCell<ItemCache>,
@@ -373,10 +459,57 @@ pub(crate) struct Branches {
     anchor: RefCell<ScrollAnchor>,
 }
 
+/// What git refused, and the stronger form of the same operation.
+///
+/// Only these two are offered again: git's refusal is what says the user has to
+/// decide whether losing the work is acceptable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Retry {
+    /// `git branch -d` refused a branch that is not fully merged.
+    DeleteBranch { name: String, forced: bool },
+    /// `git worktree remove` refused a checkout with modified or untracked files.
+    RemoveWorktree { path: PathBuf, forced: bool },
+}
+
+impl Retry {
+    /// Whether `error` is the refusal this retry exists for.
+    fn refused_by(&self, error: &str) -> bool {
+        match self {
+            Retry::DeleteBranch { .. } => is_not_fully_merged(error),
+            Retry::RemoveWorktree { .. } => is_dirty_worktree(error),
+        }
+    }
+
+    /// The same operation with the flag that overrides the refusal, or `None`
+    /// when it already carried it: a forced retry that fails again is reported
+    /// instead of offered a third time.
+    fn stronger(&self) -> Option<Self> {
+        match self {
+            Retry::DeleteBranch {
+                name,
+                forced: false,
+            } => Some(Retry::DeleteBranch {
+                name: name.clone(),
+                forced: true,
+            }),
+            Retry::RemoveWorktree {
+                path,
+                forced: false,
+            } => Some(Retry::RemoveWorktree {
+                path: path.clone(),
+                forced: true,
+            }),
+            Retry::DeleteBranch { forced: true, .. }
+            | Retry::RemoveWorktree { forced: true, .. } => None,
+        }
+    }
+}
+
 struct Running {
     label: String,
-    /// Set for an unforced delete, which can be offered again with `force`.
-    delete: Option<String>,
+    /// Set for an unforced delete or removal, which can be offered again with
+    /// the force flag.
+    retry: Option<Retry>,
 }
 
 struct Dialog {
@@ -415,13 +548,14 @@ impl Branches {
         revision: u64,
         upstreams: &HashMap<String, UpstreamInfo>,
         remotes: &[RemoteInfo],
+        extras: &SidebarExtras<'_>,
         enabled: bool,
         busy: bool,
         colors: &Colors,
         entity: &Entity<RepoView>,
     ) -> AnyElement {
         let head = data.head_branch.clone();
-        let items = self.items(data, revision, upstreams, remotes, &colors.design);
+        let items = self.items(data, revision, upstreams, remotes, extras, &colors.design);
         self.restore_scroll(&items);
 
         let reveal = self.reveal.clone();
@@ -470,10 +604,12 @@ impl Branches {
         revision: u64,
         upstreams: &HashMap<String, UpstreamInfo>,
         remotes: &[RemoteInfo],
+        extras: &SidebarExtras<'_>,
         design: &Design,
     ) -> Rc<Vec<SidebarItem>> {
         let key = ItemsKey {
             revision,
+            lists: extras.revision,
             local: self.local_revision,
             show_remote_branches: design.show_remote_branches,
             show_tags: design.show_tags,
@@ -483,7 +619,7 @@ impl Branches {
         if cache.key.as_ref() == Some(&key) {
             return cache.items.clone();
         }
-        let items = Rc::new(self.flatten(data, upstreams, remotes, design));
+        let items = Rc::new(self.flatten(data, upstreams, remotes, extras, design));
         cache.key = Some(key);
         cache.items = items.clone();
         items
@@ -497,6 +633,7 @@ impl Branches {
         data: SidebarData,
         upstreams: &HashMap<String, UpstreamInfo>,
         remotes: &[RemoteInfo],
+        extras: &SidebarExtras<'_>,
         design: &Design,
     ) -> Vec<SidebarItem> {
         let SidebarData {
@@ -506,12 +643,19 @@ impl Branches {
             mut stashes,
             ..
         } = data;
-        let mut items =
-            Vec::with_capacity(local.len() + remote.len() + tags.len() + stashes.len() + 8);
+        let mut items = Vec::with_capacity(
+            local.len()
+                + remote.len()
+                + tags.len()
+                + stashes.len()
+                + extras.submodules.len()
+                + extras.worktrees.len()
+                + 10,
+        );
         let mut remote_row_index = 0;
 
         for section in Section::ALL {
-            if section.hidden(design) {
+            if section.hidden(design) || !section.present(extras) {
                 continue;
             }
             let count = match section {
@@ -519,6 +663,8 @@ impl Branches {
                 Section::Remote => remote.len(),
                 Section::Tags => tags.len(),
                 Section::Stashes => stashes.len(),
+                Section::Submodules => extras.submodules.len(),
+                Section::Worktrees => extras.worktrees.len(),
             };
             let open = !self.collapsed[section.index()];
             items.push(SidebarItem::SectionHeader {
@@ -566,6 +712,39 @@ impl Branches {
                     }
                     for (index, name) in std::mem::take(&mut stashes).into_iter().enumerate() {
                         items.push(SidebarItem::Stash { name, index });
+                    }
+                }
+                // The submodule list is already sorted by path, which is the
+                // order a person reads it in; the name is the row's label.
+                Section::Submodules => {
+                    for (index, submodule) in extras.submodules.iter().enumerate() {
+                        items.push(SidebarItem::Submodule {
+                            index,
+                            name: submodule.name.clone(),
+                            path: submodule.path.clone(),
+                            detail: submodule_detail(submodule),
+                            status: submodule.status,
+                        });
+                    }
+                }
+                // `git worktree list` order is the main worktree, then the
+                // registered ones; that is also the order that keeps the one
+                // the user is looking at on top.
+                Section::Worktrees => {
+                    for (index, worktree) in extras.worktrees.iter().enumerate() {
+                        items.push(SidebarItem::Worktree {
+                            index,
+                            label: worktree_label(worktree),
+                            path: worktree.path.display().to_string(),
+                            detail: worktree_detail(worktree),
+                            lock_reason: worktree.lock_reason.clone(),
+                            is_main: worktree.is_main,
+                            locked: worktree.locked,
+                            prunable: worktree.prunable,
+                            current: extras
+                                .current_worktree
+                                .is_some_and(|current| same_path(current, &worktree.path)),
+                        });
                     }
                 }
                 // Remote branches are grouped under their remote, which is the
@@ -684,26 +863,26 @@ impl Branches {
         )
     }
 
-    pub(crate) fn start(&mut self, id: OperationId, label: String, delete: Option<(String, bool)>) {
-        // A forced delete that fails again is reported, not offered a third time.
-        let delete = delete.and_then(|(name, forced)| (!forced).then_some(name));
-        self.running.insert(id, Running { label, delete });
+    pub(crate) fn start(&mut self, id: OperationId, label: String, retry: Option<Retry>) {
+        self.running.insert(id, Running { label, retry });
     }
 
-    /// Takes the branch to offer a forced delete for, if git refused one.
-    pub(crate) fn take_force_delete(&mut self) -> Option<String> {
-        self.force_delete.take()
+    /// Takes the operation to offer again with its force flag, if git refused
+    /// an unforced one.
+    pub(crate) fn take_force_retry(&mut self) -> Option<Retry> {
+        self.force_retry.take()
     }
 
     /// Records that an operation finished. Returns the label it was started
     /// with so the caller can name the operation in the status bar, and opens
-    /// the force-delete offer when git refused an unforced delete.
+    /// the force offer when git refused an unforced delete or removal.
     pub(crate) fn finish(&mut self, id: OperationId, error: Option<&str>) -> Option<String> {
         let running = self.running.remove(&id)?;
-        if let (Some(error), Some(name)) = (error, running.delete)
-            && is_not_fully_merged(error)
+        if let (Some(error), Some(retry)) = (error, running.retry)
+            && retry.refused_by(error)
+            && let Some(stronger) = retry.stronger()
         {
-            self.force_delete = Some(name);
+            self.force_retry = Some(stronger);
         }
         Some(running.label)
     }
@@ -913,13 +1092,49 @@ fn item_element(
             colors,
             entity,
         ),
+        SidebarItem::Submodule {
+            index,
+            name,
+            path,
+            detail,
+            status,
+        } => submodule_row(
+            *index, name, path, detail, *status, enabled, busy, colors, entity,
+        ),
+        SidebarItem::Worktree {
+            index,
+            label,
+            path,
+            detail,
+            lock_reason,
+            is_main,
+            locked,
+            prunable,
+            current,
+        } => worktree_row(
+            *index,
+            label,
+            path,
+            detail,
+            lock_reason.as_deref(),
+            *is_main,
+            *locked,
+            *prunable,
+            *current,
+            enabled,
+            busy,
+            colors,
+            entity,
+        ),
         SidebarItem::Placeholder { text, place } => {
             empty_row_at(text, place.indent(), colors).into_any_element()
         }
     }
 }
 
-/// A section's heading: the fold control and the number of entries it holds.
+/// A section's heading: the fold control, the number of entries it holds, and
+/// the section's own actions in a context menu. Folding is what a click means,
+/// so a menu is what right-click can offer without a second control.
 fn section_header(
     section: Section,
     count: usize,
@@ -929,6 +1144,7 @@ fn section_header(
     entity: Entity<RepoView>,
 ) -> AnyElement {
     let index = section.index();
+    let click_entity = entity.clone();
     let mut header =
         crate::ui::section_header(("branch-section", index), section.title(), &colors.design)
             .count(count)
@@ -942,7 +1158,7 @@ fn section_header(
             // section heading must match a row's height.
             .h(px(ITEM_HEIGHT))
             .on_click(move |_, cx| {
-                entity.update(cx, |view, cx| {
+                click_entity.update(cx, |view, cx| {
                     view.branches.toggle(index);
                     cx.notify();
                 });
@@ -956,7 +1172,71 @@ fn section_header(
                 .child("working…"),
         );
     }
-    header.into_any_element()
+
+    match section {
+        Section::Submodules | Section::Worktrees => {
+            let menu_entity = entity.clone();
+            div()
+                .id(("branch-section-menu", index))
+                .w_full()
+                .context_menu(move |menu, _window, cx| {
+                    section_menu(menu, section, busy, &menu_entity, cx)
+                })
+                .child(header)
+                .into_any_element()
+        }
+        _ => header.into_any_element(),
+    }
+}
+
+/// The section-level actions of the two lists git stores outside the refs.
+fn section_menu(
+    menu: PopupMenu,
+    section: Section,
+    busy: bool,
+    entity: &Entity<RepoView>,
+    cx: &App,
+) -> PopupMenu {
+    match section {
+        Section::Submodules => {
+            let update = {
+                let entity = entity.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    entity.update(cx, |view, cx| view.update_all_submodules(window, cx));
+                }
+            };
+            menu.item(
+                PopupMenuItem::new("Update all")
+                    .disabled(busy || !entity.read(cx).has_submodules())
+                    .on_click(update),
+            )
+        }
+        Section::Worktrees => {
+            let add = {
+                let entity = entity.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    entity.update(cx, |view, cx| view.open_add_worktree(window, cx));
+                }
+            };
+            let prune = {
+                let entity = entity.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    entity.update(cx, |view, cx| view.prune_worktrees(window, cx));
+                }
+            };
+            menu.item(
+                PopupMenuItem::new("Add worktree…")
+                    .disabled(busy)
+                    .on_click(add),
+            )
+            .item(
+                PopupMenuItem::new("Prune")
+                    .disabled(busy || !entity.read(cx).has_prunable_worktree())
+                    .on_click(prune),
+            )
+        }
+        _ => menu,
+    }
 }
 
 /// A remote's own collapsing header, above its branch list.
@@ -1307,7 +1587,303 @@ fn tag_row(
         .into_any_element()
 }
 
+/// A submodule's row: its name, a badge for anything but an up-to-date
+/// checkout, and its path and commits in the tooltip.
+#[allow(clippy::too_many_arguments)]
+fn submodule_row(
+    index: usize,
+    name: &str,
+    path: &str,
+    detail: &str,
+    status: SubmoduleStatus,
+    enabled: bool,
+    busy: bool,
+    colors: &Colors,
+    entity: Entity<RepoView>,
+) -> AnyElement {
+    let tooltip_text = detail.to_owned();
+    let mut row_element = crate::ui::list_row(
+        ("submodule", index),
+        crate::ui::RowState::NORMAL,
+        &colors.design,
+    )
+    .h(px(ITEM_HEIGHT))
+    .w_full()
+    .mx(px(0.0))
+    .rounded(px(7.0))
+    .text_size(px(colors.design.small()))
+    .text_color(colors.sidebar_foreground)
+    .child(div().flex_1().min_w_0().truncate().child(name.to_owned()))
+    .tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx));
+    if let Some((label, tone)) = submodule_badge(status) {
+        row_element = row_element.child(crate::ui::status_badge(label, tone, &colors.design));
+    }
+
+    // An uninitialised submodule has no checkout to open; its row only offers
+    // the context menu that initialises it.
+    if status != SubmoduleStatus::Uninitialised {
+        let click_entity = entity.clone();
+        let click_path = path.to_owned();
+        row_element = row_element.cursor_pointer().on_click(move |_, window, cx| {
+            click_entity.update(cx, |view, cx| {
+                view.open_repository_path(Path::new(&click_path), window, cx)
+            });
+        });
+    }
+
+    if !enabled {
+        return row_element.into_any_element();
+    }
+
+    let menu_entity = entity.clone();
+    let copy_path = path.to_owned();
+    let menu_path = copy_path.clone();
+    row_element
+        .context_menu(move |menu, _window, _cx| {
+            let update = {
+                let entity = menu_entity.clone();
+                let path = menu_path.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let path = path.clone();
+                    entity.update(cx, |view, cx| {
+                        view.update_submodule(path, false, window, cx)
+                    });
+                }
+            };
+            let init = {
+                let entity = menu_entity.clone();
+                let path = menu_path.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let path = path.clone();
+                    entity.update(cx, |view, cx| view.update_submodule(path, true, window, cx));
+                }
+            };
+            let menu = menu.item(
+                PopupMenuItem::new("Update")
+                    .disabled(busy || status == SubmoduleStatus::Uninitialised)
+                    .on_click(update),
+            );
+            let menu = if status == SubmoduleStatus::Uninitialised {
+                menu.item(
+                    PopupMenuItem::new("Initialise and update")
+                        .disabled(busy)
+                        .on_click(init),
+                )
+            } else {
+                menu
+            };
+            let copy_path = menu_path.clone();
+            menu.separator()
+                .item(PopupMenuItem::new("Copy path").on_click(
+                    move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(copy_path.clone()));
+                    },
+                ))
+        })
+        .into_any_element()
+}
+
+/// A worktree's row: its branch (or the commit a detached one is on), its
+/// badges, and its path and lock reason in the tooltip.
+#[allow(clippy::too_many_arguments)]
+fn worktree_row(
+    index: usize,
+    label: &str,
+    path: &str,
+    detail: &str,
+    lock_reason: Option<&str>,
+    is_main: bool,
+    locked: bool,
+    prunable: bool,
+    current: bool,
+    enabled: bool,
+    busy: bool,
+    colors: &Colors,
+    entity: Entity<RepoView>,
+) -> AnyElement {
+    let tooltip_text = detail.to_owned();
+    let mut row_element = crate::ui::list_row(
+        ("worktree", index),
+        // The checkout the window is showing reads like the HEAD branch; the
+        // badge says "main" rather than the tint, because a linked worktree can
+        // be the one on screen.
+        crate::ui::RowState::NORMAL.head(current),
+        &colors.design,
+    )
+    .h(px(ITEM_HEIGHT))
+    .w_full()
+    .mx(px(0.0))
+    .rounded(px(7.0))
+    .text_size(px(colors.design.small()))
+    .text_color(colors.sidebar_foreground)
+    .child(div().flex_1().min_w_0().truncate().child(label.to_owned()))
+    .tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx));
+    if is_main {
+        row_element = row_element.child(crate::ui::status_badge(
+            "main",
+            crate::ui::BadgeTone::Accent,
+            &colors.design,
+        ));
+    }
+    if locked {
+        let badge =
+            crate::ui::status_badge("locked", crate::ui::BadgeTone::Warning, &colors.design);
+        let reason = lock_reason.map(str::to_owned);
+        let wrapper = div().id(("worktree-lock", index)).flex_none();
+        row_element = row_element.child(match reason {
+            Some(reason) => wrapper
+                .tooltip(move |window, cx| Tooltip::new(reason.clone()).build(window, cx))
+                .child(badge),
+            None => wrapper.child(badge),
+        });
+    }
+    if prunable {
+        row_element = row_element.child(crate::ui::status_badge(
+            "missing",
+            crate::ui::BadgeTone::Danger,
+            &colors.design,
+        ));
+    }
+
+    // A prunable worktree has no checkout left; opening it would only fail.
+    if !prunable {
+        let click_entity = entity.clone();
+        let click_path = path.to_owned();
+        row_element = row_element.cursor_pointer().on_click(move |_, window, cx| {
+            click_entity.update(cx, |view, cx| {
+                view.open_repository_path(Path::new(&click_path), window, cx)
+            });
+        });
+    }
+
+    if !enabled {
+        return row_element.into_any_element();
+    }
+
+    let menu_entity = entity.clone();
+    let remove_path = PathBuf::from(path);
+    let copy_path = path.to_owned();
+    row_element
+        .context_menu(move |menu, _window, _cx| {
+            let open = {
+                let entity = menu_entity.clone();
+                let path = copy_path.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    entity.update(cx, |view, cx| {
+                        view.open_repository_path(Path::new(&path), window, cx)
+                    });
+                }
+            };
+            let remove = {
+                let entity = menu_entity.clone();
+                let path = remove_path.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let path = path.clone();
+                    entity.update(cx, |view, cx| {
+                        view.confirm_remove_worktree(path, window, cx)
+                    });
+                }
+            };
+            let copy_path = copy_path.clone();
+            menu.item(PopupMenuItem::new("Open").disabled(prunable).on_click(open))
+                .item(
+                    // The main worktree, a locked one and a missing checkout all
+                    // refuse `git worktree remove`; offering it would only
+                    // report the refusal.
+                    PopupMenuItem::new("Remove…")
+                        .disabled(busy || is_main || locked || prunable)
+                        .on_click(remove),
+                )
+                .separator()
+                .item(PopupMenuItem::new("Copy path").on_click(
+                    move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(copy_path.clone()));
+                    },
+                ))
+        })
+        .into_any_element()
+}
+
+/// The badge a submodule's state deserves, or nothing when it is up to date.
+fn submodule_badge(status: SubmoduleStatus) -> Option<(&'static str, crate::ui::BadgeTone)> {
+    match status {
+        SubmoduleStatus::Uninitialised => Some(("not initialised", crate::ui::BadgeTone::Neutral)),
+        SubmoduleStatus::CommitDiffers => Some(("changed", crate::ui::BadgeTone::Accent)),
+        SubmoduleStatus::Modified => Some(("modified", crate::ui::BadgeTone::Warning)),
+        SubmoduleStatus::UpToDate => None,
+    }
+}
+
+/// A submodule row's tooltip: where it lives, what it points at, and the two
+/// commits whose difference is the row's state.
+fn submodule_detail(submodule: &SubmoduleInfo) -> String {
+    let mut detail = submodule.path.clone();
+    if let Some(url) = &submodule.url {
+        detail.push('\n');
+        detail.push_str(url);
+    }
+    detail.push_str("\nrecorded ");
+    detail.push_str(&commit_label(submodule.recorded_commit));
+    detail.push_str(" · checked out ");
+    detail.push_str(&commit_label(submodule.checked_out_commit));
+    detail
+}
+
+fn commit_label(commit: Option<strata_core::Oid>) -> String {
+    commit.map_or_else(|| "none".to_owned(), crate::data::short_oid)
+}
+
+/// A worktree row's label: the branch it has checked out, or the commit a
+/// detached checkout is on.
+fn worktree_label(worktree: &WorktreeInfo) -> String {
+    match &worktree.head {
+        Some(HeadInfo::Branch { short_name, .. }) => short_name.clone(),
+        Some(HeadInfo::Detached { target }) => {
+            format!("detached {}", crate::data::short_oid(*target))
+        }
+        None => "unknown HEAD".to_owned(),
+    }
+}
+
+/// A worktree row's tooltip: its path, and why it cannot be removed when git
+/// says so.
+fn worktree_detail(worktree: &WorktreeInfo) -> String {
+    let mut detail = worktree.path.display().to_string();
+    if worktree.locked {
+        let line = match &worktree.lock_reason {
+            Some(reason) => format!("\nlocked: {reason}"),
+            None => "\nlocked".to_owned(),
+        };
+        detail.push_str(&line);
+    }
+    if worktree.prunable {
+        detail.push_str("\nthe checkout directory is missing; Prune drops the registration");
+    }
+    detail
+}
+
+/// Whether two paths name the same checkout.
+///
+/// The session's worktree and `git worktree list` can spell one directory
+/// differently (symlinks, a trailing separator), so both sides are canonicalized
+/// when they exist. A prunable worktree's path does not, and then git's own
+/// spelling is the only one there is.
+fn same_path(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
 impl RepoView {
+    /// Runs the force form of an operation the user just confirmed.
+    pub(crate) fn run_retry(&mut self, retry: Retry, window: &mut Window, cx: &mut Context<Self>) {
+        match retry {
+            Retry::DeleteBranch { name, .. } => self.delete_branch(name, true, window, cx),
+            Retry::RemoveWorktree { path, .. } => self.remove_worktree(path, true, window, cx),
+        }
+    }
+
     /// Reloads history limited to `short_name`'s history and remembers the name
     /// for the sidebar banner. The full ref name is what the walk resolves, so
     /// a branch that is not `refs/heads/...` still reads exactly.
@@ -1399,6 +1975,10 @@ fn row_with_icon(
     let name = strip_stash_prefix(name);
     let row = crate::ui::list_row(id, state, &colors.design)
         .h(px(ITEM_HEIGHT))
+        // A list item is laid out at its content width unless it is told to
+        // fill, which would leave most of the row outside its hitbox.
+        .w_full()
+        .mx(px(0.0))
         .rounded(px(7.0))
         .text_size(px(colors.design.small()))
         .text_color(colors.sidebar_foreground);
@@ -1467,7 +2047,7 @@ fn remote_groups(entries: &[String], remotes: &[RemoteInfo]) -> Vec<RemoteGroup>
 
 /// The names in natural order, so a numbered ref reads `feature-2` before
 /// `feature-10` instead of after it.
-fn natural_sorted(names: &[String]) -> Vec<&str> {
+pub(crate) fn natural_sorted(names: &[String]) -> Vec<&str> {
     let mut sorted: Vec<&str> = names.iter().map(String::as_str).collect();
     sorted.sort_by(|a, b| natural_cmp(a, b));
     sorted
@@ -1670,37 +2250,47 @@ fn dialog_card(colors: &Colors, entity: &Entity<RepoView>, focus: Option<&FocusH
         .on_action(cancel)
 }
 
-/// Offers the forced delete after git refused to delete an unmerged branch.
+/// Offers the force form of an operation git refused.
 ///
 /// The session event that learns about the refusal has no window, so the dialog
 /// is opened on the active one. It always asks, even when confirmations are off:
-/// the forced delete is a different, stronger action than the one the user
-/// chose, and skipping the ask would silently escalate it.
-pub(crate) fn offer_force_delete(entity: Entity<RepoView>, name: String, cx: &mut App) {
+/// the forced form is a different, stronger action than the one the user chose,
+/// and skipping the ask would silently escalate it.
+pub(crate) fn offer_force(entity: Entity<RepoView>, retry: Retry, cx: &mut App) {
     let Some(handle) = cx
         .active_window()
         .or_else(|| cx.windows().into_iter().next())
     else {
-        log::warn!("cannot offer the forced delete without a window");
+        log::warn!("cannot offer the forced operation without a window");
         return;
     };
     let entity = entity.downgrade();
     let _ = handle.update(cx, |_, window, cx| {
-        crate::ui::confirm(
-            window,
-            cx,
-            crate::ui::Confirm::new(
+        let confirm = match &retry {
+            Retry::DeleteBranch { name, .. } => crate::ui::Confirm::new(
                 format!("Delete branch {name}?"),
                 "The branch is not fully merged. Forcing the delete loses the commits it points at.",
             )
-            .ok_label("Force delete")
-            .always_ask(),
-            move |window, cx| {
-                let name = name.clone();
-                let _ = entity.update(cx, |view, cx| view.delete_branch(name, true, window, cx));
-            },
-        );
+            .ok_label("Force delete"),
+            Retry::RemoveWorktree { path, .. } => crate::ui::Confirm::new(
+                format!("Remove worktree {}?", worktree_name(path)),
+                "The worktree has modified or untracked files. Forcing the removal deletes them.",
+            )
+            .ok_label("Force remove"),
+        }
+        .always_ask();
+        crate::ui::confirm(window, cx, confirm, move |window, cx| {
+            let retry = retry.clone();
+            let _ = entity.update(cx, |view, cx| view.run_retry(retry, window, cx));
+        });
     });
+}
+
+/// The name a worktree is referred to by: its directory, not the whole path.
+pub(crate) fn worktree_name(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 /// `git check-ref-format` rules that apply to `refs/heads/<name>`, plus the one
@@ -1783,6 +2373,14 @@ pub(crate) fn local_name_for_remote(remote: &str) -> Option<&str> {
 /// HEAD; that message is what turns the delete dialog into a force offer.
 fn is_not_fully_merged(error: &str) -> bool {
     error.contains("not fully merged")
+}
+
+/// `git worktree remove` refuses a checkout with local changes; that message is
+/// what turns the removal into a force offer. A missing directory is git's
+/// `validation failed` instead, and forcing would not help: Prune is the fix.
+fn is_dirty_worktree(error: &str) -> bool {
+    error.contains("contains modified or untracked files")
+        || error.contains("use --force to delete it")
 }
 
 #[cfg(test)]
@@ -1987,7 +2585,10 @@ mod tests {
         branches.start(
             OperationId(7),
             "delete branch topic".to_owned(),
-            Some(("topic".to_owned(), false)),
+            Some(Retry::DeleteBranch {
+                name: "topic".to_owned(),
+                forced: false,
+            }),
         );
         let label = branches.finish(
             OperationId(7),
@@ -1995,12 +2596,15 @@ mod tests {
         );
         assert_eq!(label.as_deref(), Some("delete branch topic"));
         assert_eq!(
-            branches.take_force_delete().as_deref(),
-            Some("topic"),
+            branches.take_force_retry(),
+            Some(Retry::DeleteBranch {
+                name: "topic".to_owned(),
+                forced: true,
+            }),
             "the offer must rerun the delete with force"
         );
         assert_eq!(
-            branches.take_force_delete(),
+            branches.take_force_retry(),
             None,
             "the offer is taken once, so it cannot reopen by itself"
         );
@@ -2012,13 +2616,66 @@ mod tests {
         branches.start(
             OperationId(8),
             "delete branch topic".to_owned(),
-            Some(("topic".to_owned(), true)),
+            Some(Retry::DeleteBranch {
+                name: "topic".to_owned(),
+                forced: true,
+            }),
         );
         branches.finish(
             OperationId(8),
             Some("error: the branch 'topic' is not fully merged"),
         );
-        assert_eq!(branches.take_force_delete(), None);
+        assert_eq!(branches.take_force_retry(), None);
+    }
+
+    #[test]
+    fn a_dirty_worktree_removal_offers_a_forced_removal() {
+        let mut branches = Branches::default();
+        branches.start(
+            OperationId(9),
+            "remove worktree strata-topic".to_owned(),
+            Some(Retry::RemoveWorktree {
+                path: PathBuf::from("/src/strata-topic"),
+                forced: false,
+            }),
+        );
+        let label = branches.finish(
+            OperationId(9),
+            Some(
+                "fatal: '/src/strata-topic' contains modified or untracked files, \
+                 use --force to delete it",
+            ),
+        );
+        assert_eq!(label.as_deref(), Some("remove worktree strata-topic"));
+        assert_eq!(
+            branches.take_force_retry(),
+            Some(Retry::RemoveWorktree {
+                path: PathBuf::from("/src/strata-topic"),
+                forced: true,
+            })
+        );
+    }
+
+    #[test]
+    fn a_missing_worktree_checkout_is_pruned_not_forced() {
+        let mut branches = Branches::default();
+        branches.start(
+            OperationId(10),
+            "remove worktree strata-gone".to_owned(),
+            Some(Retry::RemoveWorktree {
+                path: PathBuf::from("/src/strata-gone"),
+                forced: false,
+            }),
+        );
+        branches.finish(
+            OperationId(10),
+            Some("fatal: validation failed, cannot remove working tree"),
+        );
+        assert_eq!(
+            branches.take_force_retry(),
+            None,
+            "forcing cannot help a worktree whose directory is gone; pruning does"
+        );
     }
 
     fn sorted(names: &[String]) -> Vec<String> {
@@ -2112,11 +2769,25 @@ mod tests {
         upstreams: &HashMap<String, UpstreamInfo>,
         remotes: &[RemoteInfo],
     ) -> Vec<SidebarItem> {
-        branches.flatten(data, upstreams, remotes, &Design::default())
+        branches.flatten(
+            data,
+            upstreams,
+            remotes,
+            &SidebarExtras::default(),
+            &Design::default(),
+        )
     }
 
     fn flatten(branches: &Branches, data: SidebarData) -> Vec<SidebarItem> {
         flatten_with(branches, data, &HashMap::new(), &[])
+    }
+
+    fn flatten_extras(
+        branches: &Branches,
+        data: SidebarData,
+        extras: &SidebarExtras<'_>,
+    ) -> Vec<SidebarItem> {
+        branches.flatten(data, &HashMap::new(), &[], extras, &Design::default())
     }
 
     #[test]
@@ -2227,6 +2898,7 @@ mod tests {
             sidebar_data(&["main"], &[], &["v1"], &["stash@{0}: wip"]),
             &HashMap::new(),
             &[],
+            &SidebarExtras::default(),
             &design,
         );
 
@@ -2436,6 +3108,386 @@ mod tests {
             branches.scroll.0.borrow().base_handle.offset().y,
             px(-56.0),
             "an unchanged list must not move under the pointer"
+        );
+    }
+
+    fn oid(byte: u8) -> strata_core::Oid {
+        format!("{byte:02x}")
+            .repeat(20)
+            .parse()
+            .expect("hex object id")
+    }
+
+    fn submodule(name: &str, status: SubmoduleStatus) -> SubmoduleInfo {
+        SubmoduleInfo {
+            name: name.to_owned(),
+            path: name.to_owned(),
+            url: Some(format!("../{name}.git")),
+            recorded_commit: Some(oid(1)),
+            checked_out_commit: match status {
+                SubmoduleStatus::Uninitialised => None,
+                SubmoduleStatus::CommitDiffers => Some(oid(2)),
+                SubmoduleStatus::UpToDate | SubmoduleStatus::Modified => Some(oid(1)),
+            },
+            status,
+        }
+    }
+
+    fn worktree(
+        path: &str,
+        head: Option<HeadInfo>,
+        is_main: bool,
+        locked: bool,
+        prunable: bool,
+    ) -> WorktreeInfo {
+        WorktreeInfo {
+            path: PathBuf::from(path),
+            head,
+            is_main,
+            locked,
+            lock_reason: locked.then(|| "testing".to_owned()),
+            prunable,
+        }
+    }
+
+    fn branch_head(name: &str) -> HeadInfo {
+        HeadInfo::Branch {
+            short_name: name.to_owned(),
+            target: Some(oid(3)),
+        }
+    }
+
+    #[test]
+    fn a_repository_without_submodules_or_linked_worktrees_hides_both_sections() {
+        let branches = Branches::default();
+        let extras = SidebarExtras {
+            revision: 4,
+            ..SidebarExtras::default()
+        };
+
+        let items = flatten_extras(&branches, sidebar_data(&["main"], &[], &[], &[]), &extras);
+
+        assert!(
+            !items.iter().any(|item| matches!(
+                item,
+                SidebarItem::SectionHeader {
+                    section: Section::Submodules | Section::Worktrees,
+                    ..
+                } | SidebarItem::Submodule { .. }
+                    | SidebarItem::Worktree { .. }
+            )),
+            "an empty repository has no submodule or worktree heading to fold"
+        );
+    }
+
+    #[test]
+    fn the_main_worktree_alone_does_not_earn_a_section() {
+        let branches = Branches::default();
+        let main = [worktree(
+            "/src/strata",
+            Some(branch_head("main")),
+            true,
+            false,
+            false,
+        )];
+        let main_only = SidebarExtras {
+            worktrees: &main,
+            current_worktree: Some(Path::new("/src/strata")),
+            revision: 1,
+            ..SidebarExtras::default()
+        };
+        let items = flatten_extras(
+            &branches,
+            sidebar_data(&["main"], &[], &[], &[]),
+            &main_only,
+        );
+        assert!(!items.iter().any(|item| matches!(
+            item,
+            SidebarItem::SectionHeader {
+                section: Section::Worktrees,
+                ..
+            } | SidebarItem::Worktree { .. }
+        )));
+
+        let both = [
+            worktree("/src/strata", Some(branch_head("main")), true, false, false),
+            worktree(
+                "/src/strata-docs",
+                Some(branch_head("docs")),
+                false,
+                false,
+                false,
+            ),
+        ];
+        let linked = SidebarExtras {
+            worktrees: &both,
+            current_worktree: Some(Path::new("/src/strata")),
+            ..main_only
+        };
+        let items = flatten_extras(&branches, sidebar_data(&["main"], &[], &[], &[]), &linked);
+        assert!(items.contains(&SidebarItem::SectionHeader {
+            section: Section::Worktrees,
+            count: 2,
+            open: true,
+        }));
+        let current = items
+            .iter()
+            .find_map(|item| match item {
+                SidebarItem::Worktree { current, path, .. } if path == "/src/strata" => {
+                    Some(*current)
+                }
+                _ => None,
+            })
+            .expect("the main worktree row");
+        assert!(current, "the window's own checkout is marked like HEAD");
+    }
+
+    #[test]
+    fn submodule_rows_carry_the_state_their_badge_names() {
+        let branches = Branches::default();
+        let submodules = [
+            submodule("libs/parser", SubmoduleStatus::UpToDate),
+            submodule("libs/legacy", SubmoduleStatus::Uninitialised),
+            submodule("libs/ui", SubmoduleStatus::CommitDiffers),
+            submodule("libs/dirty", SubmoduleStatus::Modified),
+        ];
+        let extras = SidebarExtras {
+            submodules: &submodules,
+            revision: 1,
+            ..SidebarExtras::default()
+        };
+
+        let items = flatten_extras(&branches, sidebar_data(&["main"], &[], &[], &[]), &extras);
+
+        assert!(items.contains(&SidebarItem::SectionHeader {
+            section: Section::Submodules,
+            count: 4,
+            open: true,
+        }));
+        let statuses: Vec<SubmoduleStatus> = items
+            .iter()
+            .filter_map(|item| match item {
+                SidebarItem::Submodule { status, .. } => Some(*status),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            statuses,
+            [
+                SubmoduleStatus::UpToDate,
+                SubmoduleStatus::Uninitialised,
+                SubmoduleStatus::CommitDiffers,
+                SubmoduleStatus::Modified,
+            ]
+        );
+        assert_eq!(
+            submodule_badge(SubmoduleStatus::UpToDate),
+            None,
+            "an up-to-date checkout needs no label"
+        );
+        assert_eq!(
+            submodule_badge(SubmoduleStatus::Uninitialised).map(|(label, _)| label),
+            Some("not initialised")
+        );
+        assert_eq!(
+            submodule_badge(SubmoduleStatus::CommitDiffers).map(|(label, _)| label),
+            Some("changed")
+        );
+        assert_eq!(
+            submodule_badge(SubmoduleStatus::Modified).map(|(label, _)| label),
+            Some("modified")
+        );
+    }
+
+    #[test]
+    fn a_submodule_tooltip_names_its_path_url_and_both_commits() {
+        let detail = submodule_detail(&submodule("libs/ui", SubmoduleStatus::CommitDiffers));
+        assert!(detail.starts_with("libs/ui\n../libs/ui.git"), "{detail}");
+        assert!(detail.contains("recorded 0101010"), "{detail}");
+        assert!(detail.contains("checked out 0202020"), "{detail}");
+
+        let uninitialised =
+            submodule_detail(&submodule("libs/legacy", SubmoduleStatus::Uninitialised));
+        assert!(
+            uninitialised.contains("checked out none"),
+            "{uninitialised}"
+        );
+    }
+
+    #[test]
+    fn worktree_rows_label_their_branch_or_detached_commit_and_badge_their_state() {
+        let branches = Branches::default();
+        let worktrees = [
+            worktree("/src/strata", Some(branch_head("main")), true, false, false),
+            worktree(
+                "/src/strata-docs",
+                Some(branch_head("docs")),
+                false,
+                true,
+                false,
+            ),
+            worktree(
+                "/src/strata-gone",
+                Some(HeadInfo::Detached { target: oid(0xab) }),
+                false,
+                false,
+                true,
+            ),
+        ];
+        let extras = SidebarExtras {
+            worktrees: &worktrees,
+            revision: 1,
+            ..SidebarExtras::default()
+        };
+
+        let items = flatten_extras(&branches, sidebar_data(&["main"], &[], &[], &[]), &extras);
+
+        let rows: Vec<&SidebarItem> = items
+            .iter()
+            .filter(|item| matches!(item, SidebarItem::Worktree { .. }))
+            .collect();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(
+            worktree_label(&worktrees[0]),
+            "main",
+            "a branch checkout is named by its branch"
+        );
+        assert_eq!(
+            worktree_label(&worktrees[2]),
+            "detached abababa",
+            "a detached checkout is named by its short commit"
+        );
+        let labels: Vec<String> = rows
+            .iter()
+            .map(|item| match item {
+                SidebarItem::Worktree {
+                    is_main,
+                    locked,
+                    prunable,
+                    ..
+                } => format!("{is_main}/{locked}/{prunable}"),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            ["true/false/false", "false/true/false", "false/false/true"]
+        );
+        assert_eq!(
+            worktree_detail(&worktrees[1]),
+            "/src/strata-docs\nlocked: testing"
+        );
+        assert!(worktree_detail(&worktrees[2]).contains("missing"));
+    }
+
+    #[test]
+    fn submodule_and_worktree_keys_survive_a_refresh() {
+        let branches = Branches::default();
+        let first = [
+            submodule("a", SubmoduleStatus::UpToDate),
+            submodule("b", SubmoduleStatus::UpToDate),
+        ];
+        let second = [
+            submodule("0", SubmoduleStatus::UpToDate),
+            submodule("a", SubmoduleStatus::UpToDate),
+            submodule("b", SubmoduleStatus::UpToDate),
+        ];
+        let worktrees = [
+            worktree("/src/strata", Some(branch_head("main")), true, false, false),
+            worktree(
+                "/src/strata-docs",
+                Some(branch_head("docs")),
+                false,
+                false,
+                false,
+            ),
+        ];
+        let before_extras = SidebarExtras {
+            submodules: &first,
+            worktrees: &worktrees,
+            revision: 1,
+            ..SidebarExtras::default()
+        };
+        let after_extras = SidebarExtras {
+            submodules: &second,
+            worktrees: &worktrees,
+            revision: 2,
+            ..SidebarExtras::default()
+        };
+        let data = || sidebar_data(&["main"], &[], &[], &[]);
+        let before = flatten_extras(&branches, data(), &before_extras);
+        let after = flatten_extras(&branches, data(), &after_extras);
+
+        let key = ItemKey::Submodule("b".to_owned());
+        let old_index = before.iter().position(|item| item.is(&key)).unwrap();
+        let new_index = after.iter().position(|item| item.is(&key)).unwrap();
+        assert_eq!(
+            new_index,
+            old_index + 1,
+            "a submodule added above moves the row, not the key"
+        );
+
+        let keys: std::collections::HashSet<ItemKey> = after.iter().map(SidebarItem::key).collect();
+        assert_eq!(keys.len(), after.len(), "every row has a key of its own");
+    }
+
+    #[test]
+    fn the_item_cache_follows_the_submodule_and_worktree_answer() {
+        let branches = Branches::default();
+        let submodules = [submodule("libs/ui", SubmoduleStatus::UpToDate)];
+        let worktrees = [
+            worktree("/src/strata", Some(branch_head("main")), true, false, false),
+            worktree(
+                "/src/strata-docs",
+                Some(branch_head("docs")),
+                false,
+                false,
+                false,
+            ),
+        ];
+        let upstreams = HashMap::new();
+        let design = Design::default();
+
+        let first = SidebarExtras {
+            submodules: &submodules,
+            worktrees: &worktrees,
+            revision: 1,
+            ..SidebarExtras::default()
+        };
+        let cached = branches.items(
+            sidebar_data(&["main"], &[], &[], &[]),
+            3,
+            &upstreams,
+            &[],
+            &first,
+            &design,
+        );
+        let again = branches.items(
+            sidebar_data(&["main"], &[], &[], &[]),
+            3,
+            &upstreams,
+            &[],
+            &first,
+            &design,
+        );
+        assert!(
+            Rc::ptr_eq(&cached, &again),
+            "an unchanged snapshot and answer reuse the flattened list"
+        );
+
+        let mut updated = SidebarExtras { ..first };
+        updated.revision = 2;
+        let rebuilt = branches.items(
+            sidebar_data(&["main"], &[], &[], &[]),
+            3,
+            &upstreams,
+            &[],
+            &updated,
+            &design,
+        );
+        assert!(
+            !Rc::ptr_eq(&cached, &rebuilt),
+            "a new submodule/worktree answer rebuilds the sections"
         );
     }
 }

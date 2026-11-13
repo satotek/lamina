@@ -18,7 +18,7 @@ pub(crate) mod gallery;
 mod row;
 mod text;
 
-pub use badge::{avatar, change_badge, count_pill, kbd, ref_badge};
+pub use badge::{BadgeTone, avatar, change_badge, count_pill, kbd, ref_badge, status_badge};
 pub use banner::{BannerKind, banner};
 pub use button::{ButtonKind, ButtonSize, UiButton, button, content_button, icon_button};
 pub use confirm::{Confirm, confirm};
