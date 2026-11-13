@@ -148,6 +148,25 @@ so the binary is not under `./target`; `cargo run` finds it either way.
 macOS and Windows need no Nix; `cargo build -p strata-app` from a normal Rust
 toolchain is enough.
 
+## Development
+
+For automated UI checks, Strata accepts debug launch flags alongside `[PATH]`,
+`--fake`, or `--gallery` and applies them once the repository's first snapshot
+has loaded (printing one `debug-launch:` line per applied option to stderr):
+
+- `--select <rev>`: select and scroll to a commit (id or ref name).
+- `--file-history <path>`: open file history for a path.
+- `--tree <rev>[:<dir>]`: open the tree browser at a commit (currently opens at
+  the commit root; `--tree-file <rev>:<path>` is also accepted and opens the
+  tree root while `tree_view` exposes only root opening).
+- `--worktree`: start in the working-tree view.
+- `--dialog <name>`: open a dialog (`create-branch`, `stash`, `settings`,
+  `palette`, `open-repository`, `add-worktree`, `create-tag`).
+- `--window-size <W>x<H>`: request an initial window size.
+
+Invalid values or unknown flags log an error to stderr and continue with a
+normal launch.
+
 ## Headless smoke test
 
 `STRATA_SMOKE=1` starts with the overlay enabled, scrolls the commit list every

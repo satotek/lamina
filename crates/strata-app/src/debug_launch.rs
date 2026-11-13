@@ -1,0 +1,832 @@
+//! Debug launch flags for opening a specific view or dialog at startup.
+//!
+//! Automated UI checks pass these flags alongside `[PATH]`, `--fake`, or
+//! `--gallery` so they can land directly on the view under test without
+//! hunting for button coordinates. Parsing is pure and returns errors as
+//! strings; the caller prints them to stderr and continues with a normal
+//! launch when a value is invalid or unknown.
+
+use std::path::PathBuf;
+
+use gpui::{App, Window};
+use strata_core::session::RepoSnapshot;
+use strata_core::{HeadInfo, Oid};
+
+use crate::actions::{OpenSettings, TogglePalette};
+use crate::fake;
+
+/// Initial window size requested via `--window-size <W>x<H>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct WindowSize {
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Dialogs and secondary windows that can be opened with `--dialog <name>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DebugDialog {
+    CreateBranch,
+    Stash,
+    Settings,
+    Palette,
+    OpenRepository,
+    AddWorktree,
+    CreateTag,
+}
+
+impl DebugDialog {
+    pub(crate) const ALL_NAMES: &'static [&'static str] = &[
+        "create-branch",
+        "stash",
+        "settings",
+        "palette",
+        "open-repository",
+        "add-worktree",
+        "create-tag",
+    ];
+
+    pub(crate) fn parse(name: &str) -> Option<Self> {
+        match name {
+            "create-branch" => Some(Self::CreateBranch),
+            "stash" => Some(Self::Stash),
+            "settings" => Some(Self::Settings),
+            "palette" => Some(Self::Palette),
+            "open-repository" => Some(Self::OpenRepository),
+            "add-worktree" => Some(Self::AddWorktree),
+            "create-tag" => Some(Self::CreateTag),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::CreateBranch => "create-branch",
+            Self::Stash => "stash",
+            Self::Settings => "settings",
+            Self::Palette => "palette",
+            Self::OpenRepository => "open-repository",
+            Self::AddWorktree => "add-worktree",
+            Self::CreateTag => "create-tag",
+        }
+    }
+
+    pub(crate) fn needs_repo(self) -> bool {
+        match self {
+            Self::CreateBranch | Self::Stash | Self::AddWorktree | Self::CreateTag => true,
+            Self::Settings | Self::Palette | Self::OpenRepository => false,
+        }
+    }
+}
+
+/// Target for `--tree <rev>[:<dir>]` or `--tree-file <rev>:<path>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum TreeTarget {
+    Directory { rev: String, dir: Option<String> },
+    File { rev: String, path: String },
+}
+
+impl TreeTarget {
+    pub(crate) fn rev(&self) -> &str {
+        match self {
+            Self::Directory { rev, .. } | Self::File { rev, .. } => rev,
+        }
+    }
+}
+
+/// Debug launch options applied once the window and first snapshot are ready.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct DebugLaunch {
+    pub select: Option<String>,
+    pub file_history: Option<String>,
+    pub tree: Option<TreeTarget>,
+    pub worktree: bool,
+    pub dialog: Option<DebugDialog>,
+    pub window_size: Option<WindowSize>,
+}
+
+impl DebugLaunch {
+    pub(crate) fn has_repo_actions(&self) -> bool {
+        self.select.is_some()
+            || self.file_history.is_some()
+            || self.tree.is_some()
+            || self.worktree
+            || self.dialog.is_some_and(DebugDialog::needs_repo)
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        self.has_repo_actions() || self.dialog.is_some() || self.window_size.is_some()
+    }
+}
+
+/// What the command line asked the first window to show.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StartMode {
+    /// `strata [PATH]`: a repository, or the error screen for a bad path.
+    Path(PathBuf),
+    /// `strata --fake [N]`: the synthetic render benchmark.
+    Fake(usize),
+    /// `strata --gallery`: every shared UI part, with no repository.
+    Gallery,
+    /// No argument: the last repository when restoring is on, else the welcome
+    /// screen.
+    Welcome,
+}
+
+/// Pure result of parsing command-line arguments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ParsedArgs {
+    pub help: bool,
+    pub start: StartMode,
+    pub debug: DebugLaunch,
+    pub errors: Vec<String>,
+}
+
+/// Parses command-line arguments from `std::env::args().skip(1)`.
+pub(crate) fn parse_args() -> ParsedArgs {
+    parse_args_from(std::env::args().skip(1))
+}
+
+/// Pure CLI argument parser.
+///
+/// Unknown flags and invalid option values append a message to `errors` and
+/// leave the affected field unset so the app continues with a normal launch.
+pub(crate) fn parse_args_from<I, S>(args: I) -> ParsedArgs
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let raw: Vec<String> = args
+        .into_iter()
+        .map(|arg| arg.as_ref().to_owned())
+        .collect();
+    let mut index = 0;
+
+    let mut help = false;
+    let mut start: Option<StartMode> = None;
+    let mut debug = DebugLaunch::default();
+    let mut errors = Vec::new();
+    let mut after_double_dash = false;
+
+    while index < raw.len() {
+        let arg = &raw[index];
+        index += 1;
+
+        if after_double_dash {
+            record_positional(arg, &mut start, &mut errors);
+            continue;
+        }
+
+        if arg == "--" {
+            after_double_dash = true;
+            continue;
+        }
+
+        if arg == "-h" || arg == "--help" {
+            help = true;
+            continue;
+        }
+
+        if arg == "--gallery" {
+            match &start {
+                None => start = Some(StartMode::Gallery),
+                Some(StartMode::Gallery) => {}
+                Some(_) => {
+                    errors.push("--gallery conflicts with an earlier target (ignored)".into())
+                }
+            }
+            continue;
+        }
+
+        if arg == "--fake" {
+            let count = match raw.get(index).and_then(|next| next.parse::<usize>().ok()) {
+                Some(count) => {
+                    index += 1;
+                    count
+                }
+                None => fake::COMMIT_COUNT,
+            };
+            match &start {
+                None => start = Some(StartMode::Fake(count)),
+                Some(StartMode::Fake(_)) => start = Some(StartMode::Fake(count)),
+                Some(_) => errors.push("--fake conflicts with an earlier target (ignored)".into()),
+            }
+            continue;
+        }
+
+        if let Some(val) = arg.strip_prefix("--fake=") {
+            match val.parse::<usize>() {
+                Ok(count) => match &start {
+                    None | Some(StartMode::Fake(_)) => start = Some(StartMode::Fake(count)),
+                    Some(_) => {
+                        errors.push("--fake conflicts with an earlier target (ignored)".into())
+                    }
+                },
+                Err(_) => errors.push(format!("invalid --fake count '{val}' (ignored)")),
+            }
+            continue;
+        }
+
+        if arg == "--worktree" {
+            debug.worktree = true;
+            continue;
+        }
+
+        if let Some((flag, inline_val)) = split_flag_value(arg) {
+            match flag {
+                "--select" => {
+                    if let Some(val) = take_value(flag, inline_val, &raw, &mut index, &mut errors) {
+                        if val.is_empty() {
+                            errors.push("invalid --select '': revision cannot be empty".into());
+                        } else {
+                            debug.select = Some(val);
+                        }
+                    }
+                }
+                "--file-history" => {
+                    if let Some(val) = take_value(flag, inline_val, &raw, &mut index, &mut errors) {
+                        if val.is_empty() {
+                            errors.push("invalid --file-history '': path cannot be empty".into());
+                        } else {
+                            debug.file_history = Some(val);
+                        }
+                    }
+                }
+                "--tree" => {
+                    if let Some(val) = take_value(flag, inline_val, &raw, &mut index, &mut errors) {
+                        match parse_tree_arg(&val) {
+                            Ok(target) => debug.tree = Some(target),
+                            Err(msg) => errors.push(msg),
+                        }
+                    }
+                }
+                "--tree-file" => {
+                    if let Some(val) = take_value(flag, inline_val, &raw, &mut index, &mut errors) {
+                        match parse_tree_file_arg(&val) {
+                            Ok(target) => debug.tree = Some(target),
+                            Err(msg) => errors.push(msg),
+                        }
+                    }
+                }
+                "--dialog" => {
+                    if let Some(val) = take_value(flag, inline_val, &raw, &mut index, &mut errors) {
+                        match DebugDialog::parse(&val) {
+                            Some(dialog) => debug.dialog = Some(dialog),
+                            None => errors.push(format!(
+                                "unknown --dialog '{val}'; supported dialogs: {}",
+                                DebugDialog::ALL_NAMES.join(", ")
+                            )),
+                        }
+                    }
+                }
+                "--window-size" => {
+                    if let Some(val) = take_value(flag, inline_val, &raw, &mut index, &mut errors) {
+                        match parse_window_size(&val) {
+                            Ok(size) => debug.window_size = Some(size),
+                            Err(msg) => errors.push(msg),
+                        }
+                    }
+                }
+                _ => {
+                    errors.push(format!("unknown option '{arg}' (ignored)"));
+                }
+            }
+            continue;
+        }
+
+        record_positional(arg, &mut start, &mut errors);
+    }
+
+    ParsedArgs {
+        help,
+        start: start.unwrap_or(StartMode::Welcome),
+        debug,
+        errors,
+    }
+}
+
+fn record_positional(arg: &str, start: &mut Option<StartMode>, errors: &mut Vec<String>) {
+    match start {
+        None => *start = Some(StartMode::Path(PathBuf::from(arg))),
+        Some(_) => errors.push(format!("unexpected extra argument '{arg}' (ignored)")),
+    }
+}
+
+fn split_flag_value(arg: &str) -> Option<(&str, Option<&str>)> {
+    if !arg.starts_with('-') || arg == "-" {
+        return None;
+    }
+    match arg.split_once('=') {
+        Some((flag, value)) => Some((flag, Some(value))),
+        None => Some((arg, None)),
+    }
+}
+
+fn take_value(
+    flag: &str,
+    inline_val: Option<&str>,
+    raw: &[String],
+    index: &mut usize,
+    errors: &mut Vec<String>,
+) -> Option<String> {
+    if let Some(val) = inline_val {
+        return Some(val.to_owned());
+    }
+    if *index < raw.len() {
+        let val = raw[*index].clone();
+        *index += 1;
+        Some(val)
+    } else {
+        errors.push(format!("missing value for {flag} (ignored)"));
+        None
+    }
+}
+
+fn parse_tree_arg(value: &str) -> Result<TreeTarget, String> {
+    if value.is_empty() {
+        return Err("invalid --tree '': expected <rev>[:<dir>]".into());
+    }
+    match value.split_once(':') {
+        Some((rev, dir)) => {
+            if rev.is_empty() {
+                return Err(format!(
+                    "invalid --tree '{value}': missing revision before ':'"
+                ));
+            }
+            let dir = dir.trim_matches('/');
+            Ok(TreeTarget::Directory {
+                rev: rev.to_owned(),
+                dir: (!dir.is_empty()).then(|| dir.to_owned()),
+            })
+        }
+        None => Ok(TreeTarget::Directory {
+            rev: value.to_owned(),
+            dir: None,
+        }),
+    }
+}
+
+fn parse_tree_file_arg(value: &str) -> Result<TreeTarget, String> {
+    let Some((rev, path)) = value.split_once(':') else {
+        return Err(format!(
+            "invalid --tree-file '{value}': expected <rev>:<path>"
+        ));
+    };
+    let path = path.trim_start_matches('/');
+    if rev.is_empty() || path.is_empty() {
+        return Err(format!(
+            "invalid --tree-file '{value}': expected <rev>:<path>"
+        ));
+    }
+    Ok(TreeTarget::File {
+        rev: rev.to_owned(),
+        path: path.to_owned(),
+    })
+}
+
+fn parse_window_size(value: &str) -> Result<WindowSize, String> {
+    let parts = value.split_once('x').or_else(|| value.split_once('X'));
+    let Some((w_str, h_str)) = parts else {
+        return Err(format!("invalid --window-size '{value}': expected <W>x<H>"));
+    };
+    let Ok(width) = w_str.parse::<u32>() else {
+        return Err(format!(
+            "invalid --window-size '{value}': expected positive integers"
+        ));
+    };
+    let Ok(height) = h_str.parse::<u32>() else {
+        return Err(format!(
+            "invalid --window-size '{value}': expected positive integers"
+        ));
+    };
+    if width == 0 || height == 0 {
+        return Err(format!(
+            "invalid --window-size '{value}': width and height must be positive"
+        ));
+    }
+    Ok(WindowSize { width, height })
+}
+
+pub(crate) fn help_text() -> String {
+    format!(
+        "usage: strata [PATH] [OPTIONS]\n\
+         \x20      strata --fake [N] [OPTIONS]\n\
+         \x20      strata --gallery [OPTIONS]\n\n\
+         Without PATH, Strata reopens the last repository when restoring is enabled\n\
+         and shows the welcome screen otherwise.\n\
+         --fake renders N synthetic commits (default {}) for the render benchmark.\n\
+         --gallery shows every shared UI part, and needs no repository.\n\n\
+         Debug launch options (applied once the first snapshot loads):\n\
+         \x20 --select <rev>         Select and scroll to a commit (id or ref)\n\
+         \x20 --file-history <path>  Open file history for <path>\n\
+         \x20 --tree <rev>[:<dir>]   Open the tree browser at <rev>\n\
+         \x20 --tree-file <rev>:<path>\n\
+         \x20                        Open the tree browser for <rev> / <path>\n\
+         \x20 --worktree             Start in the working-tree view\n\
+         \x20 --dialog <name>        Open a dialog ({})\n\
+         \x20 --window-size <W>x<H>  Request an initial window size",
+        fake::COMMIT_COUNT,
+        DebugDialog::ALL_NAMES.join(", ")
+    )
+}
+
+/// Outcome of matching a revision string against the loaded `RepoSnapshot`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SnapshotRevMatch {
+    /// Resolved to an object id.
+    Found(Oid),
+    /// A short hex prefix matched multiple commits in the loaded snapshot.
+    Ambiguous(usize),
+    /// Not found in the snapshot (caller may still try a full rev-parse via core).
+    NotFound,
+}
+
+/// Resolves `HEAD`, ref names, `stash@{N}`, full object ids, or unique short
+/// hex prefixes from the already-loaded `RepoSnapshot`.
+pub(crate) fn resolve_in_snapshot(snapshot: &RepoSnapshot, rev: &str) -> SnapshotRevMatch {
+    if rev == "HEAD" {
+        if let Some(head) = &snapshot.head {
+            match head {
+                HeadInfo::Branch {
+                    target: Some(oid), ..
+                }
+                | HeadInfo::Detached { target: oid } => return SnapshotRevMatch::Found(*oid),
+                HeadInfo::Branch { target: None, .. } => return SnapshotRevMatch::NotFound,
+            }
+        }
+        return SnapshotRevMatch::NotFound;
+    }
+
+    if let Some(reference) = snapshot
+        .refs
+        .iter()
+        .find(|reference| reference.full_name == rev)
+        .or_else(|| {
+            snapshot
+                .refs
+                .iter()
+                .find(|reference| reference.short_name == rev)
+        })
+    {
+        return SnapshotRevMatch::Found(reference.target);
+    }
+
+    if let Some(index) = rev
+        .strip_prefix("stash@{")
+        .and_then(|rest| rest.strip_suffix('}'))
+        .and_then(|num| num.parse::<usize>().ok())
+        && let Some(stash) = snapshot.stashes.iter().find(|stash| stash.index == index)
+    {
+        return SnapshotRevMatch::Found(stash.id);
+    }
+
+    if let Ok(oid) = rev.parse::<Oid>() {
+        return SnapshotRevMatch::Found(oid);
+    }
+
+    // Short hex prefix against loaded commits (4+ hex chars, matching search).
+    if rev.len() >= 4 && rev.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        let prefix = rev.to_ascii_lowercase();
+        let mut matched: Option<Oid> = None;
+        let mut count = 0usize;
+        for index in 0..snapshot.commits.len() {
+            if let Some((commit, _)) = snapshot.commits.get(index)
+                && commit.id.to_string().starts_with(&prefix)
+            {
+                matched = Some(commit.id);
+                count += 1;
+            }
+        }
+        if count > 1 {
+            return SnapshotRevMatch::Ambiguous(count);
+        }
+        if let Some(oid) = matched
+            && snapshot.commits.complete
+        {
+            return SnapshotRevMatch::Found(oid);
+        }
+    }
+
+    SnapshotRevMatch::NotFound
+}
+
+/// Dispatches a window-level dialog (`settings` or `palette`) that does not
+/// require a `RepoView` method.
+pub(crate) fn dispatch_window_dialog(dialog: DebugDialog, window: &mut Window, cx: &mut App) {
+    match dialog {
+        DebugDialog::Settings => {
+            window.dispatch_action(Box::new(OpenSettings), cx);
+            eprintln!("debug-launch: applied --dialog settings");
+        }
+        DebugDialog::Palette => {
+            // `TogglePalette` opens on `cx.active_window()` inside `cx.defer`,
+            // so activate the window first and dispatch once the first frame's
+            // key context / available actions have been built.
+            window.activate_window();
+            window.on_next_frame(move |window, cx| {
+                window.activate_window();
+                window.dispatch_action(Box::new(TogglePalette), cx);
+            });
+            window.refresh();
+            eprintln!("debug-launch: applied --dialog palette");
+        }
+        DebugDialog::OpenRepository
+        | DebugDialog::CreateBranch
+        | DebugDialog::Stash
+        | DebugDialog::AddWorktree
+        | DebugDialog::CreateTag => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> ParsedArgs {
+        parse_args_from(args.iter().copied())
+    }
+
+    #[test]
+    fn empty_args_launch_welcome() {
+        let parsed = parse(&[]);
+        assert!(!parsed.help);
+        assert_eq!(parsed.start, StartMode::Welcome);
+        assert_eq!(parsed.debug, DebugLaunch::default());
+        assert!(!parsed.debug.is_active());
+        assert!(parsed.errors.is_empty());
+    }
+
+    #[test]
+    fn positional_path_and_existing_modes_parse() {
+        let path = parse(&["/tmp/repo"]);
+        assert_eq!(path.start, StartMode::Path(PathBuf::from("/tmp/repo")));
+        assert!(path.errors.is_empty());
+
+        let fake_default = parse(&["--fake"]);
+        assert_eq!(fake_default.start, StartMode::Fake(fake::COMMIT_COUNT));
+        assert!(fake_default.errors.is_empty());
+
+        let fake_count = parse(&["--fake", "5000"]);
+        assert_eq!(fake_count.start, StartMode::Fake(5000));
+        assert!(fake_count.errors.is_empty());
+
+        let fake_followed_by_flag = parse(&["--fake", "--worktree"]);
+        assert_eq!(
+            fake_followed_by_flag.start,
+            StartMode::Fake(fake::COMMIT_COUNT)
+        );
+        assert!(fake_followed_by_flag.debug.worktree);
+        assert!(fake_followed_by_flag.errors.is_empty());
+
+        let gallery = parse(&["--gallery"]);
+        assert_eq!(gallery.start, StartMode::Gallery);
+        assert!(gallery.errors.is_empty());
+    }
+
+    #[test]
+    fn all_debug_flags_parse_with_space_or_equals() {
+        let parsed = parse(&[
+            ".",
+            "--select",
+            "HEAD~1",
+            "--file-history=crates/strata-app/src/main.rs",
+            "--tree",
+            "main:crates/strata-app",
+            "--worktree",
+            "--dialog",
+            "create-branch",
+            "--window-size",
+            "1280x720",
+        ]);
+        assert!(parsed.errors.is_empty());
+        assert_eq!(parsed.start, StartMode::Path(PathBuf::from(".")));
+        assert_eq!(parsed.debug.select.as_deref(), Some("HEAD~1"));
+        assert_eq!(
+            parsed.debug.file_history.as_deref(),
+            Some("crates/strata-app/src/main.rs")
+        );
+        assert_eq!(
+            parsed.debug.tree,
+            Some(TreeTarget::Directory {
+                rev: "main".into(),
+                dir: Some("crates/strata-app".into()),
+            })
+        );
+        assert!(parsed.debug.worktree);
+        assert_eq!(parsed.debug.dialog, Some(DebugDialog::CreateBranch));
+        assert_eq!(
+            parsed.debug.window_size,
+            Some(WindowSize {
+                width: 1280,
+                height: 720,
+            })
+        );
+        assert!(parsed.debug.is_active());
+    }
+
+    #[test]
+    fn tree_and_tree_file_variants_parse() {
+        let root_only = parse(&["--tree", "abc1234"]);
+        assert_eq!(
+            root_only.debug.tree,
+            Some(TreeTarget::Directory {
+                rev: "abc1234".into(),
+                dir: None,
+            })
+        );
+        assert!(root_only.errors.is_empty());
+
+        let trailing_colon = parse(&["--tree", "HEAD:"]);
+        assert_eq!(
+            trailing_colon.debug.tree,
+            Some(TreeTarget::Directory {
+                rev: "HEAD".into(),
+                dir: None,
+            })
+        );
+        assert!(trailing_colon.errors.is_empty());
+
+        let file = parse(&["--tree-file", "main:src/lib.rs"]);
+        assert_eq!(
+            file.debug.tree,
+            Some(TreeTarget::File {
+                rev: "main".into(),
+                path: "src/lib.rs".into(),
+            })
+        );
+        assert!(file.errors.is_empty());
+    }
+
+    #[test]
+    fn dialog_names_parse_and_unknown_dialog_errors() {
+        for name in DebugDialog::ALL_NAMES {
+            let parsed = parse(&["--dialog", name]);
+            assert!(parsed.errors.is_empty(), "failed on dialog {name}");
+            assert_eq!(parsed.debug.dialog.map(DebugDialog::name), Some(*name));
+        }
+
+        let bad = parse(&["--dialog", "nonexistent", "."]);
+        assert_eq!(bad.debug.dialog, None);
+        assert_eq!(bad.start, StartMode::Path(PathBuf::from(".")));
+        assert_eq!(bad.errors.len(), 1);
+        assert!(bad.errors[0].contains("nonexistent"));
+    }
+
+    #[test]
+    fn invalid_values_and_unknown_flags_report_errors_and_continue() {
+        let parsed = parse(&[
+            "--unknown-flag",
+            "--window-size",
+            "0x800",
+            "--tree-file",
+            "missing-colon",
+            "--tree",
+            ":dir-without-rev",
+            "--select",
+        ]);
+        assert_eq!(parsed.start, StartMode::Welcome);
+        assert_eq!(parsed.debug, DebugLaunch::default());
+        assert_eq!(parsed.errors.len(), 5);
+
+        let bad_size = parse(&["--window-size", "wide x tall", "."]);
+        assert_eq!(bad_size.debug.window_size, None);
+        assert_eq!(bad_size.start, StartMode::Path(PathBuf::from(".")));
+        assert_eq!(bad_size.errors.len(), 1);
+
+        let uppercase_x = parse(&["--window-size", "1024X768"]);
+        assert_eq!(
+            uppercase_x.debug.window_size,
+            Some(WindowSize {
+                width: 1024,
+                height: 768,
+            })
+        );
+        assert!(uppercase_x.errors.is_empty());
+    }
+
+    #[test]
+    fn flags_before_path_work_and_double_dash_allows_dash_paths() {
+        let parsed = parse(&["--worktree", "--", "-weird-repo-dir"]);
+        assert!(parsed.errors.is_empty());
+        assert!(parsed.debug.worktree);
+        assert_eq!(
+            parsed.start,
+            StartMode::Path(PathBuf::from("-weird-repo-dir"))
+        );
+    }
+
+    #[test]
+    fn help_flag_sets_help() {
+        let short = parse(&["-h"]);
+        assert!(short.help);
+        let long = parse(&["--help"]);
+        assert!(long.help);
+    }
+
+    #[test]
+    fn snapshot_rev_resolution_matches_head_refs_stashes_and_oids() {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+        use strata_core::graph::GraphRows;
+        use strata_core::session::CommitList;
+        use strata_core::{CommitInfo, RefInfo, RefKind, RepoState, StashInfo, WorktreeStatus};
+
+        let oid1: Oid = "1111111111111111111111111111111111111111"
+            .parse()
+            .expect("oid1");
+        let oid2: Oid = "1111222222222222222222222222222222222222"
+            .parse()
+            .expect("oid2");
+
+        let mut rows = GraphRows::default();
+        rows.push_row(0, 0, 1, &[], &[]);
+        rows.push_row(0, 0, 1, &[], &[]);
+        let mut commits = CommitList::default();
+        commits.extend(
+            vec![
+                CommitInfo {
+                    id: oid1,
+                    parents: vec![oid2],
+                    summary: "first".into(),
+                    author_name: "a".into(),
+                    author_email: "a@example.com".into(),
+                    author_time: 10,
+                    committer_time: 10,
+                },
+                CommitInfo {
+                    id: oid2,
+                    parents: vec![],
+                    summary: "second".into(),
+                    author_name: "a".into(),
+                    author_email: "a@example.com".into(),
+                    author_time: 5,
+                    committer_time: 5,
+                },
+            ],
+            rows,
+        );
+        commits.complete = true;
+
+        let snapshot = RepoSnapshot {
+            generation: 1,
+            head: Some(HeadInfo::Branch {
+                short_name: "main".into(),
+                target: Some(oid1),
+            }),
+            refs: Arc::new(vec![RefInfo {
+                full_name: "refs/heads/main".into(),
+                short_name: "main".into(),
+                kind: RefKind::LocalBranch,
+                target: oid1,
+            }]),
+            refs_by_commit: Arc::new(HashMap::new()),
+            commits,
+            commit_index: Arc::new(HashMap::from([(oid1, 0), (oid2, 1)])),
+            status: Arc::new(WorktreeStatus::default()),
+            stashes: Arc::new(vec![StashInfo {
+                index: 0,
+                id: oid2,
+                message: "WIP".into(),
+                created_time: 12,
+                branch: Some("main".into()),
+            }]),
+            upstreams: Arc::new(HashMap::new()),
+            remotes: Vec::new(),
+            state: RepoState::Normal,
+            conflicts: Arc::new(Vec::new()),
+            busy: None,
+        };
+
+        assert_eq!(
+            resolve_in_snapshot(&snapshot, "HEAD"),
+            SnapshotRevMatch::Found(oid1)
+        );
+        assert_eq!(
+            resolve_in_snapshot(&snapshot, "main"),
+            SnapshotRevMatch::Found(oid1)
+        );
+        assert_eq!(
+            resolve_in_snapshot(&snapshot, "refs/heads/main"),
+            SnapshotRevMatch::Found(oid1)
+        );
+        assert_eq!(
+            resolve_in_snapshot(&snapshot, "stash@{0}"),
+            SnapshotRevMatch::Found(oid2)
+        );
+        assert_eq!(
+            resolve_in_snapshot(&snapshot, &oid2.to_string()),
+            SnapshotRevMatch::Found(oid2)
+        );
+        assert_eq!(
+            resolve_in_snapshot(&snapshot, "111122"),
+            SnapshotRevMatch::Found(oid2)
+        );
+        assert_eq!(
+            resolve_in_snapshot(&snapshot, "1111"),
+            SnapshotRevMatch::Ambiguous(2)
+        );
+        assert_eq!(
+            resolve_in_snapshot(&snapshot, "HEAD~1"),
+            SnapshotRevMatch::NotFound
+        );
+    }
+}

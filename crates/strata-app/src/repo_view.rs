@@ -41,6 +41,7 @@ use strata_core::{FileChange, HeadInfo, Oid, RefKind};
 
 use crate::branches::{BranchStart, Branches};
 use crate::data::{self, LaneWidth, Source};
+use crate::debug_launch::{self, DebugDialog, DebugLaunch, SnapshotRevMatch, TreeTarget};
 use crate::diff_view::{self, Row as DiffRow};
 use crate::fake::{self, FakeRepo};
 use crate::file_history::FileHistory;
@@ -357,6 +358,7 @@ pub struct RepoView {
     smoke: bool,
     finished: bool,
     metrics: FrameMetrics,
+    debug_launch: Option<DebugLaunchRunner>,
 
     _appearance: Subscription,
     /// Notifies the view when the settings change, so sizes and colours that
@@ -455,6 +457,7 @@ impl RepoView {
             smoke,
             finished: false,
             metrics: FrameMetrics::default(),
+            debug_launch: None,
             _appearance: appearance,
             _settings: settings,
             _bridge: None,
@@ -482,15 +485,24 @@ impl RepoView {
             } => {
                 view.name = Some(name);
                 view.title = title;
+                let window_handle = window.window_handle();
                 // Every session event is delivered here, on the foreground
                 // executor: the session callback only pushes into the channel.
                 view._bridge = Some(cx.spawn(async move |this, cx| {
                     while let Some(event) = events.next().await {
+                        let is_snapshot = matches!(event, SessionEvent::SnapshotUpdated { .. });
                         if this
                             .update(cx, |this, cx| this.on_event(event, cx))
                             .is_err()
                         {
                             break;
+                        }
+                        if is_snapshot {
+                            let _ = window_handle.update(cx, |_, window, cx| {
+                                let _ = this.update(cx, |this, cx| {
+                                    this.step_debug_launch(window, cx);
+                                });
+                            });
                         }
                     }
                 }));
@@ -640,6 +652,15 @@ impl RepoView {
                 cx.notify();
             }
             SessionEvent::LoadFailed { error } => {
+                if self.debug_launch.is_some()
+                    && self
+                        .session
+                        .as_ref()
+                        .is_none_or(|session| session.snapshot().head.is_none())
+                {
+                    eprintln!("debug-launch: error: repository load failed: {error}");
+                    self.debug_launch = None;
+                }
                 self.status_error = Some(error);
                 cx.notify();
             }
@@ -1192,6 +1213,355 @@ impl RepoView {
             .map(|interval| interval.as_secs_f32() * 1000.0)
             .filter(|interval| *interval > 0.0)
             .unwrap_or(1000.0 / 60.0)
+    }
+
+    /// Configures debug launch flags to be applied once the repository's first
+    /// snapshot has loaded (or reports why they cannot apply for `--fake` / error views).
+    pub(crate) fn set_debug_launch(
+        &mut self,
+        debug: DebugLaunch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !debug.is_active() {
+            return;
+        }
+        if self.session.is_none() {
+            if debug.has_repo_actions() {
+                if self.fake.is_some() {
+                    eprintln!(
+                        "debug-launch: error: repository options require a real repository (cannot be used with --fake)"
+                    );
+                } else {
+                    eprintln!(
+                        "debug-launch: error: repository failed to open, skipping repository debug options"
+                    );
+                }
+            }
+            if let Some(dialog) = debug.dialog
+                && !dialog.needs_repo()
+            {
+                let handle = window.window_handle();
+                window.defer(cx, move |_, cx| {
+                    let _ = handle.update(cx, |_, window, cx| match dialog {
+                        DebugDialog::OpenRepository => {
+                            window.dispatch_action(Box::new(crate::actions::OpenRepository), cx);
+                            eprintln!("debug-launch: applied --dialog open-repository");
+                        }
+                        _ => debug_launch::dispatch_window_dialog(dialog, window, cx),
+                    });
+                });
+            }
+            return;
+        }
+
+        self.debug_launch = Some(DebugLaunchRunner::new(debug));
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|session| session.snapshot().head.is_some())
+        {
+            self.step_debug_launch(window, cx);
+        }
+    }
+
+    fn step_debug_launch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.session.as_ref() else {
+            self.debug_launch = None;
+            return;
+        };
+        let snapshot = session.snapshot();
+        // Status refreshes can publish an empty snapshot before history::load
+        // reads HEAD and the first commit chunk.
+        if snapshot.head.is_none() {
+            return;
+        }
+        let Some(mut runner) = self.debug_launch.take() else {
+            return;
+        };
+
+        let select_ready = if let Some(rev) = runner.launch.select.clone() {
+            runner.resolve_rev(
+                &rev,
+                RevSlot::Select,
+                &snapshot,
+                session.repo().clone(),
+                window,
+                cx,
+            )
+        } else {
+            true
+        };
+        let tree_ready = if let Some(target) = runner.launch.tree.clone() {
+            runner.resolve_rev(
+                target.rev(),
+                RevSlot::Tree,
+                &snapshot,
+                session.repo().clone(),
+                window,
+                cx,
+            )
+        } else {
+            true
+        };
+
+        if !select_ready || !tree_ready {
+            self.debug_launch = Some(runner);
+            return;
+        }
+
+        let launch = runner.launch;
+        if let Some(rev) = &launch.select {
+            match runner.select_oid {
+                Some(Ok(oid)) => match snapshot.commit_index.get(&oid).copied() {
+                    Some(index) => {
+                        self.jump(index, cx);
+                        eprintln!(
+                            "debug-launch: applied --select {rev} -> {} (row {index})",
+                            data::short_oid(oid)
+                        );
+                    }
+                    None => eprintln!(
+                        "debug-launch: error: --select '{rev}' resolved to {}, which is not in the loaded history",
+                        data::short_oid(oid)
+                    ),
+                },
+                Some(Err(err)) => {
+                    eprintln!("debug-launch: error: --select '{rev}' failed: {err}");
+                }
+                None => {}
+            }
+        }
+
+        if let Some(target) = &launch.tree {
+            let rev = target.rev();
+            let flag = match target {
+                TreeTarget::Directory { .. } => "--tree",
+                TreeTarget::File { .. } => "--tree-file",
+            };
+            match runner.tree_oid {
+                Some(Ok(oid)) => match snapshot.commit_index.get(&oid).copied() {
+                    Some(index) => {
+                        self.jump(index, cx);
+                        self.open_tree(window, cx);
+                        match target {
+                            TreeTarget::Directory { dir: None, .. } => {
+                                eprintln!(
+                                    "debug-launch: applied --tree {rev} -> {}",
+                                    data::short_oid(oid)
+                                );
+                            }
+                            TreeTarget::Directory { dir: Some(dir), .. } => {
+                                eprintln!(
+                                    "debug-launch: applied --tree {rev} -> {} (opened root; subdirectory '{dir}' is not yet exposed by tree_view)",
+                                    data::short_oid(oid)
+                                );
+                            }
+                            TreeTarget::File { path, .. } => {
+                                eprintln!(
+                                    "debug-launch: applied --tree-file {rev} -> {} (opened root; opening '{path}' directly is not yet exposed by tree_view)",
+                                    data::short_oid(oid)
+                                );
+                            }
+                        }
+                    }
+                    None => eprintln!(
+                        "debug-launch: error: {flag} '{rev}' resolved to {}, which is not in the loaded history",
+                        data::short_oid(oid)
+                    ),
+                },
+                Some(Err(err)) => {
+                    eprintln!("debug-launch: error: {flag} '{rev}' failed: {err}");
+                }
+                None => {}
+            }
+        }
+
+        if let Some(path) = launch.file_history {
+            self.open_file_history(path.clone(), window, cx);
+            eprintln!("debug-launch: applied --file-history {path}");
+        }
+
+        if launch.worktree {
+            self.open_worktree(window, cx);
+            eprintln!("debug-launch: applied --worktree");
+        }
+
+        if let Some(dialog) = launch.dialog {
+            let view = cx.weak_entity();
+            window.on_next_frame(move |window, cx| {
+                let _ = view.update(cx, |this, cx| {
+                    this.apply_debug_dialog(dialog, window, cx);
+                });
+            });
+            window.refresh();
+        }
+    }
+
+    fn apply_debug_dialog(
+        &mut self,
+        dialog: DebugDialog,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match dialog {
+            DebugDialog::CreateBranch => {
+                self.create_branch_from_head(window, cx);
+                eprintln!("debug-launch: applied --dialog create-branch");
+            }
+            DebugDialog::Stash => {
+                self.stash_changes(window, cx);
+                eprintln!("debug-launch: applied --dialog stash");
+            }
+            DebugDialog::AddWorktree => {
+                self.open_add_worktree(window, cx);
+                eprintln!("debug-launch: applied --dialog add-worktree");
+            }
+            DebugDialog::CreateTag => {
+                let head_commit = self.session.as_ref().and_then(|session| {
+                    session
+                        .snapshot()
+                        .head
+                        .as_ref()
+                        .and_then(|head| match head {
+                            HeadInfo::Branch { target, .. } => *target,
+                            HeadInfo::Detached { target } => Some(*target),
+                        })
+                });
+                let target = self.selection_commit.or(head_commit);
+                if let Some(commit) = target {
+                    self.open_tag_dialog(commit, data::short_oid(commit), window, cx);
+                    eprintln!("debug-launch: applied --dialog create-tag");
+                } else {
+                    eprintln!(
+                        "debug-launch: error: --dialog create-tag requires a commit (HEAD is unborn)"
+                    );
+                }
+            }
+            DebugDialog::OpenRepository => {
+                window.dispatch_action(Box::new(crate::actions::OpenRepository), cx);
+                eprintln!("debug-launch: applied --dialog open-repository");
+            }
+            DebugDialog::Settings | DebugDialog::Palette => {
+                debug_launch::dispatch_window_dialog(dialog, window, cx);
+            }
+        }
+    }
+
+    fn finish_debug_rev_lookup(
+        &mut self,
+        slot: RevSlot,
+        resolved: Result<Oid, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(runner) = self.debug_launch.as_mut() else {
+            return;
+        };
+        match slot {
+            RevSlot::Select => {
+                runner.select_resolving = false;
+                runner.select_oid = Some(resolved);
+            }
+            RevSlot::Tree => {
+                runner.tree_resolving = false;
+                runner.tree_oid = Some(resolved);
+            }
+        }
+        self.step_debug_launch(window, cx);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RevSlot {
+    Select,
+    Tree,
+}
+
+struct DebugLaunchRunner {
+    launch: DebugLaunch,
+    select_oid: Option<Result<Oid, String>>,
+    select_resolving: bool,
+    tree_oid: Option<Result<Oid, String>>,
+    tree_resolving: bool,
+}
+
+impl DebugLaunchRunner {
+    fn new(launch: DebugLaunch) -> Self {
+        Self {
+            launch,
+            select_oid: None,
+            select_resolving: false,
+            tree_oid: None,
+            tree_resolving: false,
+        }
+    }
+
+    /// Returns `true` when this revision is settled (either resolved and present
+    /// in `snapshot.commit_index`, or resolved to a final error / missing after
+    /// `snapshot.commits.complete`).
+    fn resolve_rev(
+        &mut self,
+        rev: &str,
+        which: RevSlot,
+        snapshot: &strata_core::session::RepoSnapshot,
+        repo: strata_core::repo::Repo,
+        window: &mut Window,
+        cx: &mut Context<RepoView>,
+    ) -> bool {
+        let (slot, resolving) = match which {
+            RevSlot::Select => (&mut self.select_oid, &mut self.select_resolving),
+            RevSlot::Tree => (&mut self.tree_oid, &mut self.tree_resolving),
+        };
+
+        if slot.is_none() {
+            if *resolving {
+                return false;
+            }
+            match debug_launch::resolve_in_snapshot(snapshot, rev) {
+                SnapshotRevMatch::Found(oid) => *slot = Some(Ok(oid)),
+                SnapshotRevMatch::Ambiguous(count) => {
+                    *slot = Some(Err(format!(
+                        "ambiguous revision '{rev}' ({count} matching commits)"
+                    )));
+                }
+                SnapshotRevMatch::NotFound => {
+                    *resolving = true;
+                    let window_handle = window.window_handle();
+                    let rev_owned = rev.to_owned();
+                    cx.spawn(async move |this, cx| {
+                        let resolved = cx
+                            .background_executor()
+                            .spawn(async move {
+                                let mut walk = repo
+                                    .walk_commits_from_refs(std::slice::from_ref(&rev_owned))
+                                    .map_err(|err| err.to_string())?;
+                                match walk.next() {
+                                    Some(Ok(commit)) => Ok(commit.id),
+                                    Some(Err(err)) => Err(err.to_string()),
+                                    None => Err(format!(
+                                        "revision '{rev_owned}' did not resolve to a commit"
+                                    )),
+                                }
+                            })
+                            .await;
+                        let _ = window_handle.update(cx, |_, window, cx| {
+                            let _ = this.update(cx, |this, cx| {
+                                this.finish_debug_rev_lookup(which, resolved, window, cx);
+                            });
+                        });
+                    })
+                    .detach();
+                    return false;
+                }
+            }
+        }
+
+        match slot {
+            Some(Ok(oid)) => snapshot.commit_index.contains_key(oid) || snapshot.commits.complete,
+            Some(Err(_)) => true,
+            None => false,
+        }
     }
 }
 

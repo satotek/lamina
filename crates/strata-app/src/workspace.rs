@@ -21,6 +21,7 @@ use gpui_component::dialog::DialogFooter;
 use strata_core::session::Session;
 
 use crate::actions::OpenRepository;
+use crate::debug_launch::{self, DebugDialog, DebugLaunch};
 use crate::picker::{Mode, Picker};
 use crate::recent::{self, RecentRepositories};
 use crate::repo_view::{Launch, RepoView};
@@ -44,11 +45,24 @@ pub struct Workspace {
 impl Workspace {
     /// `None` opens the welcome screen; `Some` is whatever the command line or
     /// the restore settings resolved to.
+    #[allow(dead_code)]
     pub(crate) fn new(launch: Option<Launch>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::new_with_debug(launch, DebugLaunch::default(), window, cx)
+    }
+
+    pub(crate) fn new_with_debug(
+        launch: Option<Launch>,
+        debug: DebugLaunch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         match launch {
             Some(launch) => {
                 let path = repo_path(&launch);
                 let view = cx.new(|cx| RepoView::new(launch, window, cx));
+                if debug.is_active() {
+                    view.update(cx, |view, cx| view.set_debug_launch(debug, window, cx));
+                }
                 // The session already opened successfully, so this is the point
                 // where the repository counts as "opened".
                 if let Some(path) = &path {
@@ -59,7 +73,33 @@ impl Workspace {
                     path,
                 }
             }
-            None => Self::welcome(window, cx),
+            None => {
+                if debug.is_active() {
+                    if debug.has_repo_actions() {
+                        eprintln!(
+                            "debug-launch: error: repository options require an open repository (showing welcome screen)"
+                        );
+                    }
+                    if let Some(dialog) = debug.dialog
+                        && !dialog.needs_repo()
+                    {
+                        let workspace = cx.weak_entity();
+                        let handle = window.window_handle();
+                        window.defer(cx, move |_, cx| {
+                            let _ = handle.update(cx, |_, window, cx| match dialog {
+                                DebugDialog::OpenRepository => {
+                                    let _ = workspace.update(cx, |this, cx| {
+                                        this.open_picker(window, cx);
+                                    });
+                                    eprintln!("debug-launch: applied --dialog open-repository");
+                                }
+                                _ => debug_launch::dispatch_window_dialog(dialog, window, cx),
+                            });
+                        });
+                    }
+                }
+                Self::welcome(window, cx)
+            }
         }
     }
 
@@ -137,7 +177,7 @@ impl Workspace {
     }
 
     /// `OpenRepository`: the same picker as a dialog over the current view.
-    fn open_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn open_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if window.has_active_dialog(cx) {
             return;
         }

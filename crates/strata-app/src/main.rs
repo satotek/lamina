@@ -14,6 +14,7 @@ mod autofetch;
 mod branches;
 mod conflicts;
 mod data;
+mod debug_launch;
 mod diff_view;
 mod fake;
 mod file_history;
@@ -34,8 +35,6 @@ mod ui;
 mod workspace;
 mod worktree_panel;
 
-use std::path::PathBuf;
-
 use gpui::{
     App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions,
     px, size,
@@ -43,12 +42,23 @@ use gpui::{
 use gpui_component::{Root, TitleBar};
 use gpui_platform::application;
 
+use debug_launch::{DebugDialog, DebugLaunch, StartMode};
 use repo_view::Launch;
 use workspace::Workspace;
 
 fn main() {
     env_logger::init();
-    let start = parse_args();
+    let parsed = debug_launch::parse_args();
+    if parsed.help {
+        println!("{}", debug_launch::help_text());
+        std::process::exit(0);
+    }
+    for error in &parsed.errors {
+        eprintln!("strata: {error}");
+    }
+
+    let start = parsed.start;
+    let debug = parsed.debug;
 
     let app = application().with_assets(gpui_kit_assets::Assets);
 
@@ -58,7 +68,7 @@ fn main() {
     #[cfg(target_os = "macos")]
     app.on_reopen(|cx| {
         if cx.windows().is_empty() {
-            open_window(Start::Welcome, cx);
+            open_window(StartMode::Welcome, DebugLaunch::default(), cx);
         } else {
             cx.activate(true);
         }
@@ -77,32 +87,19 @@ fn main() {
         picker::bind(cx);
         palette::bind(cx);
 
-        open_window(start, cx);
+        open_window(start, debug, cx);
 
         cx.activate(true);
     });
 }
 
-/// What the command line asked the first window to show.
-enum Start {
-    /// `strata [PATH]`: a repository, or the error screen for a bad path.
-    Path(PathBuf),
-    /// `strata --fake [N]`: the synthetic render benchmark.
-    Fake(usize),
-    /// `strata --gallery`: every shared UI part, with no repository.
-    Gallery,
-    /// No argument: the last repository when restoring is on, else the welcome
-    /// screen.
-    Welcome,
-}
-
-fn open_window(start: Start, cx: &mut App) {
-    let gallery = matches!(start, Start::Gallery);
+fn open_window(start: StartMode, debug: DebugLaunch, cx: &mut App) {
+    let gallery = matches!(start, StartMode::Gallery);
     let launch = match start {
-        Start::Path(path) => Some(Launch::open(&path)),
-        Start::Fake(count) => Some(Launch::fake(count)),
-        Start::Gallery => None,
-        Start::Welcome => workspace::restored_launch(cx),
+        StartMode::Path(path) => Some(Launch::open(&path)),
+        StartMode::Fake(count) => Some(Launch::fake(count)),
+        StartMode::Gallery => None,
+        StartMode::Welcome => workspace::restored_launch(cx),
     };
     let title = if gallery {
         "Strata UI gallery".to_owned()
@@ -112,7 +109,22 @@ fn open_window(start: Start, cx: &mut App) {
             .map_or_else(|| "Strata".to_owned(), Launch::title)
     };
 
-    let bounds = Bounds::centered(None, size(px(1360.0), px(860.0)), cx);
+    let (window_size, min_size) = if let Some(requested) = debug.window_size {
+        eprintln!(
+            "debug-launch: applied --window-size {}x{}",
+            requested.width, requested.height
+        );
+        let width = requested.width as f32;
+        let height = requested.height as f32;
+        (
+            size(px(width), px(height)),
+            size(px(width.min(720.0)), px(height.min(480.0))),
+        )
+    } else {
+        (size(px(1360.0), px(860.0)), size(px(720.0), px(480.0)))
+    };
+
+    let bounds = Bounds::centered(None, window_size, cx);
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         // The app draws its own title bar (with the repository and branch in
@@ -123,7 +135,7 @@ fn open_window(start: Start, cx: &mut App) {
             ..TitleBar::title_bar_options()
         }),
         window_decorations: Some(WindowDecorations::Client),
-        window_min_size: Some(size(px(720.0), px(480.0))),
+        window_min_size: Some(min_size),
         focus: true,
         // X11 and Wayland group windows by this id and match them to a desktop
         // file, so it has the name of packaging/linux/strata.desktop. macOS
@@ -142,6 +154,27 @@ fn open_window(start: Start, cx: &mut App) {
     cx.open_window(options, move |window, cx| {
         settings::apply_theme(Some(window), cx);
         if gallery {
+            if debug.has_repo_actions() {
+                eprintln!("debug-launch: error: repository options cannot be used with --gallery");
+            }
+            if let Some(dialog) = debug.dialog {
+                match dialog {
+                    DebugDialog::Settings | DebugDialog::Palette => {
+                        let handle = window.window_handle();
+                        window.defer(cx, move |_, cx| {
+                            let _ = handle.update(cx, |_, window, cx| {
+                                debug_launch::dispatch_window_dialog(dialog, window, cx);
+                            });
+                        });
+                    }
+                    _ => {
+                        eprintln!(
+                            "debug-launch: error: --dialog {} cannot be used with --gallery",
+                            dialog.name()
+                        );
+                    }
+                }
+            }
             // The gallery is a window of its own: it reads the theme and the
             // settings and nothing else, so it opens without a repository.
             let content = cx.new(|cx| ui::gallery::Gallery::new(window, cx));
@@ -149,7 +182,7 @@ fn open_window(start: Start, cx: &mut App) {
         } else {
             // The workspace owns whichever view fills the window, so the
             // picker can replace a repository (and its session) in place.
-            let content = cx.new(|cx| Workspace::new(launch, window, cx));
+            let content = cx.new(|cx| Workspace::new_with_debug(launch, debug, window, cx));
             // Root hosts gpui-component's dialog, notification and tooltip
             // layers and draws the client-side window border.
             cx.new(|cx| Root::new(content, window, cx))
@@ -172,35 +205,5 @@ fn linux_window_icon() -> Option<std::sync::Arc<image::RgbaImage>> {
             log::warn!("could not decode the window icon: {error}");
             None
         }
-    }
-}
-
-fn parse_args() -> Start {
-    let mut args = std::env::args().skip(1);
-    let Some(first) = args.next() else {
-        return Start::Welcome;
-    };
-
-    match first.as_str() {
-        "--fake" => {
-            let count = args
-                .next()
-                .and_then(|arg| arg.parse().ok())
-                .unwrap_or(fake::COMMIT_COUNT);
-            Start::Fake(count)
-        }
-        "--gallery" => Start::Gallery,
-        "-h" | "--help" => {
-            println!(
-                "usage: strata [PATH]\n       strata --fake [N]\n       strata --gallery\n\n\
-                 Without PATH, Strata reopens the last repository when restoring is enabled\n\
-                 and shows the welcome screen otherwise.\n\
-                 --fake renders N synthetic commits (default {}) for the render benchmark.\n\
-                 --gallery shows every shared UI part, and needs no repository.",
-                fake::COMMIT_COUNT
-            );
-            std::process::exit(0);
-        }
-        path => Start::Path(PathBuf::from(path)),
     }
 }
