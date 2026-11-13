@@ -418,6 +418,13 @@ impl Session {
     pub fn git(&self) -> &Git {
         &self.shared.git
     }
+
+    /// Read-only repository handle for small on-demand reads the snapshot does
+    /// not carry (e.g. the file list of a selected commit). Cheap to clone and
+    /// safe to use from any thread; run it off the UI thread.
+    pub fn repo(&self) -> &Repo {
+        &self.shared.repo
+    }
 }
 
 impl Drop for Session {
