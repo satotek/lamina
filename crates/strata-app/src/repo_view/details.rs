@@ -9,7 +9,7 @@ use gpui::{
     AnyElement, App, ClickEvent, ClipboardItem, Context, FontWeight, InteractiveElement,
     IntoElement, ParentElement, Styled, Window, div, px, uniform_list,
 };
-use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
+use gpui_component::menu::PopupMenuItem;
 use gpui_kit_assets::IconName;
 use strata_core::diff::LineKind;
 use strata_core::session::QueryTicket;
@@ -328,11 +328,14 @@ impl RepoView {
                     let menu_entity = entity;
                     let menu_path = path.clone();
                     let menu_work_dir = work_dir.clone();
-                    row.cursor_pointer()
-                        .on_click(move |_event, _window, cx| {
-                            click_entity.update(cx, |this, cx| this.select_file(index, cx));
-                        })
-                        .context_menu(move |menu, _window, _cx| {
+                    let trigger = row.cursor_pointer().on_click(move |_event, _window, cx| {
+                        click_entity.update(cx, |this, cx| this.select_file(index, cx));
+                    });
+                    crate::ui::context_menu(
+                        ("changed-file-menu", index),
+                        &list_design,
+                        trigger,
+                        move |menu, _window, _cx| {
                             let entity = menu_entity.clone();
                             let path = menu_path.clone();
                             let present = in_working_tree(menu_work_dir.as_deref(), &path);
@@ -372,8 +375,9 @@ impl RepoView {
                                     ));
                             }
                             menu
-                        })
-                        .into_any_element()
+                        },
+                    )
+                    .into_any_element()
                 })
                 .collect::<Vec<_>>()
         })

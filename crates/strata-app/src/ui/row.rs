@@ -281,7 +281,7 @@ mod tests {
             Render, Styled as _, VisualTestContext, Window, div, point, px, rgb,
         };
         use gpui_component::Root;
-        use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
+        use gpui_component::menu::PopupMenuItem;
 
         const TIP: u32 = 0x7a135e;
 
@@ -298,15 +298,17 @@ mod tests {
         impl Render for Probe {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
                 let opened = self.opened.clone();
-                div().size_full().child(
+                div().size_full().child(crate::ui::context_menu(
+                    "tip-row-menu",
+                    &Design::default(),
                     list_row("tip-row", RowState::NORMAL, &Design::default())
                         .w(px(220.0))
-                        .row_tooltip(|_, cx| cx.new(|_| Tip).into())
-                        .context_menu(move |menu, _, _| {
-                            opened.set(opened.get() + 1);
-                            menu.item(PopupMenuItem::new("Item"))
-                        }),
-                )
+                        .row_tooltip(|_, cx| cx.new(|_| Tip).into()),
+                    move |menu, _, _| {
+                        opened.set(opened.get() + 1);
+                        menu.item(PopupMenuItem::new("Item"))
+                    },
+                ))
             }
         }
 

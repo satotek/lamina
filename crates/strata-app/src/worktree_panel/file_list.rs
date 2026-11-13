@@ -7,7 +7,7 @@ use gpui::prelude::*;
 use gpui::{
     AnyElement, Entity, IntoElement, MouseButton, ParentElement, Styled, div, px, uniform_list,
 };
-use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
+use gpui_component::menu::PopupMenuItem;
 use strata_core::session::RepoSnapshot;
 use strata_core::{ChangeKind, FileChange};
 
@@ -231,7 +231,8 @@ fn file_row(
     let right_entity = context.entity.clone();
     let right_path = click_path.clone();
 
-    row.cursor_pointer()
+    let trigger = row
+        .cursor_pointer()
         .on_click(move |event, window, cx| {
             let modifiers = event.modifiers();
             let shift = modifiers.shift;
@@ -252,8 +253,12 @@ fn file_row(
             right_entity.update(cx, |this, cx| {
                 this.ensure_worktree_selection(side, path, cx)
             });
-        })
-        .context_menu(move |menu, _window, cx| {
+        });
+    crate::ui::context_menu(
+        gpui::ElementId::named_usize(format!("worktree-file-menu-{}", side as u8), index),
+        &context.colors.design,
+        trigger,
+        move |menu, _window, cx| {
             let count = menu_entity.read(cx).worktree.selection.len();
             // The menu acts on the pointed-at row even when the selection
             // holds several files.
@@ -314,6 +319,7 @@ fn file_row(
                 Side::Conflict => {}
             }
             menu
-        })
-        .into_any_element()
+        },
+    )
+    .into_any_element()
 }

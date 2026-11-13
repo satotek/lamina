@@ -78,6 +78,11 @@ pub struct Design {
     pub syntax_tag: Hsla,
     /// UI font family, when the user picked one.
     pub ui_font: Option<SharedString>,
+    /// The family UI text draws with: [`Self::ui_font`] when the user picked
+    /// one, the theme's UI font otherwise. Parts that repaint text outside the
+    /// row that owns it — a context menu — need the resolved value, because
+    /// they cannot inherit the default from the window root.
+    pub ui_font_family: SharedString,
     /// `history.date_format`.
     pub date_format: DateFormat,
     /// `history.show_remote_branches`; hides matching badges.
@@ -104,11 +109,21 @@ impl Design {
         } else {
             Palette::light()
         };
-        Self::from_palette(palette, settings, theme.mono_font_family.clone())
+        Self::from_palette(
+            palette,
+            settings,
+            theme.font_family.clone(),
+            theme.mono_font_family.clone(),
+        )
     }
 
     /// Fills the settings-dependent fields around one appearance's colours.
-    fn from_palette(palette: Palette, settings: &Settings, fallback_mono: SharedString) -> Self {
+    fn from_palette(
+        palette: Palette,
+        settings: &Settings,
+        fallback_ui: SharedString,
+        fallback_mono: SharedString,
+    ) -> Self {
         Self {
             background: palette.background,
             chrome: palette.chrome,
@@ -151,6 +166,11 @@ impl Design {
                 .ui_font
                 .as_deref()
                 .map(SharedString::from),
+            ui_font_family: settings
+                .appearance
+                .ui_font
+                .as_deref()
+                .map_or(fallback_ui, SharedString::from),
             date_format: settings.history.date_format,
             show_remote_branches: settings.history.show_remote_branches,
             show_tags: settings.history.show_tags,
@@ -261,9 +281,15 @@ pub fn sync_component_buttons(cx: &mut App) {
 
 impl Default for Design {
     fn default() -> Self {
-        // The fallback font matches `Settings::default`, so the default design
-        // is the light palette with no user choices applied.
-        Self::from_palette(Palette::light(), &Settings::default(), "monospace".into())
+        // The fallback fonts match the GPUI Kit defaults (`.SystemUIFont` is
+        // gpui-component's sans family) and `Settings::default`, so the default
+        // design is the light palette with no user choices applied.
+        Self::from_palette(
+            Palette::light(),
+            &Settings::default(),
+            ".SystemUIFont".into(),
+            "monospace".into(),
+        )
     }
 }
 

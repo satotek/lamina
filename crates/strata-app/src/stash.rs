@@ -21,7 +21,7 @@ use gpui_component::Disableable as _;
 use gpui_component::checkbox::Checkbox;
 use gpui_component::dialog::DialogFooter;
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
+use gpui_component::menu::PopupMenuItem;
 use gpui_component::notification::Notification;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{ActiveTheme as _, WindowExt as _};
@@ -323,46 +323,64 @@ pub(crate) fn sidebar_row(
         return row.into_any_element();
     }
 
-    row.context_menu(move |menu, _window, cx| {
-        let detail = entity.read(cx).stash_detail(index);
-        let menu = match detail {
-            Some(detail) => menu
-                .item(PopupMenuItem::label(format!(
-                    "stash@{{{index}}} · {detail}"
-                )))
-                .separator(),
-            None => menu,
-        };
-        let reveal = {
-            let entity = entity.clone();
-            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                entity.update(cx, |view, cx| view.reveal_stash(index, window, cx));
-            }
-        };
-        let apply = {
-            let entity = entity.clone();
-            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                entity.update(cx, |view, cx| view.stash_apply(index, window, cx));
-            }
-        };
-        let pop = {
-            let entity = entity.clone();
-            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                entity.update(cx, |view, cx| view.stash_pop(index, window, cx));
-            }
-        };
-        let drop = {
-            let entity = entity.clone();
-            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                entity.update(cx, |view, cx| view.confirm_stash_drop(index, window, cx));
-            }
-        };
-        menu.item(PopupMenuItem::new("Reveal in history").on_click(reveal))
-            .item(PopupMenuItem::new("Apply").disabled(busy).on_click(apply))
-            .item(PopupMenuItem::new("Pop").disabled(busy).on_click(pop))
-            .separator()
-            .item(PopupMenuItem::new("Drop…").disabled(busy).on_click(drop))
-    })
+    crate::ui::context_menu(
+        ("stash-menu", index),
+        &colors.design,
+        row,
+        move |menu, _window, cx| {
+            let detail = entity.read(cx).stash_detail(index);
+            let menu = match detail {
+                Some(detail) => menu
+                    .item(PopupMenuItem::label(format!(
+                        "stash@{{{index}}} · {detail}"
+                    )))
+                    .separator(),
+                None => menu,
+            };
+            let reveal = {
+                let entity = entity.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    entity.update(cx, |view, cx| view.reveal_stash(index, window, cx));
+                }
+            };
+            let apply = {
+                let entity = entity.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    entity.update(cx, |view, cx| view.stash_apply(index, window, cx));
+                }
+            };
+            let pop = {
+                let entity = entity.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    entity.update(cx, |view, cx| view.stash_pop(index, window, cx));
+                }
+            };
+            let drop = {
+                let entity = entity.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    entity.update(cx, |view, cx| view.confirm_stash_drop(index, window, cx));
+                }
+            };
+            let blocked = busy.then_some("an operation is running");
+            menu.item(PopupMenuItem::new("Reveal in history").on_click(reveal))
+                .item(
+                    PopupMenuItem::new(crate::ui::menu_label("Apply", blocked))
+                        .disabled(blocked.is_some())
+                        .on_click(apply),
+                )
+                .item(
+                    PopupMenuItem::new(crate::ui::menu_label("Pop", blocked))
+                        .disabled(blocked.is_some())
+                        .on_click(pop),
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new(crate::ui::menu_label("Drop…", blocked))
+                        .disabled(blocked.is_some())
+                        .on_click(drop),
+                )
+        },
+    )
     .into_any_element()
 }
 

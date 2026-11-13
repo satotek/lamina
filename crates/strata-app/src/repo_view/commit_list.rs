@@ -9,7 +9,6 @@ use gpui::{
     AnyElement, Div, FontWeight, InteractiveElement, IntoElement, ParentElement, Styled, div, px,
     uniform_list,
 };
-use gpui_component::menu::ContextMenuExt as _;
 use strata_core::{Oid, RefKind};
 
 use super::history_ops::{self, CommitTarget};
@@ -130,8 +129,11 @@ impl RepoView {
                     });
                     let menu_entity = entity;
                     let menu_state = menu_state.clone();
-                    element
-                        .context_menu(move |menu, window, cx| {
+                    crate::ui::context_menu(
+                        ("commit-row-menu", index),
+                        &row_design,
+                        element,
+                        move |menu, window, cx| {
                             history_ops::commit_menu(
                                 menu,
                                 target.clone(),
@@ -140,8 +142,10 @@ impl RepoView {
                                 window,
                                 cx,
                             )
-                        })
-                        .into_any_element()
+                        },
+                    )
+                    .w_full()
+                    .into_any_element()
                 })
                 .collect::<Vec<_>>()
         })

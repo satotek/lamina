@@ -21,7 +21,7 @@ use gpui::{
     ParentElement, UniformListScrollHandle, Window, actions, div, px, uniform_list,
 };
 use gpui_component::ActiveTheme as _;
-use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
+use gpui_component::menu::PopupMenuItem;
 use gpui_component::tooltip::Tooltip;
 use gpui_kit_assets::IconName;
 use strata_core::Oid;
@@ -921,14 +921,21 @@ impl RepoView {
                             let menu_entity = entity.clone();
                             let copy_id = commit.to_string();
                             let hover = design.field;
-                            div()
+                            let gutter = div()
                                 .id(("blame-gutter", index))
                                 .flex()
                                 .items_center()
                                 .gap_2()
                                 .flex_none()
                                 .w(px(ANNOTATION_WIDTH))
-                                .h_full()
+                                // The wrapper that carries the menu now sits
+                                // between this row and the mono line, so the
+                                // row states its own family.
+                                .font_family(design.mono.clone())
+                                // The menu wrapper around this row is sized by
+                                // its content, so a percentage height here would
+                                // have no definite parent to resolve against.
+                                .h(px(row_height))
                                 .px_1()
                                 .pr_2()
                                 .rounded(px(4.0))
@@ -943,7 +950,44 @@ impl RepoView {
                                         this.reveal_commit(Some(commit), window, cx);
                                     });
                                 })
-                                .context_menu(move |menu, _window, _cx| {
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .w(px(52.0))
+                                        .truncate()
+                                        .font_family(design.mono.clone())
+                                        .text_color(design.accent)
+                                        .child(short),
+                                )
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .w(px(88.0))
+                                        .truncate()
+                                        .text_color(design.text)
+                                        .child(author),
+                                )
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .w(px(72.0))
+                                        .truncate()
+                                        .text_color(design.muted)
+                                        .child(date),
+                                )
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_color(design.muted)
+                                        .child(summary),
+                                );
+                            crate::ui::context_menu(
+                                ("blame-gutter-menu", index),
+                                &design,
+                                gutter,
+                                move |menu, _window, _cx| {
                                     let parent_entity = menu_entity.clone();
                                     let parent_path = orig_path.clone();
                                     let copy = copy_id.clone();
@@ -986,41 +1030,9 @@ impl RepoView {
                                             ));
                                         },
                                     ))
-                                })
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .w(px(52.0))
-                                        .truncate()
-                                        .font_family(design.mono.clone())
-                                        .text_color(design.accent)
-                                        .child(short),
-                                )
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .w(px(88.0))
-                                        .truncate()
-                                        .text_color(design.text)
-                                        .child(author),
-                                )
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .w(px(72.0))
-                                        .truncate()
-                                        .text_color(design.muted)
-                                        .child(date),
-                                )
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .truncate()
-                                        .text_color(design.muted)
-                                        .child(summary),
-                                )
-                                .into_any_element()
+                                },
+                            )
+                            .into_any_element()
                         }
                         _ => div()
                             .flex_none()

@@ -39,6 +39,7 @@ use crate::data::short_oid;
 use crate::settings::Settings;
 use crate::style::Design;
 use crate::ui;
+use crate::ui::menu_label;
 
 /// The history commands a commit row can offer.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -741,16 +742,6 @@ fn edit_group(
         });
     }
     menu.separator().item(item)
-}
-
-/// A menu label that says why it is disabled; a popup item has no tooltip, so
-/// the reason has to travel in the text.
-pub(crate) fn menu_label(base: impl Into<String>, blocked: Option<&'static str>) -> String {
-    let base = base.into();
-    match blocked {
-        Some(reason) => format!("{base} ({reason})"),
-        None => base,
-    }
 }
 
 /// What a reset confirmation says: which branch moves, what happens to the

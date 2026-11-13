@@ -29,7 +29,7 @@ use gpui_component::{
     Icon,
     checkbox::Checkbox,
     input::{Input, InputState},
-    menu::{ContextMenuExt as _, PopupMenu, PopupMenuItem},
+    menu::{PopupMenu, PopupMenuItem},
     tooltip::Tooltip,
 };
 use strata_core::repo::{SubmoduleInfo, SubmoduleStatus, WorktreeInfo};
@@ -1177,14 +1177,14 @@ fn section_header(
     match section {
         Section::Submodules | Section::Worktrees => {
             let menu_entity = entity.clone();
-            div()
-                .id(("branch-section-menu", index))
-                .w_full()
-                .context_menu(move |menu, _window, cx| {
-                    section_menu(menu, section, busy, &menu_entity, cx)
-                })
-                .child(header)
-                .into_any_element()
+            crate::ui::context_menu(
+                ("branch-section-menu", index),
+                &colors.design,
+                header,
+                move |menu, _window, cx| section_menu(menu, section, busy, &menu_entity, cx),
+            )
+            .w_full()
+            .into_any_element()
         }
         _ => header.into_any_element(),
     }
@@ -1206,9 +1206,10 @@ fn section_menu(
                     entity.update(cx, |view, cx| view.update_all_submodules(window, cx));
                 }
             };
+            let blocked = blocked_section(busy, !entity.read(cx).has_submodules(), "no submodules");
             menu.item(
-                PopupMenuItem::new("Update all")
-                    .disabled(busy || !entity.read(cx).has_submodules())
+                PopupMenuItem::new(crate::ui::menu_label("Update all", blocked))
+                    .disabled(blocked.is_some())
                     .on_click(update),
             )
         }
@@ -1225,18 +1226,36 @@ fn section_menu(
                     entity.update(cx, |view, cx| view.prune_worktrees(window, cx));
                 }
             };
+            let add_blocked = busy.then_some("an operation is running");
+            let prune_blocked = blocked_section(
+                busy,
+                !entity.read(cx).has_prunable_worktree(),
+                "no missing worktrees",
+            );
             menu.item(
-                PopupMenuItem::new("Add worktree…")
-                    .disabled(busy)
+                PopupMenuItem::new(crate::ui::menu_label("Add worktree…", add_blocked))
+                    .disabled(add_blocked.is_some())
                     .on_click(add),
             )
             .item(
-                PopupMenuItem::new("Prune")
-                    .disabled(busy || !entity.read(cx).has_prunable_worktree())
+                PopupMenuItem::new(crate::ui::menu_label("Prune", prune_blocked))
+                    .disabled(prune_blocked.is_some())
                     .on_click(prune),
             )
         }
         _ => menu,
+    }
+}
+
+/// Why a section action is disabled: the list's own state says something
+/// permanent, so it wins over a running operation.
+fn blocked_section(busy: bool, empty: bool, empty_reason: &'static str) -> Option<&'static str> {
+    if empty {
+        Some(empty_reason)
+    } else if busy {
+        Some("an operation is running")
+    } else {
+        None
     }
 }
 
@@ -1340,35 +1359,52 @@ fn local_row(
 
     let entity_menu = entity.clone();
     let branch = name.to_owned();
-    row.context_menu(move |menu, _window, _cx| {
-        menu.item(
-            PopupMenuItem::new("Checkout")
-                .disabled(busy || active)
-                .on_click({
-                    let entity = entity_menu.clone();
-                    let branch = branch.clone();
-                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+    crate::ui::context_menu(
+        ("local-branch-menu", index),
+        &colors.design,
+        row,
+        move |menu, _window, _cx| {
+            // A disabled entry says why, the way the commit menu's entries do.
+            let checkout_blocked = branch_blocked(active, "already checked out", busy);
+            let merge_blocked = branch_blocked(active, "this is the current branch", busy);
+            let create_blocked = busy.then_some("an operation is running");
+            let delete_blocked = branch_blocked(active, "this is the current branch", busy);
+            menu.item(
+                PopupMenuItem::new(crate::ui::menu_label("Checkout", checkout_blocked))
+                    .disabled(checkout_blocked.is_some())
+                    .on_click({
+                        let entity = entity_menu.clone();
                         let branch = branch.clone();
-                        entity.update(cx, |view, cx| {
-                            let label = format!("check out {branch}");
-                            view.run_operation(Operation::Checkout { branch }, label, window, cx);
-                        });
-                    }
-                }),
-        )
-        .item(PopupMenuItem::new("Show only this branch").on_click({
-            let entity = entity_menu.clone();
-            let branch = branch.clone();
-            move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                            let branch = branch.clone();
+                            entity.update(cx, |view, cx| {
+                                let label = format!("check out {branch}");
+                                view.run_operation(
+                                    Operation::Checkout { branch },
+                                    label,
+                                    window,
+                                    cx,
+                                );
+                            });
+                        }
+                    }),
+            )
+            .item(PopupMenuItem::new("Show only this branch").on_click({
+                let entity = entity_menu.clone();
                 let branch = branch.clone();
-                entity.update(cx, |view, cx| {
-                    view.show_only_ref(RefKind::LocalBranch, &branch, cx)
-                });
-            }
-        }))
-        .item(
-            PopupMenuItem::new("Merge into current branch")
-                .disabled(busy || active)
+                move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                    let branch = branch.clone();
+                    entity.update(cx, |view, cx| {
+                        view.show_only_ref(RefKind::LocalBranch, &branch, cx)
+                    });
+                }
+            }))
+            .item(
+                PopupMenuItem::new(crate::ui::menu_label(
+                    "Merge into current branch",
+                    merge_blocked,
+                ))
+                .disabled(merge_blocked.is_some())
                 .on_click({
                     let entity = entity_menu.clone();
                     let branch = branch.clone();
@@ -1388,10 +1424,13 @@ fn local_row(
                         });
                     }
                 }),
-        )
-        .item(
-            PopupMenuItem::new("Create branch from here…")
-                .disabled(busy)
+            )
+            .item(
+                PopupMenuItem::new(crate::ui::menu_label(
+                    "Create branch from here…",
+                    create_blocked,
+                ))
+                .disabled(create_blocked.is_some())
                 .on_click({
                     let entity = entity_menu.clone();
                     let point = branch.clone();
@@ -1404,24 +1443,38 @@ fn local_row(
                         });
                     }
                 }),
-        )
-        .separator()
-        .item(
-            PopupMenuItem::new("Delete…")
-                .disabled(busy || active)
-                .on_click({
-                    let entity = entity_menu.clone();
-                    let branch = branch.clone();
-                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+            )
+            .separator()
+            .item(
+                PopupMenuItem::new(crate::ui::menu_label("Delete…", delete_blocked))
+                    .disabled(delete_blocked.is_some())
+                    .on_click({
+                        let entity = entity_menu.clone();
                         let branch = branch.clone();
-                        entity.update(cx, |view, cx| {
-                            view.confirm_delete_branch(branch, window, cx);
-                        });
-                    }
-                }),
-        )
-    })
+                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                            let branch = branch.clone();
+                            entity.update(cx, |view, cx| {
+                                view.confirm_delete_branch(branch, window, cx);
+                            });
+                        }
+                    }),
+            )
+        },
+    )
+    .w_full()
     .into_any_element()
+}
+
+/// Why a branch action is disabled: the branch's own state is permanent, so it
+/// wins over an operation that is only running for now.
+fn branch_blocked(active: bool, active_reason: &'static str, busy: bool) -> Option<&'static str> {
+    if active {
+        Some(active_reason)
+    } else if busy {
+        Some("an operation is running")
+    } else {
+        None
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1474,20 +1527,28 @@ fn remote_row(
 
     let entity_menu = entity.clone();
     let remote = name.to_owned();
-    row_element
-        .context_menu(move |menu, _window, _cx| {
-            menu.item(PopupMenuItem::new("Checkout").disabled(busy).on_click({
-                let entity = entity_menu.clone();
-                let remote = remote.clone();
-                let target = local_name.clone();
-                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                    let remote = remote.clone();
-                    let target = target.clone();
-                    entity.update(cx, |view, cx| {
-                        checkout_remote(view, &remote, &target, existing, window, cx)
-                    });
-                }
-            }))
+    crate::ui::context_menu(
+        ("remote-branch-menu", index),
+        &colors.design,
+        row_element,
+        move |menu, _window, _cx| {
+            let blocked = busy.then_some("an operation is running");
+            menu.item(
+                PopupMenuItem::new(crate::ui::menu_label("Checkout", blocked))
+                    .disabled(blocked.is_some())
+                    .on_click({
+                        let entity = entity_menu.clone();
+                        let remote = remote.clone();
+                        let target = local_name.clone();
+                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                            let remote = remote.clone();
+                            let target = target.clone();
+                            entity.update(cx, |view, cx| {
+                                checkout_remote(view, &remote, &target, existing, window, cx)
+                            });
+                        }
+                    }),
+            )
             .item(PopupMenuItem::new("Show only this branch").on_click({
                 let entity = entity_menu.clone();
                 let remote = remote.clone();
@@ -1499,8 +1560,8 @@ fn remote_row(
                 }
             }))
             .item(
-                PopupMenuItem::new("Merge into current branch")
-                    .disabled(busy)
+                PopupMenuItem::new(crate::ui::menu_label("Merge into current branch", blocked))
+                    .disabled(blocked.is_some())
                     .on_click({
                         let entity = entity_menu.clone();
                         let remote = remote.clone();
@@ -1522,8 +1583,8 @@ fn remote_row(
                     }),
             )
             .item(
-                PopupMenuItem::new("Create branch from here…")
-                    .disabled(busy)
+                PopupMenuItem::new(crate::ui::menu_label("Create branch from here…", blocked))
+                    .disabled(blocked.is_some())
                     .on_click({
                         let entity = entity_menu.clone();
                         let remote = remote.clone();
@@ -1537,8 +1598,10 @@ fn remote_row(
                         }
                     }),
             )
-        })
-        .into_any_element()
+        },
+    )
+    .w_full()
+    .into_any_element()
 }
 
 fn tag_row(
@@ -1569,11 +1632,15 @@ fn tag_row(
     if !enabled {
         return row_element.into_any_element();
     }
-    row_element
-        .context_menu(move |menu, _window, _cx| {
+    crate::ui::context_menu(
+        ("tag-menu", index),
+        &colors.design,
+        row_element,
+        move |menu, _window, _cx| {
+            let blocked = busy.then_some("an operation is running");
             menu.item(
-                PopupMenuItem::new("Show only this tag")
-                    .disabled(busy)
+                PopupMenuItem::new(crate::ui::menu_label("Show only this tag", blocked))
+                    .disabled(blocked.is_some())
                     .on_click({
                         let entity = menu_entity.clone();
                         let tag = menu_tag.clone();
@@ -1584,8 +1651,10 @@ fn tag_row(
                         }
                     }),
             )
-        })
-        .into_any_element()
+        },
+    )
+    .w_full()
+    .into_any_element()
 }
 
 /// A submodule's row: its name, a badge for anything but an up-to-date
@@ -1637,10 +1706,18 @@ fn submodule_row(
     }
 
     let menu_entity = entity.clone();
-    let copy_path = path.to_owned();
-    let menu_path = copy_path.clone();
-    row_element
-        .context_menu(move |menu, _window, _cx| {
+    let menu_path = path.to_owned();
+    crate::ui::context_menu(
+        ("submodule-menu", index),
+        &colors.design,
+        row_element,
+        move |menu, _window, _cx| {
+            let update_blocked = if status == SubmoduleStatus::Uninitialised {
+                Some("not initialised")
+            } else {
+                busy.then_some("an operation is running")
+            };
+            let init_blocked = busy.then_some("an operation is running");
             let update = {
                 let entity = menu_entity.clone();
                 let path = menu_path.clone();
@@ -1660,15 +1737,18 @@ fn submodule_row(
                 }
             };
             let menu = menu.item(
-                PopupMenuItem::new("Update")
-                    .disabled(busy || status == SubmoduleStatus::Uninitialised)
+                PopupMenuItem::new(crate::ui::menu_label("Update", update_blocked))
+                    .disabled(update_blocked.is_some())
                     .on_click(update),
             );
             let menu = if status == SubmoduleStatus::Uninitialised {
                 menu.item(
-                    PopupMenuItem::new("Initialise and update")
-                        .disabled(busy)
-                        .on_click(init),
+                    PopupMenuItem::new(crate::ui::menu_label(
+                        "Initialise and update",
+                        init_blocked,
+                    ))
+                    .disabled(init_blocked.is_some())
+                    .on_click(init),
                 )
             } else {
                 menu
@@ -1680,8 +1760,10 @@ fn submodule_row(
                         cx.write_to_clipboard(ClipboardItem::new_string(copy_path.clone()));
                     },
                 ))
-        })
-        .into_any_element()
+        },
+    )
+    .w_full()
+    .into_any_element()
 }
 
 /// A worktree's row: its branch (or the commit a detached one is on), its
@@ -1764,8 +1846,21 @@ fn worktree_row(
     let menu_entity = entity.clone();
     let remove_path = PathBuf::from(path);
     let copy_path = path.to_owned();
-    row_element
-        .context_menu(move |menu, _window, _cx| {
+    crate::ui::context_menu(
+        ("worktree-menu", index),
+        &colors.design,
+        row_element,
+        move |menu, _window, _cx| {
+            let open_blocked = prunable.then_some("this worktree is missing");
+            let remove_blocked = if is_main {
+                Some("this is the main worktree")
+            } else if locked {
+                Some("this worktree is locked")
+            } else if prunable {
+                Some("this worktree is missing")
+            } else {
+                busy.then_some("an operation is running")
+            };
             let open = {
                 let entity = menu_entity.clone();
                 let path = copy_path.clone();
@@ -1786,23 +1881,29 @@ fn worktree_row(
                 }
             };
             let copy_path = copy_path.clone();
-            menu.item(PopupMenuItem::new("Open").disabled(prunable).on_click(open))
-                .item(
-                    // The main worktree, a locked one and a missing checkout all
-                    // refuse `git worktree remove`; offering it would only
-                    // report the refusal.
-                    PopupMenuItem::new("Remove…")
-                        .disabled(busy || is_main || locked || prunable)
-                        .on_click(remove),
-                )
-                .separator()
-                .item(PopupMenuItem::new("Copy path").on_click(
-                    move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
-                        cx.write_to_clipboard(ClipboardItem::new_string(copy_path.clone()));
-                    },
-                ))
-        })
-        .into_any_element()
+            menu.item(
+                PopupMenuItem::new(crate::ui::menu_label("Open", open_blocked))
+                    .disabled(open_blocked.is_some())
+                    .on_click(open),
+            )
+            .item(
+                // The main worktree, a locked one and a missing checkout all
+                // refuse `git worktree remove`; offering it would only
+                // report the refusal.
+                PopupMenuItem::new(crate::ui::menu_label("Remove…", remove_blocked))
+                    .disabled(remove_blocked.is_some())
+                    .on_click(remove),
+            )
+            .separator()
+            .item(PopupMenuItem::new("Copy path").on_click(
+                move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(copy_path.clone()));
+                },
+            ))
+        },
+    )
+    .w_full()
+    .into_any_element()
 }
 
 /// The badge a submodule's state deserves, or nothing when it is up to date.
