@@ -87,7 +87,8 @@ impl Workspace {
     ) -> Result<(), String> {
         let root = crate::picker::resolve_repository(path)?;
         if !is_current(self.path.as_deref(), &root) {
-            let launch = Launch::open(&root);
+            let launch =
+                Launch::open_with(&root, Settings::get(cx).behaviour.git_executable.clone());
             if let Launch::Error { error, .. } = &launch {
                 return Err(format!("Cannot open {}: {error}", root.display()));
             }
@@ -193,7 +194,7 @@ pub(crate) fn restored_launch(cx: &App) -> Option<Launch> {
     }
     let recents = RecentRepositories::load_default();
     let path = recents.most_recent()?;
-    match Launch::open(path) {
+    match Launch::open_with(path, Settings::get(cx).behaviour.git_executable.clone()) {
         launch @ Launch::Repo { .. } => Some(launch),
         // A repository that moved or was deleted is not an error at startup;
         // the welcome screen lists it so the user can retry or forget it.

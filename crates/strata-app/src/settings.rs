@@ -6,10 +6,12 @@
 //! is passed to git per command instead.
 //!
 //! The current value is a GPUI global. Read it with [`Settings::get`], change it
-//! with [`update`] (which saves in the background and notifies observers), and
-//! react to changes with `cx.observe_global::<Settings>(…)`.
+//! with [`update`] (which notifies observers at once and saves a moment later),
+//! and react to changes with `cx.observe_global::<Settings>(…)`.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::Duration;
 
 use gpui::{App, BorrowAppContext as _, Global, Window};
 use gpui_component::Theme;
@@ -211,6 +213,60 @@ impl Settings {
     }
 }
 
+/// How long a burst of changes settles before it is written. A text field
+/// reports one change per keystroke, and `save` renames through one fixed temp
+/// file, so two writes started in quick succession could interleave there.
+const SAVE_DEBOUNCE: Duration = Duration::from_millis(300);
+
+/// Serialises writes to the settings file and coalesces a burst of changes into
+/// a single write: a writer that wakes up after a newer change only records
+/// that its generation is stale and writes nothing.
+static SAVE: Mutex<SaveCoalescer> = Mutex::new(SaveCoalescer::new());
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct SaveCoalescer {
+    /// Generation of the newest recorded change.
+    latest: u64,
+    /// Generation of the newest change a write has covered.
+    saved: u64,
+}
+
+impl SaveCoalescer {
+    const fn new() -> Self {
+        Self {
+            latest: 0,
+            saved: 0,
+        }
+    }
+
+    /// Records a change and returns the generation its writer must present.
+    fn record(&mut self) -> u64 {
+        self.latest += 1;
+        self.latest
+    }
+
+    /// True when `generation` is still the newest change and no write covered
+    /// it yet. Marks it covered, so two writers cannot both write it.
+    fn take(&mut self, generation: u64) -> bool {
+        if generation != self.latest || self.saved >= generation {
+            return false;
+        }
+        self.saved = generation;
+        true
+    }
+
+    /// True while a recorded change is still waiting for the debounce.
+    fn pending(&self) -> bool {
+        self.saved < self.latest
+    }
+}
+
+fn save_logged(settings: &Settings, path: &Path) {
+    if let Err(error) = settings.save(path) {
+        log::warn!("cannot save {}: {error}", path.display());
+    }
+}
+
 /// Where Strata keeps its settings and state files:
 /// `~/Library/Application Support/Strata` on macOS, `%APPDATA%\Strata` on
 /// Windows, `$XDG_CONFIG_HOME/strata` (default `~/.config/strata`) elsewhere.
@@ -247,6 +303,15 @@ pub fn settings_file() -> Option<PathBuf> {
     settings_path()
 }
 
+/// The git executable named by the saved file, for opening a repository from
+/// the command line: that happens before a window (and so an [`App`]) exists,
+/// so the settings global cannot be read yet.
+pub fn saved_git_executable() -> Option<PathBuf> {
+    settings_path()
+        .map(|path| Settings::load(&path).behaviour.git_executable)
+        .unwrap_or_default()
+}
+
 /// Loads the settings into the app global. Call once at startup, before any
 /// window opens.
 pub fn init(cx: &mut App) {
@@ -254,6 +319,13 @@ pub fn init(cx: &mut App) {
         .map(|path| Settings::load(&path))
         .unwrap_or_default();
     cx.set_global(settings);
+    // Changes made in the debounce window would otherwise be lost on quit;
+    // GPUI polls this before the process ends.
+    cx.on_app_quit(|cx| {
+        flush(cx);
+        async {}
+    })
+    .detach();
 }
 
 /// Applies the theme setting. `System` follows the OS and is re-applied when
@@ -266,19 +338,52 @@ pub fn apply_theme(window: Option<&mut Window>, cx: &mut App) {
     }
 }
 
-/// Changes the settings, notifies `observe_global::<Settings>` observers and
-/// saves the result off the UI thread.
+/// Changes the settings and notifies `observe_global::<Settings>` observers at
+/// once. The file is written in the background once the changes have stopped
+/// for [`SAVE_DEBOUNCE`], so typing in a text field does not start one write
+/// per character.
 pub fn update(cx: &mut App, change: impl FnOnce(&mut Settings)) {
     cx.update_global::<Settings, _>(|settings, _| change(settings));
     let snapshot = Settings::get(cx).clone();
-    if let Some(path) = settings_path() {
-        cx.background_executor()
-            .spawn(async move {
-                if let Err(error) = snapshot.save(&path) {
-                    log::warn!("cannot save {}: {error}", path.display());
-                }
-            })
-            .detach();
+    let Some(path) = settings_path() else {
+        return;
+    };
+    let Ok(mut state) = SAVE.lock() else {
+        return;
+    };
+    let generation = state.record();
+    drop(state);
+
+    let timer = cx.background_executor().timer(SAVE_DEBOUNCE);
+    cx.background_executor()
+        .spawn(async move {
+            timer.await;
+            // The lock is held across the write, not only across the decision:
+            // a slower, older writer must not still be renaming while a newer
+            // one starts on the same temp file.
+            if let Ok(mut state) = SAVE.lock()
+                && state.take(generation)
+            {
+                save_logged(&snapshot, &path);
+            }
+        })
+        .detach();
+}
+
+/// Writes changes the debounce has not saved yet. Called on app quit.
+fn flush(cx: &App) {
+    let Some(path) = settings_path() else {
+        return;
+    };
+    let Ok(mut state) = SAVE.lock() else {
+        return;
+    };
+    if !state.pending() {
+        return;
+    }
+    let latest = state.latest;
+    if state.take(latest) {
+        save_logged(Settings::get(cx), &path);
     }
 }
 
@@ -324,5 +429,50 @@ mod tests {
             Settings::load(&dir.path().join("absent.json")),
             Settings::default()
         );
+    }
+
+    #[test]
+    fn a_burst_of_changes_only_lets_the_newest_write() {
+        let mut coalescer = SaveCoalescer::new();
+        assert!(!coalescer.pending());
+
+        let first = coalescer.record();
+        let second = coalescer.record();
+        let third = coalescer.record();
+        assert!(coalescer.pending());
+
+        // The writers of the first two keystrokes wake up after the third one
+        // and write nothing.
+        assert!(!coalescer.take(first));
+        assert!(!coalescer.take(second));
+        assert!(!coalescer.take(second), "a write happens at most once");
+        assert!(coalescer.pending());
+
+        assert!(coalescer.take(third));
+        assert!(!coalescer.take(third));
+        assert!(!coalescer.pending());
+    }
+
+    #[test]
+    fn a_change_after_a_write_is_pending_again() {
+        let mut coalescer = SaveCoalescer::new();
+        let generation = coalescer.record();
+        assert!(coalescer.take(generation));
+        assert!(!coalescer.pending());
+
+        let later = coalescer.record();
+        assert!(coalescer.pending());
+        assert!(
+            !coalescer.take(generation),
+            "an already covered generation cannot write the newer value"
+        );
+        assert!(coalescer.take(later));
+    }
+
+    #[test]
+    fn no_changes_leave_nothing_to_flush() {
+        let mut coalescer = SaveCoalescer::new();
+        assert!(!coalescer.pending());
+        assert!(!coalescer.take(0));
     }
 }

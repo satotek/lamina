@@ -20,7 +20,7 @@ use strata_core::session::{DiffRequest, DiffTicket, DiffView, QueryTicket};
 
 use crate::data;
 use crate::diff_view::{self, DiffColors, Row as DiffRow};
-use crate::repo_view::RepoView;
+use crate::repo_view::{RepoView, history_diff_options};
 use crate::scrollbar::WithScrollbar as _;
 use crate::search::{QuerySlot, Ready};
 use crate::settings::Settings;
@@ -314,7 +314,9 @@ impl RepoView {
         self.select_history_commit(index, cx);
     }
 
-    fn request_history_diff(&mut self, cx: &mut Context<Self>) {
+    /// Requests the selected commit's diff of the path with the settings'
+    /// comparison options.
+    pub(crate) fn request_history_diff(&mut self, cx: &mut Context<Self>) {
         let Some((index, path)) = self
             .file_history
             .as_ref()
@@ -332,10 +334,13 @@ impl RepoView {
         else {
             return;
         };
-        let ticket = session.request_diff(DiffRequest::Commit {
-            commit,
-            path: path.clone(),
-        });
+        let ticket = session.request_diff_with(
+            DiffRequest::Commit {
+                commit,
+                path: path.clone(),
+            },
+            history_diff_options(cx),
+        );
         if let Some(previous) = history.diff_ticket.replace(ticket) {
             session.cancel_diff(previous);
         }

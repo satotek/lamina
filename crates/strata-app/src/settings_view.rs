@@ -13,14 +13,28 @@ use std::path::Path;
 
 use gpui::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, FocusHandle, Global,
-    InteractiveElement as _, IntoElement, ParentElement, Render, Styled, TitlebarOptions, Window,
-    WindowBounds, WindowDecorations, WindowOptions, div, px, size,
+    InteractiveElement as _, IntoElement, KeyBinding, ParentElement, Render, Styled,
+    TitlebarOptions, Window, WindowBounds, WindowDecorations, WindowOptions, actions, div, px,
+    size,
 };
 use gpui_component::setting::Settings as SettingsPages;
 use gpui_component::{ActiveTheme as _, TitleBar, h_flex, v_flex};
 
 use crate::actions::OpenSettings;
 use crate::settings;
+
+/// Key context of the settings window, so its close shortcuts do not fire in
+/// the main window's views.
+const SETTINGS_VIEW: &str = "SettingsView";
+
+actions!(strata, [CloseSettings]);
+
+// `KeyBinding::new` parses without an OS, so the `secondary-` modifier is
+// rejected there; pick the platform's modifier at compile time instead.
+#[cfg(target_os = "macos")]
+const PLATFORM_CLOSE: &str = "cmd-w";
+#[cfg(not(target_os = "macos"))]
+const PLATFORM_CLOSE: &str = "ctrl-w";
 
 /// Size the window opens at, and the smallest it can be dragged to.
 const WIDTH: f32 = 820.0;
@@ -32,6 +46,10 @@ const MIN_HEIGHT: f32 = 420.0;
 pub fn bind(cx: &mut App) {
     cx.set_global(OpenSettingsWindow::default());
     cx.on_action(|_: &OpenSettings, cx: &mut App| open(cx));
+    cx.bind_keys([
+        KeyBinding::new("escape", CloseSettings, Some(SETTINGS_VIEW)),
+        KeyBinding::new(PLATFORM_CLOSE, CloseSettings, Some(SETTINGS_VIEW)),
+    ]);
 }
 
 /// Which window is showing the settings, so the shortcut raises it instead of
@@ -140,7 +158,9 @@ impl Render for SettingsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .size_full()
+            .key_context(SETTINGS_VIEW)
             .track_focus(&self.focus)
+            .on_action(cx.listener(|_, _: &CloseSettings, window, _| window.remove_window()))
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             .child(

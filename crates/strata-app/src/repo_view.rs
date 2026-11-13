@@ -15,7 +15,7 @@ mod sidebar;
 mod status_bar;
 mod title_bar;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -27,7 +27,10 @@ use gpui::{
 };
 use gpui_component::input::InputState;
 use strata_core::git_cli::CommandRecord;
-use strata_core::session::{DiffRequest, DiffTicket, DiffView, Operation, Session, SessionEvent};
+use strata_core::session::{
+    DiffOptions, DiffRequest, DiffTicket, DiffView, Operation, Session, SessionEvent,
+    SessionOptions,
+};
 use strata_core::{FileChange, HeadInfo, Oid, RefKind};
 
 use crate::branches::{BranchStart, Branches};
@@ -76,9 +79,19 @@ impl Launch {
     }
 
     /// Opens the repository containing `path` (defaulting to the current dir).
+    ///
+    /// The command line opens a repository before a window, and so an `App`,
+    /// exists, so the git executable comes from the saved settings file rather
+    /// than the settings global.
     pub fn open(path: &Path) -> Self {
+        Self::open_with(path, crate::settings::saved_git_executable())
+    }
+
+    /// [`Launch::open`] with the git executable the caller read from the
+    /// settings; a repository keeps the binary it was opened with.
+    pub fn open_with(path: &Path, git_executable: Option<PathBuf>) -> Self {
         let (sender, events) = mpsc::unbounded();
-        match Session::open(path, move |event| {
+        match Session::open_with(path, SessionOptions { git_executable }, move |event| {
             // A closed receiver only means the window is gone; the session is
             // shutting down anyway.
             let _ = sender.unbounded_send(event);
@@ -181,6 +194,20 @@ impl DiffSlot {
     }
 }
 
+/// The options history diffs are compared with, from the settings.
+///
+/// The working-tree/staging diff in `worktree_panel` deliberately keeps
+/// `DiffOptions::default()`: staging maps the diff's lines back to real file
+/// line numbers, so ignoring whitespace or shrinking the context there would
+/// make the pane stage the wrong lines.
+pub(crate) fn history_diff_options(cx: &App) -> DiffOptions {
+    let settings = crate::settings::Settings::get(cx);
+    DiffOptions {
+        context_lines: settings.diff.context_lines,
+        ignore_whitespace: settings.diff.ignore_whitespace,
+    }
+}
+
 pub struct RepoView {
     pub(crate) session: Option<Session>,
     fake: Option<Rc<FakeRepo>>,
@@ -220,6 +247,9 @@ pub struct RepoView {
     selected_file: Option<usize>,
 
     diff: DiffSlot,
+    /// The options `diff` was requested with, so a settings change that does
+    /// not touch them does not re-request the same diff.
+    diff_options: DiffOptions,
     diff_rows: Rc<Vec<DiffRow>>,
     diff_error: Option<String>,
     /// Pre-flattened synthetic diffs so `--fake` does not rebuild one per frame.
@@ -249,10 +279,14 @@ impl RepoView {
         window.focus(&focus, cx);
         let appearance = window
             .observe_window_appearance(|window, cx| crate::settings::apply_theme(Some(window), cx));
-        let settings = cx.observe_global::<crate::settings::Settings>(|_, cx| cx.notify());
+        let settings = cx.observe_global::<crate::settings::Settings>(|this, cx| {
+            this.settings_changed(cx);
+            cx.notify();
+        });
         let smoke = std::env::var_os("STRATA_SMOKE").is_some();
         let title = launch.title();
         let entity = cx.entity();
+        let diff_options = history_diff_options(cx);
 
         let mut view = Self {
             session: None,
@@ -278,6 +312,7 @@ impl RepoView {
             files_error: None,
             selected_file: None,
             diff: DiffSlot::default(),
+            diff_options,
             diff_rows: Rc::new(Vec::new()),
             diff_error: None,
             fake_diffs: Rc::new(Vec::new()),
@@ -716,11 +751,28 @@ impl RepoView {
         self.selected_file = Some(index);
         self.diff_error = None;
         self.diff_rows = Rc::new(Vec::new());
-        let ticket = session.request_diff(DiffRequest::Commit { commit, path });
+        let options = history_diff_options(cx);
+        let ticket = session.request_diff_with(DiffRequest::Commit { commit, path }, options);
+        self.diff_options = options;
         if let Some(previous) = self.diff.begin(ticket) {
             session.cancel_diff(previous);
         }
         cx.notify();
+    }
+
+    /// Re-requests the history diff when the options it was computed with
+    /// changed, so a new context size or ignore-whitespace shows at once.
+    fn settings_changed(&mut self, cx: &mut Context<Self>) {
+        let options = history_diff_options(cx);
+        if options == self.diff_options {
+            return;
+        }
+        self.diff_options = options;
+        if self.file_history.is_some() {
+            self.request_history_diff(cx);
+        } else if let Some(index) = self.selected_file {
+            self.select_file(index, cx);
+        }
     }
 
     fn cancel_diff(&mut self) {

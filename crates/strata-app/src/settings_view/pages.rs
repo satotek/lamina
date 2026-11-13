@@ -7,15 +7,17 @@
 //! meaning "default", the offered fetch intervals) live in
 //! [`super::change`].
 
+use std::path::Path;
+
 use gpui::{
     App, AppContext as _, Entity, IntoElement, ParentElement, PathPromptOptions, SharedString,
-    Styled, Subscription, Window, px,
+    Styled, Subscription, Window, div, px,
 };
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::setting::{
     NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage,
 };
-use gpui_component::{Sizable as _, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 
 use super::change::{self, Section};
 use crate::settings::{self, DateFormat, DiffLayout, Settings, ThemeMode};
@@ -159,10 +161,8 @@ fn diff() -> SettingPage {
         )
         .group(
             SettingGroup::new()
-                .title("Waiting on git")
-                .description(
-                    "Saved now, applied once the diff worker can take options per request.",
-                )
+                .title("Comparison")
+                .description("Applied to every history diff. The staging diff keeps git's default context and whitespace, because staging picks real file lines.")
                 .items([
                     SettingItem::new(
                         "Ignore whitespace",
@@ -171,8 +171,7 @@ fn diff() -> SettingPage {
                             change::ignore_whitespace,
                         ),
                     )
-                    .disabled(true)
-                    .description("applies after core support lands"),
+                    .description("Compare lines without their whitespace, as git diff -w."),
                     SettingItem::new(
                         "Context lines",
                         number(
@@ -182,8 +181,7 @@ fn diff() -> SettingPage {
                             change::context_lines,
                         ),
                     )
-                    .disabled(true)
-                    .description("applies after core support lands"),
+                    .description("Unchanged lines shown around each change (git's default is 3)."),
                 ]),
         )
 }
@@ -313,8 +311,9 @@ fn tools() -> SettingPage {
         .description("Programs Strata runs on your behalf.")
         .group(
             SettingGroup::new().title("Git").item(
-                SettingItem::new("Git executable", git_field())
-                    .description("Leave empty to use git from PATH."),
+                SettingItem::new("Git executable", git_field()).description(
+                    "Leave empty to use git from PATH. A changed path applies to repositories opened afterwards; a repository already open keeps the binary it started with.",
+                ),
             ),
         )
         .group(
@@ -512,6 +511,10 @@ fn text_field(
 }
 
 /// The git executable: a text field with the platform's file picker beside it.
+///
+/// An unusable path is kept and explained inline rather than corrected or
+/// cleared on the spot: the user may be halfway through typing it, and the
+/// error says what to finish.
 fn git_field() -> SettingField<SharedString> {
     SettingField::render(|options, window, cx| {
         let get = |settings: &Settings| {
@@ -524,45 +527,63 @@ fn git_field() -> SettingField<SharedString> {
         let key = field_key(options, "git");
         let state = text_state(key, "/usr/bin/git", get, change::git_executable, window, cx);
         let input = state.read(cx).input.clone();
+        let error = git_executable_error(Settings::get(cx).behaviour.git_executable.as_deref());
 
-        h_flex()
-            .gap_1()
-            .w(px(220.0))
-            .child(
-                Input::new(&input)
-                    .flex_1()
-                    .min_w_0()
-                    .with_size(options.size())
-                    .disabled(options.is_disabled()),
-            )
-            .child(
-                crate::ui::button("git-executable-browse", "Browse…")
-                    .size(crate::ui::ButtonSize::Small)
-                    .disabled(options.is_disabled())
-                    .on_click(move |_, _, cx| {
-                        let paths = cx.prompt_for_paths(PathPromptOptions {
-                            files: true,
-                            directories: false,
-                            multiple: false,
-                            prompt: Some("Choose the git executable".into()),
-                        });
-                        cx.spawn(async move |cx| {
-                            if let Ok(Ok(Some(mut chosen))) = paths.await
-                                && let Some(path) = chosen.pop()
-                            {
-                                cx.update(|cx| {
-                                    settings::update(cx, |settings| {
-                                        change::git_executable_path(settings, path.clone());
+        let mut field = v_flex().gap_1().w(px(320.0)).child(
+            h_flex()
+                .gap_1()
+                .w(px(220.0))
+                .child(
+                    Input::new(&input)
+                        .flex_1()
+                        .min_w_0()
+                        .with_size(options.size())
+                        .disabled(options.is_disabled()),
+                )
+                .child(
+                    crate::ui::button("git-executable-browse", "Browse…")
+                        .size(crate::ui::ButtonSize::Small)
+                        .disabled(options.is_disabled())
+                        .on_click(move |_, _, cx| {
+                            let paths = cx.prompt_for_paths(PathPromptOptions {
+                                files: true,
+                                directories: false,
+                                multiple: false,
+                                prompt: Some("Choose the git executable".into()),
+                            });
+                            cx.spawn(async move |cx| {
+                                if let Ok(Ok(Some(mut chosen))) = paths.await
+                                    && let Some(path) = chosen.pop()
+                                {
+                                    cx.update(|cx| {
+                                        settings::update(cx, |settings| {
+                                            change::git_executable_path(settings, path.clone());
+                                        });
+                                        cx.refresh_windows();
                                     });
-                                    cx.refresh_windows();
-                                });
-                            }
-                        })
-                        .detach();
-                    }),
-            )
-            .into_any_element()
+                                }
+                            })
+                            .detach();
+                        }),
+                ),
+        );
+        if let Some(error) = error {
+            let danger = crate::style::Design::new(cx.theme(), Settings::get(cx)).remove_text;
+            field = field.child(div().text_size(px(11.0)).text_color(danger).child(error));
+        }
+        field.into_any_element()
     })
+}
+
+/// Why the configured git executable cannot be run, if it cannot. An empty
+/// setting is valid: it means git from `PATH`.
+fn git_executable_error(path: Option<&Path>) -> Option<String> {
+    let path = path?;
+    match std::fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => None,
+        Ok(_) => Some(format!("{} is not a file", path.display())),
+        Err(_) => Some(format!("{} does not exist", path.display())),
+    }
 }
 
 fn field_key(options: &gpui_component::setting::RenderOptions, prefix: &str) -> SharedString {
@@ -618,4 +639,29 @@ fn text_state(
         }
     });
     state
+}
+
+#[cfg(test)]
+mod tests {
+    use super::git_executable_error;
+
+    #[test]
+    fn the_git_executable_must_name_an_existing_file() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file = dir.path().join("git");
+        std::fs::write(&file, b"").expect("write");
+
+        assert_eq!(git_executable_error(None), None, "empty means git on PATH");
+        assert_eq!(git_executable_error(Some(&file)), None);
+        assert!(
+            git_executable_error(Some(dir.path()))
+                .expect("a directory is not runnable")
+                .contains("is not a file")
+        );
+        assert!(
+            git_executable_error(Some(&dir.path().join("absent")))
+                .expect("a missing path is an error")
+                .contains("does not exist")
+        );
+    }
 }
