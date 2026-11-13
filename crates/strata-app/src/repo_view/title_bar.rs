@@ -26,8 +26,9 @@ impl RepoView {
     /// The title bar: the app mark, the repository and branch, the commit
     /// search, and the remote and window actions on the right.
     ///
-    /// The actions never shrink or leave the window, so the names and the
-    /// search give way first as the window narrows: see [`TitleBarFit`].
+    /// The actions never leave the window; they drop to icons at the narrowest
+    /// widths, where the names and then the search give way: see
+    /// [`TitleBarFit`].
     pub(super) fn header(&self, design: &Design, window: &Window) -> AnyElement {
         let has_back = self.parent_name.is_some();
         let fit = TitleBarFit::new(window.viewport_size().width.as_f32(), has_back);
@@ -192,6 +193,7 @@ impl RepoView {
                     accent: design.accent,
                     accent_foreground: design.on_accent,
                 },
+                fit.remote_compact,
             ))
             .child(stash_button(design, fit.stash_label))
             .child(separator)
@@ -260,14 +262,51 @@ impl RepoView {
     }
 }
 
-/// The title bar's actions at their full size: fetch, pull and push (52 px
-/// each with their 2 px gaps), stash, the separator, the terminal and the
-/// settings. They never shrink, so this is what the rest of the bar has to
-/// leave room for.
-const ACTIONS_WIDTH: f32 = 297.0;
+/// The Fetch / Pull / Push row at full size, with the 2 px gap between buttons.
+const REMOTE_ACTIONS_WIDTH: f32 = 3.0 * remote::LABELLED_BUTTON_WIDTH + 4.0;
+
+/// The same row as icon-only buttons, which the narrowest tier shows.
+const COMPACT_REMOTE_ACTIONS_WIDTH: f32 = 3.0 * remote::ICON_BUTTON_WIDTH + 4.0;
+
+/// The gap between the actions row's parts.
+const ACTION_GAP: f32 = 2.0;
+
+/// The separator's 1 px rule and its 6 px margins.
+const SEPARATOR_WIDTH: f32 = 13.0;
+
+/// The terminal and settings buttons.
+const TOOL_BUTTON_WIDTH: f32 = 32.0;
+
+/// The width of the title bar's actions: the remote row, the stash action
+/// (52 px with its label, 32 as an icon), the separator, the terminal and the
+/// settings. They never leave the window, so this is what the rest of the bar
+/// has to leave room for.
+const fn actions_width(remote: f32, stash: f32) -> f32 {
+    remote
+        + ACTION_GAP
+        + stash
+        + ACTION_GAP
+        + SEPARATOR_WIDTH
+        + ACTION_GAP
+        + TOOL_BUTTON_WIDTH
+        + ACTION_GAP
+        + TOOL_BUTTON_WIDTH
+}
+
+/// The actions at their full size.
+const ACTIONS_WIDTH: f32 = actions_width(REMOTE_ACTIONS_WIDTH, 52.0);
 
 /// The same row with the stash action drawn as an icon only.
-const COMPACT_ACTIONS_WIDTH: f32 = 277.0;
+const COMPACT_ACTIONS_WIDTH: f32 = actions_width(REMOTE_ACTIONS_WIDTH, 32.0);
+
+/// The same row with the remote actions drawn as icons too, for the narrowest
+/// tier.
+const NARROW_ACTIONS_WIDTH: f32 = actions_width(COMPACT_REMOTE_ACTIONS_WIDTH, 32.0);
+
+/// Below this width the remote buttons lose their labels, since that frees
+/// more room for the search field and the back button than the labels are
+/// worth.
+const REMOTE_ICONS_BELOW: f32 = 760.0;
 
 /// Space the title bar reserves around this row: its own left padding, the
 /// platform's window controls (`gpui-component` draws three 34 px buttons at
@@ -286,8 +325,10 @@ const MAX_SEARCH_WIDTH: f32 = 420.0;
 /// The actions on the right always stay in the window, down to the 720 px
 /// minimum size, so everything between them and the app mark gives way in
 /// steps as the window narrows: the search hint, then the wordmark, the
-/// upstream tracking label, and finally the branch chip. The name caps are
-/// what the row reserves; a longer name truncates inside its cap.
+/// upstream tracking label, and finally the branch chip. In the narrowest
+/// tier the remote buttons themselves become icons, which keeps the search
+/// and the back button in the bar. The name caps are what the row reserves; a
+/// longer name truncates inside its cap.
 #[derive(Clone, Copy, Debug)]
 struct TitleBarFit {
     /// The search column. It is dropped only below the app's minimum window
@@ -302,6 +343,8 @@ struct TitleBarFit {
     track: bool,
     /// The stash action's label, as opposed to its icon alone.
     stash_label: bool,
+    /// Fetch, Pull and Push as icons only, with the labels in their tooltips.
+    remote_compact: bool,
     /// Whether the "Back to <parent>" label is shown beside its arrow icon.
     back_label: bool,
     back_width: f32,
@@ -324,7 +367,7 @@ impl TitleBarFit {
                     (160.0, 160.0, true, false, false, false, 0.0)
                 } else if width >= 900.0 {
                     (100.0, 80.0, true, false, false, false, 0.0)
-                } else if width >= 760.0 {
+                } else if width >= REMOTE_ICONS_BELOW {
                     (100.0, 0.0, false, false, false, false, 0.0)
                 } else {
                     (70.0, 0.0, false, false, false, false, 0.0)
@@ -337,14 +380,17 @@ impl TitleBarFit {
                 (130.0, 130.0, true, false, false, true, 100.0)
             } else if width >= 1000.0 {
                 (90.0, 60.0, true, false, false, true, 80.0)
-            } else if width >= 760.0 {
+            } else if width >= REMOTE_ICONS_BELOW {
                 (90.0, 0.0, false, false, false, true, 80.0)
             } else {
                 (70.0, 0.0, false, false, false, false, 20.0)
             };
         let stash_label = width >= 1300.0;
+        let remote_compact = width < REMOTE_ICONS_BELOW;
         let actions = if stash_label {
             ACTIONS_WIDTH
+        } else if remote_compact {
+            NARROW_ACTIONS_WIDTH
         } else {
             COMPACT_ACTIONS_WIDTH
         };
@@ -371,6 +417,7 @@ impl TitleBarFit {
             branch,
             track,
             stash_label,
+            remote_compact,
             back_label,
             back_width,
             repository_width,
@@ -562,6 +609,8 @@ mod tests {
         );
         let actions = if fit.stash_label {
             ACTIONS_WIDTH
+        } else if fit.remote_compact {
+            NARROW_ACTIONS_WIDTH
         } else {
             COMPACT_ACTIONS_WIDTH
         };
@@ -627,7 +676,23 @@ mod tests {
         assert!(!fit.wordmark, "the wordmark goes before the name chips");
         assert!(!fit.branch, "the branch chip goes at the narrowest widths");
         assert!(!fit.stash_label, "the stash action keeps its icon only");
+        assert!(!fit.remote_compact, "800 px still has room for the labels");
         assert!(fit.search && fit.search_width >= MIN_SEARCH_WIDTH);
+    }
+
+    #[test]
+    fn the_remote_buttons_drop_their_labels_in_the_narrowest_tier() {
+        assert!(!TitleBarFit::new(REMOTE_ICONS_BELOW, false).remote_compact);
+        assert!(!TitleBarFit::new(REMOTE_ICONS_BELOW, true).remote_compact);
+        assert!(TitleBarFit::new(REMOTE_ICONS_BELOW - 1.0, false).remote_compact);
+        assert!(TitleBarFit::new(REMOTE_ICONS_BELOW - 1.0, true).remote_compact);
+
+        // The width the icons free is what keeps a usable search field next to
+        // the back button at the app's minimum window size.
+        let fit = TitleBarFit::new(720.0, true);
+        assert!(fit.remote_compact);
+        assert!(fit.search && fit.search_width >= MIN_SEARCH_WIDTH);
+        assert!(used(&fit) <= 720.0);
     }
 
     #[test]
@@ -661,6 +726,14 @@ mod tests {
 
         let narrow_fit = TitleBarFit::new(720.0, true);
         assert!(!narrow_fit.back_label, "label drops to icon-only at 720 px");
+        assert!(
+            narrow_fit.remote_compact,
+            "the remote labels give way before the search does"
+        );
+        assert!(
+            narrow_fit.search && narrow_fit.search_width >= MIN_SEARCH_WIDTH,
+            "the compact remote row leaves the search its usable width"
+        );
         assert!(used(&narrow_fit) <= 720.0);
     }
 }

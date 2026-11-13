@@ -34,6 +34,14 @@ use crate::repo_view::RepoView;
 /// Width of the slim progress bar in the status bar.
 const PROGRESS_WIDTH: f32 = 90.0;
 
+/// Width of a remote button with its icon and label. The title bar counts it
+/// when it works out how much room the search field has left.
+pub(crate) const LABELLED_BUTTON_WIDTH: f32 = 52.0;
+
+/// The same button as an icon alone, with the label in the tooltip. The
+/// narrowest title bar uses this form.
+pub(crate) const ICON_BUTTON_WIDTH: f32 = 32.0;
+
 const DETACHED_HEAD: &str = "Detached HEAD: check out a branch to pull or push.";
 const BUSY: &str = "An operation is already running.";
 const NO_SESSION: &str =
@@ -517,7 +525,16 @@ fn open_force_dialog(
 
 impl RepoView {
     /// The Fetch / Pull / Push buttons in the title bar.
-    pub(crate) fn remote_buttons(&self, source: Option<&Source>, colors: &Colors) -> AnyElement {
+    ///
+    /// `compact` draws each as an icon alone for the narrowest title bar; the
+    /// tooltip then carries the label, and the ahead/behind count stays on the
+    /// button as a badge.
+    pub(crate) fn remote_buttons(
+        &self,
+        source: Option<&Source>,
+        colors: &Colors,
+        compact: bool,
+    ) -> AnyElement {
         let targets = source.map_or_else(Targets::default, |source| match source {
             Source::Repo(snapshot) => Targets::read(snapshot),
             Source::Fake(_) => Targets::default(),
@@ -535,6 +552,11 @@ impl RepoView {
                       badge: Option<u32>,
                       command: Command| {
             let entity = entity.clone();
+            let tooltip = if compact {
+                named_tooltip(label, tooltip)
+            } else {
+                tooltip
+            };
             let mut content = div()
                 .relative()
                 .size_full()
@@ -544,14 +566,19 @@ impl RepoView {
                 .justify_center()
                 .gap(px(2.0))
                 .text_size(px(10.0))
-                .child(Icon::new(icon_name).with_size(px(16.0)))
-                .child(label);
+                .child(Icon::new(icon_name).with_size(px(16.0)));
+            if !compact {
+                content = content.child(label);
+            }
             if let Some(count) = badge {
+                // An icon-only button has no label under the icon, so its
+                // badge moves into the corner the label would have left free.
+                let (top, right) = if compact { (1.0, 2.0) } else { (2.0, 8.0) };
                 content = content.child(
                     div()
                         .absolute()
-                        .top(px(2.0))
-                        .right(px(8.0))
+                        .top(px(top))
+                        .right(px(right))
                         .min_w(px(14.0))
                         .h(px(14.0))
                         .px(px(3.0))
@@ -565,7 +592,11 @@ impl RepoView {
             }
             crate::ui::content_button(id)
                 .ghost()
-                .w(px(52.0))
+                .w(px(if compact {
+                    ICON_BUTTON_WIDTH
+                } else {
+                    LABELLED_BUTTON_WIDTH
+                }))
                 .h(px(40.0))
                 .p_0()
                 .text_color(if enabled {
@@ -877,6 +908,18 @@ fn shortcut(key: char) -> String {
     format!("{MODIFIER}+Alt+{key}")
 }
 
+/// An icon-only button has no visible label, so its tooltip has to name it.
+///
+/// The tooltip builders normally open with the button's verb already; the
+/// prefix covers the states that do not, such as a blocked button.
+fn named_tooltip(label: &str, tooltip: String) -> String {
+    if tooltip.starts_with(label) {
+        tooltip
+    } else {
+        format!("{label} · {tooltip}")
+    }
+}
+
 fn fetch_tooltip(blocked: Option<&'static str>) -> String {
     blocked.map_or_else(
         || {
@@ -1182,6 +1225,25 @@ mod tests {
         assert!(
             matches!(push_plan(&gone), Ok(PushPlan::Publish { .. })),
             "a gone upstream is republished"
+        );
+    }
+
+    #[test]
+    fn an_icon_only_button_names_itself_in_the_tooltip() {
+        let fetch = fetch_tooltip(None);
+        assert_eq!(
+            named_tooltip("Fetch", fetch.clone()),
+            fetch,
+            "a tooltip that already opens with the verb needs no prefix"
+        );
+        assert_eq!(
+            named_tooltip("Pull", BUSY.to_owned()),
+            format!("Pull · {BUSY}"),
+            "a blocked button still says which command it is"
+        );
+        assert_eq!(
+            named_tooltip("Push", push_tooltip(&Targets::default(), None)),
+            format!("Push · {NO_SESSION}")
         );
     }
 
