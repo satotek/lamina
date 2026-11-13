@@ -2,13 +2,15 @@
 //!
 //! `log.rs` (commit walk, refs, HEAD), `status.rs` (status, commit changes,
 //! blob/file content), `conflicts.rs` (repository state, conflicted paths),
-//! `upstream.rs` (tracking branches), `history.rs` (path-limited history) and
-//! `message.rs` (commit and merge messages) are owned by separate tasks.
+//! `upstream.rs` (tracking branches), `history.rs` (path-limited history),
+//! `message.rs` (commit and merge messages) and `remotes.rs` (configured
+//! remotes) are owned by separate tasks.
 
 mod conflicts;
 mod history;
 mod log;
 mod message;
+mod remotes;
 mod status;
 mod upstream;
 

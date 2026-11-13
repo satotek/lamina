@@ -19,6 +19,7 @@ const MAX_HIGHLIGHT_BYTES: usize = 1024 * 1024;
 pub(crate) struct DiffJob {
     pub(crate) ticket: DiffTicket,
     pub(crate) request: DiffRequest,
+    pub(crate) options: DiffOptions,
 }
 
 pub(crate) fn run(shared: Arc<Shared>, jobs: Arc<Mutex<Receiver<DiffJob>>>) {
@@ -59,7 +60,7 @@ fn compute(shared: &Shared, job: &DiffJob, highlighter: &mut Highlighter) -> Res
     let old_bytes = old.as_deref().unwrap_or_default();
     let new_bytes = new.as_deref().unwrap_or_default();
 
-    let diff = diff_text(old_bytes, new_bytes, &DiffOptions::default());
+    let diff = diff_text(old_bytes, new_bytes, &job.options);
     let binary = diff.binary;
     let view = Arc::new(DiffView {
         request: job.request.clone(),

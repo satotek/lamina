@@ -15,7 +15,21 @@ fn diff_with_context(old: &str, new: &str, context_lines: u32) -> FileDiff {
     diff_text(
         old.as_bytes(),
         new.as_bytes(),
-        &DiffOptions { context_lines },
+        &DiffOptions {
+            context_lines,
+            ..DiffOptions::default()
+        },
+    )
+}
+
+fn diff_ignoring_whitespace(old: &str, new: &str) -> FileDiff {
+    diff_text(
+        old.as_bytes(),
+        new.as_bytes(),
+        &DiffOptions {
+            ignore_whitespace: true,
+            ..DiffOptions::default()
+        },
     )
 }
 
@@ -202,6 +216,133 @@ fn zero_context_keeps_only_changed_lines() {
     );
     let separated = diff_with_context("a\nb\nc\nd\ne\n", "a\nX\nc\nY\ne\n", 0);
     assert_eq!(separated.hunks.len(), 2);
+}
+
+#[test]
+fn context_lines_shape_the_hunks() {
+    let old: String = (1..=40).map(|index| format!("line {index}\n")).collect();
+    let new = old
+        .replace("line 10\n", "line ten\n")
+        .replace("line 30\n", "line thirty\n");
+
+    // The 19 common lines between the edits keep the hunks apart up to the
+    // default `-U3`; each hunk grows by the requested context on both sides.
+    for context in [0u32, 1, 3] {
+        let file_diff = diff_with_context(&old, &new, context);
+        assert_eq!(file_diff.hunks.len(), 2, "context {context}");
+        for hunk in &file_diff.hunks {
+            assert_eq!(
+                hunk.lines.len(),
+                2 + 2 * context as usize,
+                "context {context}"
+            );
+        }
+        assert_eq!(
+            file_diff.hunks[0].lines[context as usize].kind,
+            LineKind::Removed
+        );
+    }
+
+    // `-U10` reaches across the gap and merges the two edits into one hunk.
+    let merged = diff_with_context(&old, &new, 10);
+    assert_eq!(merged.hunks.len(), 1);
+    let hunk = &merged.hunks[0];
+    assert_eq!((hunk.old_start, hunk.old_len), (1, 40));
+    assert_eq!((hunk.new_start, hunk.new_len), (1, 40));
+    // Nine context lines above the first edit (the file starts there), the 19
+    // common lines in between, ten lines after the second edit.
+    assert_eq!(hunk.lines.len(), 9 + 2 + 19 + 2 + 10);
+    assert_eq!(contents(hunk)[0], (" ", "line 1"));
+    assert_eq!(contents(hunk).last().copied(), Some((" ", "line 40")));
+}
+
+#[test]
+fn default_options_are_three_context_lines_that_see_whitespace() {
+    assert_eq!(
+        DiffOptions::default(),
+        DiffOptions {
+            context_lines: 3,
+            ignore_whitespace: false,
+        }
+    );
+
+    let old = "one\ntwo\nthree\nfour\nfive\nsix\n";
+    let new = "one\nTWO\nthree\nfour\nfive\nsix\n";
+    assert_eq!(
+        to_unified(&diff(old, new), "a", "b"),
+        to_unified(&diff_with_context(old, new, 3), "a", "b"),
+        "the default must stay -U3"
+    );
+
+    // A change that is only whitespace is still a change by default.
+    assert_eq!(diff("a b\n", "a  b\n").hunks.len(), 1);
+}
+
+#[test]
+fn ignore_whitespace_hides_whitespace_only_changes() {
+    let old = "fn main() {\n    let x = 1;\n}\n";
+    let reindented = "fn main() {\n        let x = 1;\n}\n";
+    assert_eq!(diff(old, reindented).hunks.len(), 1, "default sees it");
+    assert!(
+        diff_ignoring_whitespace(old, reindented).hunks.is_empty(),
+        "reindenting must not produce a hunk"
+    );
+
+    // Tabs, spaces and trailing whitespace are all the same to `-w`.
+    assert!(
+        diff_ignoring_whitespace("a\tb\n", "a b   \n")
+            .hunks
+            .is_empty()
+    );
+    // A blank line that gained spaces is not a change either.
+    assert!(
+        diff_ignoring_whitespace("a\n\nb\n", "a\n   \nb\n")
+            .hunks
+            .is_empty()
+    );
+    // CRLF vs LF is a whitespace-only difference too.
+    assert!(
+        diff_ignoring_whitespace("a\r\nb\r\n", "a\nb\n")
+            .hunks
+            .is_empty()
+    );
+    // A dropped final newline is not whitespace, so it stays a change.
+    assert_eq!(diff_ignoring_whitespace("a\nb", "a\nb\n").hunks.len(), 1);
+}
+
+#[test]
+fn ignore_whitespace_keeps_real_changes_and_their_real_text() {
+    let old = "alpha\n    beta  \ngamma\n";
+    let new = "alpha\n  BETA\ngamma\n";
+    let file_diff = diff_ignoring_whitespace(old, new);
+    assert_eq!(file_diff.hunks.len(), 1);
+    let hunk = &file_diff.hunks[0];
+    assert_eq!(
+        (hunk.old_start, hunk.old_len, hunk.new_start, hunk.new_len),
+        (1, 3, 1, 3)
+    );
+    // The hunk carries the file's real lines, not the stripped comparison.
+    assert_eq!(
+        contents(hunk),
+        vec![
+            (" ", "alpha"),
+            ("-", "    beta  "),
+            ("+", "  BETA"),
+            (" ", "gamma")
+        ]
+    );
+    // Line numbers are those of the real text, so both full sides can be
+    // highlighted from them.
+    assert_eq!(hunk.lines[1].old_lineno, Some(2));
+    assert_eq!(hunk.lines[2].new_lineno, Some(2));
+
+    // Whitespace noise next to a real edit disappears; only the real lines are
+    // reported, still with their original text.
+    let mixed = diff_ignoring_whitespace("one   \ntwo\nthree\n", "one\nTWO\nthree\n");
+    assert_eq!(
+        contents(&mixed.hunks[0]),
+        vec![(" ", "one   "), ("-", "two"), ("+", "TWO"), (" ", "three")]
+    );
 }
 
 #[test]
@@ -537,6 +678,7 @@ fn hunks_reconstruct_random_new_text() {
         let (old, new) = generate_pair(&mut rng);
         let opts = DiffOptions {
             context_lines: (case % 5) as u32,
+            ..DiffOptions::default()
         };
         let file_diff = diff_text(old.as_bytes(), new.as_bytes(), &opts);
         assert!(

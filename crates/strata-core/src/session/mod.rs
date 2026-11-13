@@ -18,7 +18,7 @@ mod queries;
 mod refresh;
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -32,9 +32,11 @@ use crate::patch::LineSelection;
 use crate::repo::Repo;
 use crate::watch::RepoWatcher;
 use crate::{
-    CommitInfo, ConflictEntry, Error, HeadInfo, Oid, RefInfo, RepoState, Result, StashInfo,
-    UpstreamInfo, WorktreeStatus,
+    CommitInfo, ConflictEntry, Error, HeadInfo, Oid, RefInfo, RemoteInfo, RepoState, Result,
+    StashInfo, UpstreamInfo, WorktreeStatus,
 };
+
+pub use crate::diff::DiffOptions;
 
 use diffs::DiffJob;
 use history::LoadCommand;
@@ -153,6 +155,9 @@ pub struct RepoSnapshot {
     pub stashes: Arc<Vec<StashInfo>>,
     /// Upstream tracking per local branch short name; refreshed with refs.
     pub upstreams: Arc<HashMap<String, UpstreamInfo>>,
+    /// Configured remotes, sorted by name. Includes remotes that have no
+    /// remote-tracking branches yet.
+    pub remotes: Vec<RemoteInfo>,
     /// A merge/rebase/... left in progress; refreshed with status.
     pub state: RepoState,
     /// Unmerged paths; refreshed with status. Non-empty only while `state` is not Normal.
@@ -388,6 +393,14 @@ pub enum SessionEvent {
     },
 }
 
+/// How a session talks to `git`.
+#[derive(Debug, Clone, Default)]
+pub struct SessionOptions {
+    /// The `git` executable used for every write. `None` uses the `git` found
+    /// on `PATH` when the session opened.
+    pub git_executable: Option<PathBuf>,
+}
+
 pub struct Session {
     shared: Arc<Shared>,
     /// Held so that dropping the session closes every worker's channel.
@@ -416,6 +429,16 @@ impl Session {
         path: impl AsRef<Path>,
         on_event: impl Fn(SessionEvent) + Send + Sync + 'static,
     ) -> Result<Self> {
+        Self::open_with(path, SessionOptions::default(), on_event)
+    }
+
+    /// Like [`open`](Self::open), with control over the environment the
+    /// session works in.
+    pub fn open_with(
+        path: impl AsRef<Path>,
+        options: SessionOptions,
+        on_event: impl Fn(SessionEvent) + Send + Sync + 'static,
+    ) -> Result<Self> {
         let repo = Repo::open(path)?;
         // A bare repository has no working tree; git commands fail there with a
         // message the operation reports, which is better than no session at all.
@@ -424,6 +447,12 @@ impl Session {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| repo.git_dir().to_path_buf());
         let git = Git::new(git_workdir);
+        // Choosing the executable here, not per command, keeps every write on
+        // the same binary even when `PATH` changes later.
+        let git = match options.git_executable {
+            Some(binary) => git.with_git_binary(binary),
+            None => git,
+        };
 
         let events: EventSink = Arc::new(on_event);
         {
@@ -518,12 +547,24 @@ impl Session {
         id
     }
 
-    /// Computes a diff in the background. Newer requests do not cancel older
-    /// ones automatically; call `cancel_diff` for a selection the user left.
+    /// Computes a diff in the background with [`DiffOptions::default`]. Newer
+    /// requests do not cancel older ones automatically; call `cancel_diff` for
+    /// a selection the user left.
     pub fn request_diff(&self, request: DiffRequest) -> DiffTicket {
+        self.request_diff_with(request, DiffOptions::default())
+    }
+
+    /// Like [`request_diff`](Self::request_diff), with the comparison options
+    /// the UI is configured for. The options travel with the job, so queued
+    /// requests each keep their own.
+    pub fn request_diff_with(&self, request: DiffRequest, options: DiffOptions) -> DiffTicket {
         let ticket = self.shared.next_ticket();
         if let Some(senders) = &self.senders {
-            let _ = senders.diffs.send(DiffJob { ticket, request });
+            let _ = senders.diffs.send(DiffJob {
+                ticket,
+                request,
+                options,
+            });
         }
         ticket
     }
@@ -619,6 +660,7 @@ fn empty_snapshot() -> RepoSnapshot {
         status: Arc::new(WorktreeStatus::default()),
         stashes: Arc::new(Vec::new()),
         upstreams: Arc::new(HashMap::new()),
+        remotes: Vec::new(),
         state: RepoState::Normal,
         conflicts: Arc::new(Vec::new()),
         busy: None,

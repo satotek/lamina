@@ -10,7 +10,7 @@ use crate::graph::GraphRows;
 use crate::repo::CommitWalk;
 use crate::session::publish::Shared;
 use crate::session::{COMMIT_CHUNK, CommitList, SessionEvent};
-use crate::{CommitInfo, HeadInfo, Oid, RefInfo, Result, StashInfo, UpstreamInfo};
+use crate::{CommitInfo, HeadInfo, Oid, RefInfo, RemoteInfo, Result, StashInfo, UpstreamInfo};
 
 pub(crate) struct LoadCommand {
     pub(crate) generation: u64,
@@ -46,6 +46,9 @@ fn load(shared: &Shared, generation: u64) -> Result<()> {
     // Tracking state is computed from refs, so it belongs to the same snapshot
     // update: the UI must never show badges for upstreams that lag behind them.
     let upstreams = Arc::new(shared.repo.upstreams()?);
+    // Remotes come from the configuration, not from refs: one that was never
+    // fetched still has to be offered for fetching and pushing.
+    let remotes = shared.repo.remotes()?;
     let walk = shared.repo.walk_commits()?;
 
     Loader {
@@ -56,6 +59,7 @@ fn load(shared: &Shared, generation: u64) -> Result<()> {
         refs_by_commit,
         stashes,
         upstreams,
+        remotes,
         commits: CommitList::default(),
         index: HashMap::new(),
         loaded: 0,
@@ -82,6 +86,7 @@ struct Loader<'a> {
     refs_by_commit: Arc<HashMap<Oid, Vec<usize>>>,
     stashes: Arc<Vec<StashInfo>>,
     upstreams: Arc<HashMap<String, UpstreamInfo>>,
+    remotes: Vec<RemoteInfo>,
     commits: CommitList,
     index: HashMap<Oid, usize>,
     loaded: usize,
@@ -141,6 +146,7 @@ impl Loader<'_> {
         let refs_by_commit = Arc::clone(&self.refs_by_commit);
         let stashes = Arc::clone(&self.stashes);
         let upstreams = Arc::clone(&self.upstreams);
+        let remotes = self.remotes.clone();
 
         self.shared
             .publish_for_generation(self.generation, move |snapshot| {
@@ -148,6 +154,7 @@ impl Loader<'_> {
                 snapshot.refs = refs;
                 snapshot.stashes = stashes;
                 snapshot.upstreams = upstreams;
+                snapshot.remotes = remotes;
                 snapshot.refs_by_commit = refs_by_commit;
                 snapshot.commits = commits;
                 snapshot.commit_index = commit_index;

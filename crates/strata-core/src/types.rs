@@ -98,6 +98,20 @@ pub struct UpstreamInfo {
     pub gone: bool,
 }
 
+/// A configured remote.
+///
+/// A remote is listed even while it has no remote-tracking branches: fetching
+/// and pushing only need its URLs, and the UI offers every configured remote
+/// before the first fetch created any refs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteInfo {
+    pub name: String,
+    /// The first `remote.<name>.url`, as git resolves it.
+    pub fetch_url: Option<String>,
+    /// The push URL, but only when pushes do not already use `fetch_url`.
+    pub push_url: Option<String>,
+}
+
 /// An operation git left half-done, as recorded in the git dir.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum RepoState {

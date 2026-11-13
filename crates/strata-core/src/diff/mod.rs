@@ -6,6 +6,7 @@ mod lines;
 #[cfg(test)]
 mod tests;
 
+use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::ops::Range;
 
@@ -49,14 +50,21 @@ pub struct FileDiff {
     pub binary: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DiffOptions {
+    /// Unchanged lines shown around each hunk, as `git diff -U<n>`.
     pub context_lines: u32,
+    /// Compare lines with their whitespace removed, as `git diff -w`. A hunk
+    /// that still shows up keeps the real text of both sides.
+    pub ignore_whitespace: bool,
 }
 
 impl Default for DiffOptions {
     fn default() -> Self {
-        Self { context_lines: 3 }
+        Self {
+            context_lines: 3,
+            ignore_whitespace: false,
+        }
     }
 }
 
@@ -80,10 +88,14 @@ pub fn diff_text(old: &[u8], new: &[u8], opts: &DiffOptions) -> FileDiff {
     let new_text: &str = &new;
     let old_lines = lines::split(old_text);
     let new_lines = lines::split(new_text);
+    let old_tokens_text = comparison_text(old_text, opts.ignore_whitespace);
+    let new_tokens_text = comparison_text(new_text, opts.ignore_whitespace);
+    let old_tokens = lines::split(&old_tokens_text);
+    let new_tokens = lines::split(&new_tokens_text);
 
     // imara's `&str` source tokenises whole lines including their terminator,
     // which is what makes CRLF/LF and a dropped final newline show up.
-    let input = InternedInput::new(old_text, new_text);
+    let input = InternedInput::new(old_tokens_text.as_ref(), new_tokens_text.as_ref());
     let mut diff = Diff::compute(Algorithm::Histogram, &input);
     diff.postprocess_lines(&input);
 
@@ -96,9 +108,17 @@ pub fn diff_text(old: &[u8], new: &[u8], opts: &DiffOptions) -> FileDiff {
         .collect();
 
     let context = opts.context_lines as usize;
+    let old_side = Side {
+        lines: &old_lines,
+        tokens: &old_tokens,
+    };
+    let new_side = Side {
+        lines: &new_lines,
+        tokens: &new_tokens,
+    };
     let mut hunks = Vec::new();
     for (first, last) in group_changes(&changes, context) {
-        let mut hunk = build_hunk(&old_lines, &new_lines, &changes, first, last, context);
+        let mut hunk = build_hunk(old_side, new_side, &changes, first, last, context);
         emphasis::emphasize(&mut hunk.lines);
         hunks.push(hunk);
     }
@@ -107,6 +127,34 @@ pub fn diff_text(old: &[u8], new: &[u8], opts: &DiffOptions) -> FileDiff {
         hunks,
         binary: false,
     }
+}
+
+/// The text the comparison reads: the original, or one token per real line
+/// with the whitespace removed.
+///
+/// Keeping one token per line is what lets a whitespace-insensitive diff keep
+/// the line numbers of the file, so the hunks still index the real text.
+fn comparison_text(text: &str, ignore_whitespace: bool) -> Cow<'_, str> {
+    if !ignore_whitespace {
+        return Cow::Borrowed(text);
+    }
+    let mut stripped = String::with_capacity(text.len());
+    for line in lines::split(text) {
+        stripped.extend(line.content.chars().filter(|c| !c.is_whitespace()));
+        // The terminator stays, so a missing final newline is still a change.
+        if !line.no_newline {
+            stripped.push('\n');
+        }
+    }
+    Cow::Owned(stripped)
+}
+
+/// One side of the diff: the text the hunks carry and the text that was
+/// compared. The two differ only when whitespace is ignored.
+#[derive(Clone, Copy)]
+struct Side<'a> {
+    lines: &'a [Line<'a>],
+    tokens: &'a [Line<'a>],
 }
 
 /// Groups changes the way `git diff` does: changes stay in one hunk when the
@@ -132,8 +180,8 @@ fn group_changes(changes: &[Change], context: usize) -> Vec<(usize, usize)> {
 }
 
 fn build_hunk(
-    old: &[Line<'_>],
-    new: &[Line<'_>],
+    old: Side<'_>,
+    new: Side<'_>,
     changes: &[Change],
     first: usize,
     last: usize,
@@ -143,8 +191,8 @@ fn build_hunk(
         .min(changes[first].old.start)
         .min(changes[first].new.start);
     let ctx_after = context
-        .min(old.len() - changes[last].old.end)
-        .min(new.len() - changes[last].new.end);
+        .min(old.lines.len() - changes[last].old.end)
+        .min(new.lines.len() - changes[last].new.end);
 
     let old_start = changes[first].old.start - ctx_before;
     let new_start = changes[first].new.start - ctx_before;
@@ -171,8 +219,8 @@ fn build_hunk(
                 kind: LineKind::Removed,
                 old_lineno: Some(idx as u32 + 1),
                 new_lineno: None,
-                content: old[idx].content.to_string(),
-                no_newline_at_eof: old[idx].no_newline,
+                content: old.lines[idx].content.to_string(),
+                no_newline_at_eof: old.lines[idx].no_newline,
                 emphasis: Vec::new(),
             });
         }
@@ -181,8 +229,8 @@ fn build_hunk(
                 kind: LineKind::Added,
                 old_lineno: None,
                 new_lineno: Some(idx as u32 + 1),
-                content: new[idx].content.to_string(),
-                no_newline_at_eof: new[idx].no_newline,
+                content: new.lines[idx].content.to_string(),
+                no_newline_at_eof: new.lines[idx].no_newline,
                 emphasis: Vec::new(),
             });
         }
@@ -215,17 +263,20 @@ fn header_start(index: usize, len: usize) -> u32 {
     }
 }
 
-fn context_line(old: &[Line<'_>], old_pos: usize, new: &[Line<'_>], new_pos: usize) -> DiffLine {
+fn context_line(old: Side<'_>, old_pos: usize, new: Side<'_>, new_pos: usize) -> DiffLine {
+    // Whitespace-insensitive comparison legalises context lines that differ in
+    // whitespace, so the check has to look at the compared text, not the raw
+    // lines the hunk carries.
     debug_assert_eq!(
-        old[old_pos].raw, new[new_pos].raw,
+        old.tokens[old_pos].raw, new.tokens[new_pos].raw,
         "context must be identical on both sides"
     );
     DiffLine {
         kind: LineKind::Context,
         old_lineno: Some(old_pos as u32 + 1),
         new_lineno: Some(new_pos as u32 + 1),
-        content: old[old_pos].content.to_string(),
-        no_newline_at_eof: old[old_pos].no_newline || new[new_pos].no_newline,
+        content: old.lines[old_pos].content.to_string(),
+        no_newline_at_eof: old.lines[old_pos].no_newline || new.lines[new_pos].no_newline,
         emphasis: Vec::new(),
     }
 }

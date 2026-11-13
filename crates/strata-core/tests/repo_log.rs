@@ -5,7 +5,7 @@ use std::process::Command;
 use std::time::Instant;
 
 use strata_core::repo::Repo;
-use strata_core::{HeadInfo, RefInfo, RefKind};
+use strata_core::{HeadInfo, RefInfo, RefKind, RemoteInfo};
 use tempfile::TempDir;
 
 const BASE_TIME: i64 = 1_700_000_000;
@@ -691,4 +691,77 @@ fn stashes_are_listed_newest_first() {
         stashes[0].id.to_string(),
         fixture.git(&["rev-parse", "stash@{0}"]).trim()
     );
+}
+
+#[test]
+fn remotes_are_sorted_by_name_and_keep_their_urls() {
+    let fixture = Fixture::new();
+    fixture.git(&["remote", "add", "zeta", "https://example.com/zeta.git"]);
+    // Added second, so a listing in configuration order would put it second.
+    fixture.git(&["remote", "add", "alpha", "https://example.com/alpha.git"]);
+    fixture.git(&[
+        "remote",
+        "set-url",
+        "--push",
+        "alpha",
+        "ssh://example.com/alpha.git",
+    ]);
+
+    assert_eq!(
+        fixture.open().remotes().expect("remotes"),
+        vec![
+            RemoteInfo {
+                name: "alpha".into(),
+                fetch_url: Some("https://example.com/alpha.git".into()),
+                push_url: Some("ssh://example.com/alpha.git".into()),
+            },
+            RemoteInfo {
+                name: "zeta".into(),
+                fetch_url: Some("https://example.com/zeta.git".into()),
+                push_url: None,
+            },
+        ]
+    );
+}
+
+#[test]
+fn a_remote_without_fetched_branches_is_still_listed() {
+    let fixture = Fixture::new();
+    fixture.commit("a.txt", "one\n", BASE_TIME, "base");
+    fixture.git_at(
+        fixture.tmp.path(),
+        &["init", "--quiet", "--bare", "origin.git"],
+    );
+    let bare = fixture.tmp.path().join("origin.git");
+    let bare_url = bare.to_str().expect("utf-8 path").to_string();
+    fixture.git(&["remote", "add", "origin", &bare_url]);
+    fixture.git(&["push", "--quiet", "--set-upstream", "origin", "main"]);
+    // Configured but never fetched: it has no remote-tracking branches at all.
+    fixture.git(&["remote", "add", "spare", "https://example.com/spare.git"]);
+
+    assert!(
+        fixture.ref_exists("refs/remotes/origin/main"),
+        "the first remote should have a tracking branch"
+    );
+    assert!(!fixture.ref_exists("refs/remotes/spare/main"));
+
+    let remotes = fixture.open().remotes().expect("remotes");
+    let names: Vec<&str> = remotes.iter().map(|remote| remote.name.as_str()).collect();
+    assert_eq!(names, vec!["origin", "spare"]);
+    assert_eq!(remotes[0].fetch_url.as_deref(), Some(bare_url.as_str()));
+    assert_eq!(
+        remotes[0].push_url, None,
+        "pushes use the fetch URL unless a push URL is configured"
+    );
+    assert_eq!(
+        remotes[1].fetch_url.as_deref(),
+        Some("https://example.com/spare.git")
+    );
+}
+
+#[test]
+fn a_repository_without_remotes_lists_none() {
+    let fixture = Fixture::new();
+    fixture.commit("a.txt", "one\n", BASE_TIME, "base");
+    assert!(fixture.open().remotes().expect("remotes").is_empty());
 }

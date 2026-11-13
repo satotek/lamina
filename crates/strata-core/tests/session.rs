@@ -19,8 +19,9 @@ use strata_core::patch::LineSelection;
 use strata_core::repo::Repo;
 use strata_core::session::{
     DiffRequest, DiffTicket, DiffView, Operation, OperationId, RepoSnapshot, Session, SessionEvent,
+    SessionOptions,
 };
-use strata_core::{HeadInfo, WorktreeStatus};
+use strata_core::{HeadInfo, RefKind, WorktreeStatus};
 use tempfile::TempDir;
 
 /// Generous: inotify, FSEvents and Windows deliver with different latencies,
@@ -163,8 +164,12 @@ struct Harness {
 
 impl Harness {
     fn open(repo: TestRepo) -> Self {
+        Self::open_with(repo, SessionOptions::default())
+    }
+
+    fn open_with(repo: TestRepo, options: SessionOptions) -> Self {
         let (tx, rx) = mpsc::channel();
-        let session = Session::open(repo.path(), move |event| {
+        let session = Session::open_with(repo.path(), options, move |event| {
             let _ = tx.send(event);
         })
         .expect("open session");
@@ -779,7 +784,235 @@ fn an_empty_repository_loads_without_commits() {
         })
     );
     assert!(snapshot.refs.is_empty());
+    assert!(
+        snapshot.remotes.is_empty(),
+        "the test repository has no remotes"
+    );
     assert!(snapshot.status.staged.is_empty() && snapshot.status.unstaged.is_empty());
+}
+
+#[test]
+fn request_diff_with_threads_context_lines_and_whitespace_to_the_worker() {
+    let repo = TestRepo::new();
+    let base: String = (1..=40).map(|index| format!("line {index}\n")).collect();
+    repo.write("a.txt", &base);
+    repo.write("b.txt", &base);
+    repo.commit_all("base");
+    let harness = Harness::open(repo);
+    harness.wait_for_complete(1);
+
+    let edited = base
+        .replace("line 10\n", "line ten\n")
+        .replace("line 30\n", "line thirty\n");
+    harness.repo.write("a.txt", &edited);
+
+    for context_lines in [0u32, 1, 3, 10] {
+        let ticket = harness.session.request_diff_with(
+            DiffRequest::Unstaged {
+                path: "a.txt".into(),
+            },
+            DiffOptions {
+                context_lines,
+                ignore_whitespace: false,
+            },
+        );
+        let views = harness.diff_ready_views(ticket, 1, TIMEOUT);
+        let diff = &views[0].diff;
+        if context_lines < 10 {
+            assert_eq!(diff.hunks.len(), 2, "context {context_lines}");
+            for hunk in &diff.hunks {
+                assert_eq!(hunk.lines.len(), 2 + 2 * context_lines as usize);
+            }
+        } else {
+            // Ten lines of context reach across the 19 common lines and merge
+            // both edits into one hunk.
+            assert_eq!(diff.hunks.len(), 1, "context {context_lines}");
+            assert_eq!(diff.hunks[0].lines.len(), 9 + 2 + 19 + 2 + 10);
+        }
+    }
+
+    // `b.txt` keeps the real edits out of the way: only line 20 is reindented,
+    // which a whitespace-insensitive request must hide entirely.
+    let reindented = base.replace("line 20\n", "    line 20   \n");
+    harness.repo.write("b.txt", &reindented);
+
+    let folded = harness.session.request_diff_with(
+        DiffRequest::Unstaged {
+            path: "b.txt".into(),
+        },
+        DiffOptions {
+            context_lines: 3,
+            ignore_whitespace: true,
+        },
+    );
+    let views = harness.diff_ready_views(folded, 1, TIMEOUT);
+    assert!(
+        views[0].diff.hunks.is_empty(),
+        "a whitespace-only change produced hunks"
+    );
+
+    // With a real edit next to it, only the real lines survive, still carrying
+    // the file's text.
+    let both = reindented.replace("line 30\n", "line thirty\n");
+    harness.repo.write("b.txt", &both);
+    let folded = harness.session.request_diff_with(
+        DiffRequest::Unstaged {
+            path: "b.txt".into(),
+        },
+        DiffOptions {
+            context_lines: 3,
+            ignore_whitespace: true,
+        },
+    );
+    let views = harness.diff_ready_views(folded, 1, TIMEOUT);
+    let hunks = &views[0].diff.hunks;
+    assert_eq!(hunks.len(), 1, "only the line 30 edit is real");
+    let changed: Vec<&str> = hunks[0]
+        .lines
+        .iter()
+        .filter(|line| line.kind != LineKind::Context)
+        .map(|line| line.content.as_str())
+        .collect();
+    assert_eq!(changed, vec!["line 30", "line thirty"]);
+
+    let strict = harness.session.request_diff(DiffRequest::Unstaged {
+        path: "b.txt".into(),
+    });
+    let views = harness.diff_ready_views(strict, 1, TIMEOUT);
+    assert_eq!(
+        views[0].diff.hunks.len(),
+        2,
+        "request_diff must keep the default behaviour"
+    );
+}
+
+#[test]
+fn snapshot_lists_remotes_that_have_no_fetched_branches() {
+    let repo = TestRepo::new();
+    repo.git(&["remote", "add", "origin", "https://example.com/origin.git"]);
+    repo.git(&[
+        "remote",
+        "add",
+        "--no-tags",
+        "mirror",
+        "https://example.com/mirror.git",
+    ]);
+    repo.git(&[
+        "remote",
+        "set-url",
+        "--push",
+        "mirror",
+        "ssh://example.com/mirror.git",
+    ]);
+    let harness = Harness::open(repo);
+
+    let snapshot = harness.wait_until(TIMEOUT, |snapshot| !snapshot.remotes.is_empty());
+    // Sorted by name even though `origin` was added first.
+    assert_eq!(
+        snapshot
+            .remotes
+            .iter()
+            .map(|remote| remote.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["mirror", "origin"]
+    );
+    let mirror = &snapshot.remotes[0];
+    assert_eq!(
+        mirror.fetch_url.as_deref(),
+        Some("https://example.com/mirror.git")
+    );
+    assert_eq!(
+        mirror.push_url.as_deref(),
+        Some("ssh://example.com/mirror.git")
+    );
+    let origin = &snapshot.remotes[1];
+    assert_eq!(
+        origin.fetch_url.as_deref(),
+        Some("https://example.com/origin.git")
+    );
+    assert_eq!(
+        origin.push_url, None,
+        "a remote whose push URL matches its fetch URL reports no separate push URL"
+    );
+    // Neither remote was fetched, which is exactly why the snapshot must carry
+    // the configuration rather than the remote-tracking branches.
+    assert!(
+        snapshot
+            .refs
+            .iter()
+            .all(|reference| reference.kind != RefKind::RemoteBranch),
+        "the test repository should have no remote-tracking branches"
+    );
+}
+
+#[test]
+fn a_missing_git_executable_fails_writes_without_panicking() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "one\n");
+    repo.commit_all("base");
+    let missing = repo.path().join("no-such-git-binary");
+    let harness = Harness::open_with(
+        repo,
+        SessionOptions {
+            git_executable: Some(missing),
+        },
+    );
+    harness.wait_for_complete(1);
+    harness.warm_up_watcher();
+
+    harness.repo.write("a.txt", "two\n");
+    harness.wait_for_status(|status| status.unstaged.iter().any(|change| change.path == "a.txt"));
+
+    let id = harness
+        .session
+        .run(Operation::StagePaths(vec!["a.txt".into()]));
+    let outcome = harness.wait_for_operation(id);
+    let error = outcome
+        .error
+        .expect("a write with a missing git executable must fail");
+    assert!(!error.trim().is_empty(), "the failure has no message");
+    // The spawn never reached git, so the command log shows the failed attempt
+    // without an exit code.
+    assert!(
+        outcome
+            .commands
+            .iter()
+            .any(|record| record.exit_code.is_none()),
+        "the spawn failure was not logged: {error}"
+    );
+    // Reads run through gix, so the index is untouched and the session stays
+    // usable after the failed write.
+    let snapshot = harness.session.snapshot();
+    assert!(snapshot.busy.is_none());
+    assert!(snapshot.status.staged.is_empty());
+    assert!(
+        snapshot
+            .status
+            .unstaged
+            .iter()
+            .any(|change| change.path == "a.txt")
+    );
+}
+
+#[test]
+fn default_session_options_stage_through_git_on_path() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "one\n");
+    repo.commit_all("base");
+    let harness = Harness::open_with(repo, SessionOptions::default());
+    harness.wait_for_complete(1);
+
+    harness.repo.write("a.txt", "two\n");
+    let id = harness
+        .session
+        .run(Operation::StagePaths(vec!["a.txt".into()]));
+    let outcome = harness.wait_for_operation(id);
+    assert!(
+        outcome.error.is_none(),
+        "staging failed with the default options: {:?}",
+        outcome.error
+    );
+    harness.wait_for_status(|status| status.staged.iter().any(|change| change.path == "a.txt"));
 }
 
 #[test]

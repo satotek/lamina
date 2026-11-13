@@ -292,6 +292,12 @@ fn apply_lines(
         PatchMode::Unstage => (head_file(repo, path)?, repo.file_in_index(path)?),
     };
 
+    // Patch generation must keep the default options. The selection is built
+    // from the view the user clicked, but `git apply` rewrites the real index
+    // and worktree text, so the hunks have to describe every real line change:
+    // whitespace-insensitive comparison would drop changes from the patch, and
+    // zero context would produce a patch `git apply` refuses without
+    // `--unidiff-zero`.
     let diff = diff_text(
         old.as_deref().unwrap_or_default(),
         new.as_deref().unwrap_or_default(),
