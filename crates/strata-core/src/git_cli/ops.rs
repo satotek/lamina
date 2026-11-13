@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
-use crate::{Error, Oid, Result};
+use crate::{Error, Oid, RepoState, Result};
 
 use super::{Git, checked_ref};
 
@@ -255,6 +255,9 @@ impl Git {
 
     /// Pull the current branch's upstream. `None` keeps the user's configured
     /// `pull.rebase`; `Some` forces rebase or merge for this call.
+    ///
+    /// A pull that stops on conflicts leaves a merge or rebase in progress, so
+    /// it succeeds like [`Git::merge`] does; only other failures are errors.
     pub fn pull(&self, rebase: Option<bool>) -> Result<()> {
         let mut args = vec![
             "pull".to_owned(),
@@ -267,7 +270,27 @@ impl Git {
             Some(false) => args.push("--no-rebase".to_owned()),
             None => {}
         }
-        self.run_unit(&args, None)
+        let result = self.run_unit(&args, None);
+        self.finish_pull(result)
+    }
+
+    /// Turn a pull that stopped on conflicts into the normal, resumable
+    /// outcome [`Git::merge`] already reports.
+    ///
+    /// The repository is then in a merge or rebase the user resolves, so the
+    /// exit code alone must not read as failure. Only exit 1 with that state
+    /// recorded counts as a stop: a network or authentication failure, a
+    /// refused `--ff-only` and a dirty-worktree refusal leave no such state and
+    /// stay errors.
+    pub(super) fn finish_pull(&self, result: Result<()>) -> Result<()> {
+        match result {
+            Ok(()) => Ok(()),
+            Err(error @ Error::GitCommand { code: Some(1), .. }) => match self.state()? {
+                RepoState::Merging | RepoState::Rebasing => Ok(()),
+                _ => Err(error),
+            },
+            Err(error) => Err(error),
+        }
     }
 
     /// Push `branch` to `remote`. A branch without a remote is rejected

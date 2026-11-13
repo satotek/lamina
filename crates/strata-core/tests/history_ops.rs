@@ -291,6 +291,97 @@ fn cherry_pick_of_a_clean_commit_lands_on_the_current_branch() {
 }
 
 #[test]
+fn cherry_pick_of_an_already_applied_commit_is_skipped_and_reported() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "base\n");
+    repo.commit_all("base");
+    repo.git(&["checkout", "-q", "-b", "side"]);
+    repo.write("b.txt", "side\n");
+    repo.commit_all("side");
+    let picked = repo.head();
+    // `main` already carries the same change, so the pick commits nothing.
+    repo.git(&["checkout", "-q", "main"]);
+    repo.write("b.txt", "side\n");
+    repo.commit_all("already there");
+    let before = repo.head();
+
+    let harness = Harness::open(repo);
+    harness.wait_for_complete(3);
+
+    let error = harness
+        .run(Operation::CherryPick { commit: picked })
+        .expect("an empty pick must not report success");
+    assert!(
+        error.contains("already applied"),
+        "unexpected error: {error}"
+    );
+
+    let done = harness.wait_until(|snapshot| snapshot.state == RepoState::Normal);
+    assert_eq!(
+        harness.repo.head(),
+        before,
+        "an empty pick must not move the branch"
+    );
+    assert!(
+        !harness.repo.path().join(".git/CHERRY_PICK_HEAD").is_file(),
+        "the empty pick must be skipped, not left in progress"
+    );
+    assert!(
+        done.conflicts.is_empty(),
+        "an empty pick has no conflict to resolve"
+    );
+    assert_eq!(harness.repo.status(), "");
+    assert_eq!(
+        harness.repo.git(&["rev-list", "--count", "HEAD"]).trim(),
+        "2",
+        "the pick must not add a commit to main"
+    );
+}
+
+#[test]
+fn revert_of_an_already_reverted_commit_is_reported_without_a_state() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "one\n");
+    repo.commit_all("one");
+    repo.write("a.txt", "two\n");
+    repo.commit_all("two");
+    let reverted = repo.head();
+    // Revert it once for real; reverting it again has nothing left to undo.
+    repo.git(&["revert", "--no-edit", &reverted.to_string()]);
+    let before = repo.head();
+    assert_eq!(repo.read("a.txt"), "one\n");
+
+    let harness = Harness::open(repo);
+    harness.wait_for_complete(3);
+
+    let error = harness
+        .run(Operation::Revert { commit: reverted })
+        .expect("an empty revert must not report success");
+    assert!(
+        error.contains("already reverted"),
+        "unexpected error: {error}"
+    );
+
+    let done = harness.wait_until(|snapshot| snapshot.state == RepoState::Normal);
+    assert_eq!(
+        harness.repo.head(),
+        before,
+        "an empty revert must not move the branch"
+    );
+    assert!(
+        !harness.repo.path().join(".git/REVERT_HEAD").is_file(),
+        "the empty revert must not be left in progress"
+    );
+    assert!(done.conflicts.is_empty());
+    assert_eq!(harness.repo.status(), "");
+    assert_eq!(
+        harness.repo.git(&["rev-list", "--count", "HEAD"]).trim(),
+        "3",
+        "no commit may be added"
+    );
+}
+
+#[test]
 fn cherry_pick_conflict_is_not_an_error_and_continues_after_resolving() {
     let repo = conflict_repo();
     let picked = repo.oid("side");

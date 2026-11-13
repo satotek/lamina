@@ -104,6 +104,9 @@ impl Git {
     /// A pick that stops on a conflict leaves the repository in the
     /// cherry-picking state for the user to resolve; like a stopped merge, that
     /// is a normal outcome rather than an error.
+    ///
+    /// A pick whose change the branch already has produces no commit at all;
+    /// it is skipped to keep the repository clean and reported as an error.
     pub fn cherry_pick(&self, commit: Oid) -> Result<()> {
         self.apply_commit("cherry-pick", commit, RepoState::CherryPicking, false)
     }
@@ -136,11 +139,25 @@ impl Git {
 
         match self.run_unit(&args, None) {
             Ok(()) => Ok(()),
-            // Both commands exit 1 for a conflict and for a refusal to start
-            // one; the recorded state, not the code alone, tells them apart. A
-            // fatal error (exit 128), such as a pick already in progress, still
-            // leaves the earlier state behind and must not pass as success.
+            // A conflict, a refusal to start and an empty pick all exit 1; the
+            // message and the recorded state, not the code alone, tell them
+            // apart. A fatal error (exit 128), such as a pick already in
+            // progress, still leaves the earlier state behind and must not
+            // pass as success.
             Err(error @ Error::GitCommand { code: Some(1), .. }) => {
+                // An empty pick has nothing to resolve, so it is not a stop.
+                // Without the skip the repository would stay mid-pick with
+                // zero conflicts, and the UI would offer a banner for an
+                // operation the user cannot finish.
+                if is_empty_commit_output(&error) && !self.has_unmerged_paths()? {
+                    if self.state()? == stopped {
+                        // Only single commits reach here (see `cherry_pick`),
+                        // so the skip finishes the sequencer as well; a
+                        // multi-commit range would go on with the next commit.
+                        self.run(&[command, "--skip"], None)?;
+                    }
+                    return Err(Error::other(empty_commit_message(stopped)));
+                }
                 if self.state()? == stopped {
                     Ok(())
                 } else {
@@ -149,6 +166,13 @@ impl Git {
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// Whether the index holds unmerged entries, i.e. what a stopped pick
+    /// needs before it is a conflict the user can resolve.
+    fn has_unmerged_paths(&self) -> Result<bool> {
+        let output = self.run(&["ls-files", "--unmerged", "-z"], None)?;
+        Ok(!output.stdout.is_empty())
     }
 
     /// Whether `commit` has more than one parent.
@@ -260,7 +284,7 @@ impl Git {
 
     /// The operation recorded in the git dir, read through the same module the
     /// UI uses so a busy/abort decision never disagrees with the snapshot.
-    fn state(&self) -> Result<RepoState> {
+    pub(super) fn state(&self) -> Result<RepoState> {
         Repo::open(self.workdir())?.state()
     }
 
@@ -270,5 +294,29 @@ impl Git {
             git = git.with_env("GIT_SEQUENCE_EDITOR", "true");
         }
         git.run(args, None).map(|_| ())
+    }
+}
+
+/// Whether git's output says the pick produced no commit.
+///
+/// A pick of a change the branch already has stops with "The previous
+/// cherry-pick is now empty" on stderr. A revert on newer git instead gets as
+/// far as its commit step, which fails with "nothing to commit", and that text
+/// reaches here through the stdout fallback in `command_error`, so both
+/// streams are covered.
+fn is_empty_commit_output(error: &Error) -> bool {
+    let Error::GitCommand { stderr, .. } = error else {
+        return false;
+    };
+    ["now empty", "nothing to commit", "nothing added to commit"]
+        .iter()
+        .any(|text| stderr.contains(text))
+}
+
+/// What the user needs to know when an empty pick is skipped.
+fn empty_commit_message(stopped: RepoState) -> &'static str {
+    match stopped {
+        RepoState::Reverting => "The commit is already reverted: reverting it changes nothing.",
+        _ => "The commit is already applied: cherry-picking it changes nothing.",
     }
 }

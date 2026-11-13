@@ -47,7 +47,9 @@ impl Git {
             Some(false) => args.push("--no-rebase".to_owned()),
             None => {}
         }
-        self.stream(&args, on_line)
+        // A stop on conflicts is a normal outcome here, as for `Git::pull`.
+        let result = self.stream(&args, on_line);
+        self.finish_pull(result)
     }
 
     /// [`Git::push`] with stderr delivered line by line.
