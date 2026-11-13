@@ -384,6 +384,12 @@ fn open(window: &mut Window, cx: &mut App) {
             .centered()
             .w(px(WIDTH))
             .close_button(false)
+            // The field owns Enter: its `PressEnter` runs the command and
+            // closes the card itself. Letting the dialog confirm as well would
+            // close it a second time, and that path schedules a delayed focus
+            // restore to the view that would pull the keyboard back out of the
+            // field the command just focused.
+            .on_ok(|_, _, _| false)
             .content(move |body, _, _| body.child(content.clone()))
     });
     // The dialog's card takes the focus when it opens; the field needs it to

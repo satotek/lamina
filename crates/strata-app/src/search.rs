@@ -13,10 +13,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{
-    App, AppContext as _, Context, Entity, Focusable as _, KeyBinding, Subscription, Window,
-    actions,
-};
+use gpui::{App, AppContext as _, Context, Entity, KeyBinding, Subscription, Window, actions};
 use gpui_component::input::{InputEvent, InputState};
 use strata_core::session::{CommitQuery, QueryTicket};
 
@@ -504,8 +501,7 @@ impl RepoView {
         let Some(input) = self.search.input().cloned() else {
             return;
         };
-        let handle = input.focus_handle(cx);
-        window.focus(&handle, cx);
+        crate::ui::focus_input(&input, window, cx);
         cx.notify();
     }
 

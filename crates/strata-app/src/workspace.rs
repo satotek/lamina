@@ -67,8 +67,8 @@ impl Workspace {
     fn welcome(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let workspace = cx.entity();
         let view = cx.new(|cx| Picker::new(Mode::Page, workspace, window, cx));
-        let focus = view.read(cx).focus_handle();
-        window.focus(&focus, cx);
+        let input = view.read(cx).input().clone();
+        crate::ui::focus_input(&input, window, cx);
         window.set_window_title("Strata");
         Self {
             content: Content::Welcome(view),
@@ -133,7 +133,7 @@ impl Workspace {
     fn content_focus(&self, cx: &App) -> Option<gpui::FocusHandle> {
         match &self.content {
             Content::Repo(view) => Some(view.read(cx).view_focus()),
-            Content::Welcome(view) => Some(view.read(cx).focus_handle()),
+            Content::Welcome(view) => Some(view.read(cx).input_focus(cx)),
         }
     }
 
@@ -144,7 +144,7 @@ impl Workspace {
         }
         let workspace = cx.entity();
         let picker = cx.new(|cx| Picker::new(Mode::Dialog, workspace, window, cx));
-        let focus = picker.read(cx).focus_handle();
+        let input = picker.read(cx).input().clone();
         window.open_dialog(cx, move |dialog, _, _| {
             let content_picker = picker.clone();
             let footer_picker = picker.clone();
@@ -176,8 +176,9 @@ impl Workspace {
                     false
                 })
         });
-        // The dialog focuses its own card; the picker's keys need the focus.
-        window.defer(cx, move |window, cx| focus.focus(window, cx));
+        // The dialog's shell takes the focus when it opens; the field needs it
+        // to receive what the user types.
+        crate::ui::focus_input(&input, window, cx);
     }
 }
 

@@ -120,8 +120,10 @@ impl Picker {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        // The view's own handle is only where `Escape` returns the keyboard;
+        // the field itself is what has to be focused for typing, and the
+        // window does that once this picker is in the tree.
         let focus = cx.focus_handle();
-        window.focus(&focus, cx);
         // A fresh read: a repository may have been opened since the last picker.
         let recents = RecentRepositories::load_default();
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter repositories"));
@@ -169,8 +171,15 @@ impl Picker {
         }
     }
 
-    pub(crate) fn focus_handle(&self) -> FocusHandle {
-        self.focus.clone()
+    /// The picker's text field: the window focuses it so typing goes to the
+    /// filter (or the typed path) without a click.
+    pub(crate) fn input(&self) -> &Entity<InputState> {
+        &self.input
+    }
+
+    /// The focus handle of that field, for a view that only has the handle.
+    pub(crate) fn input_focus(&self, cx: &App) -> FocusHandle {
+        self.input.focus_handle(cx)
     }
 
     /// The repositories the list shows: `recents` filtered by the text field,
