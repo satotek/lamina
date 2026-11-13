@@ -506,6 +506,30 @@ impl RepoView {
         cx.notify();
     }
 
+    /// Opens the working-tree view on the conflicts list, selecting its first
+    /// path.
+    ///
+    /// Used when an operation stops on conflicts. The file history and the
+    /// search filter belong to the history view, and leaving either in place
+    /// would hide what just happened when the user comes back.
+    pub(crate) fn open_conflicts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_file_history(window, cx);
+        if self.search.is_active() {
+            self.clear_search(window, cx);
+        }
+        self.open_worktree(window, cx);
+        let first = self.session.as_ref().and_then(|session| {
+            session
+                .snapshot()
+                .conflicts
+                .first()
+                .map(|entry| entry.path.clone())
+        });
+        if let Some(path) = first {
+            self.select_conflict_file(path, window, cx);
+        }
+    }
+
     pub(crate) fn close_worktree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.mode = MainMode::History;
         if let Some(session) = self.session.as_ref()

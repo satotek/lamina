@@ -107,7 +107,7 @@ impl Render for RepoView {
             if self.mode != MainMode::History {
                 self.discard_file_history();
             }
-            let main = if self.mode == MainMode::History && self.file_history.is_some() {
+            let content = if self.mode == MainMode::History && self.file_history.is_some() {
                 self.file_history_view(entity.clone(), cx)
             } else {
                 match self.mode {
@@ -123,6 +123,13 @@ impl Render for RepoView {
                     MainMode::Worktree => self.worktree_view(entity.clone(), window, cx),
                 }
             };
+            // The banner spans the top of the main area, above whichever view
+            // is showing, so a stopped operation is visible from the history
+            // and not only from the working tree.
+            let mut main = div().flex().flex_col().flex_1().min_w_0().min_h_0();
+            if let Some(banner) = self.in_progress_banner(entity.clone(), &design) {
+                main = main.child(banner);
+            }
             root = root
                 .child(
                     div()
@@ -131,7 +138,7 @@ impl Render for RepoView {
                         .min_h_0()
                         .min_w_0()
                         .child(sidebar)
-                        .child(main),
+                        .child(main.child(content)),
                 )
                 .child(self.status_bar(&design));
         }

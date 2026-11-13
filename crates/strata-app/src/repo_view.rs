@@ -11,6 +11,7 @@ mod commit_list;
 mod common;
 mod details;
 mod diff_pane;
+mod in_progress;
 mod sidebar;
 mod status_bar;
 mod title_bar;
@@ -42,6 +43,8 @@ use crate::metrics::FrameMetrics;
 use crate::remote::Remote;
 use crate::search::SearchState;
 use crate::worktree_panel::{MainMode, WorktreePanel};
+
+use in_progress::{FinishedOperation, InProgress};
 
 /// Height of the diff pane below the commit list.
 const DIFF_HEIGHT: f32 = 360.0;
@@ -229,6 +232,8 @@ pub struct RepoView {
     pub(crate) search: SearchState,
     /// The file-history view while it is open.
     pub(crate) file_history: Option<FileHistory>,
+    /// The job in flight and the banner for what git left in progress.
+    in_progress: InProgress,
 
     /// Running maximum of graph widths, updated as chunks arrive.
     lanes: LaneWidth,
@@ -300,6 +305,7 @@ impl RepoView {
             remote: Remote::default(),
             search: SearchState::default(),
             file_history: None,
+            in_progress: InProgress::default(),
             lanes: LaneWidth::default(),
             selected: None,
             selection_commit: None,
@@ -461,6 +467,15 @@ impl RepoView {
                 cx.notify();
             }
             SessionEvent::OperationFinished { id, error } => {
+                // The session refreshed the status before it reported the end,
+                // so this snapshot already has the conflicts the command left.
+                let conflicts = self
+                    .session
+                    .as_ref()
+                    .map_or(0, |session| session.snapshot().conflicts.len());
+                if self.in_progress.finished(id, conflicts) {
+                    self.reveal_conflicts(cx);
+                }
                 self.worktree.on_operation_finished(id, error.as_deref());
                 self.remote.on_finished(id, error.as_deref(), cx);
                 // The label records which operation failed, so the status bar
@@ -479,7 +494,18 @@ impl RepoView {
                 }
                 cx.notify();
             }
-            SessionEvent::OperationStarted { id } => self.remote.on_started(id, cx),
+            SessionEvent::OperationStarted { id } => {
+                // The snapshot published with `busy` still holds the status
+                // from before the command, which is what the switch compares
+                // against.
+                let conflicts = self
+                    .session
+                    .as_ref()
+                    .map_or(0, |session| session.snapshot().conflicts.len());
+                // Only a user action queues a job; a refresh just publishes.
+                self.in_progress.started(id, conflicts, true);
+                self.remote.on_started(id, cx)
+            }
             SessionEvent::OperationProgress { id, text, percent } => {
                 self.remote.on_progress(id, &text, percent, cx)
             }
@@ -519,7 +545,9 @@ impl RepoView {
             Operation::DeleteBranch { name, force } => Some((name.clone(), *force)),
             _ => None,
         };
+        let kind = FinishedOperation::of(&operation);
         let id = session.run(operation);
+        self.in_progress.submitted(id, kind);
         self.branches.start(id, label, delete);
         cx.notify();
     }
