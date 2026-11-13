@@ -618,7 +618,6 @@ impl RepoView {
                 }
                 match changes {
                     Ok(files) => {
-                        let files = drop_directory_entries(files);
                         let empty = files.is_empty();
                         this.files = Some(files);
                         this.files_error = None;
@@ -765,35 +764,6 @@ impl RepoView {
     }
 }
 
-/// Drops directory entries from a commit's change list.
-///
-/// `Repo::commit_changes` can report a changed directory (e.g. `src`) next to
-/// the files inside it, while `git diff --name-status` never lists directories.
-/// A tree cannot hold a file and a directory with the same name, so an entry
-/// that is a strict path prefix of another entry is that noise. Kept here
-/// rather than in core because core is owned by another task.
-fn drop_directory_entries(files: Vec<FileChange>) -> Vec<FileChange> {
-    let paths: Vec<String> = files.iter().map(|change| change.path.clone()).collect();
-    files
-        .into_iter()
-        .enumerate()
-        .filter(|(index, change)| {
-            !paths
-                .iter()
-                .enumerate()
-                .any(|(other, path)| other != *index && is_under(&change.path, path))
-        })
-        .map(|(_, change)| change)
-        .collect()
-}
-
-/// True when `path` is a directory containing `child`, using `/` as separator.
-fn is_under(directory: &str, child: &str) -> bool {
-    child
-        .strip_prefix(directory)
-        .is_some_and(|rest| rest.starts_with('/') && rest.len() > 1)
-}
-
 /// git's stderr can span several lines, but the status bar is one line tall.
 fn one_line(text: &str) -> String {
     text.lines()
@@ -824,7 +794,6 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime};
-    use strata_core::ChangeKind;
     use strata_core::diff::FileDiff;
 
     fn oid(byte: u8) -> Oid {
@@ -886,28 +855,6 @@ mod tests {
         assert_eq!(slot.cancel(), Some(DiffTicket(7)));
         assert_eq!(slot.cancel(), None);
         assert!(!slot.fail(DiffTicket(7)), "cancelled tickets are stale");
-    }
-
-    #[test]
-    fn directory_entries_are_dropped_from_a_commit_change_list() {
-        let change = |path: &str, kind: ChangeKind| FileChange {
-            path: path.into(),
-            old_path: None,
-            kind,
-        };
-        let files = vec![
-            change("README.md", ChangeKind::Modified),
-            change("src", ChangeKind::Deleted),
-            change("src/lib.rs", ChangeKind::Modified),
-            // `src/lib` is a file next to `src/lib.rs`, not a directory.
-            change("src/lib", ChangeKind::Added),
-        ];
-
-        let kept: Vec<String> = drop_directory_entries(files)
-            .into_iter()
-            .map(|change| change.path)
-            .collect();
-        assert_eq!(kept, ["README.md", "src/lib.rs", "src/lib"]);
     }
 
     #[test]
