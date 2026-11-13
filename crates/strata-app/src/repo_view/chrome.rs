@@ -171,10 +171,7 @@ impl RepoView {
     }
 
     fn sidebar(&self, palette: &Palette) -> AnyElement {
-        let data = self.source().map(|source| source.sidebar());
-        let (staged, unstaged) = data.as_ref().map_or((0, 0), |data| data.working_tree);
-
-        let mut column = div()
+        div()
             .flex()
             .flex_col()
             .w(px(SIDEBAR_WIDTH))
@@ -184,9 +181,21 @@ impl RepoView {
             .overflow_hidden()
             .bg(palette.sidebar)
             .border_r_1()
-            .border_color(palette.border);
+            .border_color(palette.border)
+            .child(self.working_tree_section(palette))
+            .child(self.ref_sections(palette))
+            .into_any_element()
+    }
 
-        column = column
+    /// The working-tree entry at the top of the sidebar.
+    fn working_tree_section(&self, palette: &Palette) -> AnyElement {
+        let (staged, unstaged) = self
+            .source()
+            .map_or((0, 0), |source| source.sidebar().working_tree);
+
+        div()
+            .flex()
+            .flex_col()
             .child(section_title("WORKING TREE", None, palette))
             .child(
                 div()
@@ -201,9 +210,14 @@ impl RepoView {
                     .child(format!(
                         "Working tree: {staged} staged, {unstaged} unstaged"
                     )),
-            );
+            )
+            .into_any_element()
+    }
 
-        if let Some(data) = &data {
+    /// Branches, remotes, tags and stashes below the working-tree entry.
+    fn ref_sections(&self, palette: &Palette) -> AnyElement {
+        let mut column = div().flex().flex_col();
+        if let Some(data) = self.source().map(|source| source.sidebar()) {
             column = column
                 .child(sidebar_section(
                     "LOCAL BRANCHES",
@@ -220,7 +234,6 @@ impl RepoView {
                 .child(sidebar_section("TAGS", &data.tags, None, palette))
                 .child(sidebar_section("STASHES", &data.stashes, None, palette));
         }
-
         column.into_any_element()
     }
 
