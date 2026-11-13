@@ -1314,6 +1314,7 @@ pub(crate) fn offer_force_delete(entity: Entity<RepoView>, name: String, cx: &mu
         log::warn!("cannot offer the forced delete without a window");
         return;
     };
+    let entity = entity.downgrade();
     let _ = handle.update(cx, |_, window, cx| {
         crate::ui::confirm(
             window,
@@ -1326,7 +1327,7 @@ pub(crate) fn offer_force_delete(entity: Entity<RepoView>, name: String, cx: &mu
             .always_ask(),
             move |window, cx| {
                 let name = name.clone();
-                entity.update(cx, |view, cx| view.delete_branch(name, true, window, cx));
+                let _ = entity.update(cx, |view, cx| view.delete_branch(name, true, window, cx));
             },
         );
     });

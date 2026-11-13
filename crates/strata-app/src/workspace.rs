@@ -2,11 +2,10 @@
 //!
 //! `Root` is created with a fixed child, so the window's content is swapped one
 //! level down: this view owns whichever child is current and replaces it when
-//! the user opens another repository. The replaced [`RepoView`] holds a handle
-//! to itself, so dropping the workspace's handle does not release it (or its
-//! [`Session`]); the swap takes the session out and hands it to a background
-//! thread, because `Session::drop` joins its worker threads and that must not
-//! happen on the UI thread.
+//! the user opens another repository. Releasing the old [`RepoView`] frees it
+//! (it keeps no handle to itself); the swap takes its [`Session`] out and hands
+//! it to a background thread, because `Session::drop` joins its worker threads
+//! and that must not happen on the UI thread.
 //!
 //! Swapping also gives every repository one place to record "opened": the recent
 //! list is written here, never by a view.
@@ -97,10 +96,10 @@ impl Workspace {
             let path = repo_path(&launch);
             let title = launch.title();
             let view = cx.new(|cx| RepoView::new(launch, window, cx));
-            // Taking the old session out explicitly stops its workers even
-            // though the old view itself is kept alive by its self-handle. The
-            // drop runs on another thread so the swap does not wait for a
-            // running history walk to notice the shutdown.
+            // Taking the old session out explicitly keeps the hand-off obvious
+            // at the swap site. The drop runs on another thread so the swap does
+            // not wait for a running history walk to notice the shutdown; the
+            // view's own memory is released when `previous` goes out of scope.
             let previous = std::mem::replace(&mut self.content, Content::Repo(view));
             if let Content::Repo(previous) = previous
                 && let Some(session) = previous.update(cx, |previous, _| previous.detach_session())

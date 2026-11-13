@@ -174,7 +174,7 @@ impl RepoView {
                     .child("synthetic diff"),
             );
         } else if self.session.is_some() {
-            let entity = self.entity.clone();
+            let entity = self.entity();
             block = block.child(
                 div().flex().items_center().gap_2().child(
                     crate::ui::button("browse-files", "Browse files")
@@ -264,7 +264,7 @@ impl RepoView {
         let Some(files) = &self.files else {
             return div().into_any_element();
         };
-        let entity = self.entity.clone();
+        let entity = self.entity();
         let selected = self.selected_file;
         let list_design = design.clone();
         let count = files.len();

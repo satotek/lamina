@@ -313,13 +313,13 @@ impl RepoView {
         if self.is_busy() {
             return;
         }
-        let entity = self.entity.clone();
+        let entity = cx.weak_entity();
         crate::ui::confirm(
             window,
             cx,
             crate::ui::Confirm::new(title, detail).ok_label(ok_label),
             move |window, cx| {
-                entity.update(cx, |this, cx| this.abort_in_progress(window, cx));
+                let _ = entity.update(cx, |this, cx| this.abort_in_progress(window, cx));
             },
         );
     }
@@ -347,7 +347,7 @@ impl RepoView {
     /// switch is deferred to the end of the effect cycle; the window is only
     /// needed to focus the working-tree panel.
     pub(crate) fn reveal_conflicts(&mut self, cx: &mut Context<Self>) {
-        let entity = cx.entity();
+        let entity = cx.weak_entity();
         let Some(handle) = cx
             .active_window()
             .or_else(|| cx.windows().into_iter().next())
@@ -356,7 +356,7 @@ impl RepoView {
         };
         let _ = handle.update(cx, |_, window, cx| {
             window.defer(cx, move |window, cx| {
-                entity.update(cx, |this, cx| this.open_conflicts(window, cx));
+                let _ = entity.update(cx, |this, cx| this.open_conflicts(window, cx));
             });
         });
     }

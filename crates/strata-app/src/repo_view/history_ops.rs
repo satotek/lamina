@@ -14,7 +14,7 @@
 use gpui::prelude::*;
 use gpui::{
     App, ClickEvent, ClipboardItem, Context, Entity, EntityId, Focusable as _, IntoElement,
-    ParentElement, Render, Styled, Subscription, Window, div, px,
+    ParentElement, Render, Styled, Subscription, WeakEntity, Window, div, px,
 };
 use gpui_component::ActiveTheme as _;
 use gpui_component::WindowExt as _;
@@ -413,9 +413,9 @@ impl RepoView {
             ui::Confirm::new(format!("Revert commit {short}?"), detail).ok_label("Revert");
         confirm.danger = false;
         self.focus_root(window, cx);
-        let entity = self.entity.clone();
+        let entity = cx.weak_entity();
         ui::confirm(window, cx, confirm, move |window, cx| {
-            entity.update(cx, |view, cx| {
+            let _ = entity.update(cx, |view, cx| {
                 let label = format!("revert {short}");
                 view.run_operation(Operation::Revert { commit }, label, window, cx);
             });
@@ -458,9 +458,9 @@ impl RepoView {
             }
         };
         self.focus_root(window, cx);
-        let entity = self.entity.clone();
+        let entity = cx.weak_entity();
         ui::confirm(window, cx, confirm, move |window, cx| {
-            entity.update(cx, |view, cx| view.reset_to(target, mode, window, cx));
+            let _ = entity.update(cx, |view, cx| view.reset_to(target, mode, window, cx));
         });
     }
 
@@ -507,7 +507,7 @@ impl RepoView {
         // The context menu that offered this is closing; the dialog restores
         // the focus it was opened with, which must outlive the menu.
         self.focus_root(window, cx);
-        let view = self.entity.clone();
+        let view = cx.weak_entity();
         let dialog = cx.new(|cx| TagDialog::new(view, commit, short, existing, window, cx));
         let focus = dialog.read(cx).name_focus(cx);
         let content = dialog.clone();
@@ -582,7 +582,7 @@ impl RepoView {
             return;
         }
         self.focus_root(window, cx);
-        let entity = self.entity.clone();
+        let entity = cx.weak_entity();
         ui::confirm(
             window,
             cx,
@@ -593,7 +593,7 @@ impl RepoView {
             .ok_label("Delete tag"),
             move |window, cx| {
                 let name = name.clone();
-                entity.update(cx, |view, cx| {
+                let _ = entity.update(cx, |view, cx| {
                     let label = format!("delete tag {name}");
                     view.run_operation(Operation::DeleteTag { name }, label, window, cx);
                 });
@@ -607,7 +607,8 @@ impl RepoView {
 /// It is its own entity so the form state lives as long as the dialog, without
 /// `RepoView` needing a field for a dialog that is open only briefly.
 pub(crate) struct TagDialog {
-    view: Entity<RepoView>,
+    /// Weak: the dialog outlives a `RepoView` the workspace has replaced.
+    view: WeakEntity<RepoView>,
     /// Own id, so a failed submit can repaint the form without borrowing the
     /// entity it is already updating.
     entity: EntityId,
@@ -622,7 +623,7 @@ pub(crate) struct TagDialog {
 
 impl TagDialog {
     fn new(
-        view: Entity<RepoView>,
+        view: WeakEntity<RepoView>,
         target: Oid,
         short: String,
         existing: Vec<String>,
@@ -683,7 +684,7 @@ impl TagDialog {
         let message = self.message.read(cx).value().trim().to_owned();
         let message = (!message.is_empty()).then_some(message);
         let target = self.target;
-        self.view.update(cx, |view, cx| {
+        let _ = self.view.update(cx, |view, cx| {
             view.create_tag(target, name, message, window, cx);
         });
         // Closing here would drop this dialog while it is being updated.

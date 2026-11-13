@@ -54,3 +54,6 @@ winresource = "0.1"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+# `TestAppContext` and `#[gpui::test]`, for the tests that check a view is
+# actually released. Test-only: the binary is built without it.
+gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }

@@ -15,7 +15,7 @@
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, ClickEvent, Context, Entity, Focusable as _, IntoElement, ParentElement,
-    Render, SharedString, Styled, Subscription, Window, div, px,
+    Render, SharedString, Styled, Subscription, WeakEntity, Window, div, px,
 };
 use gpui_component::Disableable as _;
 use gpui_component::checkbox::Checkbox;
@@ -86,7 +86,7 @@ impl RepoView {
                 .all(|change| change.kind == ChangeKind::Untracked);
         let files = checklist(status);
 
-        let view = self.entity.clone();
+        let view = cx.weak_entity();
         let dialog = cx.new(|cx| StashDialog::new(view, include_default, files, window, cx));
         let focus = dialog.read(cx).input_focus(cx);
         let content = dialog.clone();
@@ -155,7 +155,7 @@ impl RepoView {
         // leave the dialog with a focus handle that dies with it; the dialog
         // hands focus back to whatever was focused when it opened.
         self.focus_root(window, cx);
-        let entity = self.entity.clone();
+        let entity = cx.weak_entity();
         crate::ui::confirm(
             window,
             cx,
@@ -166,7 +166,7 @@ impl RepoView {
             )
             .ok_label("Drop stash"),
             move |window, cx| {
-                entity.update(cx, |view, cx| view.stash_drop(index, window, cx));
+                let _ = entity.update(cx, |view, cx| view.stash_drop(index, window, cx));
             },
         );
     }
@@ -382,7 +382,8 @@ fn stash_message(name: &str) -> &str {
 /// It is its own entity so the form state lives as long as the dialog, without
 /// `RepoView` needing a field for a dialog that is open only briefly.
 pub struct StashDialog {
-    view: Entity<RepoView>,
+    /// Weak: the dialog outlives a `RepoView` the workspace has replaced.
+    view: WeakEntity<RepoView>,
     input: Entity<InputState>,
     include_untracked: bool,
     files: Vec<StashFile>,
@@ -391,7 +392,7 @@ pub struct StashDialog {
 
 impl StashDialog {
     fn new(
-        view: Entity<RepoView>,
+        view: WeakEntity<RepoView>,
         include_untracked: bool,
         files: Vec<StashFile>,
         window: &mut Window,
@@ -438,7 +439,7 @@ impl StashDialog {
             return;
         };
         let label = operation_label(&operation);
-        self.view.update(cx, |view, cx| {
+        let _ = self.view.update(cx, |view, cx| {
             view.run_operation(operation, label, window, cx);
         });
         // Closing here would drop this dialog while it is being updated.

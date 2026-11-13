@@ -26,7 +26,7 @@ use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedReceiver};
 use gpui::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable as _, ScrollStrategy,
-    Subscription, Task, UniformListScrollHandle, Window,
+    Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
 };
 use gpui_component::input::InputState;
 use strata_core::git_cli::CommandRecord;
@@ -229,9 +229,11 @@ pub struct RepoView {
     pub(crate) mode: MainMode,
     /// Staging state and rendering, in its own module.
     pub(crate) worktree: WorktreePanel,
-    /// Handle to this view. The sidebar's branch rows get no `Context`, so they
-    /// update the view through this entity.
-    pub(crate) entity: Entity<RepoView>,
+    /// Handle to this view for the render helpers that receive an `App`
+    /// rather than a `Context<Self>`, such as a uniform list's or a row's
+    /// callback. Weak: a view that keeps a strong handle to itself is never
+    /// released when the workspace replaces it.
+    pub(crate) entity: WeakEntity<RepoView>,
     /// Branch sections, dialogs and the operations they started.
     pub(crate) branches: Branches,
     /// Fetch/pull/push state, progress and the dialogs that decide them.
@@ -340,7 +342,7 @@ impl RepoView {
         });
         let smoke = std::env::var_os("STRATA_SMOKE").is_some();
         let title = launch.title();
-        let entity = cx.entity();
+        let entity = cx.weak_entity();
         let diff_options = history_diff_options(cx);
 
         let mut view = Self {
@@ -435,6 +437,17 @@ impl RepoView {
     /// The view's own focus handle, for panels that hand focus back on close.
     pub(crate) fn view_focus(&self) -> FocusHandle {
         self.focus.clone()
+    }
+
+    /// The strong handle a render helper needs when all it gets is an `App`.
+    ///
+    /// Everything that calls this is either rendering or an element callback
+    /// of this view's own tree, so the entity is alive: once it is gone, the
+    /// elements carrying those callbacks are gone too.
+    pub(crate) fn entity(&self) -> Entity<RepoView> {
+        self.entity
+            .upgrade()
+            .expect("the view renders only while it is alive")
     }
 
     /// Takes the session and stops forwarding its events to this view.
@@ -682,7 +695,7 @@ impl RepoView {
         // context menu that offered the delete is closing, so hand it the
         // view's own handle instead.
         self.focus_root(window, cx);
-        let entity = self.entity.clone();
+        let entity = cx.weak_entity();
         crate::ui::confirm(
             window,
             cx,
@@ -693,7 +706,7 @@ impl RepoView {
             .ok_label("Delete"),
             move |window, cx| {
                 let name = name.clone();
-                entity.update(cx, |view, cx| view.delete_branch(name, false, window, cx));
+                let _ = entity.update(cx, |view, cx| view.delete_branch(name, false, window, cx));
             },
         );
     }
@@ -1112,6 +1125,50 @@ mod tests {
             old_highlights: Arc::new(Vec::new()),
             new_highlights: Arc::new(Vec::new()),
         })
+    }
+
+    /// The workspace replaces a repository view when the user opens another
+    /// one, and a window releases its root view when it closes; in both cases
+    /// the view must actually go. It can only do that if nothing it owns keeps
+    /// a strong handle to it, which is where a stored `Entity<RepoView>` of
+    /// itself would leak the whole view (commit rows, graph, diffs, caches).
+    #[gpui::test]
+    fn closing_a_window_releases_its_repo_view(cx: &mut gpui::TestAppContext) {
+        // Closing the last window must not shut the test app down before the
+        // assertions run.
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            gpui_component::init(cx);
+            cx.set_global(crate::settings::Settings::default());
+        });
+        let window = cx.add_window(|window, cx| {
+            RepoView::new(
+                Launch::Error {
+                    path: "not-a-repository".to_owned(),
+                    error: "not a repository".to_owned(),
+                },
+                window,
+                cx,
+            )
+        });
+
+        let view = window.root(cx).expect("the window's root view");
+        let released = view.downgrade();
+        assert!(
+            released.upgrade().is_some(),
+            "the window root must hold the view"
+        );
+        drop(view);
+
+        window
+            .update(cx, |_, window, _| window.remove_window())
+            .expect("the window is still open");
+        cx.run_until_parked();
+
+        assert!(
+            released.upgrade().is_none(),
+            "the closed window must release the repository view"
+        );
     }
 
     #[test]

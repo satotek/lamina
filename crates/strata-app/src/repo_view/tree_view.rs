@@ -537,8 +537,8 @@ impl RepoView {
 impl RepoView {
     /// The tree browser's pane, filling the area the diff would use.
     pub(super) fn tree_pane(&self, design: &Design, cx: &mut App) -> AnyElement {
-        let key_entity = self.entity.clone();
-        let action_entity = self.entity.clone();
+        let key_entity = self.entity();
+        let action_entity = self.entity();
         div()
             .flex()
             .flex_col()
@@ -570,7 +570,7 @@ impl RepoView {
     }
 
     fn tree_path_bar(&self, design: &Design) -> AnyElement {
-        let entity = self.entity.clone();
+        let entity = self.entity();
         let back = crate::ui::button("tree-back-to-changes", "Back to changes")
             .icon(IconName::ArrowLeft)
             .size(crate::ui::ButtonSize::Tiny)
@@ -603,7 +603,7 @@ impl RepoView {
                 .text_color(if last { design.text } else { design.muted })
                 .child(crumb.label);
             if !last {
-                let entity = self.entity.clone();
+                let entity = self.entity();
                 let target = crumb.path;
                 label = label
                     .cursor_pointer()
@@ -658,7 +658,7 @@ impl RepoView {
 
         let entries = Rc::new(entries.clone());
         let count = entries.len();
-        let entity = self.entity.clone();
+        let entity = self.entity();
         let list_design = design.clone();
         uniform_list("tree-entries", count, move |range, _window, _cx| {
             range

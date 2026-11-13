@@ -489,6 +489,7 @@ fn open_force_dialog(
     window: &mut Window,
     cx: &mut App,
 ) {
+    let entity = entity.downgrade();
     crate::ui::confirm(
         window,
         cx,
@@ -502,7 +503,7 @@ fn open_force_dialog(
         .ok_label("Force push (with lease)"),
         move |_, cx| {
             let confirmed = offer.clone();
-            entity.update(cx, |view, cx| view.force_push(confirmed, cx));
+            let _ = entity.update(cx, |view, cx| view.force_push(confirmed, cx));
         },
     );
 }
@@ -516,7 +517,7 @@ impl RepoView {
         });
         let blocked = self.remote_blocked();
 
-        let entity = self.entity.clone();
+        let entity = self.entity();
         // The design stacks a 16 px icon over a 10 px label; the badge sits in
         // the button's top-right corner so it cannot shift the label.
         let button = |id: &'static str,
@@ -757,7 +758,7 @@ impl RepoView {
         } else {
             remotes
         };
-        let entity = self.entity.clone();
+        let entity = cx.weak_entity();
         window.open_alert_dialog(cx, move |dialog, _, _| {
             let mut footer = DialogFooter::new().child(
                 crate::ui::button("publish-cancel", "Cancel")
@@ -780,7 +781,9 @@ impl RepoView {
                             window.close_dialog(cx);
                             let remote = target.clone();
                             let branch = branch.clone();
-                            entity.update(cx, |view, cx| view.publish_branch(remote, branch, cx));
+                            let _ = entity.update(cx, |view, cx| {
+                                view.publish_branch(remote, branch, cx);
+                            });
                         }),
                 );
             }

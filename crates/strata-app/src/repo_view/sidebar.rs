@@ -3,8 +3,8 @@
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, ClickEvent, Context, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    Styled, div, px,
+    AnyElement, ClickEvent, Context, Entity, FontWeight, InteractiveElement, IntoElement,
+    ParentElement, Styled, div, px,
 };
 use gpui_kit_assets::IconName;
 
@@ -36,9 +36,10 @@ impl RepoView {
         if let Some(name) = self.branches.scope_name() {
             sidebar = sidebar.child(self.scope_banner(&name, cx, design));
         }
+        let entity = cx.entity();
         sidebar
             .child(self.nav_section(cx, design))
-            .child(self.ref_sections(design))
+            .child(self.ref_sections(design, &entity))
             .into_any_element()
     }
 
@@ -149,7 +150,7 @@ impl RepoView {
     }
 
     /// Branches, remotes, tags and stashes below the view entries.
-    fn ref_sections(&self, design: &Design) -> AnyElement {
+    fn ref_sections(&self, design: &Design, entity: &Entity<RepoView>) -> AnyElement {
         let Some(source) = self.source() else {
             return div().into_any_element();
         };
@@ -178,7 +179,7 @@ impl RepoView {
             self.session.is_some(),
             self.is_busy(),
             &colors,
-            &self.entity,
+            entity,
         )
     }
 }

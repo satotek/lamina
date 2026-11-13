@@ -1236,9 +1236,9 @@ impl RepoView {
         // the panel keeps its keys (Enter, s, u) after the dialog closes.
         let focus = self.worktree.ensure_focus(cx);
         window.focus(&focus, cx);
-        let entity = cx.entity();
+        let entity = cx.weak_entity();
         crate::ui::confirm(window, cx, confirm, move |_, cx| {
-            entity.update(cx, |view, cx| {
+            let _ = entity.update(cx, |view, cx| {
                 view.run_confirmed(kind, operations.clone(), cx);
             });
         });
