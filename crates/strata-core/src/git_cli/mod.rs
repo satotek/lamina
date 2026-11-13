@@ -9,6 +9,7 @@
 //! a process command line at roughly 32 KiB.
 
 mod command_log;
+mod merge;
 mod ops;
 mod progress;
 

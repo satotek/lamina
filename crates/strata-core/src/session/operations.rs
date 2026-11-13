@@ -12,7 +12,9 @@ use crate::patch::{LineEnding, LineSelection, PatchFile, PatchMode, build_patch}
 use crate::session::history::LoadCommand;
 use crate::session::publish::Shared;
 use crate::session::refresh::RefreshStatus;
-use crate::session::{Operation, OperationId, SessionEvent, head_file, worktree_as_git};
+use crate::session::{
+    ConflictSide, Operation, OperationId, SessionEvent, head_file, worktree_as_git,
+};
 
 /// A wedged status refresh must not block the operation queue forever. The
 /// limit is far above any real status scan.
@@ -241,14 +243,14 @@ fn execute(shared: &Shared, id: OperationId, operation: &Operation) -> Result<()
         Operation::StashPop { index } => git.stash_pop(*index),
         Operation::StashApply { index } => git.stash_apply(*index),
         Operation::StashDrop { index } => git.stash_drop(*index),
-        Operation::Merge { .. }
-        | Operation::MergeAbort
-        | Operation::ResolveConflict { .. }
-        | Operation::MarkResolved(_)
-        | Operation::MergeContinue
-        | Operation::OpenMergetool { .. } => {
-            Err(Error::other("conflict operations are not implemented yet"))
+        Operation::Merge { branch, no_ff } => git.merge(branch, *no_ff),
+        Operation::MergeAbort => git.merge_abort(),
+        Operation::ResolveConflict { path, side } => {
+            git.checkout_side(path, matches!(side, ConflictSide::Ours))
         }
+        Operation::MarkResolved(paths) => git.mark_resolved(paths),
+        Operation::MergeContinue => git.merge_continue(),
+        Operation::OpenMergetool { path } => git.mergetool(path),
     }
 }
 
