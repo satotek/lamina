@@ -36,19 +36,20 @@ so a Windows build is also what we ship.
 Install Xcode (or the Command Line Tools) and Rust with rustup, then:
 
 ```sh
-cargo build --release -p strata-app
-./target/release/strata
+cargo run --release -p strata-app
 ```
 
 ## Linux (Nix)
 
-Native libraries, fonts and sccache come from the flake's dev shell:
+Native libraries and fonts come from the flake's dev shell:
 
 ```sh
 direnv allow
-direnv exec . cargo build --release -p strata-app
-direnv exec . ./target/release/strata
+direnv exec . cargo run --release -p strata-app
 ```
+
+The dev shell builds into a shared directory (`$XDG_CACHE_HOME/strata/target`),
+not `./target`.
 
 See `crates/strata-app/README.md` for the Linux pitfalls this shell works around.
 

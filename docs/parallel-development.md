@@ -51,8 +51,10 @@ reverting one module rarely breaks another.
 
 ## Shared resources
 
-- Each worktree has its own `target/`, so N parallel Rust tasks compile the
-  dependency tree N times. Use `sccache` when running many tasks at once.
+- The dev shell sets `CARGO_TARGET_DIR` to one shared directory, so dependency
+  builds exist once instead of once per worktree. Concurrent builds wait on its
+  lock, so run at most two or three GPUI-building tasks at a time.
+- Core-only tasks build with `-p strata-core` and never compile GPUI.
 - Tasks that start servers or databases must not share ports or data
   directories.
 - Remove a task's worktree and branch once it has landed or been abandoned.

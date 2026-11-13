@@ -50,7 +50,6 @@
               pkg-config
               rustc
               rustfmt
-              sccache
               xvfb
             ];
 
@@ -100,9 +99,13 @@
 
             RUST_BACKTRACE = "1";
 
-            # Parallel agents each build in their own worktree; sccache lets them
-            # share compiled registry crates (GPUI alone is ~600 crates).
-            RUSTC_WRAPPER = "sccache";
+            # Parallel agents build in separate worktrees. One shared target
+            # directory keeps a single copy of the dependency builds (GPUI is
+            # ~600 crates, several GB) instead of one per worktree; cargo still
+            # keeps each worktree's own crates apart because their paths differ.
+            shellHook = ''
+              export CARGO_TARGET_DIR="''${XDG_CACHE_HOME:-$HOME/.cache}/strata/target"
+            '';
           };
         }
       );

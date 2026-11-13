@@ -16,9 +16,12 @@ Rust workspace: `crates/strata-core` (UI-independent) and `crates/strata-app` (G
   so tests do not depend on the machine's git config.
 - Code comments explain why, not what. English for code, comments, commits.
 - Run cargo through the Nix dev shell: `direnv allow && direnv exec . cargo …`. It provides
-  the native libraries GPUI needs on Linux and sccache, which shares compiled crates
-  between worktrees.
-- Before finishing: `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
+  the native libraries GPUI needs on Linux and points every worktree at one shared
+  target directory, so binaries are not under `./target` (use `cargo run`).
+- Build only what you touch. A task that edits only `strata-core` runs
+  `cargo clippy -p strata-core --all-targets -- -D warnings` and `cargo test -p strata-core`;
+  it never builds `strata-app` (GPUI is several GB). App tasks use `--workspace`.
+- Before finishing: `cargo fmt` plus the clippy and test commands above.
 
 ## Parallel work
 
