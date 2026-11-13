@@ -26,7 +26,7 @@ use strata_core::repo::Repo;
 use strata_core::session::Operation;
 
 use super::RepoView;
-use super::history_ops::HistoryAction;
+use super::history_ops::{HistoryAction, PendingSelection};
 use super::rebase_plan::{ActionKind, PlanProblem, PlanRow, RebasePlan};
 use crate::data::short_oid;
 use crate::settings::Settings;
@@ -40,6 +40,9 @@ const LIST_MAX_HEIGHT: f32 = 320.0;
 pub(super) struct RebaseRequest {
     /// The commit the range starts after: the clicked commit's parent.
     pub(super) onto: Oid,
+    /// HEAD when the dialog opened, so the rewrite's selection can wait for
+    /// the snapshot it produces.
+    pub(super) head: Oid,
     /// `(id, summary)` of `onto..HEAD`, oldest first.
     pub(super) commits: Vec<(Oid, String)>,
     /// Remote-tracking branches that already contain part of the range.
@@ -130,6 +133,8 @@ struct RebaseDialog {
     view: WeakEntity<RepoView>,
     repo: Repo,
     onto: Oid,
+    /// HEAD when the dialog opened; the rewrite replaces it.
+    head: Oid,
     plan: RebasePlan,
     /// The row keyboard commands act on.
     cursor: usize,
@@ -146,6 +151,7 @@ impl RebaseDialog {
             view,
             repo: request.repo,
             onto: request.onto,
+            head: request.head,
             plan: RebasePlan::new(request.commits),
             cursor: 0,
             pushed: request.pushed,
@@ -183,6 +189,9 @@ impl RebaseDialog {
     ) {
         self.error = None;
         self.cursor = index;
+        // A selector click can leave focus on its button; the list owns the
+        // keys, so an Alt+↑ right after the click still moves the row.
+        window.focus(&self.focus, cx);
         if action == ActionKind::Reword {
             self.open_reword(index, window, cx);
         } else {
@@ -300,6 +309,12 @@ impl RebaseDialog {
         }
         let onto = self.onto;
         let label = format!("edit history ({})", self.plan.summary().text());
+        // The rewrite replaces every commit it replays, so the row the user
+        // was on is found again by its distance from the new tip.
+        let selection = self
+            .plan
+            .selection_distance(self.cursor)
+            .map(|distance| PendingSelection::at(self.head, distance));
         let _ = self.view.update(cx, |view, cx| {
             // Another operation can have started while the dialog was open.
             // A dirty worktree is left to core, which refuses with a message.
@@ -313,6 +328,7 @@ impl RebaseDialog {
                 return;
             }
             view.run_operation(Operation::RebaseEdit { onto, steps }, label, window, cx);
+            view.edit_selection = selection;
         });
         // Closing here would drop this dialog while it is being updated.
         window.defer(cx, |window, cx| window.close_dialog(cx));

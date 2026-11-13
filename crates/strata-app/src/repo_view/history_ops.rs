@@ -513,6 +513,14 @@ pub(crate) struct PendingSelection {
     distance: usize,
 }
 
+impl PendingSelection {
+    /// The selection a plan rewrite restores: the commit `distance` steps
+    /// below the rewritten tip, once the new snapshot arrives.
+    pub(crate) fn at(old_head: Oid, distance: usize) -> Self {
+        Self { old_head, distance }
+    }
+}
+
 /// The first-parent commit `distance` steps below `head`, as a row index.
 fn row_at_distance(snapshot: &RepoSnapshot, head: Oid, distance: usize) -> Option<usize> {
     let mut current = head;
@@ -1119,6 +1127,7 @@ impl RepoView {
         };
         let request = RebaseRequest {
             onto,
+            head: edit.head,
             commits: commits
                 .into_iter()
                 .map(|commit| (commit, edit.summary(commit)))

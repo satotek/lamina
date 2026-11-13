@@ -65,6 +65,11 @@ impl ActionKind {
     fn combines(self) -> bool {
         matches!(self, Self::Squash | Self::Fixup)
     }
+
+    /// Whether the row leaves a commit of its own in the rewritten branch.
+    fn creates_commit(self) -> bool {
+        !self.combines() && self != Self::Drop
+    }
 }
 
 /// One commit of the range and what is going to happen to it.
@@ -343,6 +348,36 @@ impl RebasePlan {
         Ok(steps)
     }
 
+    /// Where the commit at `index` lands after the rewrite, counted down from
+    /// the new branch tip. A squash or fixup folds into the nearest kept row
+    /// above; a dropped row leaves no commit of its own, so the nearest kept
+    /// row below stands in, and the one above when there is none. `None` when
+    /// no row can produce a commit.
+    pub(super) fn selection_distance(&self, index: usize) -> Option<usize> {
+        let row = self.rows.get(index)?;
+        let target = match row.action {
+            ActionKind::Squash | ActionKind::Fixup => self.rows[..index]
+                .iter()
+                .rposition(|row| row.action.creates_commit())?,
+            ActionKind::Drop => self.rows[index + 1..]
+                .iter()
+                .position(|row| row.action.creates_commit())
+                .map(|offset| index + 1 + offset)
+                .or_else(|| {
+                    self.rows[..index]
+                        .iter()
+                        .rposition(|row| row.action.creates_commit())
+                })?,
+            ActionKind::Pick | ActionKind::Reword => index,
+        };
+        Some(
+            self.rows[target + 1..]
+                .iter()
+                .filter(|row| row.action.creates_commit())
+                .count(),
+        )
+    }
+
     pub(super) fn summary(&self) -> PlanSummary {
         let number =
             |action: ActionKind| self.rows.iter().filter(|row| row.action == action).count();
@@ -601,6 +636,68 @@ mod tests {
         let mut plan = plan(2);
         plan.set_action(1, ActionKind::Squash);
         assert_eq!(plan.summary().text(), "2 commits → 1 commit, 1 squashed");
+    }
+
+    #[test]
+    fn the_selection_follows_the_commit_a_row_produces() {
+        let mut plan = plan(5);
+        assert_eq!(plan.selection_distance(0), Some(4));
+        assert_eq!(plan.selection_distance(4), Some(0));
+
+        plan.set_action(1, ActionKind::Squash);
+        assert_eq!(
+            plan.selection_distance(1),
+            Some(3),
+            "a squash selects the commit it joined"
+        );
+
+        plan.set_action(2, ActionKind::Drop);
+        assert_eq!(
+            plan.selection_distance(0),
+            Some(2),
+            "a dropped row's commit leaves the count"
+        );
+        assert_eq!(
+            plan.selection_distance(2),
+            Some(1),
+            "a dropped row selects the nearest kept row below it"
+        );
+    }
+
+    #[test]
+    fn a_dropped_tip_selects_the_kept_row_above_it() {
+        let mut plan = plan(3);
+        plan.set_action(2, ActionKind::Drop);
+        assert_eq!(plan.selection_distance(2), Some(0));
+    }
+
+    #[test]
+    fn a_squash_skips_a_dropped_row_to_reach_its_target() {
+        let mut plan = plan(4);
+        plan.set_action(2, ActionKind::Squash);
+        plan.set_action(1, ActionKind::Drop);
+        assert_eq!(plan.selection_distance(2), Some(1));
+    }
+
+    #[test]
+    fn a_reworded_or_moved_row_keeps_its_new_position() {
+        let mut plan = plan(4);
+        assert!(plan.reword(2, "New title".to_owned()));
+        assert_eq!(plan.selection_distance(2), Some(1));
+
+        plan.move_to(0, 3);
+        assert_eq!(plan.rows()[3].commit, oid(1));
+        assert_eq!(plan.selection_distance(3), Some(0));
+    }
+
+    #[test]
+    fn a_plan_with_nothing_kept_has_no_selection_target() {
+        let mut plan = plan(2);
+        plan.set_action(0, ActionKind::Drop);
+        plan.set_action(1, ActionKind::Drop);
+        assert_eq!(plan.selection_distance(0), None);
+        assert_eq!(plan.selection_distance(1), None);
+        assert_eq!(plan.selection_distance(9), None);
     }
 
     /// A throwaway repository with its own git config, so the result never
