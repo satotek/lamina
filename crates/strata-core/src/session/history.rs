@@ -61,6 +61,7 @@ fn load(shared: &Arc<Shared>, generation: u64) -> Result<()> {
             .walk_commits_from_refs_with(&specs, Some(cancelled))?,
     };
 
+    let estimated = walk.estimated_commits().unwrap_or(0);
     Loader {
         shared: shared.as_ref(),
         generation,
@@ -71,20 +72,27 @@ fn load(shared: &Arc<Shared>, generation: u64) -> Result<()> {
         upstreams,
         remotes,
         commits: CommitList::default(),
-        index: HashMap::new(),
+        index: HashMap::with_capacity(estimated),
         loaded: 0,
         published: 0,
-        pending_commits: Vec::new(),
-        pending_rows: GraphRows::new(),
+        next_index_publish: 16_384,
+        pending_commits: Vec::with_capacity(FIRST_COMMIT_CHUNK),
+        pending_rows: GraphRows::with_capacity(FIRST_COMMIT_CHUNK, 0, 0),
+        last_passes_len: 0,
+        last_edges_len: 0,
     }
     .run(walk)
 }
 
 fn refs_by_commit(refs: &[RefInfo]) -> HashMap<Oid, Vec<usize>> {
-    let mut map: HashMap<Oid, Vec<usize>> = HashMap::new();
+    let mut map: HashMap<Oid, Vec<usize>> = HashMap::with_capacity(refs.len());
     for (index, reference) in refs.iter().enumerate() {
         map.entry(reference.target).or_default().push(index);
     }
+    for indices in map.values_mut() {
+        indices.shrink_to_fit();
+    }
+    map.shrink_to_fit();
     map
 }
 
@@ -101,8 +109,11 @@ struct Loader<'a> {
     index: HashMap<Oid, usize>,
     loaded: usize,
     published: usize,
+    next_index_publish: usize,
     pending_commits: Vec<CommitInfo>,
     pending_rows: GraphRows,
+    last_passes_len: usize,
+    last_edges_len: usize,
 }
 
 impl Loader<'_> {
@@ -135,18 +146,61 @@ impl Loader<'_> {
         publish_due(self.published, self.loaded)
     }
 
+    fn tight_index(&self) -> HashMap<Oid, usize> {
+        let mut copy = HashMap::with_capacity(self.index.len());
+        copy.extend(self.index.iter().map(|(&id, &row)| (id, row)));
+        copy
+    }
+
     fn publish(&mut self, complete: bool) -> bool {
-        // `extend` copies only the last chunk, so a growing published list costs
-        // one partial chunk per publish instead of the whole history.
+        let batch_passes = self.pending_rows.passes_len();
+        let batch_edges = self.pending_rows.edges_len();
+        if self.pending_commits.len() >= COMMIT_CHUNK / 2 {
+            self.last_passes_len = batch_passes;
+            self.last_edges_len = batch_edges;
+        }
+
+        // `extend` moves full chunks without copying once aligned to `COMMIT_CHUNK`.
         self.commits.extend(
             mem::take(&mut self.pending_commits),
             mem::take(&mut self.pending_rows),
         );
         self.commits.complete = complete;
+        if complete {
+            self.commits.shrink_to_fit();
+        }
+
+        let commit_index = if complete {
+            let mut index = mem::take(&mut self.index);
+            index.shrink_to_fit();
+            Some(Arc::new(index))
+        } else if self.published == 0 {
+            Some(Arc::new(self.tight_index()))
+        } else if self.loaded >= self.next_index_publish {
+            while self.next_index_publish <= self.loaded {
+                self.next_index_publish = self.next_index_publish.saturating_mul(4);
+            }
+            Some(Arc::new(self.tight_index()))
+        } else {
+            None
+        };
+
         self.published = self.loaded;
+        if !complete {
+            let next_commits = if self.published == FIRST_COMMIT_CHUNK {
+                COMMIT_CHUNK - FIRST_COMMIT_CHUNK
+            } else {
+                COMMIT_CHUNK
+            };
+            self.pending_commits = Vec::with_capacity(next_commits);
+            self.pending_rows = GraphRows::with_capacity(
+                next_commits,
+                self.last_passes_len + self.last_passes_len / 8,
+                self.last_edges_len + self.last_edges_len / 8,
+            );
+        }
 
         let commits = self.commits.clone();
-        let commit_index = Arc::new(self.index.clone());
         let head = self.head.clone();
         let refs = Arc::clone(&self.refs);
         let refs_by_commit = Arc::clone(&self.refs_by_commit);
@@ -163,20 +217,27 @@ impl Loader<'_> {
                 snapshot.remotes = remotes;
                 snapshot.refs_by_commit = refs_by_commit;
                 snapshot.commits = commits;
-                snapshot.commit_index = commit_index;
+                if let Some(commit_index) = commit_index {
+                    snapshot.commit_index = commit_index;
+                }
             })
     }
 }
 
 /// Whether a walk that loaded `loaded` commits and published `published` of
 /// them should publish again.
+///
+/// The first publish lands at `FIRST_COMMIT_CHUNK`; the second completes the
+/// first `COMMIT_CHUNK` so all later publishes stay chunk-aligned and move
+/// into `CommitList` without copying partial tails.
 fn publish_due(published: usize, loaded: usize) -> bool {
-    let chunk = if published == 0 {
-        FIRST_COMMIT_CHUNK
+    if published == 0 {
+        loaded >= FIRST_COMMIT_CHUNK
+    } else if published < COMMIT_CHUNK {
+        loaded >= COMMIT_CHUNK
     } else {
-        COMMIT_CHUNK
-    };
-    loaded - published >= chunk
+        loaded - published >= COMMIT_CHUNK
+    }
 }
 
 #[cfg(test)]
@@ -190,12 +251,18 @@ mod tests {
     }
 
     #[test]
-    fn later_publishes_wait_for_a_full_chunk() {
+    fn second_publish_completes_the_first_chunk_then_waits_for_full_chunks() {
         let published = FIRST_COMMIT_CHUNK;
-        assert!(!publish_due(published, published + COMMIT_CHUNK - 1));
-        assert!(publish_due(published, published + COMMIT_CHUNK));
+        assert!(!publish_due(published, COMMIT_CHUNK - 1));
+        assert!(publish_due(published, COMMIT_CHUNK));
+
+        let aligned = COMMIT_CHUNK;
+        assert!(!publish_due(aligned, aligned + COMMIT_CHUNK - 1));
+        assert!(publish_due(aligned, aligned + COMMIT_CHUNK));
         // A walk that ends earlier publishes only its tail, from `run`.
-        let tail = publish_due(published + COMMIT_CHUNK, published + COMMIT_CHUNK + 1);
-        assert!(!tail);
+        assert!(!publish_due(
+            aligned + COMMIT_CHUNK,
+            aligned + COMMIT_CHUNK + 1
+        ));
     }
 }

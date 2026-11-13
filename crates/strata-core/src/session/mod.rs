@@ -99,7 +99,7 @@ impl CommitList {
     }
 
     /// Appends rows; only the last chunk is copied (at most COMMIT_CHUNK items).
-    pub fn extend(&mut self, commits: Vec<CommitInfo>, rows: GraphRows) {
+    pub fn extend(&mut self, mut commits: Vec<CommitInfo>, mut rows: GraphRows) {
         debug_assert_eq!(commits.len(), rows.len(), "one graph row per commit");
         // A caller that disagrees about the lengths loses the extra items
         // instead of building a chunk with commits but no rows.
@@ -107,8 +107,6 @@ impl CommitList {
         if count == 0 {
             return;
         }
-        let mut commits = commits.into_iter();
-        let mut next_row = 0;
 
         // Chunks are shared with published snapshots, so completing the last
         // partial one means copying it instead of mutating it in place.
@@ -124,6 +122,20 @@ impl CommitList {
             _ => None,
         };
 
+        // Fast path: the loader produces full chunks directly, so move the
+        // vectors instead of copying every CommitInfo and PassThrough slice.
+        if tail.is_none() && count <= COMMIT_CHUNK && commits.len() == count && rows.len() == count
+        {
+            commits.shrink_to_fit();
+            rows.shrink_to_fit();
+            self.len += count;
+            self.chunks.push(Arc::new(CommitChunk { commits, rows }));
+            return;
+        }
+
+        let mut commits = commits.into_iter();
+        let mut next_row = 0;
+
         while next_row < count {
             let mut chunk = tail.take().unwrap_or_default();
             let take = (COMMIT_CHUNK - chunk.commits.len()).min(count - next_row);
@@ -132,11 +144,14 @@ impl CommitList {
             next_row += take;
             // A copied chunk was already counted when it was first published.
             self.len += take;
-            if chunk.commits.len() == COMMIT_CHUNK {
-                chunk.rows.shrink_to_fit();
-            }
+            chunk.commits.shrink_to_fit();
+            chunk.rows.shrink_to_fit();
             self.chunks.push(Arc::new(chunk));
         }
+    }
+
+    pub(crate) fn shrink_to_fit(&mut self) {
+        self.chunks.shrink_to_fit();
     }
 
     /// Approximate heap bytes of the graph rows, for memory budgeting.
@@ -1028,5 +1043,27 @@ mod tests {
                 format!("commit {index}")
             );
         }
+    }
+
+    #[test]
+    fn extend_moves_aligned_chunks_directly() {
+        let mut list = CommitList::default();
+        let (commits, rows) = batch(0..COMMIT_CHUNK);
+        list.extend(commits, rows);
+        let first_chunk = Arc::clone(&list.chunks[0]);
+
+        let (commits, rows) = batch(COMMIT_CHUNK..COMMIT_CHUNK * 2);
+        list.extend(commits, rows);
+
+        assert_eq!(list.chunks.len(), 2);
+        assert!(Arc::ptr_eq(&first_chunk, &list.chunks[0]));
+        assert_eq!(list.len(), COMMIT_CHUNK * 2);
+        assert_eq!(
+            list.get(COMMIT_CHUNK)
+                .expect("second chunk start")
+                .0
+                .summary,
+            format!("commit {COMMIT_CHUNK}")
+        );
     }
 }

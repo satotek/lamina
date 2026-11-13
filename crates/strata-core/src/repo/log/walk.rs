@@ -45,9 +45,6 @@ struct Node {
     parents_start: u32,
     /// Number of entries in the parent arena, or [`NO_PARENTS`] until loaded.
     parents_len: u32,
-    /// Parents parsed along with the metadata, so a commit missing from the
-    /// commit-graph is read from the object database once instead of twice.
-    preloaded_parents: Option<Box<[gix::ObjectId]>>,
 }
 
 /// The fields needed to order a commit, read together with its parents when it
@@ -75,6 +72,9 @@ pub(super) struct Walk {
     by_id: HashMap<gix::ObjectId, u32>,
     /// Parent node indices, one run per node, to avoid re-reading commits.
     parent_arena: Vec<u32>,
+    /// Parents parsed alongside metadata for commits missing from the
+    /// commit-graph, kept out of `Node` so graph-backed nodes stay compact.
+    preloaded_parents: HashMap<u32, Box<[gix::ObjectId]>>,
     explore: BinaryHeap<GenerationKey>,
     in_degree_queue: BinaryHeap<GenerationKey>,
     ready: BinaryHeap<DateKey>,
@@ -84,6 +84,7 @@ pub(super) struct Walk {
     object_buf: Vec<u8>,
     /// `None` for an uncancellable walk, which is every walk the UI starts.
     cancelled: Option<CancelCheck>,
+    estimated_commits: Option<usize>,
 }
 
 impl Walk {
@@ -94,13 +95,21 @@ impl Walk {
         graph: Option<gix::commitgraph::Graph>,
         tips: &[gix::ObjectId],
         cancelled: Option<CancelCheck>,
+        reserve_from_graph: bool,
     ) -> Result<Self> {
+        let estimated_commits = if reserve_from_graph {
+            graph.as_ref().map(|g| g.num_commits() as usize)
+        } else {
+            None
+        };
+        let initial = estimated_commits.unwrap_or(0);
         let mut walk = Walk {
             objects,
             graph,
-            nodes: Vec::new(),
-            by_id: HashMap::new(),
-            parent_arena: Vec::new(),
+            nodes: Vec::with_capacity(initial),
+            by_id: HashMap::with_capacity(initial),
+            parent_arena: Vec::with_capacity(initial),
+            preloaded_parents: HashMap::new(),
             explore: BinaryHeap::new(),
             in_degree_queue: BinaryHeap::new(),
             ready: BinaryHeap::new(),
@@ -109,9 +118,10 @@ impl Walk {
             parents_buf: Vec::new(),
             object_buf: Vec::new(),
             cancelled,
+            estimated_commits,
         };
 
-        let mut seeds = Vec::new();
+        let mut seeds = Vec::with_capacity(tips.len());
         for &tip in tips {
             let index = walk.node(tip)?;
             let node = &mut walk.nodes[index as usize];
@@ -141,6 +151,10 @@ impl Walk {
         }
 
         Ok(walk)
+    }
+
+    pub(super) fn estimated_commits(&self) -> Option<usize> {
+        self.estimated_commits
     }
 
     /// The next commit in `--date-order`, or `None` once every reachable
@@ -186,8 +200,10 @@ impl Walk {
             flags: 0,
             parents_start: 0,
             parents_len: NO_PARENTS,
-            preloaded_parents: metadata.parents,
         });
+        if let Some(parents) = metadata.parents {
+            self.preloaded_parents.insert(index, parents);
+        }
         self.by_id.insert(id, index);
         Ok(index)
     }
@@ -228,7 +244,7 @@ impl Walk {
             return Ok(());
         }
         self.parents_buf.clear();
-        if let Some(parents) = self.nodes[index].preloaded_parents.take() {
+        if let Some(parents) = self.preloaded_parents.remove(&(index as u32)) {
             self.parents_buf.extend_from_slice(&parents);
         } else {
             let id = self.nodes[index].id;

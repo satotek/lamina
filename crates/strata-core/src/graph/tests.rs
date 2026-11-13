@@ -377,3 +377,28 @@ fn perf_200k_commits() {
         "200k commits took {elapsed:?}, expected well under a second"
     );
 }
+
+#[test]
+fn passes_are_deduplicated_and_shrink_drops_cache() {
+    let passes = [
+        PassThrough { lane: 1, color: 2 },
+        PassThrough { lane: 3, color: 4 },
+    ];
+    let alt = [PassThrough { lane: 2, color: 5 }];
+
+    let mut rows = GraphRows::new();
+    for i in 0..20 {
+        let slice = if i % 5 == 0 { &alt[..] } else { &passes[..] };
+        rows.push_row(0, 0, 4, slice, &[]);
+    }
+
+    assert_eq!(rows.passes_len(), passes.len() + alt.len());
+    let cloned = rows.clone();
+    assert_eq!(rows, cloned);
+
+    let before_shrink = rows.heap_bytes();
+    rows.shrink_to_fit();
+    assert!(rows.heap_bytes() < before_shrink);
+    assert_eq!(rows.get(1).expect("row 1").passes, &passes);
+    assert_eq!(rows.get(5).expect("row 5").passes, &alt);
+}

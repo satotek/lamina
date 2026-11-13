@@ -6,6 +6,7 @@ mod walk;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use gix::objs::FindExt as _;
 use gix::objs::commit::ref_iter::Token as CommitToken;
 
 use super::Repo;
@@ -35,6 +36,14 @@ pub(crate) type CancelCheck = Arc<dyn Fn() -> bool + Send + Sync>;
 pub struct CommitWalk {
     repo: gix::Repository,
     walk: walk::Walk,
+    object_buf: Vec<u8>,
+    parents_buf: Vec<Oid>,
+}
+
+impl CommitWalk {
+    pub(crate) fn estimated_commits(&self) -> Option<usize> {
+        self.walk.estimated_commits()
+    }
 }
 
 impl Iterator for CommitWalk {
@@ -42,7 +51,12 @@ impl Iterator for CommitWalk {
 
     fn next(&mut self) -> Option<Self::Item> {
         match self.walk.next_id() {
-            Ok(Some(id)) => Some(commit_info(&self.repo, id)),
+            Ok(Some(id)) => Some(commit_info(
+                &self.repo,
+                id,
+                &mut self.object_buf,
+                &mut self.parents_buf,
+            )),
             Ok(None) => None,
             Err(err) => Some(Err(err)),
         }
@@ -163,8 +177,13 @@ impl Repo {
         // A missing or corrupt commit-graph is not fatal: object reads still work.
         let graph = repo.commit_graph_if_enabled().ok().flatten();
         let tips = walk_tips(&repo, graph.as_ref())?;
-        let walk = walk::Walk::new(repo.objects.clone(), graph, &tips, cancelled)?;
-        Ok(CommitWalk { repo, walk })
+        let walk = walk::Walk::new(repo.objects.clone(), graph, &tips, cancelled, true)?;
+        Ok(CommitWalk {
+            repo,
+            walk,
+            object_buf: Vec::new(),
+            parents_buf: Vec::with_capacity(4),
+        })
     }
 
     /// Streams commits reachable from `specs` only, in the same topological
@@ -202,8 +221,13 @@ impl Repo {
                 tips.push(commit);
             }
         }
-        let walk = walk::Walk::new(repo.objects.clone(), graph, &tips, cancelled)?;
-        Ok(CommitWalk { repo, walk })
+        let walk = walk::Walk::new(repo.objects.clone(), graph, &tips, cancelled, false)?;
+        Ok(CommitWalk {
+            repo,
+            walk,
+            object_buf: Vec::new(),
+            parents_buf: Vec::with_capacity(4),
+        })
     }
 
     /// A commit walk for path-limited history.
@@ -386,26 +410,31 @@ fn walk_tips(
     Ok(tips)
 }
 
-fn commit_info(repo: &gix::Repository, id: gix::ObjectId) -> Result<CommitInfo> {
-    let object = repo.find_object(id).map_err(Error::gix)?;
-    if object.kind != gix::objs::Kind::Commit {
+fn commit_info(
+    repo: &gix::Repository,
+    id: gix::ObjectId,
+    object_buf: &mut Vec<u8>,
+    parents_buf: &mut Vec<Oid>,
+) -> Result<CommitInfo> {
+    let data = repo.objects.find(&id, object_buf).map_err(Error::gix)?;
+    if data.kind != gix::objs::Kind::Commit {
         return Err(Error::other(format!("{id} is not a commit")));
     }
 
     // One pass over the commit data: `Commit`'s per-field accessors each re-parse
     // the header, which doubles the cost of decoding every commit in the log.
-    let mut parents = Vec::new();
+    parents_buf.clear();
     let mut author_name = String::new();
     let mut author_email = String::new();
     let mut author_time = 0;
     let mut committer_time = 0;
     let mut summary = String::new();
-    for token in gix::objs::CommitRefIter::from_bytes(&object.data, repo.object_hash()) {
+    for token in gix::objs::CommitRefIter::from_bytes(data.data, repo.object_hash()) {
         match token.map_err(Error::gix)? {
-            CommitToken::Parent { id } => parents.push(id),
+            CommitToken::Parent { id } => parents_buf.push(id),
             CommitToken::Author { signature } => {
-                author_name = signature.name.to_string();
-                author_email = signature.email.to_string();
+                author_name = String::from_utf8_lossy(signature.name.as_ref()).into_owned();
+                author_email = String::from_utf8_lossy(signature.email.as_ref()).into_owned();
                 // Malformed dates must not fail the whole log; git also tolerates them.
                 author_time = signature.time().map_or(0, |time| time.seconds);
             }
@@ -419,6 +448,15 @@ fn commit_info(repo: &gix::Repository, id: gix::ObjectId) -> Result<CommitInfo> 
             _ => {}
         }
     }
+
+    let parents = if parents_buf.is_empty() {
+        Vec::new()
+    } else {
+        // Exact-capacity Vec avoids Vec::push's 4-element minimum (80 bytes for Oid).
+        let mut vec = Vec::with_capacity(parents_buf.len());
+        vec.extend_from_slice(parents_buf);
+        vec
+    };
 
     Ok(CommitInfo {
         id,
