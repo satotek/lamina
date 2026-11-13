@@ -1,0 +1,15 @@
+[package]
+name = "strata-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+gix = "0.90.0"
+imara-diff = "0.2"
+notify = "8"
+thiserror = "2"
+
+[dev-dependencies]
+insta = "1.49.0"
+tempfile = "3.27.0"
