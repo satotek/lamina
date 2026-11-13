@@ -1,6 +1,7 @@
 //! The commit details column: summary, author, id and parents, the files
 //! summary and the changed-file list.
 
+use std::path::Path;
 use std::sync::Arc;
 
 use gpui::prelude::*;
@@ -12,11 +13,12 @@ use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit_assets::IconName;
 use strata_core::diff::LineKind;
 use strata_core::session::QueryTicket;
-use strata_core::{ChangeKind, CommitStat, FileChange, FileStat, Oid};
+use strata_core::{ChangeKind, CommitStat, FileChange, FileStat, HeadInfo, Oid};
 
 use super::RepoView;
 use super::common::icon;
 use crate::data;
+use crate::data::Source;
 use crate::scrollbar::WithScrollbar as _;
 use crate::style::{self, Design};
 
@@ -267,6 +269,13 @@ impl RepoView {
         let entity = self.entity();
         let selected = self.selected_file;
         let blame_commit = self.selection_commit;
+        // The editor opens the working copy whatever commit is selected, so
+        // the entry says when that copy is not what the diff shows.
+        let at_head = match (blame_commit, head_oid(self.source().as_ref())) {
+            (Some(selected), Some(head)) => selected == head,
+            _ => true,
+        };
+        let work_dir = Arc::new(self.work_dir());
         let list_design = design.clone();
         let count = files.len();
         let entries: Vec<(String, ChangeKind)> = files
@@ -318,6 +327,7 @@ impl RepoView {
                     let click_entity = entity.clone();
                     let menu_entity = entity;
                     let menu_path = path.clone();
+                    let menu_work_dir = work_dir.clone();
                     row.cursor_pointer()
                         .on_click(move |_event, _window, cx| {
                             click_entity.update(cx, |this, cx| this.select_file(index, cx));
@@ -325,15 +335,19 @@ impl RepoView {
                         .context_menu(move |menu, _window, _cx| {
                             let entity = menu_entity.clone();
                             let path = menu_path.clone();
-                            let mut menu =
-                                menu.item(PopupMenuItem::new("Open in Editor").on_click(
-                                    move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
-                                        let path = path.clone();
-                                        entity.update(cx, |this, cx| {
-                                            this.open_file_in_editor(&path, None, cx);
-                                        });
-                                    },
-                                ));
+                            let present = in_working_tree(menu_work_dir.as_deref(), &path);
+                            let mut menu = menu.item(
+                                PopupMenuItem::new(editor_entry_label(at_head, present))
+                                    .disabled(!present)
+                                    .on_click(
+                                        move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                                            let path = path.clone();
+                                            entity.update(cx, |this, cx| {
+                                                this.open_file_in_editor(&path, None, cx);
+                                            });
+                                        },
+                                    ),
+                            );
                             let entity = menu_entity.clone();
                             let path = menu_path.clone();
                             menu = menu.item(PopupMenuItem::new("Show file history").on_click(
@@ -368,6 +382,36 @@ impl RepoView {
         .flex_1()
         .min_h_0()
         .into_any_element()
+    }
+}
+
+/// The commit HEAD points at, when the source knows it.
+fn head_oid(source: Option<&Source>) -> Option<Oid> {
+    match source?.head()? {
+        HeadInfo::Branch { target, .. } => *target,
+        HeadInfo::Detached { target } => Some(*target),
+    }
+}
+
+/// Whether the working tree at `root` has `path`. A final symlink counts as
+/// present even when it dangles, because git tracks the link itself; a
+/// directory does not, because there is no file for the editor to open.
+fn in_working_tree(root: Option<&Path>, path: &str) -> bool {
+    root.is_some_and(|root| {
+        std::fs::symlink_metadata(root.join(path))
+            .map(|metadata| !metadata.is_dir())
+            .unwrap_or(false)
+    })
+}
+
+/// The editor entry's label. The editor opens the working copy, so a commit
+/// other than HEAD says so, and a missing path names the reason it is disabled.
+fn editor_entry_label(at_head: bool, in_working_tree: bool) -> &'static str {
+    match (at_head, in_working_tree) {
+        (true, true) => "Open in Editor",
+        (true, false) => "Open in Editor (not in working tree)",
+        (false, true) => "Open Working Copy in Editor",
+        (false, false) => "Open Working Copy in Editor (not in working tree)",
     }
 }
 
@@ -457,6 +501,51 @@ mod tests {
         );
         assert!(slot.get().is_none());
         assert!(!slot.accept(QueryTicket(7), stat(9, 9)));
+    }
+
+    #[test]
+    fn a_commit_away_from_head_offers_the_working_copy_in_the_editor() {
+        assert_eq!(editor_entry_label(true, true), "Open in Editor");
+        assert_eq!(
+            editor_entry_label(false, true),
+            "Open Working Copy in Editor",
+            "the editor opens the working copy, not the commit on screen"
+        );
+    }
+
+    #[test]
+    fn a_path_missing_from_the_working_tree_names_the_reason() {
+        assert_eq!(
+            editor_entry_label(true, false),
+            "Open in Editor (not in working tree)"
+        );
+        assert_eq!(
+            editor_entry_label(false, false),
+            "Open Working Copy in Editor (not in working tree)"
+        );
+    }
+
+    #[test]
+    fn the_working_tree_check_finds_files_and_links_but_not_directories() {
+        let dir = tempfile::TempDir::new().expect("temporary directory");
+        let root = dir.path();
+        std::fs::write(root.join("present.txt"), "x").expect("file");
+        std::fs::create_dir(root.join("submodule")).expect("directory");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("missing-target", root.join("link")).expect("symlink");
+
+        assert!(in_working_tree(Some(root), "present.txt"));
+        assert!(
+            !in_working_tree(Some(root), "submodule"),
+            "a directory has no file to open"
+        );
+        assert!(!in_working_tree(Some(root), "absent.txt"));
+        assert!(!in_working_tree(None, "present.txt"));
+        #[cfg(unix)]
+        assert!(
+            in_working_tree(Some(root), "link"),
+            "git tracks the link itself, so a dangling one is still present"
+        );
     }
 
     #[test]

@@ -100,7 +100,7 @@ impl Render for RepoView {
             root = root.font_family(font.clone());
         }
 
-        root = root.child(self.header(&design));
+        root = root.child(self.header(&design, window));
         if let Some((path, error)) = &self.error {
             root = root.child(self.error_screen(path, error, &design));
         } else {
