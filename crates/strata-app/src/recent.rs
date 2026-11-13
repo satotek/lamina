@@ -267,7 +267,9 @@ mod tests {
         assert_eq!(recents.len(), 1, "both spellings are the same repository");
         assert_eq!(
             recents.get(0).map(|entry| entry.path.clone()),
-            Some(std::fs::canonicalize(&repo).unwrap())
+            // `normalize`, not `canonicalize`: the stored path drops Windows'
+            // `\\?\` prefix.
+            Some(normalize(&repo))
         );
         assert!(recents.remove(&indirect));
         assert!(recents.is_empty());
