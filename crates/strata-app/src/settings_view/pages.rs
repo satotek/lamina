@@ -609,10 +609,12 @@ fn text_state(
     });
 
     // A reset or a suggestion changed the setting from outside the input; show
-    // the stored value.
+    // the stored value. The stored value is trimmed, so compare trimmed text:
+    // otherwise the space typed between "JetBrains" and "Mono" is stored as
+    // "JetBrains" and this sync immediately deletes it from the input.
     let value = get(Settings::get(cx)).unwrap_or_default();
     state.update(cx, |state, cx| {
-        if state.input.read(cx).value().as_ref() != value {
+        if state.input.read(cx).value().trim() != value.trim() {
             state
                 .input
                 .update(cx, |input, cx| input.set_value(value.clone(), window, cx));
