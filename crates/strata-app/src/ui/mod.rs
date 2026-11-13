@@ -23,5 +23,5 @@ pub use banner::{BannerKind, banner};
 pub use button::{ButtonKind, ButtonSize, UiButton, button, content_button, icon_button};
 pub use confirm::{Confirm, confirm};
 pub(crate) use focus::focus_input;
-pub use row::{RowState, list_row};
+pub use row::{RowState, list_row, row_surface};
 pub use text::{empty_state, message, section_header};

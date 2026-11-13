@@ -284,15 +284,9 @@ fn commit_row(
     let avatar_color = design.avatar_color(&data.email);
     let initials = style::initials(&data.author);
     let state = row_state(selected, revealed);
-    // The graph fades into the row's own fill, following the same precedence
-    // as `ui::list_row`: selection, then reveal, then the list background.
-    let fade = if selected {
-        design.row_selected
-    } else if revealed {
-        design.field
-    } else {
-        design.background
-    };
+    // The graph fades into the row's own fill, so it has to be the same colour
+    // `ui::list_row` gives the row.
+    let fade = crate::ui::row_surface(state, design);
     crate::ui::list_row(id, state, design)
         .gap_3()
         .h(px(graph_canvas::ROW_HEIGHT))

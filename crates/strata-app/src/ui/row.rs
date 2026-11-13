@@ -12,6 +12,10 @@
 //! Row height and padding come from the same scale as the rest of the app; a
 //! list whose rows must be shorter (the 20 px conflict list) overrides the
 //! height on the returned element.
+//!
+//! Anything that has to blend into a row's fill — the commit graph's clip fade
+//! — asks [`row_surface`] for the same colour instead of repeating the
+//! precedence above.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -83,7 +87,18 @@ pub fn row_background(state: RowState, design: &Design) -> Hsla {
         RowTint::Selected => design.row_selected,
         RowTint::Revealed => design.field,
         RowTint::Head => design.selected,
+        // Transparent, so whatever surface the list sits on shows through.
         RowTint::Normal => Hsla::transparent_black(),
+    }
+}
+
+/// The colour the row reads as against the list surface: a plain row is that
+/// surface itself. Anything painted underneath a row's contents (the graph's
+/// clip fade in the commit list) needs this, not the transparent fill.
+pub fn row_surface(state: RowState, design: &Design) -> Hsla {
+    match row_tint(state) {
+        RowTint::Normal => design.background,
+        RowTint::Selected | RowTint::Revealed | RowTint::Head => row_background(state, design),
     }
 }
 
@@ -176,5 +191,26 @@ mod tests {
             row_background(RowState::NORMAL.selected(true), &design),
             "a revealed row must not read as the selection"
         );
+    }
+
+    #[test]
+    fn a_plain_row_reads_as_the_list_surface() {
+        let design = Design::default();
+        assert_eq!(
+            row_surface(RowState::NORMAL, &design),
+            design.background,
+            "a plain row blends into the surface behind it"
+        );
+        for state in [
+            RowState::NORMAL.selected(true),
+            RowState::NORMAL.revealed(true),
+            RowState::NORMAL.head(true),
+        ] {
+            assert_eq!(
+                row_surface(state, &design),
+                row_background(state, &design),
+                "a painted row keeps its own fill"
+            );
+        }
     }
 }
