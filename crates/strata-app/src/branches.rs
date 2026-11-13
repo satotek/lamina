@@ -7,15 +7,17 @@
 //! not need a window (name validation, upstream labels, remote-to-local name
 //! mapping) are unit tested without a repository.
 
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, FocusHandle, FontWeight, Hsla,
     InteractiveElement, IntoElement, KeyBinding, ParentElement, Pixels, Size, Stateful,
-    StatefulInteractiveElement as _, Styled, Window, actions, anchored, deferred, div, hsla, point,
-    px,
+    StatefulInteractiveElement as _, Styled, UniformListScrollHandle, Window, actions, anchored,
+    deferred, div, hsla, point, px, uniform_list,
 };
 use gpui_component::{
     Icon,
@@ -29,11 +31,17 @@ use strata_core::{RefKind, RemoteInfo, UpstreamInfo};
 use crate::actions::REPO_VIEW;
 use crate::data::SidebarData;
 use crate::repo_view::RepoView;
+use crate::scrollbar::WithScrollbar as _;
 use crate::style::{self, Design};
 
 /// Key context the dialog sets while it is open, so `Enter` and `Escape` mean
 /// confirm and cancel only there.
 const BRANCH_DIALOG: &str = "BranchDialog";
+
+/// Height of one line of the sidebar list. `uniform_list` lays every item out
+/// at the height it measured once, so headers, rows and placeholders must all
+/// be this tall; it matches [`crate::ui::list_row`]'s row height.
+const ITEM_HEIGHT: f32 = 28.0;
 
 actions!(
     strata,
@@ -62,6 +70,7 @@ pub fn bind(cx: &mut App) {
 
 /// The colours the sections and dialogs paint with, taken from the window
 /// chrome's palette so the sidebar reads as one surface.
+#[derive(Clone)]
 pub(crate) struct Colors {
     pub(crate) design: Design,
     pub(crate) sidebar_foreground: Hsla,
@@ -73,7 +82,7 @@ pub(crate) struct Colors {
 }
 
 /// One collapsible section of the sidebar.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 enum Section {
     Local,
     Remote,
@@ -148,7 +157,7 @@ pub(crate) struct BranchStart {
 /// It stays highlighted until another ref is revealed or a commit row is
 /// selected; the highlight says where the view came from, not what is checked
 /// out, which is why it is kept apart from HEAD.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct RevealState {
     revealed: Option<RevealedRef>,
 }
@@ -185,6 +194,150 @@ impl RevealState {
     }
 }
 
+/// One line of the sidebar's virtualised list.
+///
+/// The list owns its strings, so drawing a frame holds nothing borrowed from
+/// the snapshot; the parts that change without the refs (the revealed row,
+/// HEAD, busy) stay out and are read while the visible rows are built.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum SidebarItem {
+    SectionHeader {
+        section: Section,
+        count: usize,
+        open: bool,
+    },
+    /// A remote's own collapsible heading, above its branch list.
+    RemoteGroup {
+        name: String,
+        /// Shown as the header's tooltip, for a remote that was never fetched.
+        fetch_url: Option<String>,
+        count: usize,
+        collapsed: bool,
+    },
+    LocalBranch {
+        name: String,
+        /// Position in the section's natural order, for the element id.
+        index: usize,
+        /// `↑2 ↓1`, `gone`, or nothing when level with the upstream.
+        upstream: Option<String>,
+    },
+    RemoteBranch {
+        name: String,
+        index: usize,
+        /// The local branch `origin/foo` stands for; `None` for `origin/HEAD`.
+        local_name: Option<String>,
+        /// Whether that local branch exists already.
+        existing: bool,
+    },
+    Tag {
+        name: String,
+        index: usize,
+    },
+    Stash {
+        /// `stash@{N}: message`, as the snapshot lists it.
+        name: String,
+        index: usize,
+    },
+    /// "no tags", "no branches fetched yet", ...
+    Placeholder {
+        text: &'static str,
+        place: PlaceholderPlace,
+    },
+}
+
+/// Where a placeholder belongs, which decides its indent and its key.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PlaceholderPlace {
+    Section(Section),
+    Remote(String),
+}
+
+impl PlaceholderPlace {
+    fn indent(&self) -> Pixels {
+        match self {
+            PlaceholderPlace::Section(_) => px(38.0),
+            PlaceholderPlace::Remote(_) => px(42.0),
+        }
+    }
+}
+
+/// Identity of a list position that survives a snapshot refresh, so the row
+/// under the viewport can be found again by what it is rather than by index.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+enum ItemKey {
+    Section(Section),
+    RemoteGroup(String),
+    LocalBranch(String),
+    RemoteBranch(String),
+    Tag(String),
+    Stash(usize),
+    SectionEmpty(Section),
+    RemoteEmpty(String),
+}
+
+impl SidebarItem {
+    fn key(&self) -> ItemKey {
+        match self {
+            SidebarItem::SectionHeader { section, .. } => ItemKey::Section(*section),
+            SidebarItem::RemoteGroup { name, .. } => ItemKey::RemoteGroup(name.clone()),
+            SidebarItem::LocalBranch { name, .. } => ItemKey::LocalBranch(name.clone()),
+            SidebarItem::RemoteBranch { name, .. } => ItemKey::RemoteBranch(name.clone()),
+            SidebarItem::Tag { name, .. } => ItemKey::Tag(name.clone()),
+            SidebarItem::Stash { index, .. } => ItemKey::Stash(*index),
+            SidebarItem::Placeholder { place, .. } => match place {
+                PlaceholderPlace::Section(section) => ItemKey::SectionEmpty(*section),
+                PlaceholderPlace::Remote(name) => ItemKey::RemoteEmpty(name.clone()),
+            },
+        }
+    }
+
+    /// Whether this item is the row `key` names. Compared without building a
+    /// key, so finding the scroll anchor does not allocate per entry.
+    fn is(&self, key: &ItemKey) -> bool {
+        match (self, key) {
+            (SidebarItem::SectionHeader { section, .. }, ItemKey::Section(key)) => section == key,
+            (SidebarItem::RemoteGroup { name, .. }, ItemKey::RemoteGroup(key)) => name == key,
+            (SidebarItem::LocalBranch { name, .. }, ItemKey::LocalBranch(key)) => name == key,
+            (SidebarItem::RemoteBranch { name, .. }, ItemKey::RemoteBranch(key)) => name == key,
+            (SidebarItem::Tag { name, .. }, ItemKey::Tag(key)) => name == key,
+            (SidebarItem::Stash { index, .. }, ItemKey::Stash(key)) => index == key,
+            (SidebarItem::Placeholder { place, .. }, ItemKey::SectionEmpty(key)) => {
+                matches!(place, PlaceholderPlace::Section(section) if section == key)
+            }
+            (SidebarItem::Placeholder { place, .. }, ItemKey::RemoteEmpty(key)) => {
+                matches!(place, PlaceholderPlace::Remote(name) if name == key)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// The flattened list, rebuilt only when its inputs change, so a frame costs
+/// the rows on screen rather than the size of the repository.
+#[derive(Default)]
+struct ItemCache {
+    key: Option<ItemsKey>,
+    items: Rc<Vec<SidebarItem>>,
+}
+
+#[derive(PartialEq, Eq)]
+struct ItemsKey {
+    /// Snapshot generation; every publish bumps it.
+    revision: u64,
+    /// Bumped when a section or a remote group folds.
+    local: u64,
+    show_remote_branches: bool,
+    show_tags: bool,
+    show_stashes: bool,
+}
+
+/// The list drawn last frame, so a refresh can put the same row back under
+/// the viewport instead of the same index.
+#[derive(Default)]
+struct ScrollAnchor {
+    items: Option<Rc<Vec<SidebarItem>>>,
+}
+
 /// Everything the branch UI owns between frames.
 #[derive(Default)]
 pub(crate) struct Branches {
@@ -212,6 +365,12 @@ pub(crate) struct Branches {
     /// offers the forced delete through [`crate::ui::confirm`], which needs a
     /// window the session event does not have.
     force_delete: Option<String>,
+    /// The section list's scroll position, shared by the list and its scrollbar.
+    scroll: UniformListScrollHandle,
+    cache: RefCell<ItemCache>,
+    /// Bumped by every fold, so the cached list cannot outlive a toggle.
+    local_revision: u64,
+    anchor: RefCell<ScrollAnchor>,
 }
 
 struct Running {
@@ -247,12 +406,13 @@ pub(crate) struct CreateRequest {
 }
 
 impl Branches {
-    /// Renders the scrollable ref sections and, when one is open, the dialog on
-    /// top of the window.
+    /// Renders the virtualised ref sections and, when one is open, the dialog
+    /// on top of the window.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render(
         &self,
-        data: &SidebarData,
+        data: SidebarData,
+        revision: u64,
         upstreams: &HashMap<String, UpstreamInfo>,
         remotes: &[RemoteInfo],
         enabled: bool,
@@ -260,515 +420,240 @@ impl Branches {
         colors: &Colors,
         entity: &Entity<RepoView>,
     ) -> AnyElement {
-        let head = data.head_branch.as_deref();
+        let head = data.head_branch.clone();
+        let items = self.items(data, revision, upstreams, remotes, &colors.design);
+        self.restore_scroll(&items);
+
+        let reveal = self.reveal.clone();
+        let list_colors = colors.clone();
+        let list_entity = entity.clone();
+        let list = uniform_list("sidebar-refs", items.len(), move |range, _window, _cx| {
+            range
+                .map(|index| {
+                    item_element(
+                        &items[index],
+                        head.as_deref(),
+                        &reveal,
+                        enabled,
+                        busy,
+                        &list_colors,
+                        list_entity.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        })
+        .track_scroll(&self.scroll)
+        .with_scrollbar(&self.scroll)
+        .flex_1()
+        .min_h_0();
 
         let mut column = div()
-            .id("branch-sections")
             .flex()
             .flex_col()
             .flex_1()
             .min_h_0()
-            .overflow_y_scroll();
-
-        let mut remote_row_index = 0;
-        for section in Section::ALL {
-            if section.hidden(&colors.design) {
-                continue;
-            }
-            let entries: Vec<&str> = match section {
-                Section::Local => natural_sorted(&data.local),
-                // The remote list is grouped first; each group's branches are
-                // ordered in `remote_groups`.
-                Section::Remote => data.remote.iter().map(String::as_str).collect(),
-                Section::Tags => natural_sorted(&data.tags),
-                // Stash rows keep `stash@{N}` order: the index is the identity.
-                Section::Stashes => data.stashes.iter().map(String::as_str).collect(),
-            };
-            column =
-                column.child(self.section_header(section, entries.len(), busy, colors, entity));
-
-            if self.collapsed[section.index()] {
-                continue;
-            }
-
-            // Remote branches are grouped under their remote, which is the
-            // first path component of `origin/main`. A configured remote is
-            // listed even before anything was fetched from it.
-            if section == Section::Remote {
-                if entries.is_empty() && remotes.is_empty() {
-                    column = column.child(empty_row(section.empty_label(), colors));
-                    continue;
-                }
-                for group in remote_groups(&data.remote, remotes) {
-                    column = column.child(self.remote_group_header(&group, colors, entity));
-                    if self
-                        .remote_groups
-                        .get(&group.name)
-                        .copied()
-                        .unwrap_or(false)
-                    {
-                        continue;
-                    }
-                    if group.branches.is_empty() {
-                        column = column.child(remote_empty_row("no branches fetched yet", colors));
-                        continue;
-                    }
-                    for name in &group.branches {
-                        column = column.child(self.remote_row(
-                            name,
-                            remote_row_index,
-                            &data.local,
-                            enabled,
-                            busy,
-                            colors,
-                            entity,
-                        ));
-                        remote_row_index += 1;
-                    }
-                }
-                continue;
-            }
-
-            if entries.is_empty() {
-                column = column.child(empty_row(section.empty_label(), colors));
-                continue;
-            }
-
-            for (index, name) in entries.iter().enumerate() {
-                let name = *name;
-                column = column.child(match section {
-                    Section::Local => self.local_row(
-                        name,
-                        index,
-                        head == Some(name),
-                        upstreams.get(name),
-                        enabled,
-                        busy,
-                        colors,
-                        entity,
-                    ),
-                    Section::Remote => unreachable!("remote rows are grouped above"),
-                    Section::Tags => {
-                        let tag = name.to_owned();
-                        let entity = entity.clone();
-                        let menu_entity = entity.clone();
-                        let menu_tag = tag.clone();
-                        let row_element = row_with_icon(
-                            ("tag", index),
-                            Some(style::glyph::TAG),
-                            name,
-                            crate::ui::RowState::NORMAL
-                                .revealed(self.reveal.is_ref(RefKind::Tag, name)),
-                            colors,
-                        )
-                        .cursor_pointer()
-                        .on_click(move |_, window, cx| {
-                            entity.update(cx, |view, cx| {
-                                view.reveal_ref(RefKind::Tag, &tag, window, cx)
-                            });
-                        });
-                        if !enabled {
-                            row_element.into_any_element()
-                        } else {
-                            row_element
-                                .context_menu(move |menu, _window, _cx| {
-                                    menu.item(
-                                        PopupMenuItem::new("Show only this tag")
-                                            .disabled(busy)
-                                            .on_click({
-                                                let entity = menu_entity.clone();
-                                                let tag = menu_tag.clone();
-                                                move |_: &ClickEvent,
-                                                      _window: &mut Window,
-                                                      cx: &mut App| {
-                                                    let tag = tag.clone();
-                                                    entity.update(cx, |view, cx| {
-                                                        view.show_only_ref(
-                                                            RefKind::Tag,
-                                                            &tag,
-                                                            cx,
-                                                        )
-                                                    });
-                                                }
-                                            }),
-                                    )
-                                })
-                                .into_any_element()
-                        }
-                    }
-                    // Stash rows are listed in stash@{N} order. The row and its
-                    // menu live in `stash`, which can read the entry's age and
-                    // source branch from the snapshot.
-                    Section::Stashes => crate::stash::sidebar_row(
-                        name,
-                        index,
-                        self.reveal.is_stash(index),
-                        enabled,
-                        busy,
-                        colors,
-                        entity.clone(),
-                    ),
-                });
-            }
-        }
-
+            .min_w_0()
+            .child(list);
         if let Some(dialog) = self.dialog_overlay(colors, entity) {
             column = column.child(dialog);
         }
         column.into_any_element()
     }
 
-    fn section_header(
+    /// The flattened list, rebuilt only when the snapshot or a fold changes.
+    ///
+    /// `revision` is the snapshot's generation, which every publish bumps; that
+    /// is what lets the cached strings outlive the frame they were copied in.
+    fn items(
         &self,
-        section: Section,
-        count: usize,
-        busy: bool,
-        colors: &Colors,
-        entity: &Entity<RepoView>,
-    ) -> AnyElement {
-        let open = !self.collapsed[section.index()];
-        let index = section.index();
-        let entity = entity.clone();
-        let mut header =
-            crate::ui::section_header(("branch-section", index), section.title(), &colors.design)
-                .count(count)
-                .disclosure(open)
-                .icon(style::glyph_icon(
-                    section.icon(),
-                    14.0,
-                    colors.muted_foreground,
-                ))
-                .on_click(move |_, cx| {
-                    entity.update(cx, |view, cx| {
-                        view.branches.toggle(index);
-                        cx.notify();
-                    });
-                });
-        if busy && section == Section::Local {
-            header = header.trailing(
-                div()
-                    .flex_none()
-                    .text_size(px(9.0))
-                    .font_weight(FontWeight::NORMAL)
-                    .child("working…"),
-            );
+        data: SidebarData,
+        revision: u64,
+        upstreams: &HashMap<String, UpstreamInfo>,
+        remotes: &[RemoteInfo],
+        design: &Design,
+    ) -> Rc<Vec<SidebarItem>> {
+        let key = ItemsKey {
+            revision,
+            local: self.local_revision,
+            show_remote_branches: design.show_remote_branches,
+            show_tags: design.show_tags,
+            show_stashes: design.show_stashes,
+        };
+        let mut cache = self.cache.borrow_mut();
+        if cache.key.as_ref() == Some(&key) {
+            return cache.items.clone();
         }
-        header.into_any_element()
+        let items = Rc::new(self.flatten(data, upstreams, remotes, design));
+        cache.key = Some(key);
+        cache.items = items.clone();
+        items
     }
 
-    /// A remote's own collapsing header, above its branch list.
-    fn remote_group_header(
+    /// Every visible line of the section list, in drawing order: a heading for
+    /// each shown section, then its rows or one placeholder. A collapsed
+    /// section contributes its heading alone.
+    fn flatten(
         &self,
-        group: &RemoteGroup,
-        colors: &Colors,
-        entity: &Entity<RepoView>,
-    ) -> AnyElement {
-        let collapsed = self
-            .remote_groups
-            .get(&group.name)
-            .copied()
-            .unwrap_or(false);
-        let click_group = group.name.clone();
-        let entity = entity.clone();
-        let mut header = crate::ui::section_header(
-            format!("remote-group-{}", group.name),
-            group.name.clone(),
-            &colors.design,
-        )
-        .disclosure(!collapsed)
-        .icon(style::glyph_icon(
-            style::glyph::CLOUD,
-            14.0,
-            colors.sidebar_foreground,
-        ))
-        .text_size(px(colors.design.small()))
-        .text_color(colors.sidebar_foreground)
-        .h(px(28.0))
-        .on_click(move |_, cx| {
-            let group = click_group.clone();
-            entity.update(cx, |view, cx| {
-                view.branches.toggle_remote_group(group);
-                cx.notify();
-            });
-        });
-        if !group.branches.is_empty() {
-            header = header.count(group.branches.len());
-        }
-        match &group.fetch_url {
-            Some(url) => {
-                let url = url.clone();
-                // The header's own elements consume the click, so the tooltip
-                // goes on a wrapper that is as wide as the row.
-                div()
-                    .id(format!("remote-group-url-{}", group.name))
-                    .w_full()
-                    .tooltip(move |window, cx| {
-                        gpui_component::tooltip::Tooltip::new(url.clone()).build(window, cx)
-                    })
-                    .child(header)
-                    .into_any_element()
+        data: SidebarData,
+        upstreams: &HashMap<String, UpstreamInfo>,
+        remotes: &[RemoteInfo],
+        design: &Design,
+    ) -> Vec<SidebarItem> {
+        let SidebarData {
+            local,
+            remote,
+            mut tags,
+            mut stashes,
+            ..
+        } = data;
+        let mut items =
+            Vec::with_capacity(local.len() + remote.len() + tags.len() + stashes.len() + 8);
+        let mut remote_row_index = 0;
+
+        for section in Section::ALL {
+            if section.hidden(design) {
+                continue;
             }
-            None => header.into_any_element(),
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn local_row(
-        &self,
-        name: &str,
-        index: usize,
-        active: bool,
-        upstream: Option<&UpstreamInfo>,
-        enabled: bool,
-        busy: bool,
-        colors: &Colors,
-        entity: &Entity<RepoView>,
-    ) -> AnyElement {
-        let mut row = row_with_icon(
-            ("local-branch", index),
-            Some(style::glyph::BRANCH),
-            name,
-            crate::ui::RowState::NORMAL
-                .head(active)
-                .revealed(self.reveal.is_ref(RefKind::LocalBranch, name)),
-            colors,
-        )
-        .cursor_pointer();
-        if let Some(label) = upstream.and_then(upstream_label) {
-            row = row.child(
-                div()
-                    .flex_none()
-                    .text_size(px(colors.design.tiny()))
-                    .text_color(colors.muted_foreground)
-                    .child(label),
-            );
-        }
-
-        if !enabled {
-            return row.into_any_element();
-        }
-
-        // One click shows the branch in the graph; a second one checks it out.
-        let click_entity = entity.clone();
-        let branch = name.to_owned();
-        row = row.on_click(move |event, window, cx| {
-            let branch = branch.clone();
-            click_entity.update(cx, |view, cx| {
-                if event.click_count() < 2 {
-                    view.reveal_ref(RefKind::LocalBranch, &branch, window, cx);
-                } else if !busy && !active {
-                    let label = format!("check out {branch}");
-                    view.run_operation(Operation::Checkout { branch }, label, window, cx);
-                }
+            let count = match section {
+                Section::Local => local.len(),
+                Section::Remote => remote.len(),
+                Section::Tags => tags.len(),
+                Section::Stashes => stashes.len(),
+            };
+            let open = !self.collapsed[section.index()];
+            items.push(SidebarItem::SectionHeader {
+                section,
+                count,
+                open,
             });
-        });
+            if !open {
+                continue;
+            }
 
-        let entity_menu = entity.clone();
-        let branch = name.to_owned();
-        row.context_menu(move |menu, _window, _cx| {
-            menu.item(
-                PopupMenuItem::new("Checkout")
-                    .disabled(busy || active)
-                    .on_click({
-                        let entity = entity_menu.clone();
-                        let branch = branch.clone();
-                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                            let branch = branch.clone();
-                            entity.update(cx, |view, cx| {
-                                let label = format!("check out {branch}");
-                                view.run_operation(
-                                    Operation::Checkout { branch },
-                                    label,
-                                    window,
-                                    cx,
-                                );
-                            });
-                        }
-                    }),
-            )
-            .item(PopupMenuItem::new("Show only this branch").on_click({
-                let entity = entity_menu.clone();
-                let branch = branch.clone();
-                move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
-                    let branch = branch.clone();
-                    entity.update(cx, |view, cx| {
-                        view.show_only_ref(RefKind::LocalBranch, &branch, cx)
-                    });
+            match section {
+                Section::Local => {
+                    if local.is_empty() {
+                        items.push(placeholder(section));
+                        continue;
+                    }
+                    for (index, name) in natural_sorted(&local).into_iter().enumerate() {
+                        items.push(SidebarItem::LocalBranch {
+                            name: name.to_owned(),
+                            index,
+                            upstream: upstreams.get(name).and_then(upstream_label),
+                        });
+                    }
                 }
-            }))
-            .item(
-                PopupMenuItem::new("Merge into current branch")
-                    .disabled(busy || active)
-                    .on_click({
-                        let entity = entity_menu.clone();
-                        let branch = branch.clone();
-                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                            let branch = branch.clone();
-                            entity.update(cx, |view, cx| {
-                                let label = format!("merge {branch} into the current branch");
-                                view.run_operation(
-                                    Operation::Merge {
-                                        branch,
-                                        no_ff: false,
-                                    },
-                                    label,
-                                    window,
-                                    cx,
-                                );
-                            });
+                Section::Tags => {
+                    if tags.is_empty() {
+                        items.push(placeholder(section));
+                        continue;
+                    }
+                    // Tags are the largest section of a real repository, so
+                    // they move their strings instead of copying them.
+                    for (index, name) in natural_sorted_owned(std::mem::take(&mut tags))
+                        .into_iter()
+                        .enumerate()
+                    {
+                        items.push(SidebarItem::Tag { name, index });
+                    }
+                }
+                // Stash rows keep `stash@{N}` order: the index is the identity.
+                Section::Stashes => {
+                    if stashes.is_empty() {
+                        items.push(placeholder(section));
+                        continue;
+                    }
+                    for (index, name) in std::mem::take(&mut stashes).into_iter().enumerate() {
+                        items.push(SidebarItem::Stash { name, index });
+                    }
+                }
+                // Remote branches are grouped under their remote, which is the
+                // first path component of `origin/main`. A configured remote is
+                // listed even before anything was fetched from it.
+                Section::Remote => {
+                    if remote.is_empty() && remotes.is_empty() {
+                        items.push(placeholder(section));
+                        continue;
+                    }
+                    for group in remote_groups(&remote, remotes) {
+                        let collapsed = self
+                            .remote_groups
+                            .get(&group.name)
+                            .copied()
+                            .unwrap_or(false);
+                        items.push(SidebarItem::RemoteGroup {
+                            name: group.name.clone(),
+                            fetch_url: group.fetch_url.clone(),
+                            count: group.branches.len(),
+                            collapsed,
+                        });
+                        if collapsed {
+                            continue;
                         }
-                    }),
-            )
-            .item(
-                PopupMenuItem::new("Create branch from here…")
-                    .disabled(busy)
-                    .on_click({
-                        let entity = entity_menu.clone();
-                        let point = branch.clone();
-                        let from = format!("from {branch}");
-                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                            let point = point.clone();
-                            let from = from.clone();
-                            entity.update(cx, |view, cx| {
-                                view.open_create_dialog(Some(point), from, window, cx);
+                        if group.branches.is_empty() {
+                            items.push(SidebarItem::Placeholder {
+                                text: "no branches fetched yet",
+                                place: PlaceholderPlace::Remote(group.name.clone()),
                             });
+                            continue;
                         }
-                    }),
-            )
-            .separator()
-            .item(
-                PopupMenuItem::new("Delete…")
-                    .disabled(busy || active)
-                    .on_click({
-                        let entity = entity_menu.clone();
-                        let branch = branch.clone();
-                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                            let branch = branch.clone();
-                            entity.update(cx, |view, cx| {
-                                view.confirm_delete_branch(branch, window, cx);
+                        for name in group.branches {
+                            let local_name = local_name_for_remote(&name).map(str::to_owned);
+                            let existing = local_name.as_deref().is_some_and(|local_name| {
+                                local.iter().any(|branch| branch == local_name)
                             });
+                            items.push(SidebarItem::RemoteBranch {
+                                name,
+                                index: remote_row_index,
+                                local_name,
+                                existing,
+                            });
+                            remote_row_index += 1;
                         }
-                    }),
-            )
-        })
-        .into_any_element()
+                    }
+                }
+            }
+        }
+        items
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn remote_row(
-        &self,
-        name: &str,
-        index: usize,
-        local: &[String],
-        enabled: bool,
-        busy: bool,
-        colors: &Colors,
-        entity: &Entity<RepoView>,
-    ) -> AnyElement {
-        let label = local_name_for_remote(name).unwrap_or(name);
-        let row_element = row(
-            ("remote-branch", index),
-            label,
-            crate::ui::RowState::NORMAL.revealed(self.reveal.is_ref(RefKind::RemoteBranch, name)),
-            colors,
-        )
-        .pl(px(42.0));
-        let Some(local_name) = local_name_for_remote(name).map(str::to_owned) else {
-            return row_element.into_any_element();
+    /// Puts the row that was at the top of the viewport back where it was when
+    /// a refresh inserts or removes entries above it. The row is remembered by
+    /// its key, not its index, so adding a tag above the viewport does not
+    /// scroll the list by a row.
+    fn restore_scroll(&self, items: &Rc<Vec<SidebarItem>>) {
+        let mut anchor = self.anchor.borrow_mut();
+        let Some(previous) = anchor.items.replace(items.clone()) else {
+            return;
         };
-        if !enabled {
-            return row_element.into_any_element();
+        // Nothing was rebuilt, so the index and the identity agree already.
+        if Rc::ptr_eq(&previous, items) || previous.is_empty() {
+            return;
         }
 
-        // Double-clicking `origin/foo` switches to `foo` when it exists and
-        // creates it from the remote ref otherwise.
-        let existing = local.iter().any(|branch| branch == &local_name);
-        let row_element = {
-            let click_entity = entity.clone();
-            let remote = name.to_owned();
-            let target = local_name.clone();
-            row_element
-                .cursor_pointer()
-                .on_click(move |event, window, cx| {
-                    let remote = remote.clone();
-                    let target = target.clone();
-                    click_entity.update(cx, |view, cx| {
-                        if event.click_count() < 2 {
-                            view.reveal_ref(RefKind::RemoteBranch, &remote, window, cx);
-                        } else if !busy {
-                            checkout_remote(view, &remote, &target, existing, window, cx)
-                        }
-                    });
-                })
-        };
+        let base = self.scroll.0.borrow().base_handle.clone();
+        let height = px(ITEM_HEIGHT);
+        let scroll_top = -base.offset().y;
+        if scroll_top <= Pixels::ZERO {
+            return;
+        }
 
-        let entity_menu = entity.clone();
-        let remote = name.to_owned();
-        row_element
-            .context_menu(move |menu, _window, _cx| {
-                menu.item(PopupMenuItem::new("Checkout").disabled(busy).on_click({
-                    let entity = entity_menu.clone();
-                    let remote = remote.clone();
-                    let target = local_name.clone();
-                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                        let remote = remote.clone();
-                        let target = target.clone();
-                        entity.update(cx, |view, cx| {
-                            checkout_remote(view, &remote, &target, existing, window, cx)
-                        });
-                    }
-                }))
-                .item(PopupMenuItem::new("Show only this branch").on_click({
-                    let entity = entity_menu.clone();
-                    let remote = remote.clone();
-                    move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
-                        let remote = remote.clone();
-                        entity.update(cx, |view, cx| {
-                            view.show_only_ref(RefKind::RemoteBranch, &remote, cx)
-                        });
-                    }
-                }))
-                .item(
-                    PopupMenuItem::new("Merge into current branch")
-                        .disabled(busy)
-                        .on_click({
-                            let entity = entity_menu.clone();
-                            let remote = remote.clone();
-                            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                                let remote = remote.clone();
-                                entity.update(cx, |view, cx| {
-                                    let label = format!("merge {remote} into the current branch");
-                                    view.run_operation(
-                                        Operation::Merge {
-                                            branch: remote,
-                                            no_ff: false,
-                                        },
-                                        label,
-                                        window,
-                                        cx,
-                                    );
-                                });
-                            }
-                        }),
-                )
-                .item(
-                    PopupMenuItem::new("Create branch from here…")
-                        .disabled(busy)
-                        .on_click({
-                            let entity = entity_menu.clone();
-                            let remote = remote.clone();
-                            let from = format!("from {remote}");
-                            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                                let remote = remote.clone();
-                                let from = from.clone();
-                                entity.update(cx, |view, cx| {
-                                    view.open_create_dialog(Some(remote), from, window, cx);
-                                });
-                            }
-                        }),
-                )
-            })
-            .into_any_element()
+        let mut index = (scroll_top / height).floor() as usize;
+        let mut within = scroll_top - height * index as f32;
+        while let Some(key) = previous.get(index).map(SidebarItem::key) {
+            if let Some(new_index) = items.iter().position(|item| item.is(&key)) {
+                if new_index != index {
+                    let offset = base.offset();
+                    base.set_offset(point(offset.x, -(height * new_index as f32 + within)));
+                }
+                return;
+            }
+            // The anchored row left with a section that collapsed; the next
+            // surviving row down is the closest place to stay.
+            index += 1;
+            within = Pixels::ZERO;
+        }
     }
 
     fn dialog_overlay(&self, colors: &Colors, entity: &Entity<RepoView>) -> Option<AnyElement> {
@@ -859,12 +744,14 @@ impl Branches {
     pub(crate) fn toggle(&mut self, index: usize) {
         if let Some(collapsed) = self.collapsed.get_mut(index) {
             *collapsed = !*collapsed;
+            self.local_revision = self.local_revision.wrapping_add(1);
         }
     }
 
     pub(crate) fn toggle_remote_group(&mut self, group: String) {
         let collapsed = self.remote_groups.entry(group).or_insert(false);
         *collapsed = !*collapsed;
+        self.local_revision = self.local_revision.wrapping_add(1);
     }
 
     pub(crate) fn set_viewport(&mut self, viewport: Size<Pixels>) {
@@ -928,6 +815,496 @@ impl Branches {
             Err(message) => Err(message.to_owned()),
         })
     }
+}
+
+/// The line a section shows when it holds no entries.
+fn placeholder(section: Section) -> SidebarItem {
+    SidebarItem::Placeholder {
+        text: section.empty_label(),
+        place: PlaceholderPlace::Section(section),
+    }
+}
+
+/// The names in natural order, taking the list so the caller can move each
+/// string straight into a list item.
+fn natural_sorted_owned(mut names: Vec<String>) -> Vec<String> {
+    names.sort_by(|a, b| natural_cmp(a, b));
+    names
+}
+
+/// Builds the element for one visible list item.
+#[allow(clippy::too_many_arguments)]
+fn item_element(
+    item: &SidebarItem,
+    head: Option<&str>,
+    reveal: &RevealState,
+    enabled: bool,
+    busy: bool,
+    colors: &Colors,
+    entity: Entity<RepoView>,
+) -> AnyElement {
+    match item {
+        SidebarItem::SectionHeader {
+            section,
+            count,
+            open,
+        } => section_header(*section, *count, *open, busy, colors, entity),
+        SidebarItem::RemoteGroup {
+            name,
+            fetch_url,
+            count,
+            collapsed,
+        } => remote_group_header(
+            name,
+            fetch_url.as_deref(),
+            *count,
+            *collapsed,
+            colors,
+            entity,
+        ),
+        SidebarItem::LocalBranch {
+            name,
+            index,
+            upstream,
+        } => local_row(
+            name,
+            *index,
+            head == Some(name.as_str()),
+            upstream.as_deref(),
+            reveal.is_ref(RefKind::LocalBranch, name),
+            enabled,
+            busy,
+            colors,
+            entity,
+        ),
+        SidebarItem::RemoteBranch {
+            name,
+            index,
+            local_name,
+            existing,
+        } => remote_row(
+            name,
+            *index,
+            local_name.as_deref(),
+            *existing,
+            reveal.is_ref(RefKind::RemoteBranch, name),
+            enabled,
+            busy,
+            colors,
+            entity,
+        ),
+        SidebarItem::Tag { name, index } => tag_row(
+            name,
+            *index,
+            reveal.is_ref(RefKind::Tag, name),
+            enabled,
+            busy,
+            colors,
+            entity,
+        ),
+        // The stash row and its menu live in `stash`, which can read the
+        // entry's age and source branch from the snapshot.
+        SidebarItem::Stash { name, index } => crate::stash::sidebar_row(
+            name,
+            *index,
+            reveal.is_stash(*index),
+            enabled,
+            busy,
+            colors,
+            entity,
+        ),
+        SidebarItem::Placeholder { text, place } => {
+            empty_row_at(text, place.indent(), colors).into_any_element()
+        }
+    }
+}
+
+/// A section's heading: the fold control and the number of entries it holds.
+fn section_header(
+    section: Section,
+    count: usize,
+    open: bool,
+    busy: bool,
+    colors: &Colors,
+    entity: Entity<RepoView>,
+) -> AnyElement {
+    let index = section.index();
+    let mut header =
+        crate::ui::section_header(("branch-section", index), section.title(), &colors.design)
+            .count(count)
+            .disclosure(open)
+            .icon(style::glyph_icon(
+                section.icon(),
+                14.0,
+                colors.muted_foreground,
+            ))
+            // A list item is only as tall as the heading measured, so every
+            // section heading must match a row's height.
+            .h(px(ITEM_HEIGHT))
+            .on_click(move |_, cx| {
+                entity.update(cx, |view, cx| {
+                    view.branches.toggle(index);
+                    cx.notify();
+                });
+            });
+    if busy && section == Section::Local {
+        header = header.trailing(
+            div()
+                .flex_none()
+                .text_size(px(9.0))
+                .font_weight(FontWeight::NORMAL)
+                .child("working…"),
+        );
+    }
+    header.into_any_element()
+}
+
+/// A remote's own collapsing header, above its branch list.
+fn remote_group_header(
+    name: &str,
+    fetch_url: Option<&str>,
+    count: usize,
+    collapsed: bool,
+    colors: &Colors,
+    entity: Entity<RepoView>,
+) -> AnyElement {
+    let click_group = name.to_owned();
+    let mut header =
+        crate::ui::section_header(format!("remote-group-{name}"), name, &colors.design)
+            .disclosure(!collapsed)
+            .icon(style::glyph_icon(
+                style::glyph::CLOUD,
+                14.0,
+                colors.sidebar_foreground,
+            ))
+            .text_size(px(colors.design.small()))
+            .text_color(colors.sidebar_foreground)
+            .h(px(ITEM_HEIGHT))
+            .on_click(move |_, cx| {
+                let group = click_group.clone();
+                entity.update(cx, |view, cx| {
+                    view.branches.toggle_remote_group(group);
+                    cx.notify();
+                });
+            });
+    if count > 0 {
+        header = header.count(count);
+    }
+    match fetch_url {
+        Some(url) => {
+            let url = url.to_owned();
+            // The header's own elements consume the click, so the tooltip
+            // goes on a wrapper that is as wide as the row.
+            div()
+                .id(format!("remote-group-url-{name}"))
+                .w_full()
+                .tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(url.clone()).build(window, cx)
+                })
+                .child(header)
+                .into_any_element()
+        }
+        None => header.into_any_element(),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn local_row(
+    name: &str,
+    index: usize,
+    active: bool,
+    upstream: Option<&str>,
+    revealed: bool,
+    enabled: bool,
+    busy: bool,
+    colors: &Colors,
+    entity: Entity<RepoView>,
+) -> AnyElement {
+    let mut row = row_with_icon(
+        ("local-branch", index),
+        Some(style::glyph::BRANCH),
+        name,
+        crate::ui::RowState::NORMAL.head(active).revealed(revealed),
+        colors,
+    )
+    .cursor_pointer();
+    if let Some(label) = upstream {
+        row = row.child(
+            div()
+                .flex_none()
+                .text_size(px(colors.design.tiny()))
+                .text_color(colors.muted_foreground)
+                .child(label.to_owned()),
+        );
+    }
+
+    if !enabled {
+        return row.into_any_element();
+    }
+
+    // One click shows the branch in the graph; a second one checks it out.
+    let click_entity = entity.clone();
+    let branch = name.to_owned();
+    row = row.on_click(move |event, window, cx| {
+        let branch = branch.clone();
+        click_entity.update(cx, |view, cx| {
+            if event.click_count() < 2 {
+                view.reveal_ref(RefKind::LocalBranch, &branch, window, cx);
+            } else if !busy && !active {
+                let label = format!("check out {branch}");
+                view.run_operation(Operation::Checkout { branch }, label, window, cx);
+            }
+        });
+    });
+
+    let entity_menu = entity.clone();
+    let branch = name.to_owned();
+    row.context_menu(move |menu, _window, _cx| {
+        menu.item(
+            PopupMenuItem::new("Checkout")
+                .disabled(busy || active)
+                .on_click({
+                    let entity = entity_menu.clone();
+                    let branch = branch.clone();
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        let branch = branch.clone();
+                        entity.update(cx, |view, cx| {
+                            let label = format!("check out {branch}");
+                            view.run_operation(Operation::Checkout { branch }, label, window, cx);
+                        });
+                    }
+                }),
+        )
+        .item(PopupMenuItem::new("Show only this branch").on_click({
+            let entity = entity_menu.clone();
+            let branch = branch.clone();
+            move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                let branch = branch.clone();
+                entity.update(cx, |view, cx| {
+                    view.show_only_ref(RefKind::LocalBranch, &branch, cx)
+                });
+            }
+        }))
+        .item(
+            PopupMenuItem::new("Merge into current branch")
+                .disabled(busy || active)
+                .on_click({
+                    let entity = entity_menu.clone();
+                    let branch = branch.clone();
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        let branch = branch.clone();
+                        entity.update(cx, |view, cx| {
+                            let label = format!("merge {branch} into the current branch");
+                            view.run_operation(
+                                Operation::Merge {
+                                    branch,
+                                    no_ff: false,
+                                },
+                                label,
+                                window,
+                                cx,
+                            );
+                        });
+                    }
+                }),
+        )
+        .item(
+            PopupMenuItem::new("Create branch from here…")
+                .disabled(busy)
+                .on_click({
+                    let entity = entity_menu.clone();
+                    let point = branch.clone();
+                    let from = format!("from {branch}");
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        let point = point.clone();
+                        let from = from.clone();
+                        entity.update(cx, |view, cx| {
+                            view.open_create_dialog(Some(point), from, window, cx);
+                        });
+                    }
+                }),
+        )
+        .separator()
+        .item(
+            PopupMenuItem::new("Delete…")
+                .disabled(busy || active)
+                .on_click({
+                    let entity = entity_menu.clone();
+                    let branch = branch.clone();
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        let branch = branch.clone();
+                        entity.update(cx, |view, cx| {
+                            view.confirm_delete_branch(branch, window, cx);
+                        });
+                    }
+                }),
+        )
+    })
+    .into_any_element()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn remote_row(
+    name: &str,
+    index: usize,
+    local_name: Option<&str>,
+    existing: bool,
+    revealed: bool,
+    enabled: bool,
+    busy: bool,
+    colors: &Colors,
+    entity: Entity<RepoView>,
+) -> AnyElement {
+    let label = local_name.unwrap_or(name);
+    let row_element = row(
+        ("remote-branch", index),
+        label,
+        crate::ui::RowState::NORMAL.revealed(revealed),
+        colors,
+    )
+    .pl(px(42.0));
+    let Some(local_name) = local_name.map(str::to_owned) else {
+        return row_element.into_any_element();
+    };
+    if !enabled {
+        return row_element.into_any_element();
+    }
+
+    // Double-clicking `origin/foo` switches to `foo` when it exists and
+    // creates it from the remote ref otherwise.
+    let row_element = {
+        let click_entity = entity.clone();
+        let remote = name.to_owned();
+        let target = local_name.clone();
+        row_element
+            .cursor_pointer()
+            .on_click(move |event, window, cx| {
+                let remote = remote.clone();
+                let target = target.clone();
+                click_entity.update(cx, |view, cx| {
+                    if event.click_count() < 2 {
+                        view.reveal_ref(RefKind::RemoteBranch, &remote, window, cx);
+                    } else if !busy {
+                        checkout_remote(view, &remote, &target, existing, window, cx)
+                    }
+                });
+            })
+    };
+
+    let entity_menu = entity.clone();
+    let remote = name.to_owned();
+    row_element
+        .context_menu(move |menu, _window, _cx| {
+            menu.item(PopupMenuItem::new("Checkout").disabled(busy).on_click({
+                let entity = entity_menu.clone();
+                let remote = remote.clone();
+                let target = local_name.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let remote = remote.clone();
+                    let target = target.clone();
+                    entity.update(cx, |view, cx| {
+                        checkout_remote(view, &remote, &target, existing, window, cx)
+                    });
+                }
+            }))
+            .item(PopupMenuItem::new("Show only this branch").on_click({
+                let entity = entity_menu.clone();
+                let remote = remote.clone();
+                move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                    let remote = remote.clone();
+                    entity.update(cx, |view, cx| {
+                        view.show_only_ref(RefKind::RemoteBranch, &remote, cx)
+                    });
+                }
+            }))
+            .item(
+                PopupMenuItem::new("Merge into current branch")
+                    .disabled(busy)
+                    .on_click({
+                        let entity = entity_menu.clone();
+                        let remote = remote.clone();
+                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                            let remote = remote.clone();
+                            entity.update(cx, |view, cx| {
+                                let label = format!("merge {remote} into the current branch");
+                                view.run_operation(
+                                    Operation::Merge {
+                                        branch: remote,
+                                        no_ff: false,
+                                    },
+                                    label,
+                                    window,
+                                    cx,
+                                );
+                            });
+                        }
+                    }),
+            )
+            .item(
+                PopupMenuItem::new("Create branch from here…")
+                    .disabled(busy)
+                    .on_click({
+                        let entity = entity_menu.clone();
+                        let remote = remote.clone();
+                        let from = format!("from {remote}");
+                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                            let remote = remote.clone();
+                            let from = from.clone();
+                            entity.update(cx, |view, cx| {
+                                view.open_create_dialog(Some(remote), from, window, cx);
+                            });
+                        }
+                    }),
+            )
+        })
+        .into_any_element()
+}
+
+fn tag_row(
+    name: &str,
+    index: usize,
+    revealed: bool,
+    enabled: bool,
+    busy: bool,
+    colors: &Colors,
+    entity: Entity<RepoView>,
+) -> AnyElement {
+    let tag = name.to_owned();
+    let menu_entity = entity.clone();
+    let menu_tag = tag.clone();
+    let row_element = row_with_icon(
+        ("tag", index),
+        Some(style::glyph::TAG),
+        name,
+        crate::ui::RowState::NORMAL.revealed(revealed),
+        colors,
+    )
+    .cursor_pointer()
+    .on_click(move |_, window, cx| {
+        entity.update(cx, |view, cx| {
+            view.reveal_ref(RefKind::Tag, &tag, window, cx)
+        });
+    });
+    if !enabled {
+        return row_element.into_any_element();
+    }
+    row_element
+        .context_menu(move |menu, _window, _cx| {
+            menu.item(
+                PopupMenuItem::new("Show only this tag")
+                    .disabled(busy)
+                    .on_click({
+                        let entity = menu_entity.clone();
+                        let tag = menu_tag.clone();
+                        move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                            let tag = tag.clone();
+                            entity
+                                .update(cx, |view, cx| view.show_only_ref(RefKind::Tag, &tag, cx));
+                        }
+                    }),
+            )
+        })
+        .into_any_element()
 }
 
 impl RepoView {
@@ -1021,7 +1398,7 @@ fn row_with_icon(
 ) -> Stateful<Div> {
     let name = strip_stash_prefix(name);
     let row = crate::ui::list_row(id, state, &colors.design)
-        .h(px(28.0))
+        .h(px(ITEM_HEIGHT))
         .rounded(px(7.0))
         .text_size(px(colors.design.small()))
         .text_color(colors.sidebar_foreground);
@@ -1161,21 +1538,14 @@ fn without_leading_zeros(run: &[u8]) -> &[u8] {
     &run[start..]
 }
 
-fn empty_row(text: &str, colors: &Colors) -> Div {
-    empty_row_at(text, px(38.0), colors)
-}
-
-/// The "nothing fetched yet" line under a remote's header, aligned with the
-/// branch rows instead of the section labels.
-fn remote_empty_row(text: &str, colors: &Colors) -> Div {
-    empty_row_at(text, px(42.0), colors)
-}
-
+/// A section's "nothing here" line. Its indent follows the place it belongs
+/// to: branch rows sit under the section labels, remote branches under a
+/// remote's own header.
 fn empty_row_at(text: &str, indent: Pixels, colors: &Colors) -> Div {
     div()
         .pl(indent)
         .pr_2()
-        .h(px(24.0))
+        .h(px(ITEM_HEIGHT))
         .flex()
         .items_center()
         .text_size(px(11.0))
@@ -1717,5 +2087,355 @@ mod tests {
         let just_below = format!("{}{}", "9".repeat(39), "8");
         assert_eq!(natural_cmp(&just_below, &forty_nines), Ordering::Less);
         assert_eq!(natural_cmp(&forty_nines, &forty_nines), Ordering::Equal);
+    }
+
+    fn sidebar_data(
+        local: &[&str],
+        remote: &[&str],
+        tags: &[&str],
+        stashes: &[&str],
+    ) -> SidebarData {
+        let owned = |names: &[&str]| names.iter().map(|name| (*name).to_owned()).collect();
+        SidebarData {
+            head_branch: Some("main".to_owned()),
+            working_tree: (0, 0),
+            local: owned(local),
+            remote: owned(remote),
+            tags: owned(tags),
+            stashes: owned(stashes),
+        }
+    }
+
+    fn flatten_with(
+        branches: &Branches,
+        data: SidebarData,
+        upstreams: &HashMap<String, UpstreamInfo>,
+        remotes: &[RemoteInfo],
+    ) -> Vec<SidebarItem> {
+        branches.flatten(data, upstreams, remotes, &Design::default())
+    }
+
+    fn flatten(branches: &Branches, data: SidebarData) -> Vec<SidebarItem> {
+        flatten_with(branches, data, &HashMap::new(), &[])
+    }
+
+    #[test]
+    fn sections_flatten_into_headings_rows_and_placeholders() {
+        let branches = Branches::default();
+        let mut upstreams = HashMap::new();
+        upstreams.insert("main".to_owned(), upstream("origin/main", 2, 1, false));
+
+        let items = flatten_with(
+            &branches,
+            sidebar_data(&["topic", "main"], &[], &[], &[]),
+            &upstreams,
+            &[],
+        );
+
+        assert_eq!(
+            items,
+            vec![
+                SidebarItem::SectionHeader {
+                    section: Section::Local,
+                    count: 2,
+                    open: true,
+                },
+                SidebarItem::LocalBranch {
+                    name: "main".into(),
+                    index: 0,
+                    upstream: Some("↑2 ↓1".into()),
+                },
+                SidebarItem::LocalBranch {
+                    name: "topic".into(),
+                    index: 1,
+                    upstream: None,
+                },
+                SidebarItem::SectionHeader {
+                    section: Section::Remote,
+                    count: 0,
+                    open: true,
+                },
+                SidebarItem::Placeholder {
+                    text: "no remotes",
+                    place: PlaceholderPlace::Section(Section::Remote),
+                },
+                SidebarItem::SectionHeader {
+                    section: Section::Tags,
+                    count: 0,
+                    open: true,
+                },
+                SidebarItem::Placeholder {
+                    text: "no tags",
+                    place: PlaceholderPlace::Section(Section::Tags),
+                },
+                SidebarItem::SectionHeader {
+                    section: Section::Stashes,
+                    count: 0,
+                    open: true,
+                },
+                SidebarItem::Placeholder {
+                    text: "no stashes",
+                    place: PlaceholderPlace::Section(Section::Stashes),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_collapsed_section_contributes_only_its_heading() {
+        let mut branches = Branches::default();
+        branches.toggle(Section::Tags.index());
+
+        let items = flatten(
+            &branches,
+            sidebar_data(&["main"], &[], &["v1", "v2"], &["stash@{0}: wip"]),
+        );
+
+        assert!(items.contains(&SidebarItem::SectionHeader {
+            section: Section::Tags,
+            count: 2,
+            open: false,
+        }));
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item, SidebarItem::Tag { .. })),
+            "a collapsed section draws no rows"
+        );
+        assert!(
+            !items
+                .iter()
+                .any(|item| item.is(&ItemKey::SectionEmpty(Section::Tags))),
+            "a collapsed section draws no placeholder either"
+        );
+        assert!(
+            items
+                .iter()
+                .any(|item| matches!(item, SidebarItem::Stash { .. })),
+            "the sections after it are unaffected"
+        );
+    }
+
+    #[test]
+    fn hidden_sections_contribute_nothing() {
+        let branches = Branches::default();
+        let mut design = Design::default();
+        design.show_tags = false;
+        design.show_stashes = false;
+
+        let items = branches.flatten(
+            sidebar_data(&["main"], &[], &["v1"], &["stash@{0}: wip"]),
+            &HashMap::new(),
+            &[],
+            &design,
+        );
+
+        assert!(
+            !items.iter().any(|item| matches!(
+                item,
+                SidebarItem::SectionHeader {
+                    section: Section::Tags | Section::Stashes,
+                    ..
+                } | SidebarItem::Tag { .. }
+                    | SidebarItem::Stash { .. }
+            )),
+            "a section the settings hide has neither a heading nor rows"
+        );
+    }
+
+    #[test]
+    fn the_remote_section_groups_branches_under_their_remote() {
+        let branches = Branches::default();
+        let remotes = [
+            remote("backup", Some("/tmp/backup.git")),
+            remote("origin", Some("https://example.invalid/repo.git")),
+        ];
+
+        let items = flatten_with(
+            &branches,
+            sidebar_data(
+                &["main"],
+                &["origin/main", "origin/feature", "origin/HEAD"],
+                &[],
+                &[],
+            ),
+            &HashMap::new(),
+            &remotes,
+        );
+
+        let remote_items: Vec<&SidebarItem> = items
+            .iter()
+            .skip_while(|item| {
+                !matches!(
+                    item,
+                    SidebarItem::SectionHeader {
+                        section: Section::Remote,
+                        ..
+                    }
+                )
+            })
+            .take_while(|item| {
+                !matches!(
+                    item,
+                    SidebarItem::SectionHeader {
+                        section: Section::Tags,
+                        ..
+                    }
+                )
+            })
+            .collect();
+        assert_eq!(
+            remote_items,
+            vec![
+                &SidebarItem::SectionHeader {
+                    section: Section::Remote,
+                    count: 3,
+                    open: true,
+                },
+                &SidebarItem::RemoteGroup {
+                    name: "backup".into(),
+                    fetch_url: Some("/tmp/backup.git".into()),
+                    count: 0,
+                    collapsed: false,
+                },
+                &SidebarItem::Placeholder {
+                    text: "no branches fetched yet",
+                    place: PlaceholderPlace::Remote("backup".into()),
+                },
+                &SidebarItem::RemoteGroup {
+                    name: "origin".into(),
+                    fetch_url: Some("https://example.invalid/repo.git".into()),
+                    count: 3,
+                    collapsed: false,
+                },
+                &SidebarItem::RemoteBranch {
+                    name: "origin/feature".into(),
+                    index: 0,
+                    local_name: Some("feature".into()),
+                    existing: false,
+                },
+                &SidebarItem::RemoteBranch {
+                    name: "origin/HEAD".into(),
+                    index: 1,
+                    local_name: None,
+                    existing: false,
+                },
+                &SidebarItem::RemoteBranch {
+                    name: "origin/main".into(),
+                    index: 2,
+                    local_name: Some("main".into()),
+                    existing: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_collapsed_remote_group_contributes_only_its_heading() {
+        let mut branches = Branches::default();
+        branches.toggle_remote_group("origin".to_owned());
+
+        let items = flatten_with(
+            &branches,
+            sidebar_data(&[], &["origin/main"], &[], &[]),
+            &HashMap::new(),
+            &[remote("origin", None)],
+        );
+
+        assert!(items.contains(&SidebarItem::RemoteGroup {
+            name: "origin".into(),
+            fetch_url: None,
+            count: 1,
+            collapsed: true,
+        }));
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item, SidebarItem::RemoteBranch { .. })),
+            "a folded remote draws no branches"
+        );
+        assert!(
+            !items
+                .iter()
+                .any(|item| item.is(&ItemKey::RemoteEmpty("origin".to_owned()))),
+            "a folded remote draws no placeholder either"
+        );
+    }
+
+    #[test]
+    fn item_keys_are_unique_and_survive_a_refresh() {
+        let branches = Branches::default();
+        let before = flatten(&branches, sidebar_data(&["main"], &[], &["v1", "v2"], &[]));
+        let after = flatten(
+            &branches,
+            sidebar_data(&["main"], &[], &["v0", "v1", "v2"], &[]),
+        );
+
+        let keys: std::collections::HashSet<ItemKey> =
+            before.iter().map(SidebarItem::key).collect();
+        assert_eq!(keys.len(), before.len(), "every row has a key of its own");
+
+        let key = ItemKey::Tag("v2".to_owned());
+        let old_index = before.iter().position(|item| item.is(&key)).unwrap();
+        let new_index = after.iter().position(|item| item.is(&key)).unwrap();
+        assert_eq!(
+            new_index,
+            old_index + 1,
+            "a tag added above moves the row, not the key"
+        );
+    }
+
+    #[test]
+    fn a_refresh_keeps_the_row_at_the_top_of_the_viewport() {
+        let branches = Branches::default();
+        let tags: Vec<String> = (1..=10).map(|number| format!("v{number}")).collect();
+        let tag_refs: Vec<&str> = tags.iter().map(String::as_str).collect();
+        let before = Rc::new(flatten(&branches, sidebar_data(&[], &[], &tag_refs, &[])));
+        branches.restore_scroll(&before);
+
+        // Five rows down: past the two empty sections' headings and
+        // placeholders, so `v1` is the first tag at the top.
+        branches
+            .scroll
+            .0
+            .borrow()
+            .base_handle
+            .set_offset(point(px(0.0), px(-140.0)));
+
+        let mut inserted = vec!["v0".to_owned()];
+        inserted.extend(tags);
+        let inserted_refs: Vec<&str> = inserted.iter().map(String::as_str).collect();
+        let after = Rc::new(flatten(
+            &branches,
+            sidebar_data(&[], &[], &inserted_refs, &[]),
+        ));
+        branches.restore_scroll(&after);
+
+        assert_eq!(
+            branches.scroll.0.borrow().base_handle.offset().y,
+            px(-168.0),
+            "the same tag must stay at the top after one is added above it"
+        );
+    }
+
+    #[test]
+    fn a_refresh_that_keeps_the_list_keeps_the_scroll_offset() {
+        let branches = Branches::default();
+        let items = Rc::new(flatten(&branches, sidebar_data(&["main"], &[], &[], &[])));
+        branches.restore_scroll(&items);
+        branches
+            .scroll
+            .0
+            .borrow()
+            .base_handle
+            .set_offset(point(px(0.0), px(-56.0)));
+
+        branches.restore_scroll(&items);
+
+        assert_eq!(
+            branches.scroll.0.borrow().base_handle.offset().y,
+            px(-56.0),
+            "an unchanged list must not move under the pointer"
+        );
     }
 }

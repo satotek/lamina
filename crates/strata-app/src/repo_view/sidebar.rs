@@ -172,8 +172,16 @@ impl RepoView {
             danger: design.remove_text,
             overlay: design.panel,
         };
+        // The snapshot's generation is the sidebar list's cache key: it changes
+        // on every publish, so the flattened strings are reused between frames
+        // but never across two different snapshots.
+        let revision = match &source {
+            Source::Repo(snapshot) => snapshot.generation,
+            Source::Fake(_) => 0,
+        };
         self.branches.render(
-            &data,
+            data,
+            revision,
             &upstreams,
             remotes,
             self.session.is_some(),
