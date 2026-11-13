@@ -15,6 +15,9 @@ Rust workspace: `crates/strata-core` (UI-independent) and `crates/strata-app` (G
   Set `GIT_CONFIG_GLOBAL=/dev/null`-equivalent isolation and author/committer env vars
   so tests do not depend on the machine's git config.
 - Code comments explain why, not what. English for code, comments, commits.
+- Never name other git clients or products in code, comments, docs, test data or
+  commit messages, and do not commit competitor research. Describe behaviour on its
+  own terms ("matches `git log --date-order`", not "like <product>").
 - Run cargo through the Nix dev shell: `direnv allow && direnv exec . cargo …`. It provides
   the native libraries GPUI needs on Linux and points every worktree at one shared
   target directory, so binaries are not under `./target` (use `cargo run`).
