@@ -20,9 +20,11 @@ use gpui::{
 use gpui_component::ActiveTheme as _;
 use gpui_component::Theme;
 use strata_core::diff::{DiffOptions, LineKind, diff_text};
+use strata_core::highlight::{Highlighter, LineHighlights, language_for_path};
 use strata_core::session::{ConflictSide, Operation, OperationId, RepoSnapshot};
 use strata_core::{ChangeKind, ConflictEntry, ConflictKind, ConflictSides, RepoState};
 
+use crate::diff_view::{self, DiffColors, DiffStyle};
 use crate::repo_view::RepoView;
 use crate::scrollbar::WithScrollbar as _;
 use crate::settings::Settings;
@@ -53,6 +55,9 @@ const MAX_LIST_ROWS: usize = 8;
 const MAX_REGIONS: usize = 200;
 /// Same probe length core's binary detector uses.
 const BINARY_PROBE: usize = 8000;
+/// Sides larger than this are not highlighted; the merge tool is the better
+/// place for a file that big, and parsing it would only slow the load down.
+const MAX_HIGHLIGHT_BYTES: usize = 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Pure helpers (unit-tested at the bottom).
@@ -144,6 +149,18 @@ fn kind_from_presence(base: bool, ours: bool, theirs: bool) -> ConflictKind {
     }
 }
 
+/// One line of a conflict side: the text shown and the 1-based line number it
+/// has in the file the side comes from.
+///
+/// The number is what makes syntax highlighting possible: the span data covers
+/// the whole side file, so a region line looks its spans up by line number
+/// instead of guessing from the fragment's text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RegionLine {
+    pub number: u32,
+    pub text: String,
+}
+
 /// One region of a text conflict: the base lines the sides disagree about and
 /// what each side puts there.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,9 +168,9 @@ pub(crate) struct Region {
     /// 1-based first base line; for an insertion this is the line it follows,
     /// and 0 means "before the first line".
     pub base_start: u32,
-    pub base: Vec<String>,
-    pub ours: Vec<String>,
-    pub theirs: Vec<String>,
+    pub base: Vec<RegionLine>,
+    pub ours: Vec<RegionLine>,
+    pub theirs: Vec<RegionLine>,
     pub ours_changed: bool,
     pub theirs_changed: bool,
 }
@@ -179,8 +196,9 @@ struct Change {
     /// 0-based, end-exclusive base line range.
     start: usize,
     end: usize,
-    /// The side's replacement text, empty for a deletion.
-    lines: Vec<String>,
+    /// The side's replacement text, empty for a deletion, with each line's
+    /// number in the side's own file.
+    lines: Vec<(u32, String)>,
 }
 
 /// `None` when either side is binary, which has no line diff to show.
@@ -214,7 +232,9 @@ fn side_changes(base: &[u8], side: Option<&[u8]>) -> Option<Vec<Change>> {
                         .lines
                         .iter()
                         .filter(|line| line.kind == LineKind::Added)
-                        .map(|line| line.content.clone())
+                        // An added line's number in the side's file is its new
+                        // line number; that is what the spans are indexed by.
+                        .map(|line| (line.new_lineno.unwrap_or(0), line.content.clone()))
                         .collect(),
                 }
             })
@@ -262,6 +282,8 @@ fn regions_from_sides(sides: &ConflictSides) -> Vec<Region> {
     let base_lines = text_lines(base_bytes);
     let ours = side_changes(base_bytes, sides.ours.as_deref()).unwrap_or_default();
     let theirs = side_changes(base_bytes, sides.theirs.as_deref()).unwrap_or_default();
+    let ours_numbers = side_line_numbers(base_lines.len(), &ours);
+    let theirs_numbers = side_line_numbers(base_lines.len(), &theirs);
 
     let mut bounds: Vec<(usize, usize)> = ours
         .iter()
@@ -288,15 +310,22 @@ fn regions_from_sides(sides: &ConflictSides) -> Vec<Region> {
     merged
         .into_iter()
         .map(|(start, end)| {
-            let (ours_lines, ours_changed) = side_text(&base_lines, &ours, start, end);
-            let (theirs_lines, theirs_changed) = side_text(&base_lines, &theirs, start, end);
+            let (ours_lines, ours_changed) =
+                side_text(&base_lines, &ours_numbers, &ours, start, end);
+            let (theirs_lines, theirs_changed) =
+                side_text(&base_lines, &theirs_numbers, &theirs, start, end);
             Region {
                 base_start: if end > start {
                     start as u32 + 1
                 } else {
                     start as u32
                 },
-                base: base_lines[start..end].to_vec(),
+                base: (start..end)
+                    .map(|index| RegionLine {
+                        number: index as u32 + 1,
+                        text: base_lines[index].clone(),
+                    })
+                    .collect(),
                 ours: ours_lines,
                 theirs: theirs_lines,
                 ours_changed,
@@ -308,7 +337,13 @@ fn regions_from_sides(sides: &ConflictSides) -> Vec<Region> {
 
 /// One side's text for `[start, end)`: the base lines with that side's changes
 /// spliced in, and whether it changed anything there.
-fn side_text(base: &[String], changes: &[Change], start: usize, end: usize) -> (Vec<String>, bool) {
+fn side_text(
+    base: &[String],
+    numbers: &[u32],
+    changes: &[Change],
+    start: usize,
+    end: usize,
+) -> (Vec<RegionLine>, bool) {
     let mut out = Vec::with_capacity(end.saturating_sub(start));
     let mut changed = false;
     let mut pos = start;
@@ -319,16 +354,54 @@ fn side_text(base: &[String], changes: &[Change], start: usize, end: usize) -> (
             continue;
         }
         if change.start > pos {
-            out.extend_from_slice(&base[pos..change.start]);
+            push_base(&mut out, base, numbers, pos, change.start);
         }
-        out.extend(change.lines.iter().cloned());
+        out.extend(change.lines.iter().map(|(number, text)| RegionLine {
+            number: *number,
+            text: text.clone(),
+        }));
         changed = true;
         pos = change.end;
     }
     if pos < end {
-        out.extend_from_slice(&base[pos..end]);
+        push_base(&mut out, base, numbers, pos, end);
     }
     (out, changed)
+}
+
+fn push_base(
+    out: &mut Vec<RegionLine>,
+    base: &[String],
+    numbers: &[u32],
+    start: usize,
+    end: usize,
+) {
+    out.extend((start..end).map(|index| RegionLine {
+        number: numbers[index],
+        text: base[index].clone(),
+    }));
+}
+
+/// The line number each base line has in a file that applied `changes` to it.
+///
+/// A side's unchanged text is the base text, but its line numbers have moved by
+/// however many lines the earlier changes added or removed; highlighting needs
+/// the number in the side's own file.
+fn side_line_numbers(base_len: usize, changes: &[Change]) -> Vec<u32> {
+    let mut numbers = Vec::with_capacity(base_len);
+    let mut next = 0;
+    let mut shift = 0i64;
+    for index in 0..base_len {
+        while let Some(change) = changes.get(next) {
+            if change.end > index {
+                break;
+            }
+            shift += change.lines.len() as i64 - (change.end - change.start) as i64;
+            next += 1;
+        }
+        numbers.push((index as i64 + 1 + shift) as u32);
+    }
+    numbers
 }
 
 /// `812 B`, `1.4 KB`, `3.1 MB`.
@@ -437,10 +510,15 @@ pub(crate) struct ConflictData {
     pub worktree_markers: bool,
     pub binary: bool,
     pub regions: Vec<Region>,
+    /// Syntax spans for every line of each whole side, indexed by line number
+    /// minus one. Empty when the path has no bundled grammar.
+    base_highlights: Vec<LineHighlights>,
+    ours_highlights: Vec<LineHighlights>,
+    theirs_highlights: Vec<LineHighlights>,
 }
 
 impl ConflictData {
-    fn new(sides: ConflictSides, worktree: Option<&[u8]>) -> Self {
+    fn new(sides: ConflictSides, worktree: Option<&[u8]>, path: &str) -> Self {
         let binary = [
             sides.base.as_deref(),
             sides.ours.as_deref(),
@@ -450,6 +528,16 @@ impl ConflictData {
         .into_iter()
         .flatten()
         .any(is_binary);
+        let regions = if binary {
+            Vec::new()
+        } else {
+            regions_from_sides(&sides)
+        };
+        let [base_highlights, ours_highlights, theirs_highlights] = if binary {
+            Default::default()
+        } else {
+            highlight_sides(path, &sides)
+        };
         Self {
             ours_present: sides.ours.is_some(),
             theirs_present: sides.theirs.is_some(),
@@ -459,13 +547,38 @@ impl ConflictData {
             base_bytes: sides.base.as_ref().map_or(0, Vec::len),
             worktree_markers: worktree.is_some_and(has_conflict_markers),
             binary,
-            regions: if binary {
-                Vec::new()
-            } else {
-                regions_from_sides(&sides)
-            },
+            regions,
+            base_highlights,
+            ours_highlights,
+            theirs_highlights,
         }
     }
+}
+
+/// The syntax spans of the three whole sides, in `[base, ours, theirs]` order.
+///
+/// Highlighting the files rather than the region fragments keeps a construct
+/// that starts outside the region (a doc comment, a raw string) coloured the way
+/// it is in the file; [`RegionLine::number`] then finds each line's spans.
+fn highlight_sides(path: &str, sides: &ConflictSides) -> [Vec<LineHighlights>; 3] {
+    let Some(language) = language_for_path(path) else {
+        return Default::default();
+    };
+    let mut highlighter = Highlighter::new();
+    let mut spans: [Vec<LineHighlights>; 3] = Default::default();
+    for (spans, bytes) in spans
+        .iter_mut()
+        .zip([&sides.base, &sides.ours, &sides.theirs])
+    {
+        let Some(bytes) = bytes else {
+            continue;
+        };
+        if bytes.len() > MAX_HIGHLIGHT_BYTES {
+            continue;
+        }
+        *spans = highlighter.highlight(language, &String::from_utf8_lossy(bytes));
+    }
+    spans
 }
 
 struct Loaded {
@@ -663,7 +776,7 @@ impl RepoView {
                 .spawn(async move {
                     let sides = repo.conflict_sides(&read_path)?;
                     let worktree = repo.file_in_worktree(&read_path).ok().flatten();
-                    Ok(ConflictData::new(sides, worktree.as_deref()))
+                    Ok(ConflictData::new(sides, worktree.as_deref(), &read_path))
                 })
                 .await;
             this.update(cx, |this, cx| {
@@ -830,6 +943,9 @@ struct Colors {
     success: Hsla,
     info: Hsla,
     mono: SharedString,
+    /// The diff palette, so conflict lines use the same add/remove tinting and
+    /// syntax colours as the diff panes.
+    diff: DiffColors,
 }
 
 impl Colors {
@@ -846,6 +962,7 @@ impl Colors {
             success: design.add_text,
             info: design.accent_text,
             mono: design.mono.clone(),
+            diff: DiffColors::from_theme(theme),
             design,
         }
     }
@@ -984,6 +1101,7 @@ impl Conflicts {
         cx: &Context<RepoView>,
     ) -> AnyElement {
         let colors = Colors::from_theme(cx.theme(), Settings::get(cx));
+        let style = DiffStyle::from_settings(cx, &colors.mono);
         let busy = snapshot.busy.is_some() || self.pending.is_some();
         let loaded = self.data_for(path);
         let kind = loaded.map(|loaded| loaded.kind);
@@ -1124,7 +1242,7 @@ impl Conflicts {
                 &colors.design,
             )
             .into_any_element(),
-            (None, Some(loaded)) => self.regions(&loaded.data.regions, &colors),
+            (None, Some(loaded)) => self.regions(&loaded.data, &colors, &style),
         });
 
         if let Some(notice) = &self.notice {
@@ -1178,7 +1296,7 @@ impl Conflicts {
         .into_any_element()
     }
 
-    fn regions(&self, regions: &[Region], colors: &Colors) -> AnyElement {
+    fn regions(&self, data: &ConflictData, colors: &Colors, style: &DiffStyle) -> AnyElement {
         let mut list = div()
             .id("conflict-regions")
             .flex()
@@ -1187,10 +1305,10 @@ impl Conflicts {
             .min_h_0()
             .w_full()
             .overflow_y_scroll();
-        for (index, region) in regions.iter().take(MAX_REGIONS).enumerate() {
-            list = list.child(region_block(index, region, colors));
+        for (index, region) in data.regions.iter().take(MAX_REGIONS).enumerate() {
+            list = list.child(region_block(index, region, data, colors, style));
         }
-        if regions.len() > MAX_REGIONS {
+        if data.regions.len() > MAX_REGIONS {
             list = list.child(
                 div()
                     .flex_none()
@@ -1200,7 +1318,7 @@ impl Conflicts {
                     .text_color(colors.muted_foreground)
                     .child(format!(
                         "{} more regions not shown; use the merge tool for this file.",
-                        regions.len() - MAX_REGIONS
+                        data.regions.len() - MAX_REGIONS
                     )),
             );
         }
@@ -1208,7 +1326,13 @@ impl Conflicts {
     }
 }
 
-fn region_block(index: usize, region: &Region, colors: &Colors) -> AnyElement {
+fn region_block(
+    index: usize,
+    region: &Region,
+    data: &ConflictData,
+    colors: &Colors,
+    style: &DiffStyle,
+) -> AnyElement {
     let mut block = div()
         .flex()
         .flex_col()
@@ -1235,14 +1359,18 @@ fn region_block(index: usize, region: &Region, colors: &Colors) -> AnyElement {
         &region.ours,
         region.ours_changed,
         colors.success,
+        &data.ours_highlights,
         colors,
+        style,
     ));
     block = block.child(side_block(
         "THEIRS (incoming)",
         &region.theirs,
         region.theirs_changed,
         colors.info,
+        &data.theirs_highlights,
         colors,
+        style,
     ));
     if !region.base.is_empty() {
         block = block.child(side_block(
@@ -1250,7 +1378,9 @@ fn region_block(index: usize, region: &Region, colors: &Colors) -> AnyElement {
             &region.base,
             false,
             colors.muted,
+            &data.base_highlights,
             colors,
+            style,
         ));
     }
     block.into_any_element()
@@ -1269,10 +1399,12 @@ fn change_badges(region: &Region, colors: &Colors) -> AnyElement {
 
 fn side_block(
     title: &str,
-    lines: &[String],
+    lines: &[RegionLine],
     changed: bool,
     tint: Hsla,
+    highlights: &[LineHighlights],
     colors: &Colors,
+    style: &DiffStyle,
 ) -> AnyElement {
     let mut block = div()
         .flex()
@@ -1313,26 +1445,51 @@ fn side_block(
         );
     } else {
         for line in lines {
-            block = block.child(line_row(line, tint, changed, colors));
+            // Spans are per line of the whole side, so a region line finds its
+            // own by the line number it kept from the file.
+            let spans = line
+                .number
+                .checked_sub(1)
+                .and_then(|index| highlights.get(index as usize));
+            block = block.child(line_row(line, spans, tint, changed, colors, style));
         }
     }
     block.into_any_element()
 }
 
-fn line_row(text: &str, tint: Hsla, changed: bool, colors: &Colors) -> AnyElement {
+fn line_row(
+    line: &RegionLine,
+    highlights: Option<&LineHighlights>,
+    tint: Hsla,
+    changed: bool,
+    colors: &Colors,
+    style: &DiffStyle,
+) -> AnyElement {
     let mut row = div()
         .flex()
-        .items_center()
+        .items_start()
         .w_full()
+        .min_h(px(style.row_height()))
         .px_3()
-        .font_family(colors.mono.clone())
-        .text_size(px(11.5))
+        .font_family(style.mono().clone())
+        .text_size(px(style.font_size()))
         .text_color(colors.foreground);
     if changed {
         row = row.bg(tint.opacity(0.08));
     }
-    row.child(SharedString::from(text.to_owned()))
-        .into_any_element()
+    row.child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .whitespace_normal()
+            .child(diff_view::styled_line(
+                &line.text,
+                style,
+                highlights,
+                &colors.diff,
+            )),
+    )
+    .into_any_element()
 }
 
 #[cfg(test)]
@@ -1345,6 +1502,14 @@ mod tests {
             ours: Some(ours.as_bytes().to_vec()),
             theirs: Some(theirs.as_bytes().to_vec()),
         }
+    }
+
+    fn texts(lines: &[RegionLine]) -> Vec<&str> {
+        lines.iter().map(|line| line.text.as_str()).collect()
+    }
+
+    fn numbers(lines: &[RegionLine]) -> Vec<u32> {
+        lines.iter().map(|line| line.number).collect()
     }
 
     #[test]
@@ -1447,17 +1612,39 @@ mod tests {
         let regions = regions_from_sides(&sides);
         assert_eq!(regions.len(), 2, "the two changes are separate regions");
 
-        assert_eq!(regions[0].base, vec!["two".to_owned()]);
-        assert_eq!(regions[0].ours, vec!["TWO".to_owned()]);
-        assert_eq!(regions[0].theirs, vec!["two".to_owned()]);
+        assert_eq!(texts(&regions[0].base), vec!["two"]);
+        assert_eq!(texts(&regions[0].ours), vec!["TWO"]);
+        assert_eq!(texts(&regions[0].theirs), vec!["two"]);
         assert!(regions[0].ours_changed);
         assert!(!regions[0].theirs_changed);
 
-        assert_eq!(regions[1].base, vec!["three".to_owned()]);
-        assert_eq!(regions[1].ours, vec!["three".to_owned()]);
-        assert_eq!(regions[1].theirs, vec!["THREE".to_owned()]);
+        assert_eq!(texts(&regions[1].base), vec!["three"]);
+        assert_eq!(texts(&regions[1].ours), vec!["three"]);
+        assert_eq!(texts(&regions[1].theirs), vec!["THREE"]);
         assert!(!regions[1].ours_changed);
         assert!(regions[1].theirs_changed);
+    }
+
+    #[test]
+    fn region_lines_keep_the_line_number_they_have_in_their_file() {
+        // Our side inserts a line before the change, so its changed line is
+        // line 3 of `ours` even though it is line 2 of the base.
+        let sides = sides("a\nb\nc\n", "a\nnew\nB\nc\n", "a\nb\nc\n");
+        let regions = regions_from_sides(&sides);
+        assert_eq!(regions.len(), 1);
+
+        assert_eq!(texts(&regions[0].base), vec!["b"]);
+        assert_eq!(numbers(&regions[0].base), vec![2]);
+
+        assert_eq!(texts(&regions[0].ours), vec!["new", "B"]);
+        assert_eq!(numbers(&regions[0].ours), vec![2, 3]);
+
+        assert_eq!(texts(&regions[0].theirs), vec!["b"]);
+        assert_eq!(
+            numbers(&regions[0].theirs),
+            vec![2],
+            "an unchanged side keeps the base position when it did not shift"
+        );
     }
 
     #[test]
@@ -1465,9 +1652,9 @@ mod tests {
         let sides = sides("a\nb\nc\n", "a\nB1\nc\n", "a\nB2\nc\n");
         let regions = regions_from_sides(&sides);
         assert_eq!(regions.len(), 1);
-        assert_eq!(regions[0].ours, vec!["B1".to_owned()]);
-        assert_eq!(regions[0].theirs, vec!["B2".to_owned()]);
-        assert_eq!(regions[0].base, vec!["b".to_owned()]);
+        assert_eq!(texts(&regions[0].ours), vec!["B1"]);
+        assert_eq!(texts(&regions[0].theirs), vec!["B2"]);
+        assert_eq!(texts(&regions[0].base), vec!["b"]);
         assert!(regions[0].ours_changed && regions[0].theirs_changed);
     }
 
@@ -1482,7 +1669,7 @@ mod tests {
         assert_eq!(regions.len(), 1);
         assert!(regions[0].ours_changed);
         assert!(regions[0].ours.is_empty(), "the file is gone on our side");
-        assert_eq!(regions[0].theirs, vec!["a", "b", "c"]);
+        assert_eq!(texts(&regions[0].theirs), vec!["a", "b", "c"]);
     }
 
     #[test]
@@ -1494,8 +1681,8 @@ mod tests {
         };
         let regions = regions_from_sides(&sides);
         assert_eq!(regions.len(), 1);
-        assert_eq!(regions[0].ours, vec!["ours".to_owned()]);
-        assert_eq!(regions[0].theirs, vec!["theirs".to_owned()]);
+        assert_eq!(texts(&regions[0].ours), vec!["ours"]);
+        assert_eq!(texts(&regions[0].theirs), vec!["theirs"]);
         assert!(regions[0].base.is_empty());
     }
 
@@ -1510,9 +1697,9 @@ mod tests {
         let sides = sides("a\nc\n", "a\nb\nc\n", "a\nC\n");
         let regions = regions_from_sides(&sides);
         assert_eq!(regions.len(), 1, "the insertion touches the change");
-        assert_eq!(regions[0].base, vec!["c".to_owned()]);
-        assert_eq!(regions[0].ours, vec!["b".to_owned(), "c".to_owned()]);
-        assert_eq!(regions[0].theirs, vec!["C".to_owned()]);
+        assert_eq!(texts(&regions[0].base), vec!["c"]);
+        assert_eq!(texts(&regions[0].ours), vec!["b", "c"]);
+        assert_eq!(texts(&regions[0].theirs), vec!["C"]);
     }
 
     #[test]
@@ -1525,13 +1712,26 @@ mod tests {
     }
 
     #[test]
+    fn highlight_sides_covers_whole_files_and_skips_unknown_languages() {
+        let sides = sides("fn a() {}\n", "fn b() {}\n", "fn c() {}\n");
+        let [base, ours, theirs] = highlight_sides("src/lib.rs", &sides);
+        assert_eq!(base.len(), 2, "one range per line, plus the empty tail");
+        assert!(base.iter().any(|spans| !spans.is_empty()));
+        assert!(ours.iter().any(|spans| !spans.is_empty()));
+        assert!(theirs.iter().any(|spans| !spans.is_empty()));
+
+        let [base, ours, theirs] = highlight_sides("notes.unknown", &sides);
+        assert!(base.is_empty() && ours.is_empty() && theirs.is_empty());
+    }
+
+    #[test]
     fn a_binary_conflict_has_sizes_instead_of_regions() {
         let sides = ConflictSides {
             base: Some(vec![0, 1, 2]),
             ours: Some(vec![0, 3, 4]),
             theirs: Some(vec![0, 5, 6]),
         };
-        let data = ConflictData::new(sides, Some(&[0, 7]));
+        let data = ConflictData::new(sides, Some(&[0, 7]), "file.bin");
         assert!(data.binary);
         assert!(data.regions.is_empty());
         assert_eq!(sizes_line(&data), "ours 3 B · theirs 3 B · base 3 B");

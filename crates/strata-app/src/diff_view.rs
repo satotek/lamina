@@ -16,12 +16,11 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, BorrowAppContext as _, Div, Global, HighlightStyle, Hsla,
-    InteractiveElement as _, IntoElement, ParentElement, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled, StyledText, UniformListScrollHandle, div,
-    prelude::FluentBuilder as _, px, uniform_list,
+    AnyElement, App, BorrowAppContext as _, Div, Global, HighlightStyle, Hsla, IntoElement,
+    ListAlignment, ListOffset, ListState, ParentElement, SharedString, Styled, StyledText,
+    UniformListScrollHandle, div, list, prelude::FluentBuilder as _, px, uniform_list,
 };
-use gpui_component::scroll::ScrollableElement as _;
+use gpui_component::scroll::Scrollbar;
 use gpui_component::theme::Theme;
 use strata_core::diff::{DiffLine, FileDiff, LineKind};
 use strata_core::highlight::{HighlightKind, LineHighlights};
@@ -43,8 +42,8 @@ enum Side {
     New,
 }
 
-/// A flat row in the diff list. Hunk headers share the line height so the list
-/// can stay a `uniform_list`.
+/// A flat row in the diff list. Hunk headers share the line height so an
+/// unwrapped list can stay a `uniform_list`.
 pub enum Row {
     HunkHeader {
         old_start: u32,
@@ -88,9 +87,8 @@ enum SplitRow {
 /// Aligns the unified row stream into side-by-side rows, one per hunk.
 ///
 /// Side-by-side is shorter than the unified stream whenever a hunk removes
-/// more lines than it adds or the other way round. [`diff_list`] keeps one list
-/// item per unified row anyway, so the tail of a split list is empty rather
-/// than a second, layout-dependent row count.
+/// more lines than it adds or the other way round, so [`diff_list`] asks for
+/// one list item per pair rather than per unified row.
 fn split_rows(rows: &[Row]) -> Vec<SplitRow> {
     let mut out = Vec::with_capacity(rows.len());
     let mut removed = Vec::new();
@@ -248,7 +246,10 @@ impl DiffStyle {
                 |font| SharedString::from(font.to_owned()),
             ),
             font_size: settings.appearance.code_font_size.clamp(9.0, 24.0),
-            tab_width: usize::from(settings.appearance.tab_width.clamp(1, 8)),
+            // The settings page offers 1–8 columns. A hand-edited file may ask
+            // for more, and there is no reason to refuse it, so only zero (which
+            // has no tab stop) is ruled out here.
+            tab_width: usize::from(settings.appearance.tab_width.clamp(1, 16)),
             split: settings.diff.layout == DiffLayout::Split,
             wrap: settings.diff.wrap_lines,
             syntax: settings.diff.syntax_highlighting,
@@ -272,6 +273,38 @@ impl DiffStyle {
     pub fn row_height(&self) -> f32 {
         (self.font_size + 7.5).max(ROW_HEIGHT)
     }
+
+    /// The code font, for a pane that draws rows of its own (the conflict view).
+    pub fn mono(&self) -> &SharedString {
+        &self.mono
+    }
+
+    /// The code font size, for a pane that draws rows of its own.
+    pub fn font_size(&self) -> f32 {
+        self.font_size
+    }
+
+    /// What changes how a wrapped line breaks: the font, its size, the tab
+    /// width and whether whitespace markers take a tab's place. A list that
+    /// cached wrapped heights has to measure again when any of them moves.
+    fn fingerprint(&self) -> u64 {
+        let mut hash = FNV_OFFSET;
+        hash_bytes(&mut hash, self.mono.as_bytes());
+        hash_bytes(&mut hash, &self.font_size.to_bits().to_le_bytes());
+        hash_bytes(&mut hash, &(self.tab_width as u64).to_le_bytes());
+        hash_bytes(&mut hash, &[u8::from(self.show_whitespace)]);
+        hash
+    }
+}
+
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+fn hash_bytes(hash: &mut u64, bytes: &[u8]) {
+    for byte in bytes {
+        *hash ^= u64::from(*byte);
+        *hash = hash.wrapping_mul(FNV_PRIME);
+    }
 }
 
 /// One row of a diff, as the plain (unified) renderer draws it.
@@ -288,9 +321,10 @@ pub fn render_row_with(
 
 /// The diff pane's list of rows.
 ///
-/// Wrapping makes rows taller than one line, which a `uniform_list` cannot
-/// measure, so a wrapped pane is a plain scroll column; everything else keeps
-/// the uniform list and the caller's scroll handle.
+/// Unwrapped rows all share [`DiffStyle::row_height`], so they stay in the
+/// caller's `uniform_list`. A wrapped row is as tall as its text needs, which
+/// only gpui's general [`list`] can measure; that list keeps its own state per
+/// pane here and remeasures when the rows, the width or the font change.
 pub fn diff_list(
     id: &'static str,
     rows: Rc<Vec<Row>>,
@@ -301,47 +335,22 @@ pub fn diff_list(
     cx: &mut App,
 ) -> AnyElement {
     let style = DiffStyle::from_settings(cx, &mono);
-    let pairs = style.split.then(|| split_rows(&rows));
+    let (count, pairs) = list_items(&rows, style.split);
+    let source = Rows {
+        rows,
+        pairs,
+        view,
+        colors,
+        style,
+    };
 
-    if style.wrap {
-        let handle = wrapped_scroll(id, cx);
-        let mut column = div().flex().flex_col().w_full();
-        for index in 0..rows.len() {
-            column = column.child(row_element(
-                &rows,
-                index,
-                pairs.as_deref(),
-                view.as_deref(),
-                &colors,
-                &style,
-                true,
-            ));
-        }
-        return div()
-            .id(id)
-            .flex_1()
-            .min_h_0()
-            .min_w_0()
-            .overflow_y_scroll()
-            .track_scroll(&handle)
-            .vertical_scrollbar(&handle)
-            .child(column)
-            .into_any_element();
+    if source.style.wrap {
+        return wrapped_list(id, source, count, cx);
     }
 
-    uniform_list(id, rows.len(), move |range: Range<usize>, _window, _cx| {
+    uniform_list(id, count, move |range: Range<usize>, _window, _cx| {
         range
-            .map(|index| {
-                row_element(
-                    &rows,
-                    index,
-                    pairs.as_deref(),
-                    view.as_deref(),
-                    &colors,
-                    &style,
-                    false,
-                )
-            })
+            .map(|index| source.element(index, false))
             .collect::<Vec<_>>()
     })
     .track_scroll(scroll)
@@ -351,47 +360,215 @@ pub fn diff_list(
     .into_any_element()
 }
 
-/// A wrapped pane cannot be a uniform list, and gpui's general list sizes its
-/// rows while text wrapping wants a definite width, so a wrapped diff is a
-/// plain scroll column. That costs the virtualisation, which is why wrapping is
-/// off by default; its scroll offset still has to outlive the frame, and the
-/// panes hold a `UniformListScrollHandle` for the unwrapped path, so the wrapped
-/// one lives here, one per pane, keyed by the pane's list id.
-#[derive(Default)]
-struct WrappedScroll(HashMap<&'static str, ScrollHandle>);
-
-impl Global for WrappedScroll {}
-
-fn wrapped_scroll(id: &'static str, cx: &mut App) -> ScrollHandle {
-    if !cx.has_global::<WrappedScroll>() {
-        cx.set_global(WrappedScroll::default());
-    }
-    cx.update_global::<WrappedScroll, _>(|scrolls, _| scrolls.0.entry(id).or_default().clone())
+/// The rows of one diff and everything they need to be drawn, shared by the
+/// items of whichever list the layout asks for.
+struct Rows {
+    rows: Rc<Vec<Row>>,
+    pairs: Option<Rc<[SplitRow]>>,
+    view: Option<Arc<DiffView>>,
+    colors: DiffColors,
+    style: DiffStyle,
 }
 
-fn row_element(
-    rows: &[Row],
-    index: usize,
-    pairs: Option<&[SplitRow]>,
-    view: Option<&DiffView>,
-    colors: &DiffColors,
-    style: &DiffStyle,
-    wrap: bool,
-) -> AnyElement {
-    if let Some(pairs) = pairs {
-        return match pairs.get(index) {
-            Some(pair) => split_row(*pair, rows, colors, style, view, wrap),
-            // Side-by-side is shorter than the unified stream; the extra list
-            // items stay empty so the item count does not depend on the layout.
-            None => div().h(px(style.row_height())).w_full().into_any_element(),
+impl Rows {
+    fn element(&self, index: usize, wrap: bool) -> AnyElement {
+        let Self {
+            rows,
+            pairs,
+            view,
+            colors,
+            style,
+        } = self;
+        if let Some(pairs) = pairs.as_deref() {
+            return match pairs.get(index) {
+                Some(pair) => split_row(*pair, rows, colors, style, view.as_deref(), wrap),
+                // The item count is the pairing's length, so this only happens
+                // for an index from a stale count.
+                None => div().h(px(style.row_height())).w_full().into_any_element(),
+            };
+        }
+
+        let Some(row) = rows.get(index) else {
+            return div().into_any_element();
         };
+        let highlights = line_highlights(row, view.as_deref(), style.syntax);
+        unified_row(row, colors, style, highlights, RowOptions::default(), wrap)
+    }
+}
+
+/// What one frame draws: the number of list items and, in side-by-side, the
+/// pairing that maps each item to its two rows.
+///
+/// The item count is the number of drawn rows; using the unified count in
+/// side-by-side mode leaves the list with blank rows at the end.
+fn list_items(rows: &[Row], split: bool) -> (usize, Option<Rc<[SplitRow]>>) {
+    if split {
+        let pairs: Rc<[SplitRow]> = Rc::from(split_rows(rows));
+        (pairs.len(), Some(pairs))
+    } else {
+        (rows.len(), None)
+    }
+}
+
+/// The wrapped diff as a [`list`], which measures each row and only lays out
+/// the ones near the viewport.
+fn wrapped_list(id: &'static str, rows: Rows, count: usize, cx: &mut App) -> AnyElement {
+    let state = wrapped_state(
+        id,
+        count,
+        rows_fingerprint(&rows.rows),
+        rows.style.fingerprint(),
+        &rows.style,
+        cx,
+    );
+
+    // `list` is the scroll container itself and has no children, so the
+    // overlay scrollbar goes beside it in a positioned container rather than
+    // through [`WithScrollbar`], which takes a `uniform_list` handle.
+    div()
+        .relative()
+        .flex_1()
+        .min_h_0()
+        .min_w_0()
+        .child(
+            list(state.clone(), move |index, _window, _cx| {
+                rows.element(index, true)
+            })
+            .size_full(),
+        )
+        .child(Scrollbar::vertical(&state).id(id))
+        .into_any_element()
+}
+
+/// One wrapped list per pane.
+///
+/// The panes hold a `UniformListScrollHandle`, which a measured list cannot
+/// use, so the wrapped list's state lives here, keyed by the pane's list id.
+#[derive(Default)]
+struct WrappedLists(HashMap<&'static str, WrappedList>);
+
+impl Global for WrappedLists {}
+
+struct WrappedList {
+    state: ListState,
+    /// The item count the state was built for; a layout change makes it stale.
+    items: usize,
+    /// Fingerprints of the rows and of the style the cached heights belong to.
+    content: u64,
+    style: u64,
+}
+
+impl WrappedList {
+    fn new(items: usize, content: u64, style: u64, row_height: f32) -> Self {
+        let state = ListState::new(items, ListAlignment::Top, px(WRAP_OVERDRAW))
+            .with_uniform_item_height(px(row_height));
+        Self {
+            state,
+            items,
+            content,
+            style,
+        }
     }
 
-    let Some(row) = rows.get(index) else {
-        return div().into_any_element();
-    };
-    let highlights = line_highlights(row, view, style.syntax);
-    unified_row(row, colors, style, highlights, RowOptions::default(), wrap)
+    /// Brings the state up to date with this frame.
+    ///
+    /// gpui only re-measures the rows it paints, so a row that is off screen
+    /// keeps the height it had when it was last seen. New rows, another font
+    /// or another tab width therefore invalidate every cached height, while
+    /// the scroll position the user had stays put.
+    fn sync(&mut self, items: usize, content: u64, style: u64, row_height: f32) {
+        if self.items != items {
+            let top = self.state.logical_scroll_top();
+            self.state.reset_with_uniform_height(items, px(row_height));
+            self.items = items;
+            self.state.scroll_to(ListOffset {
+                item_ix: top.item_ix.min(items),
+                offset_in_item: top.offset_in_item,
+            });
+        }
+        if self.content != content || self.style != style {
+            self.content = content;
+            self.style = style;
+            self.state.remeasure();
+        }
+    }
+}
+
+fn wrapped_state(
+    id: &'static str,
+    items: usize,
+    content: u64,
+    style: u64,
+    diff_style: &DiffStyle,
+    cx: &mut App,
+) -> ListState {
+    if !cx.has_global::<WrappedLists>() {
+        cx.set_global(WrappedLists::default());
+    }
+    cx.update_global::<WrappedLists, _>(|lists, _| {
+        let entry = lists
+            .0
+            .entry(id)
+            .or_insert_with(|| WrappedList::new(items, content, style, diff_style.row_height()));
+        entry.sync(items, content, style, diff_style.row_height());
+        entry.state.clone()
+    })
+}
+
+/// How far past the viewport the wrapped list measures rows, so scrolling does
+/// not reveal an unmeasured row at the edge.
+const WRAP_OVERDRAW: f32 = 240.0;
+
+/// How many rows apart the wrapped list samples a diff to tell it apart from
+/// the one it measured before; a prime keeps the sample off hunk boundaries.
+const FINGERPRINT_STEP: usize = 61;
+
+/// A cheap identity for the rows behind a wrapped list.
+///
+/// The state has to know when its cached heights describe another diff. Hashing
+/// every line per frame would cost more than it saves, so the row count, a
+/// sample of the rows and the last row are enough to see a change.
+fn rows_fingerprint(rows: &[Row]) -> u64 {
+    let mut hash = FNV_OFFSET;
+    hash_bytes(&mut hash, &(rows.len() as u64).to_le_bytes());
+    for row in rows.iter().step_by(FINGERPRINT_STEP) {
+        hash_row(&mut hash, row);
+    }
+    if let Some(last) = rows.last() {
+        hash_row(&mut hash, last);
+    }
+    hash
+}
+
+fn hash_row(hash: &mut u64, row: &Row) {
+    match row {
+        Row::HunkHeader {
+            old_start,
+            old_len,
+            new_start,
+            new_len,
+        } => {
+            for number in [*old_start, *old_len, *new_start, *new_len] {
+                hash_bytes(hash, &number.to_le_bytes());
+            }
+        }
+        Row::Line(line) => {
+            hash_bytes(hash, &[row_kind(line.kind)]);
+            hash_bytes(hash, &(line.content.len() as u64).to_le_bytes());
+            // A long line's tail rarely decides whether two diffs differ, and
+            // hashing it in full would make the fingerprint scale with the file.
+            let bytes = line.content.as_bytes();
+            hash_bytes(hash, &bytes[..bytes.len().min(48)]);
+        }
+    }
+}
+
+fn row_kind(kind: LineKind) -> u8 {
+    match kind {
+        LineKind::Context => 0,
+        LineKind::Added => 1,
+        LineKind::Removed => 2,
+    }
 }
 
 /// The syntax spans of the line a row shows, from the view that produced it.
@@ -656,10 +833,53 @@ fn line_content(
         LineKind::Context => colors.emphasis_added,
     };
     let drawn = display(line, style, highlights);
+    let text = styled(drawn, emphasis_bg, colors, style);
 
-    // One styled text run per colour/emphasis change. A single text element
-    // rather than a row of spans is what lets a long line wrap: spans are
-    // blocks, and a wrapped block stacks instead of flowing.
+    let mut content = div()
+        .font_family(style.mono.clone())
+        .text_size(px(style.font_size))
+        .text_color(colors.text);
+    content = if wrap {
+        content.flex_1().min_w_0().whitespace_normal()
+    } else {
+        content.flex_none().whitespace_nowrap()
+    };
+    content.child(text)
+}
+
+/// One line of code drawn with the diff's display settings: the tab width,
+/// visible whitespace and syntax colours.
+///
+/// The diff rows use this for their line text after [`line_content`] has added
+/// emphasis; a pane that shows code without changed ranges (the conflict view)
+/// calls it directly so both honour the same settings.
+pub fn styled_line(
+    content: &str,
+    style: &DiffStyle,
+    highlights: Option<&LineHighlights>,
+    colors: &DiffColors,
+) -> StyledText {
+    let drawn = DrawnLine {
+        text: content.to_owned(),
+        emphasis: Vec::new(),
+        highlights: highlights
+            .filter(|_| style.syntax)
+            .map(|spans| spans.to_vec()),
+    };
+    let drawn = rewrite(drawn, style);
+    styled(drawn, colors.emphasis_added, colors, style)
+}
+
+/// One styled text run per colour or emphasis change.
+///
+/// A single text element rather than a row of spans is what lets a long line
+/// wrap: spans are blocks, and a wrapped block stacks instead of flowing.
+fn styled(
+    drawn: DrawnLine,
+    emphasis_bg: Hsla,
+    colors: &DiffColors,
+    style: &DiffStyle,
+) -> StyledText {
     let mut runs = Vec::new();
     let mut offset = 0;
     for piece in segments(&drawn.text, &drawn.emphasis, drawn.highlights.as_deref()) {
@@ -677,17 +897,7 @@ fn line_content(
             ));
         }
     }
-
-    let mut content = div()
-        .font_family(style.mono.clone())
-        .text_size(px(style.font_size))
-        .text_color(colors.text);
-    content = if wrap {
-        content.flex_1().min_w_0().whitespace_normal()
-    } else {
-        content.flex_none().whitespace_nowrap()
-    };
-    content.child(StyledText::new(drawn.text).with_highlights(runs))
+    StyledText::new(drawn.text).with_highlights(runs)
 }
 
 /// One line as it is drawn: the rewritten text, its emphasis ranges and the
@@ -699,21 +909,27 @@ struct DrawnLine {
 }
 
 fn display(line: &DiffLine, style: &DiffStyle, highlights: Option<&LineHighlights>) -> DrawnLine {
-    if !style.show_whitespace && !line.content.contains('\t') {
-        return DrawnLine {
-            text: line.content.clone(),
-            emphasis: line.emphasis.clone(),
-            highlights: highlights.cloned(),
-        };
+    let drawn = DrawnLine {
+        text: line.content.clone(),
+        emphasis: line.emphasis.clone(),
+        highlights: highlights.cloned(),
+    };
+    rewrite(drawn, style)
+}
+
+/// Expands tabs and marks whitespace in `drawn`, remapping its ranges.
+fn rewrite(drawn: DrawnLine, style: &DiffStyle) -> DrawnLine {
+    if !style.show_whitespace && !drawn.text.contains('\t') {
+        return drawn;
     }
 
-    let (text, offsets) = display_text(&line.content, style.tab_width, style.show_whitespace);
-    let emphasis = line
+    let (text, offsets) = display_text(&drawn.text, style.tab_width, style.show_whitespace);
+    let emphasis = drawn
         .emphasis
         .iter()
         .map(|range| remap(range, &offsets))
         .collect();
-    let highlights = highlights.map(|spans| {
+    let highlights = drawn.highlights.as_ref().map(|spans| {
         spans
             .iter()
             .map(|(range, kind)| (remap(range, &offsets), *kind))
@@ -1064,16 +1280,113 @@ mod tests {
     }
 
     #[test]
-    fn a_uniform_list_needs_one_row_per_line_and_split_is_shorter() {
-        // The split list reuses the unified item count, so it can only be
-        // shorter; this is what leaves the tail rows empty.
+    fn list_items_are_the_rows_each_layout_draws() {
         let rows = vec![
             header(),
             line(LineKind::Removed, Some(1), None, "a"),
             line(LineKind::Removed, Some(2), None, "b"),
-            line(LineKind::Added, None, Some(1), "c"),
+            line(LineKind::Added, None, Some(1), "A"),
         ];
-        assert!(split_rows(&rows).len() <= rows.len());
+
+        let (unified, pairs) = list_items(&rows, false);
+        assert_eq!(unified, rows.len(), "unified draws one item per row");
+        assert!(pairs.is_none());
+
+        let (split, pairs) = list_items(&rows, true);
+        let pairs = pairs.expect("side-by-side pairs its rows");
+        assert_eq!(split, pairs.len());
+        assert_eq!(split, 3, "one hunk header and the two paired rows");
+        assert!(
+            split < rows.len(),
+            "the blank tail rows side-by-side used to leave are gone"
+        );
+    }
+
+    #[test]
+    fn the_last_split_item_is_a_drawn_row() {
+        // Three removals against one addition: two rows have an empty side,
+        // but every item the list asks for is still painted as a row.
+        let rows = vec![
+            header(),
+            line(LineKind::Removed, Some(1), None, "a"),
+            line(LineKind::Removed, Some(2), None, "b"),
+            line(LineKind::Removed, Some(3), None, "c"),
+            line(LineKind::Added, None, Some(1), "A"),
+            line(LineKind::Context, Some(4), Some(2), "d"),
+        ];
+        let (count, pairs) = list_items(&rows, true);
+        let pairs = pairs.expect("side-by-side pairs its rows");
+        assert_eq!(count, pairs.len());
+        assert_eq!(
+            pairs.last(),
+            Some(&SplitRow::Lines {
+                old: Some(5),
+                new: Some(5)
+            }),
+            "the list ends on the last context row, not on an empty item"
+        );
+    }
+
+    #[test]
+    fn the_wrapped_list_sees_row_changes() {
+        let rows = Rc::new(vec![line(LineKind::Context, Some(1), Some(1), "alpha")]);
+        assert_eq!(rows_fingerprint(&rows), rows_fingerprint(&rows));
+
+        let other = Rc::new(vec![line(LineKind::Context, Some(1), Some(1), "beta")]);
+        assert_ne!(
+            rows_fingerprint(&rows),
+            rows_fingerprint(&other),
+            "same length, different text"
+        );
+
+        let longer = Rc::new(vec![
+            line(LineKind::Context, Some(1), Some(1), "alpha"),
+            line(LineKind::Context, Some(2), Some(2), "next"),
+        ]);
+        assert_ne!(rows_fingerprint(&rows), rows_fingerprint(&longer));
+    }
+
+    #[test]
+    fn the_wrapped_list_sees_font_and_tab_changes() {
+        let style = DiffStyle {
+            mono: SharedString::default(),
+            font_size: 12.5,
+            tab_width: 4,
+            split: false,
+            wrap: true,
+            syntax: true,
+            show_whitespace: false,
+        };
+        let key = style.fingerprint();
+        assert_eq!(key, style.clone().fingerprint());
+
+        assert_ne!(
+            key,
+            DiffStyle {
+                font_size: 18.0,
+                ..style.clone()
+            }
+            .fingerprint(),
+            "a larger font wraps sooner"
+        );
+        assert_ne!(
+            key,
+            DiffStyle {
+                tab_width: 9,
+                ..style.clone()
+            }
+            .fingerprint(),
+            "a wider tab pushes text further"
+        );
+        assert_ne!(
+            key,
+            DiffStyle {
+                show_whitespace: true,
+                ..style.clone()
+            }
+            .fingerprint(),
+            "markers take the width a tab used to"
+        );
     }
 
     #[test]
