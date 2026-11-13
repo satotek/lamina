@@ -1,5 +1,4 @@
-//! Merge conflict resolution: the conflicts list, the per-file conflict view and
-//! the actionable merge banner.
+//! Merge conflict resolution: the conflicts list and the per-file conflict view.
 //!
 //! The session is the only route to git. The three sides of a conflicted path
 //! come from `Repo::conflict_sides` (a gix read, run on the background
@@ -15,7 +14,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, Context, Entity, Hsla, InteractiveElement, IntoElement, KeyBinding,
     ParentElement, SharedString, StatefulInteractiveElement, Styled, UniformListScrollHandle,
-    Window, actions, div, px, uniform_list,
+    actions, div, px, uniform_list,
 };
 use gpui_component::ActiveTheme as _;
 use gpui_component::Theme;
@@ -433,68 +432,6 @@ fn sizes_line(data: &ConflictData) -> String {
     )
 }
 
-/// A banner that needs a live snapshot and the pending state of this module.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct BannerState {
-    pub text: String,
-    pub can_continue: bool,
-    pub can_abort: bool,
-}
-
-fn banner_state(state: RepoState, conflicts: usize, busy: bool) -> Option<BannerState> {
-    let count = match conflicts {
-        1 => "1 conflict".to_owned(),
-        count => format!("{count} conflicts"),
-    };
-    let resolved = conflicts == 0;
-    let banner = match state {
-        RepoState::Normal => return None,
-        RepoState::Merging => BannerState {
-            text: if resolved {
-                "Merge in progress — all conflicts resolved. Continue commits the merge with git's prepared message.".to_owned()
-            } else {
-                format!("Merge in progress — {count} to resolve.")
-            },
-            can_continue: resolved && !busy,
-            can_abort: !busy,
-        },
-        // Core has merge continue/abort only; conflict resolution itself works
-        // for the other operations because it goes through the index stages.
-        RepoState::Rebasing => BannerState {
-            text: format!(
-                "Rebase in progress — {count} to resolve. Continuing or aborting a rebase is not supported yet."
-            ),
-            can_continue: false,
-            can_abort: false,
-        },
-        RepoState::CherryPicking => BannerState {
-            text: format!(
-                "Cherry-pick in progress — {count} to resolve. Continuing or aborting a cherry-pick is not supported yet."
-            ),
-            can_continue: false,
-            can_abort: false,
-        },
-        RepoState::Reverting => BannerState {
-            text: format!(
-                "Revert in progress — {count} to resolve. Continuing or aborting a revert is not supported yet."
-            ),
-            can_continue: false,
-            can_abort: false,
-        },
-        RepoState::Bisecting => BannerState {
-            text: "Bisect in progress.".to_owned(),
-            can_continue: false,
-            can_abort: false,
-        },
-        RepoState::ApplyingPatches => BannerState {
-            text: format!("Applying patches — {count} to resolve."),
-            can_continue: false,
-            can_abort: false,
-        },
-    };
-    Some(banner)
-}
-
 // ---------------------------------------------------------------------------
 // Loaded conflict data.
 // ---------------------------------------------------------------------------
@@ -593,8 +530,6 @@ enum PendingAction {
     Resolve,
     MarkResolved,
     Mergetool,
-    Continue,
-    Abort,
 }
 
 impl PendingAction {
@@ -603,8 +538,6 @@ impl PendingAction {
             PendingAction::Resolve => "Conflict resolved",
             PendingAction::MarkResolved => "Marked as resolved",
             PendingAction::Mergetool => "Merge tool finished",
-            PendingAction::Continue => "Merge committed",
-            PendingAction::Abort => "Merge aborted",
         }
     }
 }
@@ -743,11 +676,6 @@ impl Conflicts {
         }
         true
     }
-
-    pub(crate) fn banner_state(&self, snapshot: &RepoSnapshot) -> Option<BannerState> {
-        let busy = snapshot.busy.is_some() || self.pending.is_some();
-        banner_state(snapshot.state, snapshot.conflicts.len(), busy)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -880,50 +808,6 @@ impl RepoView {
         self.worktree.conflicts.start(id, PendingAction::Mergetool);
         cx.notify();
     }
-
-    pub(crate) fn continue_merge(&mut self, cx: &mut Context<Self>) {
-        if self.worktree.conflicts.pending.is_some() {
-            return;
-        }
-        let Some(session) = self.session.as_ref() else {
-            return;
-        };
-        if !session.snapshot().conflicts.is_empty() {
-            return;
-        }
-        let id = session.run(Operation::MergeContinue);
-        self.worktree.conflicts.start(id, PendingAction::Continue);
-        cx.notify();
-    }
-
-    pub(crate) fn abort_merge(&mut self, cx: &mut Context<Self>) {
-        if self.worktree.conflicts.pending.is_some() {
-            return;
-        }
-        let Some(session) = self.session.as_ref() else {
-            return;
-        };
-        let id = session.run(Operation::MergeAbort);
-        self.worktree.conflicts.start(id, PendingAction::Abort);
-        cx.notify();
-    }
-}
-
-/// Asks before throwing away the work done in a stopped merge.
-pub(crate) fn confirm_abort_merge(entity: Entity<RepoView>, window: &mut Window, cx: &mut App) {
-    crate::ui::confirm(
-        window,
-        cx,
-        crate::ui::Confirm::new(
-            "Abort the merge?",
-            "Git restores HEAD and the worktree from before the merge. Conflicts resolved so far are lost.",
-        )
-        .ok_label("Abort merge")
-        .cancel_label("Keep resolving"),
-        move |_, cx| {
-            entity.update(cx, |this, cx| this.abort_merge(cx));
-        },
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1744,27 +1628,5 @@ mod tests {
         assert_eq!(format_size(1024), "1.0 KB");
         assert_eq!(format_size(1536), "1.5 KB");
         assert_eq!(format_size(5 * 1024 * 1024), "5.0 MB");
-    }
-
-    #[test]
-    fn the_banner_counts_conflicts_and_gates_continue() {
-        assert_eq!(banner_state(RepoState::Normal, 0, false), None);
-
-        let open = banner_state(RepoState::Merging, 2, false).expect("merging banner");
-        assert!(open.text.contains("2 conflicts"));
-        assert!(!open.can_continue, "conflicts must be resolved first");
-        assert!(open.can_abort);
-
-        let resolved = banner_state(RepoState::Merging, 0, false).expect("merging banner");
-        assert!(resolved.can_continue);
-        assert!(resolved.can_abort);
-
-        let busy = banner_state(RepoState::Merging, 0, true).expect("merging banner");
-        assert!(!busy.can_continue, "an operation is already running");
-        assert!(!busy.can_abort);
-
-        let rebasing = banner_state(RepoState::Rebasing, 1, false).expect("rebase banner");
-        assert!(rebasing.text.contains("1 conflict"));
-        assert!(!rebasing.can_continue && !rebasing.can_abort);
     }
 }

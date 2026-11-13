@@ -1221,52 +1221,10 @@ impl WorktreePanel {
             .min_h_0()
             .bg(colors.background);
 
-        if let Some(banner) = self.merge_banner(entity.clone(), snapshot, &colors) {
-            root = root.child(banner);
-        }
-
         root = root
             .child(body)
             .child(self.commit_box(entity.clone(), snapshot, cx, &colors));
 
         root.into_any_element()
-    }
-
-    /// A stopped merge or another multi-step operation, with the actions core
-    /// can express: continue commits the merge with git's prepared message,
-    /// abort restores the pre-merge state after a confirmation.
-    fn merge_banner(
-        &self,
-        entity: Entity<RepoView>,
-        snapshot: &RepoSnapshot,
-        colors: &Colors,
-    ) -> Option<AnyElement> {
-        let state = self.conflicts.banner_state(snapshot)?;
-        let mut banner =
-            crate::ui::banner(crate::ui::BannerKind::Warning, state.text, &colors.design);
-        // Abort is the escape hatch, so it reads as an ordinary button; Continue
-        // is the one the banner is asking for.
-        if state.can_abort {
-            let abort = entity.clone();
-            banner = banner.action(crate::ui::button("merge-abort", "Abort merge…").on_click(
-                move |_, window, cx| {
-                    crate::conflicts::confirm_abort_merge(abort.clone(), window, cx);
-                },
-            ));
-        }
-        if state.can_continue {
-            let continue_merge = entity.clone();
-            banner = banner.action(
-                crate::ui::button("merge-continue", "Continue merge").on_click(move |_, _, cx| {
-                    continue_merge.update(cx, |this, cx| this.continue_merge(cx));
-                }),
-            );
-        } else if state.can_abort {
-            // Keep the row from jumping when the button appears; a disabled
-            // Continue also explains why the merge cannot finish yet.
-            banner =
-                banner.action(crate::ui::button("merge-continue", "Continue merge").disabled(true));
-        }
-        Some(banner.into_any_element())
     }
 }
