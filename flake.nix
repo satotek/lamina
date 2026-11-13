@@ -9,6 +9,8 @@
       systems = [
         "x86_64-linux"
         "aarch64-linux"
+        "aarch64-darwin"
+        "x86_64-darwin"
       ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
     in
@@ -16,6 +18,17 @@
       devShells = forAllSystems (
         pkgs:
         let
+          # Parallel agents build in separate worktrees. One shared target
+          # directory keeps a single copy of the dependency builds (GPUI is
+          # ~600 crates, several GB) instead of one per worktree. Cargo gives a
+          # workspace crate the same artifact name in every worktree, though, so
+          # a build in one worktree can leave another with a stale
+          # strata-core; touch its sources and rebuild when errors contradict
+          # the code.
+          sharedTarget = ''
+            export CARGO_TARGET_DIR="''${XDG_CACHE_HOME:-$HOME/.cache}/strata/target"
+          '';
+
           # GPUI's Linux backend (wayland / x11 / wgpu) loads most of these at
           # runtime through dlopen, so they have to be on LD_LIBRARY_PATH as
           # well as available to pkg-config at build time.
@@ -41,9 +54,23 @@
             # Mesa's lavapipe gives the headless smoke test a software Vulkan
             # device; without an ICD file wgpu finds no adapter at all.
             ++ lib.optionals pkgs.stdenv.hostPlatform.isx86_64 [ pkgs.mesa ];
-        in
-        {
-          default = pkgs.mkShell {
+
+          # GPUI's macOS backend links the system frameworks and compiles its
+          # Metal shaders with `xcrun metal`, which only Xcode provides. Nix's
+          # compiler wrapper and SDK would shadow both, so this shell adds the
+          # Rust toolchain alone and leaves cc, the SDK and xcrun to Xcode.
+          darwinShell = pkgs.mkShellNoCC {
+            packages = with pkgs; [
+              cargo
+              clippy
+              rustc
+              rustfmt
+            ];
+            RUST_BACKTRACE = "1";
+            shellHook = sharedTarget;
+          };
+
+          linuxShell = pkgs.mkShell {
             packages = with pkgs; [
               cargo
               clippy
@@ -99,14 +126,11 @@
 
             RUST_BACKTRACE = "1";
 
-            # Parallel agents build in separate worktrees. One shared target
-            # directory keeps a single copy of the dependency builds (GPUI is
-            # ~600 crates, several GB) instead of one per worktree; cargo still
-            # keeps each worktree's own crates apart because their paths differ.
-            shellHook = ''
-              export CARGO_TARGET_DIR="''${XDG_CACHE_HOME:-$HOME/.cache}/strata/target"
-            '';
+            shellHook = sharedTarget;
           };
+        in
+        {
+          default = if pkgs.stdenv.hostPlatform.isDarwin then darwinShell else linuxShell;
         }
       );
     };
