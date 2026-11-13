@@ -218,6 +218,11 @@ pub struct WorktreePanel {
     /// Message to restore when amend is switched off again.
     draft: String,
     clear_message: bool,
+    /// Text to put into the box on the next render if it is still empty.
+    prefill: Option<String>,
+    /// Whether the current merge's prepared message was already offered, so
+    /// clearing the box does not bring it back.
+    merge_prefilled: bool,
 
     pending: Option<(OperationId, PendingKind)>,
     /// Set while a submitted operation has not refreshed the status yet.
@@ -277,6 +282,28 @@ impl WorktreePanel {
         let input = self.ensure_input(window, cx);
         if std::mem::take(&mut self.clear_message) {
             input.update(cx, |state, cx| state.set_value("", window, cx));
+        }
+        if let Some(prefill) = self.prefill.take()
+            && input.read(cx).value().trim().is_empty()
+        {
+            input.update(cx, |state, cx| state.set_value(prefill, window, cx));
+        }
+    }
+
+    /// Offers git's prepared message once per merge, the way `git commit`
+    /// opens the editor with it.
+    fn sync_merge_message(&mut self, session: &Session, state: RepoState) {
+        if state != RepoState::Merging {
+            self.merge_prefilled = false;
+            return;
+        }
+        if self.merge_prefilled {
+            return;
+        }
+        self.merge_prefilled = true;
+        // One small file read; cheaper than a round trip through a worker.
+        if let Ok(Some(message)) = session.repo().merge_message() {
+            self.prefill = Some(message);
         }
     }
 
@@ -445,6 +472,7 @@ impl RepoView {
         if let Some(session) = self.session.as_ref() {
             let snapshot = session.snapshot();
             self.worktree.reconcile(&snapshot.status);
+            self.worktree.sync_merge_message(session, snapshot.state);
         }
         self.worktree.ensure_input(window, cx);
         self.request_worktree_diff(cx);
@@ -479,6 +507,7 @@ impl RepoView {
         if snapshot.busy.is_some() {
             return;
         }
+        self.worktree.sync_merge_message(session, snapshot.state);
         let moved = self.worktree.reconcile(&snapshot.status);
         let needs_view = self.worktree.selected.is_some()
             && self.worktree.diff.view().is_none()
@@ -774,10 +803,7 @@ impl RepoView {
     }
 
     pub(crate) fn toggle_amend(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let previous = self
-            .session
-            .as_ref()
-            .and_then(|session| previous_message(&session.snapshot()));
+        let previous = self.session.as_ref().and_then(previous_message);
         let amend = !self.worktree.amend;
         self.worktree.set_amend(amend, previous, window, cx);
     }
@@ -931,12 +957,12 @@ fn summary_hint(message: &str) -> Option<String> {
     (len > 72).then(|| format!("summary is {len} characters (guideline: 72)"))
 }
 
-/// HEAD's summary, used to prefill the amend box.
+/// HEAD's full message, used to prefill the amend box.
 ///
-/// The core exposes only commit summaries in the snapshot; the full message
-/// would need a new `Repo` read.
-fn previous_message(snapshot: &RepoSnapshot) -> Option<String> {
-    let head = match snapshot.head.as_ref()? {
+/// A single object read through gix, so it stays on the UI thread instead of
+/// adding a session round trip for every amend toggle.
+fn previous_message(session: &Session) -> Option<String> {
+    let head = match session.snapshot().head.as_ref()? {
         HeadInfo::Branch {
             target: Some(target),
             ..
@@ -944,15 +970,7 @@ fn previous_message(snapshot: &RepoSnapshot) -> Option<String> {
         HeadInfo::Detached { target } => *target,
         HeadInfo::Branch { target: None, .. } => return None,
     };
-    if let Some(index) = snapshot.commit_index.get(&head)
-        && let Some((commit, _)) = snapshot.commits.get(*index)
-    {
-        return Some(commit.summary.clone());
-    }
-    snapshot
-        .commits
-        .get(0)
-        .map(|(commit, _)| commit.summary.clone())
+    session.repo().commit_message(head).ok()
 }
 
 // ---------------------------------------------------------------------------
