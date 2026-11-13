@@ -13,6 +13,7 @@ mod diff_view;
 mod fake;
 mod graph_canvas;
 mod metrics;
+mod remote;
 mod repo_view;
 mod worktree_panel;
 
@@ -40,6 +41,7 @@ fn main() {
             worktree_panel::bind(cx);
             branches::bind(cx);
             conflicts::bind(cx);
+            remote::bind(cx);
 
             let bounds = Bounds::centered(None, size(px(1360.0), px(860.0)), cx);
             cx.open_window(

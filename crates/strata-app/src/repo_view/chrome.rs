@@ -27,6 +27,8 @@ use crate::branches::CreateBranchFromHead;
 use crate::data::{self, Badge, RowData, Source};
 use crate::diff_view::{self, DiffColors, Row as DiffRow};
 use crate::graph_canvas;
+use crate::remote;
+use crate::remote::{Command, FetchRemotes, PullBranch, PushBranch};
 use crate::worktree_panel::MainMode;
 
 const SIDEBAR_WIDTH: f32 = 240.0;
@@ -77,6 +79,15 @@ impl Render for RepoView {
             .on_action(cx.listener(|this, _: &ToggleFrameStats, _, cx| this.toggle_frame_stats(cx)))
             .on_action(cx.listener(|this, _: &CreateBranchFromHead, window, cx| {
                 this.create_branch_from_head(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &FetchRemotes, window, cx| {
+                this.remote_command(Command::Fetch, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &PullBranch, window, cx| {
+                this.remote_command(Command::Pull, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &PushBranch, window, cx| {
+                this.remote_command(Command::Push, window, cx)
             }));
 
         root = root.child(self.header(&palette));
@@ -164,13 +175,32 @@ impl RepoView {
                             .child(subtitle),
                     ),
             )
+            // The remote controls sit on the right, where a git client's
+            // network actions usually are; the key hints stay on their left so
+            // the bar keeps the hints it had before.
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .gap_3()
                     .flex_none()
                     .pr_3()
-                    .text_size(px(11.0))
-                    .text_color(palette.muted_foreground)
-                    .child("↑/↓ select · F12 frame stats"),
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(11.0))
+                            .text_color(palette.muted_foreground)
+                            .child("↑/↓ select · F12 frame stats"),
+                    )
+                    .child(self.remote_buttons(
+                        source.as_ref(),
+                        &remote::Colors {
+                            muted_foreground: palette.muted_foreground,
+                            border: palette.border,
+                            accent: palette.accent,
+                            accent_foreground: palette.accent_foreground,
+                        },
+                    )),
             )
             .into_any_element()
     }
@@ -598,8 +628,14 @@ impl RepoView {
             .clone()
             .unwrap_or_else(|| "no git commands yet".to_owned());
         let error = self.status_error.clone();
+        let operation = self.remote_status(&remote::Colors {
+            muted_foreground: palette.muted_foreground,
+            border: palette.border,
+            accent: palette.accent,
+            accent_foreground: palette.accent_foreground,
+        });
 
-        div()
+        let mut bar = div()
             .flex()
             .items_center()
             .justify_between()
@@ -619,19 +655,24 @@ impl RepoView {
                     .truncate()
                     .text_color(palette.muted_foreground)
                     .child(command),
-            )
-            .child(
-                div()
-                    .max_w(px(720.0))
-                    .truncate()
-                    .text_color(if error.is_some() {
-                        palette.danger
-                    } else {
-                        palette.muted_foreground
-                    })
-                    .child(error.unwrap_or_else(|| "ready".to_owned())),
-            )
-            .into_any_element()
+            );
+        // Only while a fetch, pull or push runs: the bar otherwise keeps its
+        // command log and last-error slots.
+        if let Some(operation) = operation {
+            bar = bar.child(operation);
+        }
+        bar.child(
+            div()
+                .max_w(px(720.0))
+                .truncate()
+                .text_color(if error.is_some() {
+                    palette.danger
+                } else {
+                    palette.muted_foreground
+                })
+                .child(error.unwrap_or_else(|| "ready".to_owned())),
+        )
+        .into_any_element()
     }
 
     fn overlay_panel(&self, palette: &Palette) -> AnyElement {

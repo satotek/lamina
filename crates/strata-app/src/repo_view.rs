@@ -29,6 +29,7 @@ use crate::data::{self, LaneWidth, Source};
 use crate::diff_view::{self, Row as DiffRow};
 use crate::fake::{self, FakeRepo};
 use crate::metrics::FrameMetrics;
+use crate::remote::Remote;
 use crate::worktree_panel::{MainMode, WorktreePanel};
 
 /// Height of the diff pane below the commit list.
@@ -184,9 +185,11 @@ pub struct RepoView {
     pub(crate) worktree: WorktreePanel,
     /// Handle to this view. The sidebar's branch rows get no `Context`, so they
     /// update the view through this entity.
-    entity: Entity<RepoView>,
+    pub(crate) entity: Entity<RepoView>,
     /// Branch sections, dialogs and the operations they started.
     pub(crate) branches: Branches,
+    /// Fetch/pull/push state, progress and the dialogs that decide them.
+    pub(crate) remote: Remote,
 
     /// Running maximum of graph widths, updated as chunks arrive.
     lanes: LaneWidth,
@@ -245,6 +248,7 @@ impl RepoView {
             worktree: WorktreePanel::default(),
             entity,
             branches: Branches::default(),
+            remote: Remote::default(),
             lanes: LaneWidth::default(),
             selected: None,
             selection_commit: None,
@@ -376,6 +380,7 @@ impl RepoView {
             }
             SessionEvent::OperationFinished { id, error } => {
                 self.worktree.on_operation_finished(id, error.as_deref());
+                self.remote.on_finished(id, error.as_deref(), cx);
                 // The label records which operation failed, so the status bar
                 // names it instead of showing a bare git message.
                 let had_dialog = self.branches.dialog_open();
@@ -393,11 +398,12 @@ impl RepoView {
                 }
                 cx.notify();
             }
-            // Progress and query results get their UI with remote operations and search.
-            SessionEvent::OperationStarted { .. }
-            | SessionEvent::OperationProgress { .. }
-            | SessionEvent::QueryReady { .. }
-            | SessionEvent::QueryFailed { .. } => {}
+            SessionEvent::OperationStarted { id } => self.remote.on_started(id, cx),
+            SessionEvent::OperationProgress { id, text, percent } => {
+                self.remote.on_progress(id, &text, percent, cx)
+            }
+            // Query results get their UI with commit search.
+            SessionEvent::QueryReady { .. } | SessionEvent::QueryFailed { .. } => {}
         }
     }
 
