@@ -30,6 +30,12 @@ actions!(
         /// Stashes the working tree's changes. Handled on `RepoView` by
         /// `stash.rs`.
         StashChanges,
+        /// Opens a terminal in the repository's working tree. Handled on
+        /// `RepoView` by `title_bar.rs`.
+        OpenTerminalHere,
+        /// Opens the selected file in the editor. Handled on `RepoView` by
+        /// `title_bar.rs`.
+        OpenInEditor,
         /// Opens the command palette over the active window. Handled globally
         /// by the palette module.
         TogglePalette,

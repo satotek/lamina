@@ -227,6 +227,7 @@ fn file_row(
     let rows = context.rows.clone();
     let untracked = kind == ChangeKind::Untracked;
     let menu_entity = context.entity.clone();
+    let menu_path = path.clone();
     let right_entity = context.entity.clone();
     let right_path = click_path.clone();
 
@@ -254,7 +255,16 @@ fn file_row(
         })
         .context_menu(move |menu, _window, cx| {
             let count = menu_entity.read(cx).worktree.selection.len();
-            let mut menu = menu;
+            // The menu acts on the pointed-at row even when the selection
+            // holds several files.
+            let editor_entity = menu_entity.clone();
+            let editor_path = menu_path.clone();
+            let mut menu = menu.item(PopupMenuItem::new("Open in Editor").on_click(
+                move |_, _window, cx| {
+                    let path = editor_path.clone();
+                    editor_entity.update(cx, |this, cx| this.open_file_in_editor(&path, None, cx));
+                },
+            ));
             match side {
                 Side::Unstaged => {
                     let stage_entity = menu_entity.clone();

@@ -28,7 +28,8 @@ use gpui_component::dialog::DialogEntrance;
 use gpui_component::input::{Input, InputEvent, InputState};
 
 use crate::actions::{
-    OpenRepository, OpenSettings, Quit, StashChanges, ToggleFrameStats, TogglePalette,
+    OpenInEditor, OpenRepository, OpenSettings, OpenTerminalHere, Quit, StashChanges,
+    ToggleFrameStats, TogglePalette,
 };
 use crate::branches::CreateBranchFromHead;
 use crate::remote::{FetchRemotes, PullBranch, PushBranch};
@@ -130,6 +131,16 @@ const COMMANDS: &[Command] = &[
     Command {
         label: "Stash changes",
         action: || Box::new(StashChanges),
+        needs_repo: true,
+    },
+    Command {
+        label: "Open terminal here",
+        action: || Box::new(OpenTerminalHere),
+        needs_repo: true,
+    },
+    Command {
+        label: "Open in Editor",
+        action: || Box::new(OpenInEditor),
         needs_repo: true,
     },
     Command {

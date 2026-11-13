@@ -328,7 +328,7 @@ fn tools() -> SettingPage {
                     ),
                 )
                 .description(
-                    "{path} and {line} are replaced. Leave empty for the system application.",
+                    "{path} and {line} are replaced inside each argument, so a path with spaces stays one argument. {line} is empty when the line is unknown. Leave empty to open the file with the system application.",
                 ),
                 SettingItem::new(
                     "Terminal command",
@@ -340,7 +340,7 @@ fn tools() -> SettingPage {
                     ),
                 )
                 .description(
-                    "{path} is replaced with the repository. Leave empty for the system terminal.",
+                    "{path} is replaced with the repository's working directory, inside one argument. Leave empty to use the system terminal.",
                 ),
             ]),
         )

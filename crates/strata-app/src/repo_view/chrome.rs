@@ -15,8 +15,8 @@ use gpui_component::ActiveTheme as _;
 
 use super::{PAGE, RepoView};
 use crate::actions::{
-    self, SelectFirst, SelectLast, SelectNext, SelectPageDown, SelectPageUp, SelectPrevious,
-    StashChanges, ToggleFrameStats,
+    self, OpenInEditor, OpenTerminalHere, SelectFirst, SelectLast, SelectNext, SelectPageDown,
+    SelectPageUp, SelectPrevious, StashChanges, ToggleFrameStats,
 };
 use crate::branches::CreateBranchFromHead;
 use crate::data::Source;
@@ -79,6 +79,10 @@ impl Render for RepoView {
             .on_action(cx.listener(|this, _: &SearchSubmit, _, cx| this.submit_search(cx)))
             .on_action(
                 cx.listener(|this, _: &StashChanges, window, cx| this.stash_changes(window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &OpenTerminalHere, _, cx| this.open_terminal_here(cx)))
+            .on_action(
+                cx.listener(|this, _: &OpenInEditor, _, cx| this.open_selection_in_editor(cx)),
             )
             .on_action(cx.listener(|this, _: &CreateBranchFromHead, window, cx| {
                 this.create_branch_from_head(window, cx)

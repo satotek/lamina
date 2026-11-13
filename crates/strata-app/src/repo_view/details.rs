@@ -326,14 +326,24 @@ impl RepoView {
                             let entity = menu_entity.clone();
                             let path = menu_path.clone();
                             let mut menu =
-                                menu.item(PopupMenuItem::new("Show file history").on_click(
-                                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                                menu.item(PopupMenuItem::new("Open in Editor").on_click(
+                                    move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
                                         let path = path.clone();
                                         entity.update(cx, |this, cx| {
-                                            this.open_file_history(path, window, cx);
+                                            this.open_file_in_editor(&path, None, cx);
                                         });
                                     },
                                 ));
+                            let entity = menu_entity.clone();
+                            let path = menu_path.clone();
+                            menu = menu.item(PopupMenuItem::new("Show file history").on_click(
+                                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                                    let path = path.clone();
+                                    entity.update(cx, |this, cx| {
+                                        this.open_file_history(path, window, cx);
+                                    });
+                                },
+                            ));
                             if let Some(commit) = blame_commit {
                                 let entity = menu_entity.clone();
                                 let path = menu_path.clone();

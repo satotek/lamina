@@ -1,9 +1,12 @@
 //! The title bar: the app mark and wordmark, the repository and branch chips,
 //! the commit search, and the remote, stash and settings actions.
 
+use std::path::PathBuf;
+
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, FontWeight, InteractiveElement, IntoElement, ParentElement, Styled, div, px,
+    AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, Styled, div,
+    px,
 };
 use gpui_component::input::Input;
 use gpui_component::{Sizable as _, TitleBar};
@@ -15,7 +18,9 @@ use super::common::{glyph, icon};
 use crate::actions;
 use crate::data::Source;
 use crate::remote;
+use crate::settings::Settings;
 use crate::style::{self, Design};
+use crate::worktree_panel::MainMode;
 
 impl RepoView {
     /// The title bar: the app mark, the repository and branch, the commit
@@ -153,15 +158,11 @@ impl RepoView {
             ))
             .child(stash_button(design))
             .child(separator)
-            .child(
-                crate::ui::icon_button("terminal-placeholder", IconName::SquareTerminal)
-                    .ghost()
-                    .w(px(32.0))
-                    .h(px(32.0))
-                    .text_color(design.muted)
-                    .tooltip("Terminal — coming soon")
-                    .disabled(true),
-            )
+            .child(terminal_button(
+                self.entity.clone(),
+                self.work_dir().is_some(),
+                design,
+            ))
             .child(
                 crate::ui::icon_button("open-settings", IconName::Settings)
                     .ghost()
@@ -212,6 +213,89 @@ impl RepoView {
             .child(nav)
             .into_any_element()
     }
+}
+
+impl RepoView {
+    /// The working tree root, or `None` for the synthetic benchmark and the
+    /// error screen, which have no directory to open.
+    fn work_dir(&self) -> Option<PathBuf> {
+        let path = self.session.as_ref()?.repo().workdir()?.to_path_buf();
+        Some(std::fs::canonicalize(&path).unwrap_or(path))
+    }
+
+    /// Opens a terminal in the repository's working tree.
+    pub(crate) fn open_terminal_here(&mut self, cx: &mut Context<Self>) {
+        let Some(dir) = self.work_dir() else {
+            self.report_tool_error("open a repository first".to_owned(), cx);
+            return;
+        };
+        match crate::external_tools::open_terminal(&dir, Settings::get(cx)) {
+            Ok(()) => cx.notify(),
+            Err(error) => self.report_tool_error(error, cx),
+        }
+    }
+
+    /// Opens a repository-relative `path` in the editor, at `line` when known.
+    pub(crate) fn open_file_in_editor(
+        &mut self,
+        path: &str,
+        line: Option<u32>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(dir) = self.work_dir() else {
+            self.report_tool_error("open a repository first".to_owned(), cx);
+            return;
+        };
+        let file = dir.join(path);
+        match crate::external_tools::open_in_editor(&file, line, Settings::get(cx)) {
+            Ok(()) => cx.notify(),
+            Err(error) => self.report_tool_error(error, cx),
+        }
+    }
+
+    /// Opens whatever file the current view has selected in the editor. The
+    /// palette and its action use this because they carry no file of their own.
+    pub(crate) fn open_selection_in_editor(&mut self, cx: &mut Context<Self>) {
+        let path = match self.mode {
+            MainMode::Worktree => self.worktree.selected_path().map(str::to_owned),
+            MainMode::History => self
+                .files
+                .as_ref()
+                .and_then(|files| self.selected_file.and_then(|index| files.get(index)))
+                .map(|file| file.path.clone()),
+        };
+        match path {
+            Some(path) => self.open_file_in_editor(&path, None, cx),
+            None => self.report_tool_error("select a file to open in the editor".to_owned(), cx),
+        }
+    }
+
+    fn report_tool_error(&mut self, error: String, cx: &mut Context<Self>) {
+        self.status_error = Some(error);
+        cx.notify();
+    }
+}
+
+/// The title bar's terminal action: opens a terminal in the repository's
+/// working tree, using the command from the settings when one is set.
+fn terminal_button(
+    entity: gpui::WeakEntity<RepoView>,
+    enabled: bool,
+    design: &Design,
+) -> AnyElement {
+    crate::ui::icon_button("open-terminal", IconName::SquareTerminal)
+        .ghost()
+        .w(px(32.0))
+        .h(px(32.0))
+        .text_color(design.muted)
+        .tooltip("Open terminal here")
+        .disabled(!enabled)
+        .on_click(move |_, _, cx| {
+            if let Some(entity) = entity.upgrade() {
+                entity.update(cx, |this, cx| this.open_terminal_here(cx));
+            }
+        })
+        .into_any_element()
 }
 
 /// The title bar's Stash action: the same icon-over-label shape as the remote

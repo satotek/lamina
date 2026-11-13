@@ -16,6 +16,7 @@ mod conflicts;
 mod data;
 mod debug_launch;
 mod diff_view;
+mod external_tools;
 mod fake;
 mod file_history;
 mod graph_canvas;

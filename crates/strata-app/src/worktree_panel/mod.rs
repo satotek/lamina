@@ -1676,6 +1676,14 @@ impl WorktreePanel {
             .map(|selected| selected.path.as_str())
     }
 
+    /// The focused file in any of the lists, for actions that carry no path of
+    /// their own, such as a palette command.
+    pub(crate) fn selected_path(&self) -> Option<&str> {
+        self.selected
+            .as_ref()
+            .map(|selected| selected.path.as_str())
+    }
+
     fn render(
         &self,
         entity: Entity<RepoView>,

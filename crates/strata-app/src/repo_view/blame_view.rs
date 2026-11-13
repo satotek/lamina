@@ -891,6 +891,7 @@ impl RepoView {
         let colors = DiffColors::from_theme(cx.theme());
         let style = DiffStyle::from_settings(cx, &design.mono);
         let design = design.clone();
+        let target_path = self.blame.path().map(str::to_owned);
         let row_height = style.row_height();
         uniform_list("blame-lines", count, move |range, _window, cx| {
             let view = entity.read(cx);
@@ -921,6 +922,8 @@ impl RepoView {
                             let author = meta.author.clone();
                             let summary = meta.summary.clone();
                             let orig_path = row.orig_path.to_owned();
+                            let line = row.line;
+                            let editor_path = target_path.clone();
                             let click_entity = entity.clone();
                             let menu_entity = entity.clone();
                             let copy_id = commit.to_string();
@@ -951,6 +954,26 @@ impl RepoView {
                                     let parent_entity = menu_entity.clone();
                                     let parent_path = orig_path.clone();
                                     let copy = copy_id.clone();
+                                    let mut menu = menu;
+                                    if let Some(path) = editor_path.clone() {
+                                        let editor_entity = menu_entity.clone();
+                                        menu = menu.item(
+                                            PopupMenuItem::new("Open in Editor").on_click(
+                                                move |_: &ClickEvent,
+                                                      _window: &mut Window,
+                                                      cx: &mut App| {
+                                                    let path = path.clone();
+                                                    editor_entity.update(cx, |this, cx| {
+                                                        this.open_file_in_editor(
+                                                            &path,
+                                                            Some(line),
+                                                            cx,
+                                                        );
+                                                    });
+                                                },
+                                            ),
+                                        );
+                                    }
                                     menu.item(
                                         PopupMenuItem::new("Blame this commit's parent").on_click(
                                             move |_: &ClickEvent,
