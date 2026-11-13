@@ -20,6 +20,7 @@ struct Fixture {
     _dir: TempDir,
     root: std::path::PathBuf,
     git: Git,
+    config: std::path::PathBuf,
 }
 
 fn isolated(cmd: &mut Command, empty_config: &Path) {
@@ -35,6 +36,10 @@ fn isolated(cmd: &mut Command, empty_config: &Path) {
 
 impl Fixture {
     fn new(head_content: &str) -> Self {
+        Self::with_autocrlf(head_content, false)
+    }
+
+    fn with_autocrlf(head_content: &str, autocrlf: bool) -> Self {
         let dir = TempDir::new().unwrap();
         let root = dir.path().join("repo");
         fs::create_dir_all(root.join("src")).unwrap();
@@ -49,7 +54,11 @@ impl Fixture {
             assert!(out.status.success(), "git {args:?}: {out:?}");
         };
         run(&["init", "-q", "-b", "main"]);
-        run(&["config", "core.autocrlf", "false"]);
+        run(&[
+            "config",
+            "core.autocrlf",
+            if autocrlf { "true" } else { "false" },
+        ]);
         fs::write(root.join(FILE), head_content).unwrap();
         run(&["add", "."]);
         run(&["commit", "-q", "-m", "base"]);
@@ -65,6 +74,7 @@ impl Fixture {
             _dir: dir,
             root,
             git,
+            config: empty_config,
         }
     }
 
@@ -82,6 +92,13 @@ impl Fixture {
         fs::read_to_string(self.root.join(FILE)).unwrap()
     }
 
+    /// The worktree file as git would store it, which is what a diff must use
+    /// whenever `core.autocrlf` or a `text` attribute is in play.
+    fn worktree_as_git(&self) -> String {
+        let bytes = self.repo().file_in_worktree_as_git(FILE).unwrap().unwrap();
+        String::from_utf8(bytes).unwrap()
+    }
+
     fn head(&self) -> String {
         let out = Command::new("git")
             .args(["show", &format!("HEAD:{FILE}")])
@@ -89,6 +106,14 @@ impl Fixture {
             .output()
             .unwrap();
         String::from_utf8(out.stdout).unwrap()
+    }
+
+    /// Run git in the fixture repository with the same isolated environment.
+    fn git_output(&self, args: &[&str]) -> std::process::Output {
+        let mut cmd = Command::new("git");
+        cmd.args(args).current_dir(&self.root);
+        isolated(&mut cmd, &self.config);
+        cmd.output().expect("run git")
     }
 
     /// Applies one changed line of the diff between `old` and `new` in `mode`.
@@ -170,6 +195,51 @@ fn staging_every_line_one_by_one_reaches_the_worktree() {
             assert!(steps < 200, "seed {seed}: staging does not converge");
         }
         assert_eq!(fx.index(), fx.worktree(), "seed {seed}");
+    }
+}
+
+/// The same pipeline on a repository where the checkout holds CRLF. The worktree
+/// side of the diff has to be the git form, or every line would look changed and
+/// the patches would not apply.
+#[test]
+fn staging_every_line_one_by_one_with_autocrlf() {
+    for seed in 1..=15 {
+        let base = base_text();
+        let fx = Fixture::with_autocrlf(&base, true);
+        let mut rng = Lcg(seed);
+        let edited = edited(&base, &mut rng);
+        // A Windows editor writes CRLF; git stores LF in the index.
+        fs::write(fx.root.join(FILE), edited.replace('\n', "\r\n")).unwrap();
+
+        assert_ne!(fx.worktree(), fx.worktree_as_git(), "seed {seed}");
+        assert_eq!(fx.worktree_as_git(), edited, "seed {seed}");
+
+        let mut steps = 0;
+        while fx.apply_one_line(
+            &fx.index(),
+            &fx.worktree_as_git(),
+            PatchMode::Stage,
+            rng.next(),
+        ) {
+            steps += 1;
+            assert!(steps < 200, "seed {seed}: staging does not converge");
+        }
+        assert_eq!(fx.index(), edited, "seed {seed}");
+        assert_eq!(fx.index(), fx.worktree_as_git(), "seed {seed}");
+
+        // `git diff` converts the worktree the same way, so nothing is left.
+        let diff = fx.git_output(&["diff", "--", FILE]);
+        assert_eq!(
+            String::from_utf8_lossy(&diff.stdout),
+            "",
+            "seed {seed}: git still sees a worktree diff"
+        );
+        assert!(
+            fx.git_output(&["diff", "--quiet", "--", FILE])
+                .status
+                .success(),
+            "seed {seed}: git diff is not quiet"
+        );
     }
 }
 

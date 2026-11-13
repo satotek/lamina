@@ -3,7 +3,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::{Duration, SystemTime};
 
+use strata_core::diff::{DiffOptions, LineKind, diff_text};
 use strata_core::repo::Repo;
 use strata_core::{ChangeKind, FileChange, Oid, WorktreeStatus};
 use tempfile::TempDir;
@@ -203,6 +205,23 @@ fn untracked(path: &str) -> FileChange {
         old_path: None,
         kind: ChangeKind::Untracked,
     }
+}
+
+/// Replace the worktree copy of `path` with what `git checkout` writes, then
+/// backdate it so a content comparison is required. This is the state a Windows
+/// checkout with CRLF conversion leaves behind.
+fn checkout_crlf(repo: &TestRepo, path: &str) {
+    let file = repo.path().join(path);
+    fs::remove_file(&file).expect("remove worktree file");
+    repo.git(&["checkout", "--", path]);
+
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(&file)
+        .expect("open worktree file");
+    let stale = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+    file.set_times(fs::FileTimes::new().set_modified(stale))
+        .expect("backdate worktree file");
 }
 
 #[test]
@@ -444,6 +463,13 @@ fn file_contents_from_commit_index_and_worktree() {
             .as_deref(),
         Some(b"worktree\n".as_slice())
     );
+    // Without any eol configuration the git form is the raw content.
+    assert_eq!(
+        repo.file_in_worktree_as_git("dir/file.txt")
+            .expect("worktree contents")
+            .as_deref(),
+        Some(b"worktree\n".as_slice())
+    );
 
     assert_eq!(
         repo.file_at_commit(commit, "missing.txt").expect("missing"),
@@ -451,6 +477,190 @@ fn file_contents_from_commit_index_and_worktree() {
     );
     assert_eq!(repo.file_in_index("missing.txt").expect("missing"), None);
     assert_eq!(repo.file_in_worktree("missing.txt").expect("missing"), None);
+    assert_eq!(
+        repo.file_in_worktree_as_git("missing.txt")
+            .expect("missing"),
+        None
+    );
     // Directories are not files.
     assert_eq!(repo.file_in_worktree("dir").expect("directory"), None);
+    assert_eq!(
+        repo.file_in_worktree_as_git("dir").expect("directory"),
+        None
+    );
+}
+
+/// A checkout with `core.autocrlf=true` holds CRLF while the index holds LF.
+/// Reading the raw bytes must stay possible (a discard writes them back), and
+/// both git and `status()` must see the file as unchanged.
+#[test]
+fn autocrlf_checkout_with_crlf_matches_lf_index() {
+    let repo = TestRepo::new();
+    repo.git(&["config", "core.autocrlf", "true"]);
+    repo.write("a.txt", "one\ntwo\n");
+    repo.git(&["add", "--", "a.txt"]);
+    repo.git(&["commit", "-q", "-m", "init"]);
+
+    // `git checkout` applies the smudge filter, which is what puts CRLF on disk
+    // on Windows. Backdating the result forces git (and gix) to compare content
+    // instead of trusting stat data.
+    checkout_crlf(&repo, "a.txt");
+
+    let open = repo.open();
+    assert_eq!(
+        open.file_in_worktree("a.txt")
+            .expect("raw contents")
+            .as_deref(),
+        Some(b"one\r\ntwo\r\n".as_slice()),
+        "file_in_worktree keeps the bytes on disk"
+    );
+    let index = open.file_in_index("a.txt").expect("index").expect("entry");
+    assert_eq!(index, b"one\ntwo\n");
+    assert_eq!(
+        open.file_in_worktree_as_git("a.txt")
+            .expect("git form")
+            .expect("entry"),
+        index
+    );
+    assert_eq!(open.status().expect("status"), WorktreeStatus::default());
+    assert_matches_git(&repo);
+}
+
+#[test]
+fn autocrlf_one_changed_crlf_line_is_one_diff_pair() {
+    let repo = TestRepo::new();
+    repo.git(&["config", "core.autocrlf", "true"]);
+    let base: String = (1..=5).map(|i| format!("line {i}\n")).collect();
+    repo.write("a.txt", &base);
+    repo.git(&["add", "--", "a.txt"]);
+    repo.git(&["commit", "-q", "-m", "init"]);
+    checkout_crlf(&repo, "a.txt");
+
+    // Same length as before, so only a content comparison can notice it.
+    let edited = base.replace("line 3", "line X").replace('\n', "\r\n");
+    repo.write("a.txt", &edited);
+
+    let open = repo.open();
+    let index = open.file_in_index("a.txt").expect("index").expect("entry");
+    let git_form = open
+        .file_in_worktree_as_git("a.txt")
+        .expect("git form")
+        .expect("entry");
+
+    let diff = diff_text(&index, &git_form, &DiffOptions::default());
+    assert_eq!(diff.hunks.len(), 1, "hunks: {diff:#?}");
+    let changed: Vec<&str> = diff
+        .hunks
+        .iter()
+        .flat_map(|hunk| &hunk.lines)
+        .filter(|line| line.kind != LineKind::Context)
+        .map(|line| line.content.as_str())
+        .collect();
+    assert_eq!(changed, vec!["line 3", "line X"], "{diff:#?}");
+
+    assert_eq!(
+        open.status().expect("status").unstaged,
+        vec![modified("a.txt")]
+    );
+    assert_matches_git(&repo);
+}
+
+/// A `text eol=crlf` attribute gives the same LF index / CRLF checkout split as
+/// `core.autocrlf`, without any configuration.
+#[test]
+fn gitattributes_text_eol_crlf_matches_lf_index() {
+    let repo = TestRepo::new();
+    repo.write(".gitattributes", "*.txt text eol=crlf\n");
+    repo.write("a.txt", "one\ntwo\n");
+    repo.git(&["add", "--", ".gitattributes", "a.txt"]);
+    repo.git(&["commit", "-q", "-m", "init"]);
+    checkout_crlf(&repo, "a.txt");
+
+    let open = repo.open();
+    assert_eq!(
+        open.file_in_worktree("a.txt")
+            .expect("raw contents")
+            .as_deref(),
+        Some(b"one\r\ntwo\r\n".as_slice())
+    );
+    assert_eq!(
+        open.file_in_worktree_as_git("a.txt")
+            .expect("git form")
+            .expect("entry"),
+        b"one\ntwo\n"
+    );
+    assert_eq!(open.status().expect("status"), WorktreeStatus::default());
+    assert_matches_git(&repo);
+}
+
+/// `binary` turns off every conversion, so the CRLF bytes on disk are the bytes
+/// in the index.
+#[test]
+fn gitattributes_binary_keeps_bytes_unchanged() {
+    let repo = TestRepo::new();
+    repo.write(".gitattributes", "*.bin binary\n");
+    let content: &[u8] = b"\x00\x01\r\nbinary\r\n";
+    fs::write(repo.path().join("data.bin"), content).expect("write binary");
+    repo.git(&["add", "--", ".gitattributes", "data.bin"]);
+    repo.git(&["commit", "-q", "-m", "init"]);
+
+    let open = repo.open();
+    assert_eq!(
+        open.file_in_index("data.bin")
+            .expect("index")
+            .expect("entry"),
+        content
+    );
+    assert_eq!(
+        open.file_in_worktree_as_git("data.bin")
+            .expect("git form")
+            .expect("entry"),
+        content
+    );
+    assert_eq!(open.status().expect("status"), WorktreeStatus::default());
+    assert_matches_git(&repo);
+}
+
+/// A `-text` attribute also disables eol conversion, for files that are text but
+/// must keep their bytes.
+#[test]
+fn gitattributes_minus_text_keeps_bytes_unchanged() {
+    let repo = TestRepo::new();
+    repo.write(".gitattributes", "*.txt -text\n");
+    repo.write("a.txt", "one\r\ntwo\r\n");
+    repo.git(&["add", "--", ".gitattributes", "a.txt"]);
+    repo.git(&["commit", "-q", "-m", "init"]);
+
+    let open = repo.open();
+    assert_eq!(
+        open.file_in_worktree_as_git("a.txt")
+            .expect("git form")
+            .expect("entry"),
+        b"one\r\ntwo\r\n"
+    );
+    assert_eq!(open.status().expect("status"), WorktreeStatus::default());
+    assert_matches_git(&repo);
+}
+
+/// A conversion gix refuses (here `core.safecrlf=true` on a mixed-ending file)
+/// must not fail the read: the raw bytes come back so the diff still renders.
+#[test]
+fn failed_conversion_falls_back_to_raw_bytes() {
+    let repo = TestRepo::new();
+    repo.git(&["config", "core.autocrlf", "true"]);
+    repo.write("a.txt", "one\ntwo\n");
+    repo.git(&["add", "--", "a.txt"]);
+    repo.git(&["commit", "-q", "-m", "init"]);
+    // A lone LF would come back as CRLF on checkout, which `safecrlf` rejects.
+    repo.git(&["config", "core.safecrlf", "true"]);
+    let raw = b"one\r\ntwo\n";
+    fs::write(repo.path().join("a.txt"), raw).expect("write mixed endings");
+
+    let open = repo.open();
+    assert_eq!(
+        open.file_in_worktree_as_git("a.txt")
+            .expect("fallback")
+            .as_deref(),
+        Some(raw.as_slice())
+    );
 }
