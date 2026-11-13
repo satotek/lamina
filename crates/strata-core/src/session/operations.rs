@@ -103,6 +103,8 @@ fn changes_refs(operation: &Operation) -> bool {
             | Operation::Push { .. }
             | Operation::StashPush { .. }
             | Operation::StashPop { .. }
+            | Operation::StashApply { .. }
+            | Operation::StashDrop { .. }
     )
 }
 
@@ -136,18 +138,26 @@ fn execute(shared: &Shared, operation: &Operation) -> Result<()> {
             checkout,
         } => git.create_branch(name, start_point.as_deref(), *checkout),
         Operation::DeleteBranch { name, force } => git.delete_branch(name, *force),
-        Operation::Fetch { remote } => git.fetch(remote.as_deref(), false),
+        Operation::Fetch { remote, prune } => git.fetch(remote.as_deref(), *prune),
         Operation::Pull { rebase } => git.pull(*rebase),
         Operation::Push {
             remote,
             branch,
             set_upstream,
-        } => git.push(remote.as_deref(), branch.as_deref(), *set_upstream, false),
+            force_with_lease,
+        } => git.push(
+            remote.as_deref(),
+            branch.as_deref(),
+            *set_upstream,
+            *force_with_lease,
+        ),
         Operation::StashPush {
             message,
             include_untracked,
         } => git.stash_push(message.as_deref(), *include_untracked),
         Operation::StashPop { index } => git.stash_pop(*index),
+        Operation::StashApply { index } => git.stash_apply(*index),
+        Operation::StashDrop { index } => git.stash_drop(*index),
     }
 }
 

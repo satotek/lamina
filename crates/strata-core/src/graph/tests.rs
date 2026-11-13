@@ -5,24 +5,47 @@ fn oid(id: u32) -> Oid {
     Oid::from_hex(format!("{id:040x}").as_bytes()).expect("40 hex digits")
 }
 
-fn layout(commits: &[(u32, &[u32])]) -> Vec<GraphRow> {
+/// A row with pass-throughs expanded, so assertions can treat every line the
+/// same way regardless of how rows are stored.
+#[derive(Debug)]
+struct TestRow {
+    node_lane: u16,
+    node_color: u16,
+    width: u16,
+    segments: Vec<Segment>,
+}
+
+fn layout_rows(commits: &[(u32, &[u32])]) -> GraphRows {
     let mut layout = GraphLayout::new();
+    let mut rows = GraphRows::new();
     for (id, parents) in commits {
         let parents: Vec<Oid> = parents.iter().copied().map(oid).collect();
-        layout.push(oid(*id), &parents);
+        layout.push(oid(*id), &parents, &mut rows);
     }
-    layout.rows().to_vec()
+    rows
+}
+
+fn layout(commits: &[(u32, &[u32])]) -> Vec<TestRow> {
+    layout_rows(commits)
+        .iter()
+        .map(|row| TestRow {
+            node_lane: row.node_lane,
+            node_color: row.node_color,
+            width: row.width,
+            segments: expanded_segments(row),
+        })
+        .collect()
 }
 
 fn render(commits: &[(u32, &[u32])]) -> String {
-    let rows = layout(commits);
+    let rows = layout_rows(commits);
     let labels: Vec<String> = commits.iter().map(|(id, _)| format!("c{id}")).collect();
     let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
     render_ascii(&rows, &labels)
 }
 
 /// `width` must be one more than the highest lane the row touches.
-fn assert_widths(rows: &[GraphRow]) {
+fn assert_widths(rows: &[TestRow]) {
     for (index, row) in rows.iter().enumerate() {
         let max_lane = row
             .segments
@@ -329,6 +352,7 @@ fn perf_200k_commits() {
     // Ids are built up front so the measurement only covers the layout itself.
     let ids: Vec<Oid> = (0..N).map(oid).collect();
     let mut layout = GraphLayout::new();
+    let mut rows = GraphRows::new();
     let mut parents: Vec<Oid> = Vec::with_capacity(2);
 
     let start = Instant::now();
@@ -342,11 +366,11 @@ fn perf_200k_commits() {
         if index % 7 == 3 && index + 4 < N {
             parents.push(ids[(index + 4) as usize]);
         }
-        layout.push(id, &parents);
+        layout.push(id, &parents, &mut rows);
     }
     let elapsed = start.elapsed();
 
-    assert_eq!(layout.rows().len(), N as usize);
+    assert_eq!(rows.len(), N as usize);
     println!("laid out {N} commits in {elapsed:?}");
     assert!(
         elapsed.as_millis() < 1_000,

@@ -5,7 +5,7 @@
 
 use std::time::Instant;
 
-use strata_core::graph::GraphLayout;
+use strata_core::graph::{GraphLayout, GraphRows};
 use strata_core::repo::Repo;
 
 fn main() -> strata_core::Result<()> {
@@ -50,9 +50,10 @@ fn main() -> strata_core::Result<()> {
 
     let layout_started = Instant::now();
     let mut layout = GraphLayout::new();
+    let mut rows = GraphRows::new();
     for commit in repo.walk_commits()? {
         let commit = commit?;
-        layout.push(commit.id, &commit.parents);
+        layout.push(commit.id, &commit.parents, &mut rows);
     }
     eprintln!("walk + layout: {:?}", layout_started.elapsed());
     Ok(())

@@ -76,3 +76,11 @@ pub struct WorktreeStatus {
     /// Index vs working tree, including untracked files.
     pub unstaged: Vec<FileChange>,
 }
+
+/// One entry of the stash list. `index` is the `N` in `stash@{N}`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StashInfo {
+    pub index: usize,
+    pub id: Oid,
+    pub message: String,
+}

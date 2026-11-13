@@ -25,12 +25,12 @@ use std::time::Duration;
 
 use crate::diff::FileDiff;
 use crate::git_cli::{CommandRecord, Git};
-use crate::graph::GraphRow;
+use crate::graph::{GraphRow, GraphRows};
 use crate::highlight::LineHighlights;
 use crate::patch::LineSelection;
 use crate::repo::Repo;
 use crate::watch::RepoWatcher;
-use crate::{CommitInfo, Error, HeadInfo, Oid, RefInfo, Result, WorktreeStatus};
+use crate::{CommitInfo, Error, HeadInfo, Oid, RefInfo, Result, StashInfo, WorktreeStatus};
 
 use diffs::DiffJob;
 use history::LoadCommand;
@@ -62,7 +62,7 @@ pub struct CommitList {
 #[derive(Debug, Default)]
 pub struct CommitChunk {
     pub commits: Vec<CommitInfo>,
-    pub rows: Vec<GraphRow>,
+    pub rows: GraphRows,
 }
 
 impl CommitList {
@@ -74,63 +74,59 @@ impl CommitList {
         self.len == 0
     }
 
-    pub fn get(&self, index: usize) -> Option<(&CommitInfo, &GraphRow)> {
+    pub fn get(&self, index: usize) -> Option<(&CommitInfo, GraphRow<'_>)> {
         let chunk = self.chunks.get(index / COMMIT_CHUNK)?;
         let offset = index % COMMIT_CHUNK;
         Some((chunk.commits.get(offset)?, chunk.rows.get(offset)?))
     }
 
     /// Appends rows; only the last chunk is copied (at most COMMIT_CHUNK items).
-    pub fn extend(&mut self, commits: Vec<CommitInfo>, rows: Vec<GraphRow>) {
+    pub fn extend(&mut self, commits: Vec<CommitInfo>, rows: GraphRows) {
         debug_assert_eq!(commits.len(), rows.len(), "one graph row per commit");
-        if commits.is_empty() {
+        // A caller that disagrees about the lengths loses the extra items
+        // instead of building a chunk with commits but no rows.
+        let count = commits.len().min(rows.len());
+        if count == 0 {
             return;
         }
         let mut commits = commits.into_iter();
-        let mut rows = rows.into_iter();
+        let mut next_row = 0;
 
         // Chunks are shared with published snapshots, so completing the last
         // partial one means copying it instead of mutating it in place.
         let mut tail = match self.chunks.last() {
-            Some(last) if last.commits.len() < COMMIT_CHUNK => Some(CommitChunk {
-                commits: last.commits.clone(),
-                rows: last.rows.clone(),
-            }),
+            Some(last) if last.commits.len() < COMMIT_CHUNK => {
+                let tail = CommitChunk {
+                    commits: last.commits.clone(),
+                    rows: last.rows.clone(),
+                };
+                self.chunks.pop();
+                Some(tail)
+            }
             _ => None,
         };
-        if tail.is_some() {
-            self.chunks.pop();
-        }
 
-        loop {
+        while next_row < count {
             let mut chunk = tail.take().unwrap_or_default();
+            let take = (COMMIT_CHUNK - chunk.commits.len()).min(count - next_row);
+            chunk.commits.extend(commits.by_ref().take(take));
+            chunk.rows.extend_from(&rows, next_row..next_row + take);
+            next_row += take;
             // A copied chunk was already counted when it was first published.
-            let existing = chunk.commits.len();
-            while chunk.commits.len() < COMMIT_CHUNK {
-                // A caller that disagrees about the lengths loses the extra
-                // commits instead of building a chunk without rows.
-                let (Some(commit), Some(row)) = (commits.next(), rows.next()) else {
-                    break;
-                };
-                chunk.commits.push(commit);
-                chunk.rows.push(row);
+            self.len += take;
+            if chunk.commits.len() == COMMIT_CHUNK {
+                chunk.rows.shrink_to_fit();
             }
-            let added = chunk.commits.len() - existing;
-            if added == 0 {
-                // Only possible when the commit and row lists disagree; the
-                // copied chunk must go back so the list stays readable.
-                if existing > 0 {
-                    self.chunks.push(Arc::new(chunk));
-                }
-                break;
-            }
-            let full = chunk.commits.len() == COMMIT_CHUNK;
-            self.len += added;
             self.chunks.push(Arc::new(chunk));
-            if !full {
-                break;
-            }
         }
+    }
+
+    /// Approximate heap bytes of the graph rows, for memory budgeting.
+    pub fn graph_heap_bytes(&self) -> usize {
+        self.chunks
+            .iter()
+            .map(|chunk| chunk.rows.heap_bytes())
+            .sum()
     }
 }
 
@@ -139,7 +135,8 @@ impl CommitList {
 pub struct RepoSnapshot {
     /// Increases on every publish; lets the UI skip redundant re-renders.
     pub generation: u64,
-    pub head: HeadInfo,
+    /// `None` until the first load has read HEAD.
+    pub head: Option<HeadInfo>,
     pub refs: Arc<Vec<RefInfo>>,
     /// Indices into `refs`, for drawing ref badges next to commits.
     pub refs_by_commit: Arc<HashMap<Oid, Vec<usize>>>,
@@ -147,6 +144,8 @@ pub struct RepoSnapshot {
     /// Row index of each loaded commit, for "jump to commit" and selection.
     pub commit_index: Arc<HashMap<Oid, usize>>,
     pub status: Arc<WorktreeStatus>,
+    /// Newest first, as `stash@{0}`, `stash@{1}`, ...
+    pub stashes: Arc<Vec<StashInfo>>,
     /// Operation currently running, if any (the UI disables conflicting actions).
     pub busy: Option<OperationId>,
 }
@@ -197,6 +196,7 @@ pub enum Operation {
     },
     Fetch {
         remote: Option<String>,
+        prune: bool,
     },
     Pull {
         rebase: Option<bool>,
@@ -205,12 +205,20 @@ pub enum Operation {
         remote: Option<String>,
         branch: Option<String>,
         set_upstream: bool,
+        /// `--force-with-lease`: refuses to overwrite remote work you have not fetched.
+        force_with_lease: bool,
     },
     StashPush {
         message: Option<String>,
         include_untracked: bool,
     },
     StashPop {
+        index: usize,
+    },
+    StashApply {
+        index: usize,
+    },
+    StashDrop {
         index: usize,
     },
 }
@@ -442,16 +450,13 @@ fn spawn(name: &str, run: impl FnOnce() + Send + 'static) -> Result<JoinHandle<(
 fn empty_snapshot() -> RepoSnapshot {
     RepoSnapshot {
         generation: 0,
-        // Replaced by the first load; `snapshot()` must never block or panic.
-        head: HeadInfo::Branch {
-            short_name: String::new(),
-            target: None,
-        },
+        head: None,
         refs: Arc::new(Vec::new()),
         refs_by_commit: Arc::new(HashMap::new()),
         commits: CommitList::default(),
         commit_index: Arc::new(HashMap::new()),
         status: Arc::new(WorktreeStatus::default()),
+        stashes: Arc::new(Vec::new()),
         busy: None,
     }
 }
@@ -473,13 +478,8 @@ fn head_file(repo: &Repo, path: &str) -> Result<Option<Vec<u8>>> {
 }
 
 /// First parent of `commit`, for the commit-vs-parent diff.
-///
-/// `Repo` has no parent accessor yet, so this is the session's only direct gix
-/// read; it belongs in `repo` once that module grows one.
 fn first_parent(repo: &Repo, commit: Oid) -> Result<Option<Oid>> {
-    let local = repo.local();
-    let commit = local.find_commit(commit).map_err(Error::gix)?;
-    Ok(commit.parent_ids().next().map(|id| id.detach()))
+    Ok(repo.parents(commit)?.into_iter().next())
 }
 
 /// The worktree side of a diff in the form git hashes into a blob, so CRLF
@@ -528,20 +528,19 @@ mod tests {
         }
     }
 
-    fn rows(count: usize) -> Vec<GraphRow> {
-        (0..count)
-            .map(|_| GraphRow {
-                node_lane: 0,
-                node_color: 0,
-                segments: Vec::new(),
-                width: 1,
-            })
-            .collect()
+    fn rows(range: std::ops::Range<usize>) -> GraphRows {
+        // A linear history: each commit's only parent is the next one.
+        let mut layout = crate::graph::GraphLayout::new();
+        let mut rows = GraphRows::new();
+        for index in range {
+            let parent = commit(index + 1).id;
+            layout.push(commit(index).id, &[parent], &mut rows);
+        }
+        rows
     }
 
-    fn batch(range: std::ops::Range<usize>) -> (Vec<CommitInfo>, Vec<GraphRow>) {
-        let count = range.len();
-        (range.map(commit).collect(), rows(count))
+    fn batch(range: std::ops::Range<usize>) -> (Vec<CommitInfo>, GraphRows) {
+        (range.clone().map(commit).collect(), rows(range))
     }
 
     #[test]
@@ -584,7 +583,7 @@ mod tests {
         list.extend(commits, rows);
         let tail = Arc::clone(&list.chunks[0]);
 
-        list.extend(Vec::new(), Vec::new());
+        list.extend(Vec::new(), GraphRows::new());
 
         assert_eq!(list.len(), 2_000);
         assert_eq!(list.chunks.len(), 1);

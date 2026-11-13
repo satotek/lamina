@@ -9,7 +9,7 @@
 use std::ops::Range;
 
 use strata_core::diff::{DiffLine, FileDiff, Hunk, LineKind};
-use strata_core::graph::{GraphRow, Half, Segment};
+use strata_core::graph::{GraphRows, Half, PassThrough, Segment};
 
 /// Number of rows the benchmark hands to the commit list.
 pub const COMMIT_COUNT: usize = 200_000;
@@ -34,7 +34,7 @@ pub struct CommitRow {
 
 pub struct FakeRepo {
     pub commits: Vec<CommitRow>,
-    pub graph: Vec<GraphRow>,
+    pub graph: GraphRows,
     /// Widest row in `graph`. Every row paints into a column of this width so
     /// lanes stay on the same x coordinate from one row to the next.
     pub max_width: u16,
@@ -50,7 +50,7 @@ impl FakeRepo {
         let mut next_color = 1u16;
         let mut lanes: Vec<Option<Pending>> = vec![Some(Pending { id: 0, color: 0 })];
         let mut commits = Vec::with_capacity(count);
-        let mut graph = Vec::with_capacity(count);
+        let mut graph = GraphRows::new();
         let mut max_width = 1u16;
         let mut last_lane = 0usize;
 
@@ -155,12 +155,31 @@ impl FakeRepo {
             }
 
             max_width = max_width.max(width);
-            graph.push(GraphRow {
-                node_lane: current as u16,
-                node_color: node.color,
-                segments,
-                width,
-            });
+            // A lane with a straight top and bottom half that is not the
+            // node's own lane is a pass-through; everything else is an edge.
+            let node_lane = current as u16;
+            let straight = |half: Half, lane: u16| {
+                segments
+                    .iter()
+                    .any(|s| s.half == half && s.from_lane == lane && s.to_lane == lane)
+            };
+            let passes: Vec<PassThrough> = segments
+                .iter()
+                .filter(|s| s.half == Half::Top && s.from_lane == s.to_lane)
+                .filter(|s| s.from_lane != node_lane && straight(Half::Bottom, s.from_lane))
+                .map(|s| PassThrough {
+                    lane: s.from_lane,
+                    color: s.color,
+                })
+                .collect();
+            let edges: Vec<Segment> = segments
+                .iter()
+                .copied()
+                .filter(|s| {
+                    !(s.from_lane == s.to_lane && passes.iter().any(|p| p.lane == s.from_lane))
+                })
+                .collect();
+            graph.push_row(node_lane, node.color, width, &passes, &edges);
             commits.push(CommitRow {
                 id: node.id,
                 author: rng.below(24) as u8,
@@ -553,12 +572,16 @@ mod tests {
     #[test]
     fn graph_rows_stay_inside_their_width() {
         let repo = FakeRepo::generate(4_000);
-        for row in &repo.graph {
+        for row in repo.graph.iter() {
             assert!(row.node_lane < row.width);
-            for segment in &row.segments {
+            for segment in row.edges {
                 assert!(segment.from_lane < row.width);
                 assert!(segment.to_lane < row.width);
                 assert!(segment.color < LANE_COLORS);
+            }
+            for pass in row.passes {
+                assert!(pass.lane < row.width);
+                assert!(pass.color < LANE_COLORS);
             }
         }
     }

@@ -6,10 +6,11 @@ use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 
 use crate::graph::GraphLayout;
+use crate::graph::GraphRows;
 use crate::repo::CommitWalk;
 use crate::session::publish::Shared;
-use crate::session::{COMMIT_CHUNK, CommitList, GraphRow, SessionEvent};
-use crate::{CommitInfo, HeadInfo, Oid, RefInfo, Result};
+use crate::session::{COMMIT_CHUNK, CommitList, SessionEvent};
+use crate::{CommitInfo, HeadInfo, Oid, RefInfo, Result, StashInfo};
 
 pub(crate) struct LoadCommand {
     pub(crate) generation: u64,
@@ -40,6 +41,8 @@ fn load(shared: &Shared, generation: u64) -> Result<()> {
     let head = shared.repo.head()?;
     let refs = Arc::new(shared.repo.refs()?);
     let refs_by_commit = Arc::new(refs_by_commit(&refs));
+    // A stash moves `refs/stash`, so it reloads with the other refs.
+    let stashes = Arc::new(shared.repo.stashes()?);
     let walk = shared.repo.walk_commits()?;
 
     Loader {
@@ -48,12 +51,13 @@ fn load(shared: &Shared, generation: u64) -> Result<()> {
         head,
         refs,
         refs_by_commit,
+        stashes,
         commits: CommitList::default(),
         index: HashMap::new(),
         loaded: 0,
         published: 0,
         pending_commits: Vec::new(),
-        pending_rows: Vec::new(),
+        pending_rows: GraphRows::new(),
     }
     .run(walk)
 }
@@ -72,12 +76,13 @@ struct Loader<'a> {
     head: HeadInfo,
     refs: Arc<Vec<RefInfo>>,
     refs_by_commit: Arc<HashMap<Oid, Vec<usize>>>,
+    stashes: Arc<Vec<StashInfo>>,
     commits: CommitList,
     index: HashMap<Oid, usize>,
     loaded: usize,
     published: usize,
     pending_commits: Vec<CommitInfo>,
-    pending_rows: Vec<GraphRow>,
+    pending_rows: GraphRows,
 }
 
 impl Loader<'_> {
@@ -92,11 +97,10 @@ impl Loader<'_> {
             }
 
             let commit = item?;
-            let row = layout.push(commit.id, &commit.parents).clone();
+            layout.push(commit.id, &commit.parents, &mut self.pending_rows);
             self.index.insert(commit.id, self.loaded);
             self.loaded += 1;
             self.pending_commits.push(commit);
-            self.pending_rows.push(row);
 
             if self.publish_due() && !self.publish(false) {
                 return Ok(());
@@ -130,11 +134,13 @@ impl Loader<'_> {
         let head = self.head.clone();
         let refs = Arc::clone(&self.refs);
         let refs_by_commit = Arc::clone(&self.refs_by_commit);
+        let stashes = Arc::clone(&self.stashes);
 
         self.shared
             .publish_for_generation(self.generation, move |snapshot| {
-                snapshot.head = head;
+                snapshot.head = Some(head);
                 snapshot.refs = refs;
+                snapshot.stashes = stashes;
                 snapshot.refs_by_commit = refs_by_commit;
                 snapshot.commits = commits;
                 snapshot.commit_index = commit_index;

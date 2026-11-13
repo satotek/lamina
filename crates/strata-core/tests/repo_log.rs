@@ -529,3 +529,64 @@ fn bench_walk_commits_per_second() {
         count as f64 / elapsed.as_secs_f64()
     );
 }
+
+#[test]
+fn parents_lists_first_parent_first() {
+    let fixture = Fixture::new();
+    let base = fixture.commit("main.txt", "base\n", BASE_TIME + 100, "base");
+    fixture.git(&["checkout", "--quiet", "-b", "feature"]);
+    let feature = fixture.commit("feature.txt", "feature\n", BASE_TIME + 200, "feature");
+    fixture.git(&["checkout", "--quiet", "main"]);
+    let main = fixture.commit("main.txt", "main\n", BASE_TIME + 300, "main");
+    fixture.git_dated(
+        BASE_TIME + 400,
+        &["merge", "--quiet", "--no-ff", "-m", "merge", "feature"],
+    );
+    let merge = fixture.head();
+
+    let repo = fixture.open();
+    let parents: Vec<String> = repo
+        .parents(merge.parse().expect("oid"))
+        .expect("parents")
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(parents, vec![main, feature]);
+    assert!(
+        repo.parents(base.parse().expect("oid"))
+            .expect("root")
+            .is_empty()
+    );
+}
+
+#[test]
+fn stashes_are_listed_newest_first() {
+    let fixture = Fixture::new();
+    fixture.commit("file.txt", "base\n", BASE_TIME + 100, "base");
+    assert!(fixture.open().stashes().expect("no stash ref").is_empty());
+
+    for (date, content, message) in [(200, "one\n", "first"), (300, "two\n", "second")] {
+        std::fs::write(fixture.path().join("file.txt"), content).expect("write");
+        fixture.git_dated(
+            BASE_TIME + date,
+            &["stash", "push", "--quiet", "-m", message],
+        );
+    }
+
+    let stashes = fixture.open().stashes().expect("stashes");
+    let listed: Vec<(usize, String)> = stashes
+        .iter()
+        .map(|stash| (stash.index, stash.message.clone()))
+        .collect();
+    assert_eq!(
+        listed,
+        vec![
+            (0, "On main: second".to_string()),
+            (1, "On main: first".to_string()),
+        ]
+    );
+    assert_eq!(
+        stashes[0].id.to_string(),
+        fixture.git(&["rev-parse", "stash@{0}"]).trim()
+    );
+}

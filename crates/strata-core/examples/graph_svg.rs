@@ -6,7 +6,7 @@
 use std::fmt::Write as _;
 use std::time::Instant;
 
-use strata_core::graph::{GraphLayout, Half};
+use strata_core::graph::{GraphLayout, GraphRows, Half};
 use strata_core::repo::Repo;
 
 const ROW_H: f32 = 22.0;
@@ -23,11 +23,12 @@ fn main() -> strata_core::Result<()> {
     let repo = Repo::open(&path)?;
     let started = Instant::now();
     let mut layout = GraphLayout::new();
+    let mut graph = GraphRows::new();
     let mut summaries = Vec::new();
     let mut total = 0usize;
     for commit in repo.walk_commits()? {
         let commit = commit?;
-        layout.push(commit.id, &commit.parents);
+        layout.push(commit.id, &commit.parents, &mut graph);
         if summaries.len() < limit {
             summaries.push(commit.summary);
         }
@@ -38,7 +39,7 @@ fn main() -> strata_core::Result<()> {
         started.elapsed()
     );
 
-    let rows = &layout.rows()[..summaries.len()];
+    let rows: Vec<_> = graph.iter().take(summaries.len()).collect();
     let max_width = rows.iter().map(|r| r.width).max().unwrap_or(1) as f32;
     let text_x = max_width * LANE_W + 12.0;
     let height = rows.len() as f32 * ROW_H;
@@ -53,7 +54,16 @@ fn main() -> strata_core::Result<()> {
     for (i, (row, summary)) in rows.iter().zip(&summaries).enumerate() {
         let top = i as f32 * ROW_H;
         let mid = top + ROW_H / 2.0;
-        for seg in &row.segments {
+        for pass in row.passes {
+            let px = x(pass.lane);
+            let color = PALETTE[pass.color as usize % PALETTE.len()];
+            let _ = writeln!(
+                svg,
+                r#"<path d="M{px} {top} V{}" stroke="{color}" stroke-width="2" fill="none"/>"#,
+                top + ROW_H
+            );
+        }
+        for seg in row.edges {
             let (y0, y1) = match seg.half {
                 Half::Top => (top, mid),
                 Half::Bottom => (mid, top + ROW_H),

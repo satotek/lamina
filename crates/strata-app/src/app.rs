@@ -236,7 +236,7 @@ impl StrataApp {
             range
                 .map(|index| {
                     let commit = &repo.commits[index];
-                    let graph: &GraphRow = &repo.graph[index];
+                    let graph: GraphRow<'_> = repo.graph.get(index).expect("row per commit");
 
                     let mut row = div()
                         .flex()

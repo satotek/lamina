@@ -345,10 +345,10 @@ fn first_snapshot_arrives_and_history_completes() {
     assert_eq!(head.summary, "commit 4999");
     assert_eq!(
         complete.head,
-        HeadInfo::Branch {
+        Some(HeadInfo::Branch {
             short_name: "main".into(),
             target: Some(head.id),
-        }
+        })
     );
 
     let main = complete
@@ -385,10 +385,10 @@ fn external_commit_triggers_a_history_reload() {
     assert_eq!(snapshot.commits.get(1).expect("parent").0.summary, "base");
     assert_eq!(
         snapshot.head,
-        HeadInfo::Branch {
+        Some(HeadInfo::Branch {
             short_name: "main".into(),
             target: Some(head.id),
-        }
+        })
     );
 }
 
@@ -486,10 +486,10 @@ fn stage_paths_and_commit_update_status_and_history() {
     assert_eq!(head.summary, "second");
     assert_eq!(
         committed.head,
-        HeadInfo::Branch {
+        Some(HeadInfo::Branch {
             short_name: "main".into(),
             target: Some(head.id),
-        }
+        })
     );
 }
 
@@ -773,10 +773,10 @@ fn an_empty_repository_loads_without_commits() {
     assert!(snapshot.commits.is_empty());
     assert_eq!(
         snapshot.head,
-        HeadInfo::Branch {
+        Some(HeadInfo::Branch {
             short_name: "main".into(),
             target: None,
-        }
+        })
     );
     assert!(snapshot.refs.is_empty());
     assert!(snapshot.status.staged.is_empty() && snapshot.status.unstaged.is_empty());

@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use gix::objs::commit::ref_iter::Token as CommitToken;
 
 use super::Repo;
-use crate::{CommitInfo, Error, HeadInfo, RefInfo, RefKind, Result};
+use crate::{CommitInfo, Error, HeadInfo, Oid, RefInfo, RefKind, Result, StashInfo};
 
 /// Streams commits reachable from HEAD and all refs, in topological order
 /// (children before parents), newest first among independent commits.
@@ -34,6 +34,36 @@ impl Iterator for CommitWalk {
 }
 
 impl Repo {
+    /// Parent ids of `commit`, first parent first.
+    pub fn parents(&self, commit: Oid) -> Result<Vec<Oid>> {
+        let repo = self.local();
+        let commit = repo.find_commit(commit).map_err(Error::gix)?;
+        Ok(commit.parent_ids().map(|id| id.detach()).collect())
+    }
+
+    /// Stash entries, newest (`stash@{0}`) first. Empty when nothing is stashed.
+    pub fn stashes(&self) -> Result<Vec<StashInfo>> {
+        let repo = self.local();
+        let Some(reference) = repo.try_find_reference("refs/stash").map_err(Error::gix)? else {
+            return Ok(Vec::new());
+        };
+        let mut platform = reference.log_iter();
+        // The reflog file is oldest first; reading it backwards yields stash@{0} first.
+        let Some(lines) = platform.rev().map_err(Error::gix)? else {
+            return Ok(Vec::new());
+        };
+        let mut stashes = Vec::new();
+        for line in lines {
+            let line = line.map_err(|err| Error::other(err.to_string()))?;
+            stashes.push(StashInfo {
+                index: stashes.len(),
+                id: line.new_oid,
+                message: line.message.to_string(),
+            });
+        }
+        Ok(stashes)
+    }
+
     pub fn head(&self) -> Result<HeadInfo> {
         let repo = self.local();
         let head = repo.head().map_err(Error::gix)?;

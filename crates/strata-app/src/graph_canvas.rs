@@ -7,7 +7,7 @@
 
 use gpui::prelude::*;
 use gpui::{Bounds, Hsla, PathBuilder, Pixels, Window, canvas, div, fill, point, px, size};
-use strata_core::graph::{GraphRow, Half};
+use strata_core::graph::{GraphRow, Half, PassThrough, Segment};
 
 pub const ROW_HEIGHT: f32 = 22.0;
 pub const LANE_WIDTH: f32 = 12.0;
@@ -16,9 +16,15 @@ const NODE_RADIUS: f32 = 3.5;
 
 /// `lanes` is the width of the widest row in the list, not of this row: the
 /// column must not resize per row or lanes would drift horizontally.
-pub fn graph_column(row: &GraphRow, colors: [Hsla; 8], lanes: u16) -> impl IntoElement {
+pub fn graph_column(row: GraphRow<'_>, colors: [Hsla; 8], lanes: u16) -> impl IntoElement {
     let width = px(LANE_WIDTH * f32::from(lanes.max(1)));
-    let row = row.clone();
+    // The paint closure must own its data; only visible rows are copied.
+    let row = OwnedRow {
+        node_lane: row.node_lane,
+        node_color: row.node_color,
+        passes: row.passes.to_vec(),
+        edges: row.edges.to_vec(),
+    };
 
     div().w(width).h_full().flex_none().child(
         canvas(
@@ -29,14 +35,32 @@ pub fn graph_column(row: &GraphRow, colors: [Hsla; 8], lanes: u16) -> impl IntoE
     )
 }
 
-fn paint_row(row: &GraphRow, colors: &[Hsla; 8], bounds: Bounds<Pixels>, window: &mut Window) {
+struct OwnedRow {
+    node_lane: u16,
+    node_color: u16,
+    passes: Vec<PassThrough>,
+    edges: Vec<Segment>,
+}
+
+fn paint_row(row: &OwnedRow, colors: &[Hsla; 8], bounds: Bounds<Pixels>, window: &mut Window) {
     let top = bounds.origin.y;
     let height = bounds.size.height;
     let middle = top + height / 2.0;
     let bottom = top + height;
     let quarter = height / 4.0;
 
-    for segment in &row.segments {
+    for pass in &row.passes {
+        let color = colors[usize::from(pass.color) % colors.len()];
+        let x = lane_x(bounds, pass.lane);
+        let mut path = PathBuilder::stroke(px(STROKE_WIDTH));
+        path.move_to(point(x, top));
+        path.line_to(point(x, bottom));
+        if let Ok(path) = path.build() {
+            window.paint_path(path, color);
+        }
+    }
+
+    for segment in &row.edges {
         let color = colors[usize::from(segment.color) % colors.len()];
         let from_x = lane_x(bounds, segment.from_lane);
         let to_x = lane_x(bounds, segment.to_lane);
