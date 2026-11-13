@@ -44,7 +44,7 @@ use gpui::{
 use gpui_component::{Root, TitleBar};
 use gpui_platform::application;
 
-use debug_launch::{DebugDialog, DebugLaunch, StartMode};
+use debug_launch::{DebugLaunch, StartMode};
 use repo_view::Launch;
 use workspace::Workspace;
 
@@ -95,8 +95,29 @@ fn main() {
     });
 }
 
-fn open_window(start: StartMode, debug: DebugLaunch, cx: &mut App) {
+fn open_window(start: StartMode, mut debug: DebugLaunch, cx: &mut App) {
     let gallery = matches!(start, StartMode::Gallery);
+    // The gallery has no view to own a dialog, so the app opens the dialogs it
+    // hosts itself once the window exists. A `window.defer` cannot do it: its
+    // callback runs before GPUI records the window handle, so the `update` that
+    // would open the dialog fails.
+    let window_dialog = if gallery {
+        match debug.dialog.take() {
+            Some(dialog) if dialog.is_window_level() => Some(dialog),
+            other => {
+                if let Some(dialog) = other {
+                    eprintln!(
+                        "debug-launch: error: --dialog {} cannot be used with --gallery",
+                        dialog.name()
+                    );
+                }
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let launch = match start {
         StartMode::Path(path) => Some(Launch::open(&path)),
         StartMode::Fake(count) => Some(Launch::fake(count)),
@@ -153,29 +174,11 @@ fn open_window(start: StartMode, debug: DebugLaunch, cx: &mut App) {
         options
     };
 
-    cx.open_window(options, move |window, cx| {
+    let opened = cx.open_window(options, move |window, cx| {
         settings::apply_theme(Some(window), cx);
         if gallery {
             if debug.has_repo_actions() {
                 eprintln!("debug-launch: error: repository options cannot be used with --gallery");
-            }
-            if let Some(dialog) = debug.dialog {
-                match dialog {
-                    DebugDialog::Settings | DebugDialog::Palette => {
-                        let handle = window.window_handle();
-                        window.defer(cx, move |_, cx| {
-                            let _ = handle.update(cx, |_, window, cx| {
-                                debug_launch::dispatch_window_dialog(dialog, window, cx);
-                            });
-                        });
-                    }
-                    _ => {
-                        eprintln!(
-                            "debug-launch: error: --dialog {} cannot be used with --gallery",
-                            dialog.name()
-                        );
-                    }
-                }
             }
             // The gallery is a window of its own: it reads the theme and the
             // settings and nothing else, so it opens without a repository.
@@ -189,8 +192,12 @@ fn open_window(start: StartMode, debug: DebugLaunch, cx: &mut App) {
             // layers and draws the client-side window border.
             cx.new(|cx| Root::new(content, window, cx))
         }
-    })
-    .expect("failed to open the Strata window");
+    });
+
+    let handle = opened.expect("failed to open the Strata window");
+    if let Some(dialog) = window_dialog {
+        debug_launch::open_window_dialog(handle.into(), dialog, cx);
+    }
 }
 
 /// The X11 window icon. Wayland draws its icon from the desktop file, and

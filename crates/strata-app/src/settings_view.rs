@@ -201,7 +201,7 @@ impl SettingsView {
 }
 
 impl Render for SettingsView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let design = Design::new(cx.theme(), Settings::get(cx));
         // `Sidebar` clears its own border and reads its colours from the theme
         // tokens, so the style set here is the one that makes the page list the
@@ -229,7 +229,7 @@ impl Render for SettingsView {
                         // Each group is a bordered card on the page surface,
                         // with its heading and description above it.
                         .with_group_variant(GroupBoxVariant::Outline)
-                        .pages(pages::pages()),
+                        .pages(pages::pages(window.viewport_size().width.into(), &design)),
                 ),
             )
             .child(self.footer(&design))

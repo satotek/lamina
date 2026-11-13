@@ -10,9 +10,10 @@
 use std::path::Path;
 
 use gpui::{
-    App, AppContext as _, Entity, IntoElement, ParentElement, PathPromptOptions, SharedString,
-    StyleRefinement, Styled, Subscription, Window, div, px,
+    App, AppContext as _, Entity, FontWeight, IntoElement, ParentElement, PathPromptOptions,
+    SharedString, StyleRefinement, Styled, Subscription, Window, div, px,
 };
+use gpui_component::group_box::GroupBoxVariant;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::setting::{
     NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage,
@@ -20,16 +21,31 @@ use gpui_component::setting::{
 use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
 use gpui_kit_assets::IconName;
 
+use super::SIDEBAR_MAX;
 use super::change::{self, Section};
 use crate::settings::{self, DateFormat, DiffLayout, Settings, ThemeMode};
+use crate::style::Design;
 
 /// Font families offered beside the free-text font fields.
 const UI_FONTS: &[&str] = &["Inter", "SF Pro Text", "Segoe UI"];
 const CODE_FONTS: &[&str] = &["JetBrains Mono", "Cascadia Code", "Menlo", "Consolas"];
 
-/// Width every control on the right of a settings row shares, so the right
-/// edge lines up down a page and across pages.
-const CONTROL_WIDTH: f32 = 260.0;
+/// The gutter the page list gives its cards, and the padding a card gives its
+/// rows. Both come from gpui-component; they are named here because the width a
+/// control may take is what is left after them.
+const PAGE_GUTTER: f32 = 16.0;
+const CARD_PADDING: f32 = 16.0;
+
+/// The gap between a row's label column and its control (`SettingItem`'s).
+const ROW_GAP: f32 = 12.0;
+
+/// The share of a row the label column may take. `SettingItem` caps it there
+/// and stops shrinking it at that cap, so a control wider than the rest of the
+/// row is pushed past the card's right padding instead of fitting beside it.
+const LABEL_FRACTION: f32 = 0.6;
+
+/// Widest a control gets: wide enough for a font name, not a slab of the page.
+const CONTROL_MAX: f32 = 260.0;
 
 /// The icon the sidebar shows beside a section, matching the main sidebar's
 /// use of one per list. Every name here is in the asset bundle the app embeds,
@@ -46,93 +62,126 @@ fn icon(section: Section) -> IconName {
 }
 
 /// Every page, in the order the sidebar lists them.
-pub(super) fn pages() -> Vec<SettingPage> {
-    Section::ALL.into_iter().map(page).collect()
+///
+/// `viewport_width` is the settings window's width. The right-hand controls are
+/// sized from it because the page list and its cards are only as wide as the
+/// window leaves them.
+pub(super) fn pages(viewport_width: f32, design: &Design) -> Vec<SettingPage> {
+    let control = control_width(viewport_width);
+    Section::ALL
+        .into_iter()
+        .map(|section| page(section, control, design))
+        .collect()
 }
 
-fn page(section: Section) -> SettingPage {
+/// Width every control on the right of a settings row shares, so the right edge
+/// lines up down a page and across pages.
+///
+/// The sidebar keeps the width it was dragged to inside the settings component,
+/// so the widest it can become is what the calculation may assume; beside a
+/// narrower sidebar the control just ends further inside the card.
+fn control_width(viewport_width: f32) -> f32 {
+    let row = viewport_width - SIDEBAR_MAX - 2.0 * PAGE_GUTTER - 2.0 * CARD_PADDING;
+    let room = row * (1.0 - LABEL_FRACTION) - ROW_GAP;
+    room.clamp(0.0, CONTROL_MAX)
+}
+
+fn page(section: Section, control: f32, design: &Design) -> SettingPage {
     match section {
-        Section::Appearance => appearance(),
-        Section::Diff => diff(),
-        Section::History => history(),
-        Section::Behaviour => behaviour(),
-        Section::Tools => tools(),
-        Section::Privacy => privacy(),
+        Section::Appearance => appearance(control, design),
+        Section::Diff => diff(control, design),
+        Section::History => history(control, design),
+        Section::Behaviour => behaviour(control, design),
+        Section::Tools => tools(control, design),
+        Section::Privacy => privacy(control, design),
     }
 }
 
-fn appearance() -> SettingPage {
-    shell(Section::Appearance)
-        .description("Preferences for Strata itself. Nothing here writes git config.")
-        .group(SettingGroup::new().title("Theme").item(
-            SettingItem::new("Theme", theme_field())
-                .description("Follow the system, or pin light or dark. Every window follows immediately."),
-        ))
-        .group(
-            SettingGroup::new()
-                .title("Fonts")
-                .items([
-                    SettingItem::new(
-                        "Interface font",
-                        text_field(
-                            "System default",
-                            UI_FONTS,
-                            |settings| settings.appearance.ui_font.clone(),
-                            change::ui_font,
-                        ),
-                    )
-                    .description("Lists, labels and the status bar. Leave empty for the platform font."),
-                    SettingItem::new(
-                        "Interface size",
-                        number(
-                            change::FONT_SIZE,
-                            0.5,
-                            |settings| f64::from(settings.appearance.ui_font_size),
-                            change::ui_font_size,
-                        ),
-                    ),
-                    SettingItem::new(
-                        "Code font",
-                        text_field(
-                            "Bundled monospace",
-                            CODE_FONTS,
-                            |settings| settings.appearance.code_font.clone(),
-                            change::code_font,
-                        ),
-                    )
-                    .description("Diffs, object ids and git commands. Leave empty for the bundled monospace face."),
-                    SettingItem::new(
-                        "Code size",
-                        number(
-                            change::FONT_SIZE,
-                            0.5,
-                            |settings| f64::from(settings.appearance.code_font_size),
-                            change::code_font_size,
-                        ),
-                    ),
-                    SettingItem::new(
-                        "Tab width",
-                        number(
-                            change::TAB_WIDTH,
-                            1.0,
-                            |settings| f64::from(settings.appearance.tab_width),
-                            change::tab_width,
-                        ),
-                    )
-                    .description("Columns a tab expands to in a diff."),
-                ]),
-        )
+fn appearance(control: f32, design: &Design) -> SettingPage {
+    shell(
+        Section::Appearance,
+        "Preferences for Strata itself. Nothing here writes git config.",
+        design,
+    )
+    .group(card("Theme").item(
+        SettingItem::new("Theme", theme_field(control)).description(
+            "Follow the system, or pin light or dark. Every window follows immediately.",
+        ),
+    ))
+    .group(
+        card("Fonts").items([
+            SettingItem::new(
+                "Interface font",
+                text_field(
+                    "System default",
+                    UI_FONTS,
+                    control,
+                    |settings| settings.appearance.ui_font.clone(),
+                    change::ui_font,
+                ),
+            )
+            .description("Lists, labels and the status bar. Leave empty for the platform font."),
+            SettingItem::new(
+                "Interface size",
+                number(
+                    change::FONT_SIZE,
+                    0.5,
+                    control,
+                    |settings| f64::from(settings.appearance.ui_font_size),
+                    change::ui_font_size,
+                ),
+            ),
+            SettingItem::new(
+                "Code font",
+                text_field(
+                    "Bundled monospace",
+                    CODE_FONTS,
+                    control,
+                    |settings| settings.appearance.code_font.clone(),
+                    change::code_font,
+                ),
+            )
+            .description(
+                "Diffs, object ids and git commands. Leave empty for the bundled monospace face.",
+            ),
+            SettingItem::new(
+                "Code size",
+                number(
+                    change::FONT_SIZE,
+                    0.5,
+                    control,
+                    |settings| f64::from(settings.appearance.code_font_size),
+                    change::code_font_size,
+                ),
+            ),
+            SettingItem::new(
+                "Tab width",
+                number(
+                    change::TAB_WIDTH,
+                    1.0,
+                    control,
+                    |settings| f64::from(settings.appearance.tab_width),
+                    change::tab_width,
+                ),
+            )
+            .description("Columns a tab expands to in a diff."),
+        ]),
+    )
 }
 
-fn diff() -> SettingPage {
-    shell(Section::Diff)
-        .description("How a diff is drawn, in every pane that shows one.")
+fn diff(control: f32, design: &Design) -> SettingPage {
+    shell(
+        Section::Diff,
+        "How a diff is drawn, in every pane that shows one.",
+        design,
+    )
         .group(
-            SettingGroup::new().title("Layout").items([
+            card("Layout").items([
                 SettingItem::new(
                     "Layout",
                     choice(
                         &[("unified", "Unified"), ("split", "Side by side")],
+                        control,
                         |settings| match settings.diff.layout {
                             DiffLayout::Unified => "unified".to_owned(),
                             DiffLayout::Split => "split".to_owned(),
@@ -157,7 +206,7 @@ fn diff() -> SettingPage {
             ]),
         )
         .group(
-            SettingGroup::new().title("Text").items([
+            card("Text").items([
                 SettingItem::new(
                     "Syntax highlighting",
                     toggle(
@@ -179,8 +228,7 @@ fn diff() -> SettingPage {
             ]),
         )
         .group(
-            SettingGroup::new()
-                .title("Comparison")
+            card("Comparison")
                 .description("Applied to every history diff. The staging diff keeps git's default context and whitespace, because staging picks real file lines.")
                 .items([
                     SettingItem::new(
@@ -196,6 +244,7 @@ fn diff() -> SettingPage {
                         number(
                             change::CONTEXT_LINES,
                             1.0,
+                            control,
                             |settings| f64::from(settings.diff.context_lines),
                             change::context_lines,
                         ),
@@ -205,63 +254,70 @@ fn diff() -> SettingPage {
         )
 }
 
-fn history() -> SettingPage {
-    shell(Section::History)
-        .description("What the commit list and the sidebar show.")
-        .group(
-            SettingGroup::new().title("Refs").items([
-                SettingItem::new(
-                    "Remote branches",
-                    toggle(
-                        |settings| settings.history.show_remote_branches,
-                        change::show_remote_branches,
-                    ),
-                )
-                .description("Badge remote-tracking branches and list them in the sidebar."),
-                SettingItem::new(
-                    "Tags",
-                    toggle(|settings| settings.history.show_tags, change::show_tags),
-                )
-                .description("Badge tagged commits and list tags in the sidebar."),
-                SettingItem::new(
-                    "Stashes",
-                    toggle(
-                        |settings| settings.history.show_stashes,
-                        change::show_stashes,
-                    ),
-                )
-                .description("List the stash in the sidebar."),
-            ]),
-        )
-        .group(
-            SettingGroup::new().title("Dates").item(
-                SettingItem::new(
-                    "Date format",
-                    choice(
-                        &[("relative", "Relative"), ("absolute", "Absolute")],
-                        |settings| match settings.history.date_format {
-                            DateFormat::Relative => "relative".to_owned(),
-                            DateFormat::Absolute => "absolute".to_owned(),
-                        },
-                        |settings, value| {
-                            let format = match value {
-                                "absolute" => DateFormat::Absolute,
-                                _ => DateFormat::Relative,
-                            };
-                            change::date_format(settings, format);
-                        },
-                    ),
-                )
-                .description("Relative says \"2 hours ago\"; absolute says 2026-11-13 14:05."),
-            ),
-        )
+fn history(control: f32, design: &Design) -> SettingPage {
+    shell(
+        Section::History,
+        "What the commit list and the sidebar show.",
+        design,
+    )
+    .group(
+        card("Refs").items([
+            SettingItem::new(
+                "Remote branches",
+                toggle(
+                    |settings| settings.history.show_remote_branches,
+                    change::show_remote_branches,
+                ),
+            )
+            .description("Badge remote-tracking branches and list them in the sidebar."),
+            SettingItem::new(
+                "Tags",
+                toggle(|settings| settings.history.show_tags, change::show_tags),
+            )
+            .description("Badge tagged commits and list tags in the sidebar."),
+            SettingItem::new(
+                "Stashes",
+                toggle(
+                    |settings| settings.history.show_stashes,
+                    change::show_stashes,
+                ),
+            )
+            .description("List the stash in the sidebar."),
+        ]),
+    )
+    .group(
+        card("Dates").item(
+            SettingItem::new(
+                "Date format",
+                choice(
+                    &[("relative", "Relative"), ("absolute", "Absolute")],
+                    control,
+                    |settings| match settings.history.date_format {
+                        DateFormat::Relative => "relative".to_owned(),
+                        DateFormat::Absolute => "absolute".to_owned(),
+                    },
+                    |settings, value| {
+                        let format = match value {
+                            "absolute" => DateFormat::Absolute,
+                            _ => DateFormat::Relative,
+                        };
+                        change::date_format(settings, format);
+                    },
+                ),
+            )
+            .description("Relative says \"2 hours ago\"; absolute says 2026-11-13 14:05."),
+        ),
+    )
 }
 
-fn behaviour() -> SettingPage {
-    shell(Section::Behaviour)
-        .description("Background work and the questions Strata asks before it acts.")
+fn behaviour(control: f32, design: &Design) -> SettingPage {
+    shell(
+        Section::Behaviour,
+        "Background work and the questions Strata asks before it acts.",
+        design,
+    )
         .group(
-            SettingGroup::new().title("Fetching").items([
+            card("Fetching").items([
                 SettingItem::new(
                     "Auto-fetch",
                     choice(
@@ -273,6 +329,7 @@ fn behaviour() -> SettingPage {
                             ("30", "Every 30 minutes"),
                             ("60", "Every 60 minutes"),
                         ],
+                        control,
                         |settings| settings.behaviour.auto_fetch_minutes.to_string(),
                         |settings, value| {
                             change::auto_fetch_minutes(
@@ -294,7 +351,7 @@ fn behaviour() -> SettingPage {
             ]),
         )
         .group(
-            SettingGroup::new().title("Safety").items([
+            card("Safety").items([
                 SettingItem::new(
                     "Confirm destructive actions",
                     toggle(
@@ -308,6 +365,7 @@ fn behaviour() -> SettingPage {
                     number(
                         change::SUMMARY_LENGTH,
                         1.0,
+                        control,
                         |settings| f64::from(settings.behaviour.summary_length_hint),
                         change::summary_length_hint,
                     ),
@@ -325,23 +383,27 @@ fn behaviour() -> SettingPage {
         )
 }
 
-fn tools() -> SettingPage {
-    shell(Section::Tools)
-        .description("Programs Strata runs on your behalf.")
+fn tools(control: f32, design: &Design) -> SettingPage {
+    shell(
+        Section::Tools,
+        "Programs Strata runs on your behalf.",
+        design,
+    )
         .group(
-            SettingGroup::new().title("Git").item(
-                SettingItem::new("Git executable", git_field()).description(
+            card("Git").item(
+                SettingItem::new("Git executable", git_field(control)).description(
                     "Leave empty to use git from PATH. A changed path applies to repositories opened afterwards; a repository already open keeps the binary it started with.",
                 ),
             ),
         )
         .group(
-            SettingGroup::new().title("Editor and terminal").items([
+            card("Editor and terminal").items([
                 SettingItem::new(
                     "Editor command",
                     text_field(
                         "code --goto {path}:{line}",
                         &[],
+                        control,
                         |settings| settings.tools.editor.clone(),
                         change::editor,
                     ),
@@ -354,6 +416,7 @@ fn tools() -> SettingPage {
                     text_field(
                         "alacritty --working-directory {path}",
                         &[],
+                        control,
                         |settings| settings.tools.terminal.clone(),
                         change::terminal,
                     ),
@@ -365,10 +428,8 @@ fn tools() -> SettingPage {
         )
 }
 
-fn privacy() -> SettingPage {
-    shell(Section::Privacy)
-        .description("Only what leaves this machine.")
-        .group(SettingGroup::new().title("Network").item(
+fn privacy(_control: f32, design: &Design) -> SettingPage {
+    shell(Section::Privacy, "Only what leaves this machine.", design).group(card("Network").item(
             SettingItem::new(
                 "Author pictures",
                 toggle(
@@ -380,29 +441,82 @@ fn privacy() -> SettingPage {
         ))
 }
 
-/// The page frame every section starts from: a title, an icon for the sidebar,
-/// and a reset button that restores just that section.
-fn shell(section: Section) -> SettingPage {
+/// A card: a section label above an outlined group, on the 8 px grid.
+///
+/// The label sits 8 px over its card. The page list gives every card 16 px
+/// above and below it, so the gap between two cards is the same 32 px on every
+/// page.
+fn card(title: &'static str) -> SettingGroup {
+    SettingGroup::new().title(title).gap(px(8.0))
+}
+
+/// The page heading: the page title, its description and the reset action.
+///
+/// It is page content rather than the settings component's own header because
+/// that header lays its title and suffix out in one left-aligned cluster, which
+/// leaves no way to put an action at the row's right end. Everything here sits
+/// on the same 32 px inset as the rows of the cards below it.
+fn heading(section: Section, description: &'static str, design: &Design) -> SettingGroup {
+    let design = design.clone();
+    SettingGroup::new()
+        .variant(GroupBoxVariant::Normal)
+        .item(SettingItem::render(move |_, _, _cx| {
+            v_flex()
+                .gap(px(8.0))
+                .pt(px(8.0))
+                .px(px(CARD_PADDING))
+                .child(
+                    h_flex()
+                        .items_center()
+                        .justify_between()
+                        .gap_3()
+                        .child(
+                            div()
+                                .text_size(px(design.ui + 5.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(design.text)
+                                .child(section.title()),
+                        )
+                        .child(
+                            crate::ui::button(
+                                SharedString::from(format!(
+                                    "reset-{}",
+                                    section.title().to_lowercase()
+                                )),
+                                "Reset section",
+                            )
+                            .size(crate::ui::ButtonSize::Small)
+                            .ghost()
+                            .on_click(move |_, _, cx| {
+                                settings::update(cx, |settings| {
+                                    change::reset_section(settings, section);
+                                });
+                                cx.refresh_windows();
+                            }),
+                        ),
+                )
+                .child(
+                    div()
+                        .text_size(px(design.ui))
+                        .text_color(design.muted)
+                        .child(description),
+                )
+        }))
+}
+
+/// The page frame every section starts from: a heading, an icon for the
+/// sidebar, and the cards below the heading.
+fn shell(section: Section, description: &'static str, design: &Design) -> SettingPage {
     SettingPage::new(section.title())
         .icon(icon(section))
         .resettable(false)
-        // 24 px of padding and an 8 px gap between title, description and the
-        // first card: the window's spacing grid.
-        .header_style(&StyleRefinement::default().p(px(24.0)).gap(px(8.0)))
-        .title_suffix(move |_, _cx| {
-            crate::ui::button(
-                SharedString::from(format!("reset-{}", section.title().to_lowercase())),
-                "Reset section",
-            )
-            .size(crate::ui::ButtonSize::Tiny)
-            .on_click(move |_, _, cx| {
-                settings::update(cx, |settings| change::reset_section(settings, section));
-                cx.refresh_windows();
-            })
-        })
+        // The built-in header is replaced by [`heading`], which controls the
+        // title's weight and the reset button's edge.
+        .header_style(&StyleRefinement::default().hidden())
+        .group(heading(section, description, design))
 }
 
-fn theme_field() -> SettingField<SharedString> {
+fn theme_field(control: f32) -> SettingField<SharedString> {
     SettingField::dropdown(
         pairs(&[
             ("system", "Follow the system"),
@@ -429,7 +543,7 @@ fn theme_field() -> SettingField<SharedString> {
             settings::apply_theme(None, cx);
         },
     )
-    .w(px(CONTROL_WIDTH))
+    .w(px(control))
 }
 
 /// Value and label pairs for a dropdown.
@@ -451,6 +565,7 @@ fn toggle(get: fn(&Settings) -> bool, set: fn(&mut Settings, bool)) -> SettingFi
 
 fn choice(
     list: &[(&'static str, &'static str)],
+    control: f32,
     get: fn(&Settings) -> String,
     set: fn(&mut Settings, &str),
 ) -> SettingField<SharedString> {
@@ -462,7 +577,7 @@ fn choice(
             cx.refresh_windows();
         },
     )
-    .w(px(CONTROL_WIDTH))
+    .w(px(control))
 }
 
 /// A number field whose bounds are the ones [`change`] clamps to, so the two
@@ -470,6 +585,7 @@ fn choice(
 fn number(
     range: std::ops::RangeInclusive<f64>,
     step: f64,
+    control: f32,
     get: fn(&Settings) -> f64,
     set: fn(&mut Settings, f64),
 ) -> SettingField<f64> {
@@ -485,7 +601,7 @@ fn number(
             cx.refresh_windows();
         },
     )
-    .w(px(CONTROL_WIDTH))
+    .w(px(control))
 }
 
 /// The state of a text field: the input plus the subscription that writes each
@@ -498,6 +614,7 @@ struct TextField {
 fn text_field(
     placeholder: &'static str,
     suggestions: &'static [&'static str],
+    control: f32,
     get: fn(&Settings) -> Option<String>,
     set: fn(&mut Settings, &str),
 ) -> SettingField<SharedString> {
@@ -506,7 +623,7 @@ fn text_field(
         let state = text_state(key.clone(), placeholder, get, set, window, cx);
         let input = state.read(cx).input.clone();
 
-        let mut field = v_flex().gap_1().w(px(CONTROL_WIDTH)).child(
+        let mut field = v_flex().gap_1().w(px(control)).child(
             Input::new(&input)
                 .with_size(options.size())
                 .disabled(options.is_disabled()),
@@ -541,8 +658,8 @@ fn text_field(
 /// An unusable path is kept and explained inline rather than corrected or
 /// cleared on the spot: the user may be halfway through typing it, and the
 /// error says what to finish.
-fn git_field() -> SettingField<SharedString> {
-    SettingField::render(|options, window, cx| {
+fn git_field(control: f32) -> SettingField<SharedString> {
+    SettingField::render(move |options, window, cx| {
         let get = |settings: &Settings| {
             settings
                 .behaviour
@@ -555,7 +672,7 @@ fn git_field() -> SettingField<SharedString> {
         let input = state.read(cx).input.clone();
         let error = git_executable_error(Settings::get(cx).behaviour.git_executable.as_deref());
 
-        let mut field = v_flex().gap_1().w(px(CONTROL_WIDTH)).child(
+        let mut field = v_flex().gap_1().w(px(control)).child(
             h_flex()
                 .gap_1()
                 .w_full()
@@ -669,7 +786,29 @@ fn text_state(
 
 #[cfg(test)]
 mod tests {
-    use super::git_executable_error;
+    use super::{
+        CARD_PADDING, CONTROL_MAX, LABEL_FRACTION, PAGE_GUTTER, ROW_GAP, SIDEBAR_MAX,
+        control_width, git_executable_error,
+    };
+
+    #[test]
+    fn a_control_always_fits_beside_its_label() {
+        // The row is what the window leaves after the sidebar at its widest and
+        // the gutters on both sides of the card, and the label may take 60% of
+        // it: anything wider than the rest, less the row's gap, spills past the
+        // card's right padding.
+        for viewport in [640.0, 900.0, 1200.0, 2400.0] {
+            let row = viewport - SIDEBAR_MAX - 2.0 * PAGE_GUTTER - 2.0 * CARD_PADDING;
+            let control = control_width(viewport);
+            assert!(control > 0.0, "{viewport}");
+            assert!(
+                control + ROW_GAP <= row * (1.0 - LABEL_FRACTION) + 0.01,
+                "{viewport}: {control} does not fit in {row}"
+            );
+            assert!(control <= CONTROL_MAX, "{viewport}");
+        }
+        assert_eq!(control_width(2400.0), CONTROL_MAX);
+    }
 
     #[test]
     fn the_git_executable_must_name_an_existing_file() {

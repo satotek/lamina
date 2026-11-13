@@ -8,9 +8,11 @@
 
 use std::path::PathBuf;
 
-use gpui::{App, Window};
+use gpui::{AnyWindowHandle, App, Window};
 use strata_core::session::RepoSnapshot;
 use strata_core::{HeadInfo, Oid};
+
+use gpui_component::WindowExt as _;
 
 use crate::actions::{OpenSettings, TogglePalette};
 use crate::fake;
@@ -74,6 +76,19 @@ impl DebugDialog {
         match self {
             Self::CreateBranch | Self::Stash | Self::AddWorktree | Self::CreateTag => true,
             Self::Settings | Self::Palette | Self::OpenRepository => false,
+        }
+    }
+
+    /// True for the dialogs the app opens itself, on whichever window is in
+    /// front, rather than a dialog a repository view owns.
+    pub(crate) fn is_window_level(self) -> bool {
+        match self {
+            Self::Settings | Self::Palette => true,
+            Self::CreateBranch
+            | Self::Stash
+            | Self::OpenRepository
+            | Self::AddWorktree
+            | Self::CreateTag => false,
         }
     }
 }
@@ -509,8 +524,7 @@ pub(crate) fn resolve_in_snapshot(snapshot: &RepoSnapshot, rev: &str) -> Snapsho
     SnapshotRevMatch::NotFound
 }
 
-/// Dispatches a window-level dialog (`settings` or `palette`) that does not
-/// require a `RepoView` method.
+/// Dispatches a dialog that does not require a `RepoView` method.
 pub(crate) fn dispatch_window_dialog(dialog: DebugDialog, window: &mut Window, cx: &mut App) {
     match dialog {
         DebugDialog::Settings => {
@@ -525,16 +539,62 @@ pub(crate) fn dispatch_window_dialog(dialog: DebugDialog, window: &mut Window, c
             window.on_next_frame(move |window, cx| {
                 window.activate_window();
                 window.dispatch_action(Box::new(TogglePalette), cx);
+                // The action needs a window with the keyboard: report a launch
+                // that could not give it one instead of claiming success. A
+                // server without a window manager never grants focus, and the
+                // palette then has nowhere to open.
+                window.on_next_frame(|window, cx| {
+                    if window.has_active_dialog(cx) {
+                        eprintln!("debug-launch: applied --dialog palette");
+                    } else {
+                        eprintln!(
+                            "debug-launch: error: --dialog palette could not open: no window has keyboard focus"
+                        );
+                    }
+                });
             });
             window.refresh();
-            eprintln!("debug-launch: applied --dialog palette");
         }
-        DebugDialog::OpenRepository
-        | DebugDialog::CreateBranch
+        DebugDialog::OpenRepository => {
+            window.dispatch_action(Box::new(crate::actions::OpenRepository), cx);
+            eprintln!("debug-launch: applied --dialog open-repository");
+        }
+        DebugDialog::CreateBranch
         | DebugDialog::Stash
         | DebugDialog::AddWorktree
         | DebugDialog::CreateTag => {}
     }
+}
+
+/// Opens a window-level dialog once `handle` is a window the app can update.
+///
+/// A `window.defer` runs while the window is still being built: GPUI records
+/// its handle only after the first frame, so an `AnyWindowHandle::update` from
+/// there fails. Deferring on the `App` still lands on that frame when the call
+/// comes from the window's own build, so a failed update is retried once on the
+/// next effect cycle; only a failure that survives the retry is reported.
+pub(crate) fn open_window_dialog(handle: AnyWindowHandle, dialog: DebugDialog, cx: &mut App) {
+    cx.defer(move |cx| {
+        if handle
+            .update(cx, |_, window, cx| {
+                dispatch_window_dialog(dialog, window, cx);
+            })
+            .is_ok()
+        {
+            return;
+        }
+        cx.defer(move |cx| {
+            let opened = handle.update(cx, |_, window, cx| {
+                dispatch_window_dialog(dialog, window, cx);
+            });
+            if let Err(error) = opened {
+                eprintln!(
+                    "debug-launch: error: --dialog {} could not open: {error}",
+                    dialog.name()
+                );
+            }
+        });
+    });
 }
 
 #[cfg(test)]
@@ -669,6 +729,19 @@ mod tests {
         assert_eq!(bad.start, StartMode::Path(PathBuf::from(".")));
         assert_eq!(bad.errors.len(), 1);
         assert!(bad.errors[0].contains("nonexistent"));
+    }
+
+    #[test]
+    fn only_the_settings_window_and_the_palette_are_window_level() {
+        // The rest open on a repository view, which has the state they need.
+        for name in DebugDialog::ALL_NAMES {
+            let dialog = DebugDialog::parse(name).expect(name);
+            assert_eq!(
+                dialog.is_window_level(),
+                matches!(dialog, DebugDialog::Settings | DebugDialog::Palette),
+                "{name}"
+            );
+        }
     }
 
     #[test]

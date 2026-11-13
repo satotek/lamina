@@ -1252,16 +1252,7 @@ impl RepoView {
             if let Some(dialog) = debug.dialog
                 && !dialog.needs_repo()
             {
-                let handle = window.window_handle();
-                window.defer(cx, move |_, cx| {
-                    let _ = handle.update(cx, |_, window, cx| match dialog {
-                        DebugDialog::OpenRepository => {
-                            window.dispatch_action(Box::new(crate::actions::OpenRepository), cx);
-                            eprintln!("debug-launch: applied --dialog open-repository");
-                        }
-                        _ => debug_launch::dispatch_window_dialog(dialog, window, cx),
-                    });
-                });
+                debug_launch::open_window_dialog(window.window_handle(), dialog, cx);
             }
             return;
         }
