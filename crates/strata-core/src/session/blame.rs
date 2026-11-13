@@ -32,18 +32,26 @@ pub(crate) fn run(shared: Arc<Shared>, state: Arc<QueryState>, jobs: Receiver<Bl
             continue;
         }
 
-        let result = shared.repo.blame(job.commit, &job.path);
-        if !state.is_cancelled(job.ticket) && !shared.is_shutdown() {
-            match result {
-                Ok(blame) => shared.emit(SessionEvent::BlameReady {
+        let result = shared
+            .repo
+            .blame_cancellable(job.commit, &job.path, &shared.git, &|| {
+                state.is_cancelled(job.ticket) || shared.is_shutdown()
+            });
+        match result {
+            Ok(Some(blame)) if !state.is_cancelled(job.ticket) && !shared.is_shutdown() => {
+                shared.emit(SessionEvent::BlameReady {
                     ticket: job.ticket,
                     blame: Arc::new(blame),
-                }),
-                Err(error) => shared.emit(SessionEvent::QueryFailed {
+                });
+            }
+            Ok(Some(_)) | Ok(None) => {}
+            Err(error) if !state.is_cancelled(job.ticket) && !shared.is_shutdown() => {
+                shared.emit(SessionEvent::QueryFailed {
                     ticket: job.ticket,
                     error: error.to_string(),
-                }),
+                });
             }
+            Err(_) => {}
         }
         state.forget(job.ticket);
     }

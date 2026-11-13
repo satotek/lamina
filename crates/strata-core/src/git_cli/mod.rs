@@ -8,6 +8,7 @@
 //! `--pathspec-from-file=-` with NUL separators instead, because Windows caps
 //! a process command line at roughly 32 KiB.
 
+mod blame;
 mod command_log;
 mod history;
 mod merge;
@@ -23,12 +24,13 @@ pub use rebase::{
 };
 
 use std::ffi::OsString;
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
-use std::sync::Arc;
+use std::process::{Child, Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use crate::{Error, Result};
 
@@ -198,6 +200,152 @@ impl Git {
         self.log_output(&args, started_at, &output);
         if output.status.success() {
             Ok(output)
+        } else {
+            Err(command_error(&args, &output))
+        }
+    }
+
+    /// Like [`run`](Self::run), but delivers each stdout line (`\n`-terminated)
+    /// to `on_line` while the command runs, and kills the child process if
+    /// `cancelled()` becomes true.
+    ///
+    /// Returns `Ok(true)` when the command finished with exit code 0, or
+    /// `Ok(false)` when `cancelled()` stopped it.
+    pub(crate) fn run_stdout_cancellable<S: AsRef<str>>(
+        &self,
+        args: &[S],
+        cancelled: &(impl Fn() -> bool + Send + Sync),
+        mut on_line: impl FnMut(&[u8]) -> Result<()>,
+    ) -> Result<bool> {
+        if cancelled() {
+            return Ok(false);
+        }
+        let args = to_args(args);
+        let started_at = SystemTime::now();
+        let mut child = match self.command(&args).spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                self.log_spawn_failure(&args, started_at, &error);
+                return Err(error.into());
+            }
+        };
+        let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(Error::other("git output pipes are unavailable"));
+        };
+
+        struct WatchState {
+            child: Mutex<Option<Child>>,
+            done: (Mutex<bool>, Condvar),
+            killed: AtomicBool,
+        }
+
+        let state = WatchState {
+            child: Mutex::new(Some(child)),
+            done: (Mutex::new(false), Condvar::new()),
+            killed: AtomicBool::new(false),
+        };
+        let mut stdout_sample = Vec::new();
+        let mut was_cancelled = false;
+
+        let (read_result, stderr_bytes, status) = thread::scope(|scope| {
+            let stderr_reader = scope.spawn(|| {
+                let mut buffer = Vec::new();
+                let mut stderr = stderr;
+                let _ = stderr.read_to_end(&mut buffer);
+                buffer
+            });
+            let cancel_watcher = scope.spawn(|| {
+                loop {
+                    if cancelled() {
+                        state.killed.store(true, Ordering::SeqCst);
+                        if let Some(child) = state
+                            .child
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .as_mut()
+                        {
+                            let _ = child.kill();
+                        }
+                        break;
+                    }
+                    let done = state.done.0.lock().unwrap_or_else(PoisonError::into_inner);
+                    if *done {
+                        break;
+                    }
+                    let (guard, _) = state
+                        .done
+                        .1
+                        .wait_timeout(done, Duration::from_millis(25))
+                        .unwrap_or_else(PoisonError::into_inner);
+                    if *guard {
+                        break;
+                    }
+                }
+            });
+
+            let read_result = (|| -> Result<()> {
+                let mut reader = io::BufReader::new(stdout);
+                let mut line = Vec::new();
+                loop {
+                    if cancelled() {
+                        was_cancelled = true;
+                        break;
+                    }
+                    line.clear();
+                    let read = reader.read_until(b'\n', &mut line)?;
+                    if read == 0 {
+                        break;
+                    }
+                    if cancelled() {
+                        was_cancelled = true;
+                        break;
+                    }
+                    if stdout_sample.len() < MAX_CAPTURE_BYTES {
+                        let remaining = MAX_CAPTURE_BYTES - stdout_sample.len();
+                        let take = remaining.min(line.len());
+                        stdout_sample.extend_from_slice(&line[..take]);
+                    }
+                    on_line(&line)?;
+                }
+                Ok(())
+            })();
+
+            // Wake the watcher before waiting on the child so normal
+            // completion never stalls for the polling interval.
+            *state.done.0.lock().unwrap_or_else(PoisonError::into_inner) = true;
+            state.done.1.notify_all();
+            let _ = cancel_watcher.join();
+
+            let mut child = state
+                .child
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take()
+                .expect("child handle present");
+            if was_cancelled || read_result.is_err() || cancelled() {
+                let _ = child.kill();
+            }
+            let status = child.wait();
+            let stderr_bytes = stderr_reader.join().unwrap_or_default();
+            (read_result, stderr_bytes, status)
+        });
+
+        let status = status?;
+        let output = Output {
+            status,
+            stdout: stdout_sample,
+            stderr: stderr_bytes,
+        };
+        self.log_output(&args, started_at, &output);
+
+        if was_cancelled || state.killed.load(Ordering::SeqCst) || cancelled() {
+            return Ok(false);
+        }
+        read_result?;
+        if output.status.success() {
+            Ok(true)
         } else {
             Err(command_error(&args, &output))
         }

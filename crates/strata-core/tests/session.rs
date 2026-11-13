@@ -1192,3 +1192,138 @@ fn history_scope_walks_only_the_chosen_refs_and_all_restores_everything() {
     expected.sort();
     assert_eq!(restored_ids, expected, "All restores the full history");
 }
+
+#[test]
+fn request_blame_serves_large_file_through_git_cli() {
+    let repo = TestRepo::new();
+    let mut body = String::new();
+    for i in 0..2_500 {
+        body.push_str(&format!("line {i:04}: padding for large blame file\n"));
+    }
+    repo.write("big.txt", &body);
+    repo.commit_all("initial");
+    let first: strata_core::Oid = repo.git(&["rev-parse", "HEAD"]).trim().parse().unwrap();
+
+    let updated = body.replacen("line 0005:", "line 0005 changed:", 1);
+    repo.write("big.txt", &updated);
+    repo.commit_all("edit");
+    let second: strata_core::Oid = repo.git(&["rev-parse", "HEAD"]).trim().parse().unwrap();
+
+    let harness = Harness::open(repo);
+    let ticket = harness.session.request_blame(second, "big.txt");
+
+    let deadline = Instant::now() + TIMEOUT;
+    let mut saw_blame_command = false;
+    let blame = loop {
+        let now = Instant::now();
+        assert!(now < deadline, "timed out waiting for BlameReady");
+        match harness.events.recv_timeout(deadline - now) {
+            Ok(SessionEvent::BlameReady { ticket: got, blame }) if got == ticket => break blame,
+            Ok(SessionEvent::QueryFailed { ticket: got, error }) if got == ticket => {
+                panic!("blame failed: {error}");
+            }
+            Ok(SessionEvent::CommandLogged(record))
+                if record.args.first().map(String::as_str) == Some("blame") =>
+            {
+                saw_blame_command = true;
+            }
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => panic!("session event channel closed"),
+        }
+    };
+
+    assert!(saw_blame_command, "large file blame should use git CLI");
+    assert_eq!(blame.lines.len(), 2_500);
+    assert_eq!(blame.hunks.len(), 3);
+    assert_eq!(blame.hunks[0].commit, first);
+    assert_eq!(blame.hunks[1].commit, second);
+    assert_eq!(blame.hunks[1].start, 6);
+    assert_eq!(blame.hunks[2].commit, first);
+}
+
+#[cfg(unix)]
+#[test]
+fn cancelling_session_blame_kills_in_flight_git_process() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = TestRepo::new();
+    let large = "x".repeat(70 * 1024);
+    repo.write("big.txt", &format!("{large}\n"));
+    repo.commit_all("big");
+    let head: strata_core::Oid = repo.git(&["rev-parse", "HEAD"]).trim().parse().unwrap();
+
+    let pid_file = repo.path().join("blame.pid");
+    let script = repo.path().join("mock-git");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\necho $$ > \"{}\"\nexec sleep 60\n",
+            pid_file.display()
+        ),
+    )
+    .expect("write mock git");
+    let mut perms = fs::metadata(&script).expect("meta").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script, perms).expect("chmod");
+
+    let harness = Harness::open_with(
+        repo,
+        SessionOptions {
+            git_executable: Some(script),
+        },
+    );
+    let ticket = harness.session.request_blame(head, "big.txt");
+
+    let start = Instant::now();
+    while !pid_file.exists() {
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "mock git never started"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let pid: u32 = fs::read_to_string(&pid_file)
+        .expect("read pid")
+        .trim()
+        .parse()
+        .expect("pid");
+
+    harness.session.cancel_query(ticket);
+
+    // Wait for the CommandLogged event that records the killed child process,
+    // which proves the blame worker already exited and reaped it.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "timed out waiting for cancelled blame to stop"
+        );
+        match harness.events.recv_timeout(deadline - now) {
+            Ok(SessionEvent::BlameReady { ticket: got, .. })
+            | Ok(SessionEvent::QueryFailed { ticket: got, .. })
+                if got == ticket =>
+            {
+                panic!("cancelled blame ticket must not emit BlameReady or QueryFailed");
+            }
+            Ok(SessionEvent::CommandLogged(record))
+                if record.args.first().map(String::as_str) == Some("blame") =>
+            {
+                assert_eq!(record.exit_code, None);
+                break;
+            }
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => panic!("session event channel closed"),
+        }
+    }
+
+    let alive = Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stderr(Stdio::null())
+        .status()
+        .expect("kill -0")
+        .success();
+    assert!(!alive, "git child {pid} should have been killed");
+}
