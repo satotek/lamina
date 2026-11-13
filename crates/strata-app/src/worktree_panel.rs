@@ -232,6 +232,12 @@ pub struct WorktreePanel {
     /// Whether the current merge's prepared message was already offered, so
     /// clearing the box does not bring it back.
     merge_prefilled: bool,
+    /// The prepared merge message that was offered, so it can be withdrawn if
+    /// the merge ends (aborted) while the box still holds it unchanged.
+    offered_merge_message: Option<String>,
+    /// Set when the merge ended; the next render clears the box if it still
+    /// holds exactly the offered message.
+    withdraw_merge_message: Option<String>,
 
     pending: Option<(OperationId, PendingKind)>,
     /// Set while a submitted operation has not refreshed the status yet.
@@ -292,6 +298,11 @@ impl WorktreePanel {
         if std::mem::take(&mut self.clear_message) {
             input.update(cx, |state, cx| state.set_value("", window, cx));
         }
+        if let Some(offered) = self.withdraw_merge_message.take()
+            && input.read(cx).value().trim() == offered.trim()
+        {
+            input.update(cx, |state, cx| state.set_value("", window, cx));
+        }
         if let Some(prefill) = self.prefill.take()
             && input.read(cx).value().trim().is_empty()
         {
@@ -304,6 +315,7 @@ impl WorktreePanel {
     fn sync_merge_message(&mut self, session: &Session, state: RepoState) {
         if state != RepoState::Merging {
             self.merge_prefilled = false;
+            self.withdraw_merge_message = self.offered_merge_message.take();
             return;
         }
         if self.merge_prefilled {
@@ -312,6 +324,7 @@ impl WorktreePanel {
         self.merge_prefilled = true;
         // One small file read; cheaper than a round trip through a worker.
         if let Ok(Some(message)) = session.repo().merge_message() {
+            self.offered_merge_message = Some(message.clone());
             self.prefill = Some(message);
         }
     }
