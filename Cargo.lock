@@ -7320,6 +7320,7 @@ dependencies = [
  "gpui-kit-assets",
  "gpui-pre",
  "gpui-pre-platform",
+ "image",
  "log",
  "serde",
  "serde_json",

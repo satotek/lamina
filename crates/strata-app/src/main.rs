@@ -111,39 +111,66 @@ fn open_window(start: Start, cx: &mut App) {
     };
 
     let bounds = Bounds::centered(None, size(px(1360.0), px(860.0)), cx);
-    cx.open_window(
-        WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            // The app draws its own title bar (with the repository and branch in
-            // it) so the window reads as one surface on every platform. The
-            // title is still set for the taskbar and window switcher.
-            titlebar: Some(TitlebarOptions {
-                title: Some(title.into()),
-                ..TitleBar::title_bar_options()
-            }),
-            window_decorations: Some(WindowDecorations::Client),
-            window_min_size: Some(size(px(720.0), px(480.0))),
-            focus: true,
-            ..TitleBar::window_options()
-        },
-        move |window, cx| {
-            settings::apply_theme(Some(window), cx);
-            if gallery {
-                // The gallery is a window of its own: it reads the theme and the
-                // settings and nothing else, so it opens without a repository.
-                let content = cx.new(|cx| ui::gallery::Gallery::new(window, cx));
-                cx.new(|cx| Root::new(content, window, cx))
-            } else {
-                // The workspace owns whichever view fills the window, so the
-                // picker can replace a repository (and its session) in place.
-                let content = cx.new(|cx| Workspace::new(launch, window, cx));
-                // Root hosts gpui-component's dialog, notification and tooltip
-                // layers and draws the client-side window border.
-                cx.new(|cx| Root::new(content, window, cx))
-            }
-        },
-    )
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        // The app draws its own title bar (with the repository and branch in
+        // it) so the window reads as one surface on every platform. The
+        // title is still set for the taskbar and window switcher.
+        titlebar: Some(TitlebarOptions {
+            title: Some(title.into()),
+            ..TitleBar::title_bar_options()
+        }),
+        window_decorations: Some(WindowDecorations::Client),
+        window_min_size: Some(size(px(720.0), px(480.0))),
+        focus: true,
+        // X11 and Wayland group windows by this id and match them to a desktop
+        // file, so it has the name of packaging/linux/strata.desktop. macOS
+        // takes its identity from the bundle's Info.plist instead.
+        app_id: Some("strata".to_owned()),
+        ..TitleBar::window_options()
+    };
+    // Only X11 needs the pixels: Wayland reads the icon from the desktop file.
+    #[cfg(target_os = "linux")]
+    let options = {
+        let mut options = options;
+        options.icon = linux_window_icon();
+        options
+    };
+
+    cx.open_window(options, move |window, cx| {
+        settings::apply_theme(Some(window), cx);
+        if gallery {
+            // The gallery is a window of its own: it reads the theme and the
+            // settings and nothing else, so it opens without a repository.
+            let content = cx.new(|cx| ui::gallery::Gallery::new(window, cx));
+            cx.new(|cx| Root::new(content, window, cx))
+        } else {
+            // The workspace owns whichever view fills the window, so the
+            // picker can replace a repository (and its session) in place.
+            let content = cx.new(|cx| Workspace::new(launch, window, cx));
+            // Root hosts gpui-component's dialog, notification and tooltip
+            // layers and draws the client-side window border.
+            cx.new(|cx| Root::new(content, window, cx))
+        }
+    })
     .expect("failed to open the Strata window");
+}
+
+/// The X11 window icon. Wayland draws its icon from the desktop file, and
+/// macOS and Windows take theirs from the bundle or the embedded resource, so
+/// this is the one platform where the app has to hand the pixels over.
+#[cfg(target_os = "linux")]
+fn linux_window_icon() -> Option<std::sync::Arc<image::RgbaImage>> {
+    const PNG: &[u8] = include_bytes!("../resources/icon/hicolor/128.png");
+
+    // A broken icon must not keep the window from opening.
+    match image::load_from_memory_with_format(PNG, image::ImageFormat::Png) {
+        Ok(icon) => Some(std::sync::Arc::new(icon.into_rgba8())),
+        Err(error) => {
+            log::warn!("could not decode the window icon: {error}");
+            None
+        }
+    }
 }
 
 fn parse_args() -> Start {

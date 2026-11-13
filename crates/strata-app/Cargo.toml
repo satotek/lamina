@@ -3,6 +3,7 @@ name = "strata-app"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Lightweight cross-platform git client"
 
 [[bin]]
 name = "strata"
@@ -40,6 +41,12 @@ futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 log = "0.4"
+
+# Only the X11 window icon is passed in as pixels. GPUI already depends on
+# `image`, but it is not re-exported, so the app names it here; the png feature
+# is the only decoder this needs.
+[target.'cfg(target_os = "linux")'.dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 # Embeds resources/icon/strata.ico in the Windows executable (see build.rs).
 [target.'cfg(windows)'.build-dependencies]
