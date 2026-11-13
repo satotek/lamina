@@ -15,13 +15,16 @@ use std::sync::Arc;
 use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedReceiver};
 use gpui::{
-    App, Context, FocusHandle, ScrollStrategy, Subscription, Task, UniformListScrollHandle, Window,
+    App, AppContext as _, Context, Entity, FocusHandle, Focusable as _, ScrollStrategy,
+    Subscription, Task, UniformListScrollHandle, Window,
 };
 use gpui_component::Theme;
+use gpui_component::input::InputState;
 use strata_core::git_cli::CommandRecord;
-use strata_core::session::{DiffRequest, DiffTicket, DiffView, Session, SessionEvent};
+use strata_core::session::{DiffRequest, DiffTicket, DiffView, Operation, Session, SessionEvent};
 use strata_core::{FileChange, HeadInfo, Oid};
 
+use crate::branches::{BranchStart, Branches};
 use crate::data::{self, LaneWidth, Source};
 use crate::diff_view::{self, Row as DiffRow};
 use crate::fake::{self, FakeRepo};
@@ -179,6 +182,11 @@ pub struct RepoView {
     pub(crate) mode: MainMode,
     /// Staging state and rendering, in its own module.
     pub(crate) worktree: WorktreePanel,
+    /// Handle to this view. The sidebar's branch rows get no `Context`, so they
+    /// update the view through this entity.
+    entity: Entity<RepoView>,
+    /// Branch sections, dialogs and the operations they started.
+    pub(crate) branches: Branches,
 
     /// Running maximum of graph widths, updated as chunks arrive.
     lanes: LaneWidth,
@@ -226,6 +234,7 @@ impl RepoView {
         });
         let smoke = std::env::var_os("STRATA_SMOKE").is_some();
         let title = launch.title();
+        let entity = cx.entity();
 
         let mut view = Self {
             session: None,
@@ -234,6 +243,8 @@ impl RepoView {
             name: None,
             mode: MainMode::History,
             worktree: WorktreePanel::default(),
+            entity,
+            branches: Branches::default(),
             lanes: LaneWidth::default(),
             selected: None,
             selection_commit: None,
@@ -260,6 +271,7 @@ impl RepoView {
             _appearance: appearance,
             _bridge: None,
         };
+        view.branches.set_dialog_focus(cx.focus_handle());
 
         match launch {
             Launch::Fake { repo } => {
@@ -363,13 +375,23 @@ impl RepoView {
                 cx.notify();
             }
             SessionEvent::OperationFinished { id, error } => {
-                let ours = self.worktree.on_operation_finished(id, error.as_deref());
+                self.worktree.on_operation_finished(id, error.as_deref());
+                // The label records which operation failed, so the status bar
+                // names it instead of showing a bare git message.
+                let had_dialog = self.branches.dialog_open();
+                let label = self.branches.finish(id, error.as_deref());
                 if let Some(error) = error {
-                    self.status_error = Some(error);
-                    cx.notify();
-                } else if ours {
-                    cx.notify();
+                    self.status_error = Some(match label {
+                        Some(label) => format!("{label}: {}", one_line(&error)),
+                        None => one_line(&error),
+                    });
                 }
+                if !had_dialog && self.branches.dialog_open() {
+                    // The force-delete offer opens here rather than in a click
+                    // handler, so it has to take focus for its keys to work.
+                    self.focus_dialog(cx);
+                }
+                cx.notify();
             }
             // Progress and query results get their UI with remote operations and search.
             SessionEvent::OperationStarted { .. }
@@ -377,6 +399,154 @@ impl RepoView {
             | SessionEvent::QueryReady { .. }
             | SessionEvent::QueryFailed { .. } => {}
         }
+    }
+
+    /// True while the session is running an operation or one this view started
+    /// has not reported back yet.
+    fn is_busy(&self) -> bool {
+        self.branches.is_running()
+            || self
+                .session
+                .as_ref()
+                .is_some_and(|session| session.snapshot().busy.is_some())
+    }
+
+    /// Runs a mutation through the session.
+    ///
+    /// The branch UI is disabled while an operation runs, and `--fake` has no
+    /// session at all, so both cases return without doing anything. `label` is
+    /// what a failure is reported as in the status bar.
+    pub(crate) fn run_operation(
+        &mut self,
+        operation: Operation,
+        label: impl Into<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session.is_none() || self.is_busy() {
+            return;
+        }
+        let Some(session) = &self.session else {
+            return;
+        };
+        let label = label.into();
+        let delete = match &operation {
+            Operation::DeleteBranch { name, force } => Some((name.clone(), *force)),
+            _ => None,
+        };
+        let id = session.run(operation);
+        self.branches
+            .start(id, label, delete, window.viewport_size());
+        cx.notify();
+    }
+
+    /// The create-branch shortcut: starts from HEAD.
+    pub(crate) fn create_branch_from_head(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session.is_none() || self.is_busy() || self.branches.dialog_open() {
+            return;
+        }
+        let label = match self.source().and_then(|source| source.head().cloned()) {
+            Some(HeadInfo::Branch { short_name, .. }) => format!("from {short_name}"),
+            Some(HeadInfo::Detached { .. }) => "from the current commit".to_owned(),
+            None => "from HEAD".to_owned(),
+        };
+        self.open_create_dialog(None, label, window, cx);
+    }
+
+    /// Opens the create dialog, focused on its name field. `start_point` is a
+    /// ref or commit id the branch is created from, or HEAD when absent.
+    pub(crate) fn open_create_dialog(
+        &mut self,
+        start_point: Option<String>,
+        label: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session.is_none() {
+            return;
+        }
+        self.branches.set_viewport(window.viewport_size());
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("branch name"));
+        let handle = input.focus_handle(cx);
+        self.branches.open_create(
+            input,
+            BranchStart {
+                point: start_point,
+                label,
+            },
+        );
+        // The dialog renders on the next frame; focus it once it is there.
+        window.defer(cx, move |window, cx| handle.focus(window, cx));
+        cx.notify();
+    }
+
+    pub(crate) fn open_delete_dialog(
+        &mut self,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session.is_none() {
+            return;
+        }
+        self.branches.set_viewport(window.viewport_size());
+        self.branches.open_delete(name);
+        if let Some(focus) = self.branches.dialog_focus() {
+            window.defer(cx, move |window, cx| focus.focus(window, cx));
+        }
+        cx.notify();
+    }
+
+    /// Confirms whichever branch dialog is open.
+    pub(crate) fn submit_branch_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(request) = self.branches.create_request(cx) {
+            match request {
+                Ok(request) => {
+                    let label = format!("create branch {}", request.name);
+                    self.branches.close_dialog();
+                    self.focus_root(window, cx);
+                    self.run_operation(
+                        Operation::CreateBranch {
+                            name: request.name,
+                            start_point: request.start_point,
+                            checkout: request.checkout,
+                        },
+                        label,
+                        window,
+                        cx,
+                    );
+                }
+                Err(message) => {
+                    self.branches.set_create_error(message);
+                    cx.notify();
+                }
+            }
+            return;
+        }
+        if let Some((name, force)) = self.branches.delete_request() {
+            let label = format!("delete branch {name}");
+            self.branches.close_dialog();
+            self.focus_root(window, cx);
+            self.run_operation(Operation::DeleteBranch { name, force }, label, window, cx);
+        }
+    }
+
+    /// Returns focus from a dialog to the commit list, which owns the keys.
+    pub(crate) fn focus_root(&self, window: &mut Window, cx: &mut App) {
+        window.focus(&self.focus, cx);
+    }
+
+    /// Moves focus to the open dialog's card, if one is open.
+    fn focus_dialog(&self, cx: &mut Context<Self>) {
+        let Some(focus) = self.branches.dialog_focus() else {
+            return;
+        };
+        // The event arrives off the window's own update, but the window still
+        // has to be reachable through the app.
+        let Some(handle) = cx.windows().into_iter().next() else {
+            return;
+        };
+        let _ = handle.update(cx, |_, window, cx| focus.focus(window, cx));
     }
 
     /// Keeps the selection valid as commits arrive or the history is replaced.
@@ -624,6 +794,15 @@ fn is_under(directory: &str, child: &str) -> bool {
         .is_some_and(|rest| rest.starts_with('/') && rest.len() > 1)
 }
 
+/// git's stderr can span several lines, but the status bar is one line tall.
+fn one_line(text: &str) -> String {
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
 /// `git <args> · 12.3 ms`, with a non-zero exit code kept visible.
 fn command_line(record: &CommandRecord) -> String {
     let mut line = String::from("git");
@@ -729,6 +908,17 @@ mod tests {
             .map(|change| change.path)
             .collect();
         assert_eq!(kept, ["README.md", "src/lib.rs", "src/lib"]);
+    }
+
+    #[test]
+    fn a_multi_line_git_error_fits_the_status_bar() {
+        assert_eq!(
+            one_line(
+                "error: the branch 'topic' is not fully merged\n\nhint: run 'git branch -D topic'"
+            ),
+            "error: the branch 'topic' is not fully merged · hint: run 'git branch -D topic'"
+        );
+        assert_eq!(one_line("  fatal: one line  "), "fatal: one line");
     }
 
     #[test]

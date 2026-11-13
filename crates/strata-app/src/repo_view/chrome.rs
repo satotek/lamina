@@ -8,9 +8,10 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, Context, Div, FontWeight, Hsla, InteractiveElement, ParentElement, Render,
-    SharedString, Styled, Window, div, px, uniform_list,
+    AnyElement, App, ClickEvent, Context, Div, FontWeight, Hsla, InteractiveElement, ParentElement,
+    Render, SharedString, Styled, Window, div, px, uniform_list,
 };
+use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_component::{ActiveTheme, Theme, TitleBar, window_border};
 use strata_core::diff::LineKind;
 use strata_core::highlight::LineHighlights;
@@ -29,7 +30,6 @@ use crate::worktree_panel::MainMode;
 
 const SIDEBAR_WIDTH: f32 = 240.0;
 const FILE_LIST_WIDTH: f32 = 260.0;
-const SIDEBAR_ENTRIES: usize = 6;
 
 impl Render for RepoView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -246,27 +246,37 @@ impl RepoView {
         entry.into_any_element()
     }
 
-    /// Branches, remotes, tags and stashes below the working-tree entry.
+    /// Branches, remotes, tags and stashes below the working-tree entry. Every
+    /// section scrolls, so long ref lists stay reachable, and collapses when
+    /// its title is clicked.
     fn ref_sections(&self, palette: &Palette) -> AnyElement {
-        let mut column = div().flex().flex_col();
-        if let Some(data) = self.source().map(|source| source.sidebar()) {
-            column = column
-                .child(sidebar_section(
-                    "LOCAL BRANCHES",
-                    &data.local,
-                    data.head_branch.as_deref(),
-                    palette,
-                ))
-                .child(sidebar_section(
-                    "REMOTE BRANCHES",
-                    &data.remote,
-                    None,
-                    palette,
-                ))
-                .child(sidebar_section("TAGS", &data.tags, None, palette))
-                .child(sidebar_section("STASHES", &data.stashes, None, palette));
-        }
-        column.into_any_element()
+        let Some(source) = self.source() else {
+            return div().into_any_element();
+        };
+        let data = source.sidebar();
+        let upstreams = match &source {
+            Source::Repo(snapshot) => snapshot.upstreams.as_ref().clone(),
+            Source::Fake(_) => Default::default(),
+        };
+        let colors = crate::branches::Colors {
+            sidebar_foreground: palette.sidebar_foreground,
+            sidebar_accent: palette.sidebar_accent,
+            sidebar_accent_foreground: palette.sidebar_accent_foreground,
+            muted_foreground: palette.muted_foreground,
+            border: palette.border,
+            foreground: palette.foreground,
+            danger: palette.danger,
+            overlay: palette.overlay,
+            mono: palette.mono.clone(),
+        };
+        self.branches.render(
+            &data,
+            &upstreams,
+            self.session.is_some(),
+            self.is_busy(),
+            &colors,
+            &self.entity,
+        )
     }
 
     fn commit_pane(&self, entity: gpui::Entity<Self>, palette: &Palette) -> AnyElement {
@@ -282,6 +292,9 @@ impl RepoView {
         let lanes = self.lanes.max();
         let row_palette = palette.clone();
         let focus = self.focus.clone();
+        // Branch creation from a commit row is only meaningful for a real
+        // repository, and only when no operation is in flight.
+        let branch_menu = self.session.is_some() && !self.is_busy();
         let list = uniform_list("commits", len, move |range, _window, _cx| {
             range
                 .map(|index| {
@@ -290,14 +303,35 @@ impl RepoView {
                     let Some(row) = source.row(index) else {
                         return div().into_any_element();
                     };
-                    commit_row(&row, selected == Some(index), lanes, &row_palette)
+                    let click_entity = entity.clone();
+                    let element = commit_row(&row, selected == Some(index), lanes, &row_palette)
                         .id(("commit-row", index))
                         .cursor_pointer()
                         .on_click(move |_event, window, cx| {
-                            entity.update(cx, |this, cx| {
+                            click_entity.update(cx, |this, cx| {
                                 this.jump(index, cx);
                                 window.focus(&focus, cx);
                             });
+                        });
+                    let Some(commit) = source.commit_id(index).filter(|_| branch_menu) else {
+                        return element.into_any_element();
+                    };
+                    let entity = entity.clone();
+                    element
+                        .context_menu(move |menu, _window, _cx| {
+                            let point = commit.to_string();
+                            let from = format!("from commit {}", data::short_oid(commit));
+                            let open = {
+                                let entity = entity.clone();
+                                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                                    let point = point.clone();
+                                    let from = from.clone();
+                                    entity.update(cx, |this, cx| {
+                                        this.open_create_dialog(Some(point), from, window, cx);
+                                    });
+                                }
+                            };
+                            menu.item(PopupMenuItem::new("Create branch here…").on_click(open))
                         })
                         .into_any_element()
                 })
@@ -811,70 +845,6 @@ fn section_title(title: &str, count: Option<usize>, palette: &Palette) -> Div {
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(palette.muted_foreground)
         .child(label)
-}
-
-fn sidebar_section(title: &str, entries: &[String], head: Option<&str>, palette: &Palette) -> Div {
-    let mut section =
-        div()
-            .flex()
-            .flex_col()
-            .pb_1()
-            .child(section_title(title, Some(entries.len()), palette));
-
-    if entries.is_empty() {
-        section = section.child(
-            div()
-                .px_3()
-                .h(px(22.0))
-                .text_size(px(11.0))
-                .text_color(palette.muted_foreground)
-                .child("none"),
-        );
-    }
-
-    for name in entries.iter().take(SIDEBAR_ENTRIES) {
-        let active = head == Some(name.as_str());
-        let mut row = div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap_2()
-            .h(px(22.0))
-            .px_3()
-            .text_size(px(11.0))
-            .text_color(if active {
-                palette.sidebar_accent_foreground
-            } else {
-                palette.sidebar_foreground
-            });
-        if active {
-            row = row.bg(palette.sidebar_accent);
-        }
-        row = row.child(div().flex_1().min_w_0().truncate().child(name.clone()));
-        if active {
-            row = row.child(
-                div()
-                    .flex_none()
-                    .text_size(px(9.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .child("HEAD"),
-            );
-        }
-        section = section.child(row);
-    }
-
-    if entries.len() > SIDEBAR_ENTRIES {
-        section = section.child(
-            div()
-                .px_3()
-                .h(px(20.0))
-                .text_size(px(10.0))
-                .text_color(palette.muted_foreground)
-                .child(format!("+{} more", entries.len() - SIDEBAR_ENTRIES)),
-        );
-    }
-
-    section
 }
 
 fn empty_pane(message: &str, palette: &Palette) -> AnyElement {

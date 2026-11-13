@@ -6,6 +6,7 @@
 //! commit-list and diff renderers.
 
 mod actions;
+mod branches;
 mod data;
 mod diff_view;
 mod fake;
@@ -36,6 +37,7 @@ fn main() {
             gpui_component::init(cx);
             actions::bind(cx);
             worktree_panel::bind(cx);
+            branches::bind(cx);
 
             let bounds = Bounds::centered(None, size(px(1360.0), px(860.0)), cx);
             cx.open_window(
