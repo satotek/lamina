@@ -14,6 +14,7 @@ mod diffs;
 mod history;
 mod operations;
 mod publish;
+mod queries;
 mod refresh;
 
 use std::collections::HashMap;
@@ -39,6 +40,7 @@ use diffs::DiffJob;
 use history::LoadCommand;
 use operations::OperationJob;
 use publish::{EventSink, Shared};
+use queries::QueryJob;
 use refresh::RefreshStatus;
 
 /// Commits are published in chunks so a growing list can be shared with the UI
@@ -357,6 +359,9 @@ struct Senders {
     status: Sender<RefreshStatus>,
     operations: Sender<OperationJob>,
     diffs: Sender<DiffJob>,
+    queries: Sender<QueryJob>,
+    /// Ticket counter and cancellation set shared with the query worker.
+    query_state: Arc<queries::QueryState>,
 }
 
 impl Session {
@@ -389,6 +394,8 @@ impl Session {
         let (ops_tx, ops_rx) = mpsc::channel();
         let (diff_tx, diff_rx) = mpsc::channel();
         let diff_rx = Arc::new(Mutex::new(diff_rx));
+        let (query_tx, query_rx) = mpsc::channel();
+        let query_state = Arc::new(queries::QueryState::new());
 
         let shared = Arc::new(Shared::new(repo, git, events, empty_snapshot()));
 
@@ -406,7 +413,7 @@ impl Session {
             },
         )?;
 
-        let mut threads = Vec::with_capacity(3 + DIFF_WORKERS);
+        let mut threads = Vec::with_capacity(4 + DIFF_WORKERS);
         threads.push(spawn("strata-session-history", {
             let shared = Arc::clone(&shared);
             move || history::run(shared, load_rx)
@@ -428,6 +435,13 @@ impl Session {
                 move || diffs::run(shared, jobs)
             })?);
         }
+        // One query worker: a path walk and a search both read a snapshot, and
+        // the UI only needs the latest answer.
+        threads.push(spawn("strata-session-queries", {
+            let shared = Arc::clone(&shared);
+            let state = Arc::clone(&query_state);
+            move || queries::run(shared, state, query_rx)
+        })?);
 
         let session = Self {
             shared,
@@ -436,6 +450,8 @@ impl Session {
                 status: status_tx,
                 operations: ops_tx,
                 diffs: diff_tx,
+                queries: query_tx,
+                query_state,
             }),
             watcher: Some(watcher),
             threads,
@@ -473,18 +489,31 @@ impl Session {
     }
 
     /// Filters loaded history in the background; answers with `QueryReady`.
-    pub fn search_commits(&self, _query: CommitQuery) -> QueryTicket {
-        todo!("history task")
+    pub fn search_commits(&self, query: CommitQuery) -> QueryTicket {
+        self.queue_query(queries::QueryKind::Search(query))
     }
 
     /// Commits that changed `path` (file or directory), as rows of the current
     /// snapshot; answers with `QueryReady`.
-    pub fn path_history(&self, _path: String) -> QueryTicket {
-        todo!("history task")
+    pub fn path_history(&self, path: String) -> QueryTicket {
+        self.queue_query(queries::QueryKind::Path(path))
     }
 
-    pub fn cancel_query(&self, _ticket: QueryTicket) {
-        todo!("history task")
+    pub fn cancel_query(&self, ticket: QueryTicket) {
+        if let Some(senders) = &self.senders {
+            senders.query_state.cancel(ticket);
+        }
+    }
+
+    fn queue_query(&self, kind: queries::QueryKind) -> QueryTicket {
+        let Some(senders) = &self.senders else {
+            // Only reachable once the session is shutting down, when no event
+            // could be delivered anyway.
+            return QueryTicket(0);
+        };
+        let ticket = senders.query_state.next_ticket();
+        let _ = senders.queries.send(QueryJob { ticket, kind });
+        ticket
     }
 
     /// Forces a full reload (refs, history, status).
