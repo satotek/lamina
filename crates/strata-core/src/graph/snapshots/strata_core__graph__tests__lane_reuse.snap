@@ -1,0 +1,28 @@
+---
+source: crates/strata-core/src/graph/tests.rs
+expression: render(&lane_reuse())
+---
+....
+*0..
+  c10
+|0\1
+|0|1
+*0|1
+  c11
+|0|1
+|0|1
+|0*1
+  c12
+|0..
+|0..
+|0*2
+  c14
+|0|2
+|0|2
+*0|2
+  c13
+..|2
+..|2
+..*2
+  c15
+....
