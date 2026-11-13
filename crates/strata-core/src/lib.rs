@@ -10,6 +10,7 @@ pub mod graph;
 pub mod highlight;
 pub mod patch;
 pub mod repo;
+pub mod session;
 pub mod types;
 pub mod watch;
 
