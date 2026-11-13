@@ -320,6 +320,21 @@ impl Git {
         self.run_unit(&args, None)
     }
 
+    /// Write one commit-graph covering every reachable commit, with changed-path
+    /// Bloom filters so path-limited history and blame can use them too.
+    ///
+    /// This is `git commit-graph write --reachable --changed-paths`; the caller
+    /// decides when the user asked for it.
+    pub fn write_commit_graph(&self) -> Result<()> {
+        let args = vec![
+            "commit-graph".to_owned(),
+            "write".to_owned(),
+            "--reachable".to_owned(),
+            "--changed-paths".to_owned(),
+        ];
+        self.run_unit(&args, None)
+    }
+
     /// `remote == None` fetches every remote.
     pub fn fetch(&self, remote: Option<&str>, prune: bool) -> Result<()> {
         let remote = remote

@@ -116,8 +116,11 @@ fn run_one(
     // forgets them here: a status scan cannot see a ref that moved. Held
     // index/worktree changes are covered by the refresh requested below.
     let held = shared.take_pending();
-    let refs_moved = held.refs_changed() || (result.is_ok() && changes_refs(&job.operation));
-    if refs_moved {
+    let history_stale = held.refs_changed()
+        || (result.is_ok()
+            && (changes_refs(&job.operation)
+                || matches!(job.operation, Operation::WriteCommitGraph)));
+    if history_stale {
         let generation = shared.begin_reload();
         let _ = load.send(LoadCommand { generation });
     }
@@ -129,7 +132,7 @@ fn run_one(
     let (ack_tx, ack_rx) = mpsc::channel();
     let _ = status.send(RefreshStatus {
         ack: Some(ack_tx),
-        config: held.config && !refs_moved,
+        config: held.config && !history_stale,
     });
     let _ = ack_rx.recv_timeout(REFRESH_TIMEOUT);
 
@@ -325,6 +328,15 @@ fn execute(shared: &Shared, id: OperationId, operation: &Operation) -> Result<()
         } => git.worktree_add(path, branch.as_deref(), new_branch.as_deref(), *commit),
         Operation::WorktreeRemove { path, force } => git.worktree_remove(path, *force),
         Operation::WorktreePrune => git.worktree_prune(),
+        Operation::WriteCommitGraph => {
+            let mut progress = ProgressReporter::new(shared, id);
+            let cancelled = || shared.is_shutdown();
+            let result = git.write_commit_graph_with_progress(&cancelled, |text, percent| {
+                progress.line(text, percent)
+            });
+            progress.finish();
+            result.map(|_| ())
+        }
     }
 }
 

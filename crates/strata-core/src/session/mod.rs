@@ -30,7 +30,7 @@ use crate::git_cli::{CommandRecord, Git, RebaseStep};
 use crate::graph::{GraphRow, GraphRows};
 use crate::highlight::LineHighlights;
 use crate::patch::LineSelection;
-use crate::repo::{Repo, SubmoduleInfo, WorktreeInfo};
+use crate::repo::{CommitGraphAdvice, Repo, SubmoduleInfo, WorktreeInfo};
 use crate::watch::RepoWatcher;
 use crate::{
     CommitInfo, CommitStat, ConflictEntry, Error, HeadInfo, Oid, RefInfo, RemoteInfo, RepoState,
@@ -413,6 +413,9 @@ pub enum Operation {
     },
     /// `git worktree prune`.
     WorktreePrune,
+    /// `git commit-graph write --reachable --changed-paths`: make future
+    /// history walks faster. Never started without an explicit user action.
+    WriteCommitGraph,
 }
 
 /// How far `Operation::Reset` rewinds.
@@ -541,6 +544,12 @@ pub enum SessionEvent {
     InProgressDetailsReady {
         ticket: QueryTicket,
         details: Option<InProgressDetails>,
+    },
+    /// The history walk found that a commit-graph is missing or stale, so
+    /// writing one would make later loads faster. The UI offers the write;
+    /// nothing is written until the user answers.
+    CommitGraphSuggested {
+        advice: CommitGraphAdvice,
     },
 }
 

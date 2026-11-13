@@ -68,6 +68,10 @@ enum GraphParents {
 pub(super) struct Walk {
     objects: gix::OdbHandle,
     graph: Option<gix::commitgraph::Graph>,
+    /// Whether a graph was loaded, even after a corrupt one is dropped.
+    graph_present: bool,
+    /// Reachable commits read from the object database instead of the graph.
+    commits_outside_graph: usize,
     nodes: Vec<Node>,
     by_id: HashMap<gix::ObjectId, u32>,
     /// Parent node indices, one run per node, to avoid re-reading commits.
@@ -105,7 +109,9 @@ impl Walk {
         let initial = estimated_commits.unwrap_or(0);
         let mut walk = Walk {
             objects,
+            graph_present: graph.is_some(),
             graph,
+            commits_outside_graph: 0,
             nodes: Vec::with_capacity(initial),
             by_id: HashMap::with_capacity(initial),
             parent_arena: Vec::with_capacity(initial),
@@ -155,6 +161,14 @@ impl Walk {
 
     pub(super) fn estimated_commits(&self) -> Option<usize> {
         self.estimated_commits
+    }
+
+    pub(super) fn has_commit_graph(&self) -> bool {
+        self.graph_present
+    }
+
+    pub(super) fn commits_outside_graph(&self) -> usize {
+        self.commits_outside_graph
     }
 
     /// The next commit in `--date-order`, or `None` once every reachable
@@ -218,6 +232,11 @@ impl Walk {
                 parents: None,
             });
         }
+        if self.graph.is_some() {
+            // The graph is usable but predates this commit: history written
+            // after the last `git commit-graph write`.
+            self.commits_outside_graph += 1;
+        }
         let iter = self
             .objects
             .find_commit_iter(id, &mut self.object_buf)
@@ -255,6 +274,7 @@ impl Walk {
                     // A corrupt graph must not hide the history: drop it and read
                     // this commit, and every later one, from the object database.
                     self.graph = None;
+                    self.graph_present = false;
                     self.odb_parents(&id)?;
                 }
             }

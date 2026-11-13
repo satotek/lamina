@@ -11,6 +11,7 @@
 //! merge, rebase, cherry-pick, revert, bisect or `am`.
 
 mod blame;
+mod commit_graph;
 mod conflicts;
 mod history;
 mod in_progress;
@@ -26,6 +27,10 @@ mod upstream;
 mod worktrees;
 
 pub use blame::{Blame, BlameCommit, BlameHunk};
+pub use commit_graph::{
+    CommitGraphAdvice, CommitGraphFacts, CommitGraphThresholds, DEFAULT_MIN_COMMITS,
+    DEFAULT_MIN_WALK,
+};
 pub use history::{PathHistory, PathHistoryEntries, PathHistoryEntry};
 pub use in_progress::{InProgressCommit, InProgressDetails, RebaseOnto};
 pub use log::CommitWalk;

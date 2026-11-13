@@ -37,6 +37,7 @@ pub fn banner(kind: BannerKind, message: impl Into<SharedString>, design: &Desig
     Banner {
         kind,
         message: message.into(),
+        detail: None,
         actions: Vec::new(),
         design: design.clone(),
         style: StyleRefinement::default(),
@@ -47,6 +48,7 @@ pub fn banner(kind: BannerKind, message: impl Into<SharedString>, design: &Desig
 pub struct Banner {
     kind: BannerKind,
     message: SharedString,
+    detail: Option<SharedString>,
     actions: Vec<AnyElement>,
     design: Design,
     style: StyleRefinement,
@@ -55,6 +57,13 @@ pub struct Banner {
 impl Banner {
     pub fn action(mut self, action: impl IntoElement) -> Self {
         self.actions.push(action.into_any_element());
+        self
+    }
+
+    /// A quieter second line under the message, for context that should not
+    /// compete with the action the banner asks for.
+    pub fn detail(mut self, detail: impl Into<SharedString>) -> Self {
+        self.detail = Some(detail.into());
         self
     }
 }
@@ -72,6 +81,17 @@ impl RenderOnce for Banner {
         for action in self.actions {
             actions = actions.child(action);
         }
+        let mut text = div().flex_1().min_w_0().flex().flex_col();
+        text = text.child(div().truncate().child(self.message));
+        if let Some(detail) = self.detail {
+            text = text.child(
+                div()
+                    .truncate()
+                    .text_size(px(self.design.tiny()))
+                    .opacity(0.8)
+                    .child(detail),
+            );
+        }
         div()
             .flex()
             .items_center()
@@ -83,7 +103,7 @@ impl RenderOnce for Banner {
             .bg(background)
             .text_size(px(self.design.small()))
             .text_color(foreground)
-            .child(div().flex_1().min_w_0().truncate().child(self.message))
+            .child(text)
             .child(actions)
             .refine_style(&self.style)
     }

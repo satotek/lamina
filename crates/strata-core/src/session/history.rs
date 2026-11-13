@@ -4,10 +4,11 @@ use std::collections::HashMap;
 use std::mem;
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
+use std::time::Instant;
 
 use crate::graph::GraphLayout;
 use crate::graph::GraphRows;
-use crate::repo::CommitWalk;
+use crate::repo::{CommitGraphThresholds, CommitWalk};
 use crate::session::publish::Shared;
 use crate::session::{COMMIT_CHUNK, CommitList, FIRST_COMMIT_CHUNK, HistoryScope, SessionEvent};
 use crate::{CommitInfo, HeadInfo, Oid, RefInfo, RemoteInfo, Result, StashInfo, UpstreamInfo};
@@ -54,12 +55,24 @@ fn load(shared: &Arc<Shared>, generation: u64) -> Result<()> {
         let shared = Arc::clone(shared);
         Arc::new(move || !shared.is_current(generation))
     };
+    let started = Instant::now();
     let walk = match shared.history_scope() {
         HistoryScope::All => shared.repo.walk_commits_with(Some(cancelled))?,
         HistoryScope::Refs(specs) => shared
             .repo
             .walk_commits_from_refs_with(&specs, Some(cancelled))?,
     };
+    // Building the walk is the reachability pass that a commit-graph shortens.
+    // Measuring it here is what lets the UI suggest a graph only on a
+    // repository large enough to need one.
+    let walk_time = started.elapsed();
+    let advice = shared
+        .repo
+        .commit_graph_facts(&walk, walk_time)
+        .advise(CommitGraphThresholds::default());
+    if let Some(advice) = advice {
+        shared.emit(SessionEvent::CommitGraphSuggested { advice });
+    }
 
     let estimated = walk.estimated_commits().unwrap_or(0);
     Loader {

@@ -159,6 +159,9 @@ impl Render for RepoView {
             if let Some(banner) = self.in_progress_banner(entity.clone(), &design) {
                 main = main.child(banner);
             }
+            if let Some(banner) = self.commit_graph_banner(entity.clone(), &design, cx) {
+                main = main.child(banner);
+            }
             root = root
                 .child(
                     div()

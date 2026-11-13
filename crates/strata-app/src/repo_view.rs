@@ -8,6 +8,7 @@
 
 mod blame_view;
 mod chrome;
+mod commit_graph;
 mod commit_list;
 mod commit_selection;
 mod common;
@@ -354,6 +355,16 @@ pub struct RepoView {
     pub(crate) file_history: Option<FileHistory>,
     /// The job in flight and the banner for what git left in progress.
     in_progress: InProgress,
+    /// The history loader suggested writing a commit-graph and the user has
+    /// not answered yet.
+    commit_graph_offer: bool,
+    /// True while the offered write runs, so a reload cannot re-show it.
+    commit_graph_writing: bool,
+    /// The user chose "Not now"; later reloads stay quiet until the repository
+    /// is opened again.
+    commit_graph_dismissed: bool,
+    /// Canonical working-tree root, the key "Don't ask" is stored under.
+    repository_key: Option<PathBuf>,
 
     /// Running maximum of graph widths, updated as chunks arrive.
     lanes: LaneWidth,
@@ -520,6 +531,10 @@ impl RepoView {
             search: SearchState::default(),
             file_history: None,
             in_progress: InProgress::default(),
+            commit_graph_offer: false,
+            commit_graph_writing: false,
+            commit_graph_dismissed: false,
+            repository_key: None,
             lanes: LaneWidth::default(),
             selected: None,
             selection: CommitSelection::default(),
@@ -608,6 +623,7 @@ impl RepoView {
                         }
                     }
                 }));
+                view.repository_key = Some(commit_graph::repository_key(session.repo()));
                 view.session = Some(*session);
                 view.search.init_input(window, cx);
                 view.sync_autofetch(cx);
@@ -891,6 +907,15 @@ impl RepoView {
                         self.pending_reveal_conflicts = true;
                     }
                 }
+                if self.commit_graph_writing {
+                    self.commit_graph_writing = false;
+                    // A successful write reloads the history and the offer is
+                    // answered; a failed one leaves it up so the user can retry.
+                    if error.is_none() {
+                        self.commit_graph_offer = false;
+                        self.commit_graph_dismissed = true;
+                    }
+                }
                 self.worktree.on_operation_finished(id, error.as_deref());
                 self.remote
                     .on_finished(id, error.as_deref(), cx, self.active);
@@ -944,6 +969,15 @@ impl RepoView {
                     pending.skipped = skipped;
                 }
                 self.remote.on_progress(id, &text, percent, cx, self.active)
+            }
+            SessionEvent::CommitGraphSuggested { .. } => {
+                if !self.commit_graph_writing
+                    && !self.commit_graph_dismissed
+                    && self.commit_graph_allowed(cx)
+                {
+                    self.commit_graph_offer = true;
+                    self.notify_if_active(cx);
+                }
             }
         }
     }

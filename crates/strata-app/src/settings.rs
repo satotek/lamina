@@ -28,6 +28,7 @@ pub struct Settings {
     pub behaviour: Behaviour,
     pub tools: Tools,
     pub privacy: Privacy,
+    pub commit_graph: CommitGraphSettings,
 }
 
 impl Global for Settings {}
@@ -177,6 +178,31 @@ pub struct Privacy {
     /// Load author pictures from an external service. Off by default because
     /// it sends author email hashes over the network.
     pub external_avatars: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct CommitGraphSettings {
+    /// Canonical working-tree roots where the user chose "Don't ask for this
+    /// repository". Empty means every repository may be asked once.
+    pub ignored_repositories: Vec<PathBuf>,
+}
+
+impl CommitGraphSettings {
+    /// Whether the offer may be shown for the repository at `repository`.
+    pub fn asks(&self, repository: &Path) -> bool {
+        !self
+            .ignored_repositories
+            .iter()
+            .any(|ignored| ignored == repository)
+    }
+
+    /// Stops asking for one repository, without touching the others.
+    pub fn ignore(&mut self, repository: PathBuf) {
+        if !self.ignored_repositories.contains(&repository) {
+            self.ignored_repositories.push(repository);
+        }
+    }
 }
 
 impl Settings {
@@ -454,6 +480,25 @@ mod tests {
         assert!(coalescer.take(third));
         assert!(!coalescer.take(third));
         assert!(!coalescer.pending());
+    }
+
+    #[test]
+    fn commit_graph_ignores_are_per_repository_and_survive_a_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let asked = PathBuf::from("/work/repo-a");
+        let silenced = PathBuf::from("/work/repo-b");
+
+        let mut settings = Settings::default();
+        assert!(settings.commit_graph.asks(&asked));
+        settings.commit_graph.ignore(silenced.clone());
+        assert!(settings.commit_graph.asks(&asked));
+        assert!(!settings.commit_graph.asks(&silenced));
+
+        settings.save(&path).unwrap();
+        let loaded = Settings::load(&path);
+        assert!(loaded.commit_graph.asks(&asked));
+        assert!(!loaded.commit_graph.asks(&silenced));
     }
 
     #[test]

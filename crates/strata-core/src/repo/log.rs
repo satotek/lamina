@@ -44,6 +44,18 @@ impl CommitWalk {
     pub(crate) fn estimated_commits(&self) -> Option<usize> {
         self.walk.estimated_commits()
     }
+
+    /// Whether the walk reads generation numbers from a commit-graph.
+    pub fn has_commit_graph(&self) -> bool {
+        self.walk.has_commit_graph()
+    }
+
+    /// Reachable commits the walk had to read from the object database because
+    /// the commit-graph does not contain them. Zero for a missing graph, which
+    /// no graph-backed walk is expected to cover.
+    pub fn commits_outside_graph(&self) -> usize {
+        self.walk.commits_outside_graph()
+    }
 }
 
 impl Iterator for CommitWalk {

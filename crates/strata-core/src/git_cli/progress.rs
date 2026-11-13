@@ -104,6 +104,28 @@ impl Git {
         })
         .map(|_| ())
     }
+
+    /// [`Git::write_commit_graph`] with git's progress lines delivered while
+    /// the command runs. Cancelling kills the child and returns `Ok(false)`.
+    pub fn write_commit_graph_with_progress(
+        &self,
+        cancelled: &(impl Fn() -> bool + Send + Sync),
+        mut on_line: impl FnMut(&str, Option<u8>),
+    ) -> Result<bool> {
+        let args = [
+            "commit-graph",
+            "write",
+            "--reachable",
+            "--changed-paths",
+            "--progress",
+        ];
+        self.run_stderr_cancellable(&args, cancelled, |text| {
+            let text = text.trim();
+            if !text.is_empty() {
+                on_line(text, progress_percent(text));
+            }
+        })
+    }
 }
 
 /// The percentage carried by a progress line.

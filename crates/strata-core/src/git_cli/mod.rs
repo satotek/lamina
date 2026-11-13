@@ -363,6 +363,128 @@ impl Git {
         }
     }
 
+    /// Like [`run_stdout_cancellable`](Self::run_stdout_cancellable) for a
+    /// command that reports progress on stderr, such as `git commit-graph
+    /// write --progress`. Both `\n` and `\r` end a line, so a progress counter
+    /// that rewrites itself is reported as it moves.
+    ///
+    /// Returns `Ok(true)` when the command finished with exit code 0, or
+    /// `Ok(false)` when `cancelled()` stopped it.
+    pub(crate) fn run_stderr_cancellable<S: AsRef<str>>(
+        &self,
+        args: &[S],
+        cancelled: &(impl Fn() -> bool + Send + Sync),
+        mut on_line: impl FnMut(&str),
+    ) -> Result<bool> {
+        if cancelled() {
+            return Ok(false);
+        }
+        let args = to_args(args);
+        let started_at = SystemTime::now();
+        let mut child = match self.command(&args).spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                self.log_spawn_failure(&args, started_at, &error);
+                return Err(error.into());
+            }
+        };
+        let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(Error::other("git output pipes are unavailable"));
+        };
+
+        struct WatchState {
+            child: Mutex<Option<Child>>,
+            done: (Mutex<bool>, Condvar),
+            killed: AtomicBool,
+        }
+
+        let state = WatchState {
+            child: Mutex::new(Some(child)),
+            done: (Mutex::new(false), Condvar::new()),
+            killed: AtomicBool::new(false),
+        };
+        let mut stderr_bytes = Vec::new();
+
+        let (read_result, stdout_bytes, status) = thread::scope(|scope| {
+            let stdout_reader = scope.spawn(|| {
+                let mut buffer = Vec::new();
+                let mut stdout = stdout;
+                let _ = stdout.read_to_end(&mut buffer);
+                buffer
+            });
+            let cancel_watcher = scope.spawn(|| {
+                loop {
+                    if cancelled() {
+                        state.killed.store(true, Ordering::SeqCst);
+                        if let Some(child) = state
+                            .child
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .as_mut()
+                        {
+                            let _ = child.kill();
+                        }
+                        break;
+                    }
+                    let done = state.done.0.lock().unwrap_or_else(PoisonError::into_inner);
+                    if *done {
+                        break;
+                    }
+                    let (guard, _) = state
+                        .done
+                        .1
+                        .wait_timeout(done, Duration::from_millis(25))
+                        .unwrap_or_else(PoisonError::into_inner);
+                    if *guard {
+                        break;
+                    }
+                }
+            });
+
+            let read_result =
+                read_stream_lines(stderr, &mut stderr_bytes, &mut |text| on_line(&text));
+
+            // Wake the watcher before waiting on the child so normal
+            // completion never stalls for the polling interval.
+            *state.done.0.lock().unwrap_or_else(PoisonError::into_inner) = true;
+            state.done.1.notify_all();
+            let _ = cancel_watcher.join();
+
+            let mut child = state
+                .child
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take()
+                .expect("child handle present");
+            if read_result.is_err() || cancelled() {
+                let _ = child.kill();
+            }
+            let status = child.wait();
+            let stdout_bytes = stdout_reader.join().unwrap_or_default();
+            (read_result, stdout_bytes, status)
+        });
+
+        let status = status?;
+        let output = Output {
+            status,
+            stdout: stdout_bytes,
+            stderr: stderr_bytes,
+        };
+        self.log_output(&args, started_at, &output);
+
+        if state.killed.load(Ordering::SeqCst) || cancelled() {
+            return Ok(false);
+        }
+        read_result?;
+        if output.status.success() {
+            Ok(true)
+        } else {
+            Err(command_error(&args, &output))
+        }
+    }
+
     /// Parse `git --version`, e.g. `2.39.3 (Apple Git-145)` into `(2, 39, 3)`.
     pub fn version(&self) -> Result<(u32, u32, u32)> {
         let output = self.run(&["--version"], None)?;
