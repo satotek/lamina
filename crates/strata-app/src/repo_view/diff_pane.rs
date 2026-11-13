@@ -43,18 +43,29 @@ impl RepoView {
             .child(self.files_summary(design))
             .child(self.file_list(design));
 
-        let right = div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_w_0()
-            .min_h_0()
-            .child(self.diff_header(design, rows.len()))
-            .child(if self.fake.is_some() {
-                self.diff_rows_list(rows, None, design, cx)
-            } else {
-                self.real_diff_body(design, cx)
-            });
+        let right =
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .min_h_0()
+                .child(if self.tree.is_open() {
+                    self.tree_pane(design, cx)
+                } else {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_h_0()
+                        .child(self.diff_header(design, rows.len()))
+                        .child(if self.fake.is_some() {
+                            self.diff_rows_list(rows, None, design, cx)
+                        } else {
+                            self.real_diff_body(design, cx)
+                        })
+                        .into_any_element()
+                });
 
         div()
             .flex()

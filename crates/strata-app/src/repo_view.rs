@@ -16,6 +16,7 @@ mod in_progress;
 mod sidebar;
 mod status_bar;
 mod title_bar;
+mod tree_view;
 
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -56,6 +57,10 @@ const SMOKE_STEP: usize = 3;
 const SMOKE_FRAMES: u64 = 300;
 
 /// What the window should show when it opens.
+///
+/// Built once per window, never collected, so the session variant's size costs
+/// nothing worth an extra allocation to even out.
+#[allow(clippy::large_enum_variant)]
 pub enum Launch {
     /// `--fake [N]`: synthetic commits for the render benchmark.
     Fake { repo: Rc<FakeRepo> },
@@ -258,6 +263,12 @@ pub struct RepoView {
     files_error: Option<String>,
     selected_file: Option<usize>,
 
+    /// Commit-wide added/removed counts; the details pane keeps the selected
+    /// file's counts until they arrive.
+    stat: details::CommitStatSlot,
+    /// The selected commit's file tree while it replaces the diff pane.
+    tree: tree_view::TreeBrowser,
+
     diff: DiffSlot,
     /// The options `diff` was requested with, so a settings change that does
     /// not touch them does not re-request the same diff.
@@ -357,6 +368,8 @@ impl RepoView {
             files_epoch: 0,
             files_error: None,
             selected_file: None,
+            stat: details::CommitStatSlot::default(),
+            tree: tree_view::TreeBrowser::default(),
             diff: DiffSlot::default(),
             diff_options,
             diff_rows: Rc::new(Vec::new()),
@@ -503,11 +516,14 @@ impl RepoView {
                     self.file_history_failed(ticket, &error, cx);
                 }
             }
-            // Nothing requests these yet: the details pane's commit-wide stat
-            // and the streaming file history are wired up in later changes.
-            SessionEvent::CommitStatReady { .. }
-            | SessionEvent::PathHistoryBatch { .. }
-            | SessionEvent::PathHistoryDone { .. } => {}
+            // The details pane requests the commit stat; the streaming file
+            // history is wired up in a later change.
+            SessionEvent::CommitStatReady { ticket, stat } => {
+                if self.stat.accept(ticket, stat) {
+                    cx.notify();
+                }
+            }
+            SessionEvent::PathHistoryBatch { .. } | SessionEvent::PathHistoryDone { .. } => {}
             SessionEvent::CommandLogged(record) => {
                 self.last_command = Some(command_line(&record));
                 cx.notify();
@@ -765,6 +781,8 @@ impl RepoView {
         self.files = None;
         self.files_error = None;
         self.diff_scroll = UniformListScrollHandle::default();
+        // The tree shows one commit's contents, so another selection leaves it.
+        self.tree.close();
         self.cancel_diff();
 
         // The smoke run scrolls as fast as it can; loading a file list and a
@@ -774,6 +792,7 @@ impl RepoView {
         {
             self.load_files(commit, cx);
         }
+        self.load_commit_stat(commit, cx);
         cx.notify();
     }
 

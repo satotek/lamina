@@ -1,15 +1,18 @@
 //! The commit details column: summary, author, id and parents, the files
 //! summary and the changed-file list.
 
+use std::sync::Arc;
+
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, ClickEvent, ClipboardItem, FontWeight, InteractiveElement, IntoElement,
-    ParentElement, Styled, Window, div, px, uniform_list,
+    AnyElement, App, ClickEvent, ClipboardItem, Context, FontWeight, InteractiveElement,
+    IntoElement, ParentElement, Styled, Window, div, px, uniform_list,
 };
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_kit_assets::IconName;
 use strata_core::diff::LineKind;
-use strata_core::{ChangeKind, FileChange};
+use strata_core::session::QueryTicket;
+use strata_core::{ChangeKind, CommitStat, FileChange, FileStat, Oid};
 
 use super::RepoView;
 use super::common::icon;
@@ -17,7 +20,64 @@ use crate::data;
 use crate::scrollbar::WithScrollbar as _;
 use crate::style::{self, Design};
 
+/// The commit-wide added/removed counts the details pane is waiting for.
+///
+/// The session answers with a ticket, so an answer for a commit the user has
+/// already left is dropped instead of replacing the totals on screen.
+#[derive(Default)]
+pub(super) struct CommitStatSlot {
+    commit: Option<Oid>,
+    ticket: Option<QueryTicket>,
+    stat: Option<Arc<CommitStat>>,
+}
+
+impl CommitStatSlot {
+    /// Points the slot at `commit`, drops the previous totals and returns the
+    /// ticket the session should cancel.
+    fn begin(&mut self, commit: Option<Oid>) -> Option<QueryTicket> {
+        self.commit = commit;
+        self.stat = None;
+        self.ticket.take()
+    }
+
+    fn start(&mut self, commit: Oid, ticket: QueryTicket) {
+        debug_assert_eq!(self.commit, Some(commit));
+        self.ticket = Some(ticket);
+    }
+
+    /// True when `ticket` is the stat the pane is still waiting for.
+    pub(super) fn accept(&mut self, ticket: QueryTicket, stat: Arc<CommitStat>) -> bool {
+        if self.ticket != Some(ticket) {
+            return false;
+        }
+        self.stat = Some(stat);
+        true
+    }
+
+    fn get(&self) -> Option<&Arc<CommitStat>> {
+        self.stat.as_ref()
+    }
+}
+
 impl RepoView {
+    /// Requests the selected commit's totals. The details pane keeps showing
+    /// the selected file's counts until the answer arrives.
+    pub(super) fn load_commit_stat(&mut self, commit: Option<Oid>, cx: &mut Context<Self>) {
+        let previous = self.stat.begin(commit);
+        if let (Some(session), Some(ticket)) = (self.session.as_ref(), previous) {
+            session.cancel_query(ticket);
+        }
+        if self.smoke {
+            return;
+        }
+        let (Some(commit), Some(session)) = (commit, self.session.as_ref()) else {
+            return;
+        };
+        let ticket = session.request_commit_stat(commit);
+        self.stat.start(commit, ticket);
+        cx.notify();
+    }
+
     /// The commit's summary, author, id and parents at the top of the details
     /// column. Empty while nothing is selected.
     pub(super) fn commit_details(
@@ -113,11 +173,24 @@ impl RepoView {
                     .text_color(design.muted)
                     .child("synthetic diff"),
             );
+        } else if self.session.is_some() {
+            let entity = self.entity.clone();
+            block = block.child(
+                div().flex().items_center().gap_2().child(
+                    crate::ui::button("browse-files", "Browse files")
+                        .icon(IconName::Folder)
+                        .size(crate::ui::ButtonSize::Small)
+                        .on_click(move |_, window, cx| {
+                            entity.update(cx, |this, cx| this.open_tree(window, cx));
+                        }),
+                ),
+            );
         }
         block.into_any_element()
     }
 
-    /// "N files" and the selected diff's line counts.
+    /// "N files" and the commit's line counts once the stat has arrived; the
+    /// selected file's counts stand in until then.
     pub(super) fn files_summary(&self, design: &Design) -> AnyElement {
         let files = self.files.as_ref().map_or(0, Vec::len);
         let mut row = div()
@@ -145,7 +218,15 @@ impl RepoView {
                 .text_color(design.muted)
                 .child(format!("{files} file{}", if files == 1 { "" } else { "s" })),
         );
-        if let Some((added, removed)) = self.diff_stats() {
+        if let Some((added, removed)) = self
+            .stat
+            .get()
+            .map(|stat| (stat.added, stat.removed))
+            .or_else(|| {
+                self.diff_stats()
+                    .map(|(added, removed)| (u64::from(added), u64::from(removed)))
+            })
+        {
             row = row.child(
                 div()
                     .flex()
@@ -191,6 +272,19 @@ impl RepoView {
             .iter()
             .map(|change: &FileChange| (change.path.clone(), change.kind))
             .collect();
+        // The stat is keyed by path and sorted, while the file list keeps the
+        // commit's change order, so align the two once per frame.
+        let counts: Vec<Option<FileStat>> = files
+            .iter()
+            .map(|change| {
+                self.stat.get().and_then(|stat| {
+                    stat.files
+                        .iter()
+                        .find(|file| file.path == change.path)
+                        .cloned()
+                })
+            })
+            .collect();
 
         uniform_list("changed-files", count, move |range, _window, _cx| {
             range
@@ -216,6 +310,9 @@ impl RepoView {
                                 .text_color(list_design.muted)
                                 .child(dir.to_owned()),
                         )
+                    })
+                    .when_some(counts.get(index).and_then(Option::as_ref), |row, file| {
+                        row.child(file_stat_label(file, &list_design))
                     });
                     let click_entity = entity.clone();
                     let menu_entity = entity;
@@ -245,5 +342,110 @@ impl RepoView {
         .flex_1()
         .min_h_0()
         .into_any_element()
+    }
+}
+
+/// The counts one changed file shows, or "bin" when git reports it as binary.
+fn file_stat_label(file: &FileStat, design: &Design) -> AnyElement {
+    if file.binary {
+        return div()
+            .flex_none()
+            .text_size(px(10.5))
+            .text_color(design.muted)
+            .child("bin")
+            .into_any_element();
+    }
+    let mut label = div().flex().flex_none().gap_1().text_size(px(10.5));
+    if let Some((added, removed)) = line_counts(file) {
+        if added > 0 {
+            label = label.child(div().text_color(design.add_text).child(format!("+{added}")));
+        }
+        if removed > 0 {
+            label = label.child(
+                div()
+                    .text_color(design.remove_text)
+                    .child(format!("−{removed}")),
+            );
+        }
+    }
+    label.into_any_element()
+}
+
+/// The line counts worth painting: binary files and mode-only changes have
+/// nothing to show.
+fn line_counts(file: &FileStat) -> Option<(u64, u64)> {
+    if file.binary || (file.added == 0 && file.removed == 0) {
+        return None;
+    }
+    Some((file.added, file.removed))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn oid(byte: u8) -> Oid {
+        format!("{byte:02x}")
+            .repeat(20)
+            .parse()
+            .expect("hex object id")
+    }
+
+    fn stat(added: u64, removed: u64) -> Arc<CommitStat> {
+        Arc::new(CommitStat {
+            added,
+            removed,
+            files: Vec::new(),
+        })
+    }
+
+    #[test]
+    fn a_late_stat_for_an_old_ticket_is_ignored() {
+        let mut slot = CommitStatSlot::default();
+        assert_eq!(slot.begin(Some(oid(1))), None);
+        slot.start(oid(1), QueryTicket(1));
+        slot.begin(Some(oid(2)));
+        slot.start(oid(2), QueryTicket(2));
+
+        assert!(!slot.accept(QueryTicket(1), stat(1, 1)));
+        assert!(slot.get().is_none(), "the stale stat must not be stored");
+
+        assert!(slot.accept(QueryTicket(2), stat(4, 2)));
+        assert_eq!(
+            slot.get().map(|stat| (stat.added, stat.removed)),
+            Some((4, 2))
+        );
+    }
+
+    #[test]
+    fn changing_the_selection_drops_the_previous_totals() {
+        let mut slot = CommitStatSlot::default();
+        slot.begin(Some(oid(1)));
+        slot.start(oid(1), QueryTicket(7));
+        assert!(slot.accept(QueryTicket(7), stat(3, 1)));
+
+        assert_eq!(
+            slot.begin(Some(oid(2))),
+            Some(QueryTicket(7)),
+            "an answered ticket is still cancelled for the old commit"
+        );
+        assert!(slot.get().is_none());
+        assert!(!slot.accept(QueryTicket(7), stat(9, 9)));
+    }
+
+    #[test]
+    fn binary_and_empty_stats_have_no_line_counts() {
+        let file = |added, removed, binary| FileStat {
+            path: "assets/logo.png".into(),
+            old_path: None,
+            added,
+            removed,
+            binary,
+        };
+        assert_eq!(line_counts(&file(0, 0, true)), None);
+        assert_eq!(line_counts(&file(0, 0, false)), None);
+        assert_eq!(line_counts(&file(3, 0, false)), Some((3, 0)));
+        assert_eq!(line_counts(&file(0, 2, false)), Some((0, 2)));
+        assert_eq!(line_counts(&file(5, 4, false)), Some((5, 4)));
     }
 }
