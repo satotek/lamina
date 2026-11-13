@@ -24,3 +24,7 @@ gpui-component = "0.9.1"
 # GPUI logs through `log`; without a logger its warnings (display server,
 # GPU adapter, window creation) are silent, which makes headless triage blind.
 env_logger = "0.11"
+
+# Only for `mpsc`: session events arrive on background threads and are drained
+# by one foreground task, so the UI never blocks on git work.
+futures = "0.3"

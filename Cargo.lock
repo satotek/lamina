@@ -7315,6 +7315,7 @@ name = "strata-app"
 version = "0.1.0"
 dependencies = [
  "env_logger",
+ "futures",
  "gpui-component",
  "gpui-pre",
  "gpui-pre-platform",

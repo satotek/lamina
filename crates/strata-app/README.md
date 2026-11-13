@@ -1,26 +1,46 @@
 # strata-app
 
-GPUI front end for Strata. Right now this crate exists to answer one question:
-**can GPUI render a huge commit graph and a highlighted diff smoothly on macOS,
-Windows and Linux?** It is a technical validation ("phase 0"), not the real UI.
+GPUI front end for Strata. It opens a real repository through
+`strata_core::session::Session` and renders the commit graph, refs, worktree
+status and diffs. A synthetic mode (`--fake`) keeps the phase-0 render
+benchmark: 200,000 generated commits, for judging whether GPUI can draw a huge
+graph and a highlighted diff smoothly on macOS, Windows and Linux.
+
+## Usage
+
+```sh
+strata [PATH]       # repository containing PATH (default: current directory)
+strata --fake [N]   # N synthetic commits (default 200000)
+```
+
+If the path is not a repository the window shows the error instead of exiting.
 
 ## What the window shows
 
-- 200,000 synthetic commits in a `uniform_list` (virtualised, ~25 rows alive).
+- A virtualised `uniform_list` over the loaded commits. Each row has the graph
+  column, ref badges (local branch, remote branch, tag, with HEAD's branch
+  emphasised), summary, author, date and short hash.
 - A graph column painted with `canvas`: stroked lane lines, cubic Bézier lane
   changes and filled nodes, driven by `strata_core::graph::{GraphRow, Segment,
-  Half}`.
-- Summary / author / date / short-hash columns, generated on demand so the
-  200k-row dataset does not hold 600k `String`s.
-- A diff pane below the list: `strata_core::diff::{FileDiff, Hunk, DiffLine,
-  LineKind}` built by hand, with line numbers, `+`/`-` backgrounds,
-  word-level emphasis ranges and a monospace font. Also a `uniform_list`.
+  Half}`. The column is as wide as the widest loaded row; that maximum grows
+  only with newly arrived chunks so lanes never move while scrolling.
+- A file list for the selected commit and a diff pane below it, built from
+  `strata_core::session::DiffView`: line numbers, `+`/`-` backgrounds,
+  word-level emphasis and syntax colours from `LineHighlights`.
+- A sidebar with the worktree status, local/remote branches, tags and stashes.
+  A status bar shows the last git command and background load errors.
 - Light/dark follows the OS appearance through `gpui-component`'s theme.
-- `F12` toggles a frame-time overlay (mean frame interval, FPS, element build
-  time, p95). While it is on the app keeps requesting animation frames, so the
-  numbers reflect continuous rendering rather than idle frames; intervals above
-  200 ms are treated as idle gaps and left out, so opening the overlay after the
-  app has been sitting still does not report a bogus average.
+- `F12` toggles a frame-time overlay (mean frame interval, p95, FPS, element
+  build time, display refresh target). While it is on the app keeps requesting
+  animation frames, so the numbers reflect continuous rendering rather than
+  idle frames; intervals above 200 ms are treated as idle gaps and left out, so
+  opening the overlay after the app has been sitting still does not report a
+  bogus average.
+
+Session events arrive on background threads; an unbounded async channel feeds
+one foreground task that updates the view entity and calls `cx.notify()`. The
+UI only ever reads `Session::snapshot()`, and file lists and diffs are computed
+off the UI thread (see `src/repo_view.rs`).
 
 Keys: `↑`/`↓` or `j`/`k` select, `PageUp`/`PageDown` jump, `Home`/`End` jump to
 the ends, `F12` toggles the overlay.
@@ -119,27 +139,39 @@ Release build, `Xvfb` 1600x1000 with a 1360x860 window, Vulkan through Mesa
 scrolls the commit list by three rows every frame for 300 frames:
 
 ```text
-strata phase 0: generated 200000 commits and graph rows in 16-20ms
-smoke: 300 frames, 53 ms/frame mean, 18-22 fps, p95 64-80 ms, build 0.06 ms
+strata: generated 200000 synthetic commits and graph rows in ~17-20ms
+smoke: 300 frames, ~50 ms/frame mean, ~20 fps, p95 ~64 ms, build 0.07 ms, target 16.7 ms, 200000 commits
+```
+
+Against this checkout's history (131 commits reachable from HEAD and all refs):
+
+```text
+smoke: 300 frames, 50.8 ms/frame mean, 19.7 fps, p95 64.0 ms, build 0.06 ms, target 16.7 ms, 131 commits
 ```
 
 Reading the numbers:
 
 - Building the element tree for the whole window (25 commit rows with canvas
-  graph columns, plus ~25 diff rows) costs **0.07 ms**: virtualisation and the
-  canvas column are not the bottleneck.
-- Nearly all of the ~53 ms frame is presentation: llvmpipe rasterising a
+  graph columns, plus the diff rows and the sidebar) costs **0.07 ms**:
+  virtualisation and the canvas column are not the bottleneck. The real-repo run
+  and the 200k-commit run cost the same, which is the point.
+- Nearly all of the ~50 ms frame is presentation: llvmpipe rasterising a
   1360x860 surface at ~500k pixels per frame. That number says nothing about
   GPU-backed macOS/Windows, where this workload should be trivial.
 - `p95` is worse than the mean because every frame re-lays out the list while
   it scrolls.
+- The overlay compares the mean against the display's reported refresh interval
+  (60 Hz here) and shows p95 next to it, so "below target" is not hard-coded to
+  a 55 fps threshold.
 
 What this machine cannot answer: whether a real GPU sustains 60 fps. That needs
 a run on macOS or Windows (or a Linux box with a hardware Vulkan device); the
 benchmark is built for exactly that.
 
-## Swapping in the real graph layout
+## Graph rows
 
-`src/fake.rs` is the only place that knows how a `GraphRow` is produced. When
-`GraphLayout::push` lands, replace `FakeRepo` with the real repository walk and
-keep the row/renderer contract (`node_lane`, `segments`, `width`) intact.
+`GraphRow`s now come from two producers: `strata_core::session::CommitList` (the
+real walk, laid out by `strata_core::graph::GraphLayout`) and `src/fake.rs` for
+the synthetic benchmark. Both are exposed through `src/data.rs::Source`, so the
+row renderer (`src/repo_view/chrome.rs`) and `graph_canvas` only ever see
+`GraphRow`.
