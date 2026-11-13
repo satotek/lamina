@@ -50,7 +50,7 @@ impl FinishedOperation {
         match operation {
             Operation::Merge { .. } | Operation::MergeContinue => Self::Merge,
             Operation::Pull { .. } => Self::Pull,
-            Operation::CherryPick { .. } => Self::CherryPick,
+            Operation::CherryPick { .. } | Operation::CherryPickMany { .. } => Self::CherryPick,
             Operation::Revert { .. } => Self::Revert,
             Operation::StashApply { .. } | Operation::StashPop { .. } => Self::Stash,
             Operation::ContinueInProgress => Self::Continue,

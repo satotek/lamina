@@ -19,6 +19,10 @@ actions!(
     [
         SelectPrevious,
         SelectNext,
+        /// Moves the focused commit row and extends the selected range.
+        ExtendSelectionPrevious,
+        /// Moves the focused commit row and extends the selected range.
+        ExtendSelectionNext,
         SelectPageUp,
         SelectPageDown,
         SelectFirst,
@@ -112,6 +116,8 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("k", SelectPrevious, scope),
         KeyBinding::new("down", SelectNext, scope),
         KeyBinding::new("j", SelectNext, scope),
+        KeyBinding::new("shift-up", ExtendSelectionPrevious, scope),
+        KeyBinding::new("shift-down", ExtendSelectionNext, scope),
         KeyBinding::new("pageup", SelectPageUp, scope),
         KeyBinding::new("pagedown", SelectPageDown, scope),
         KeyBinding::new("home", SelectFirst, scope),

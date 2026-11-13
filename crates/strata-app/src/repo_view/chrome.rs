@@ -15,8 +15,9 @@ use gpui_component::ActiveTheme as _;
 
 use super::{PAGE, RepoView};
 use crate::actions::{
-    self, NavigateBack, OpenInEditor, OpenTerminalHere, SelectFirst, SelectLast, SelectNext,
-    SelectPageDown, SelectPageUp, SelectPrevious, StashChanges, ToggleFrameStats,
+    self, ExtendSelectionNext, ExtendSelectionPrevious, NavigateBack, OpenInEditor,
+    OpenTerminalHere, SelectFirst, SelectLast, SelectNext, SelectPageDown, SelectPageUp,
+    SelectPrevious, StashChanges, ToggleFrameStats,
 };
 use crate::branches::CreateBranchFromHead;
 use crate::data::Source;
@@ -65,6 +66,14 @@ impl Render for RepoView {
             .key_context(actions::REPO_VIEW)
             .on_action(cx.listener(|this, _: &SelectPrevious, _, cx| this.move_selection(-1, cx)))
             .on_action(cx.listener(|this, _: &SelectNext, _, cx| this.move_selection(1, cx)))
+            .on_action(
+                cx.listener(|this, _: &ExtendSelectionPrevious, _, cx| {
+                    this.extend_selection(-1, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &ExtendSelectionNext, _, cx| this.extend_selection(1, cx)),
+            )
             .on_action(cx.listener(|this, _: &SelectPageUp, _, cx| this.move_selection(-PAGE, cx)))
             .on_action(cx.listener(|this, _: &SelectPageDown, _, cx| this.move_selection(PAGE, cx)))
             .on_action(cx.listener(|this, _: &SelectFirst, _, cx| this.jump(0, cx)))

@@ -31,23 +31,35 @@ impl RepoView {
             Rc::clone(&self.diff_rows)
         };
 
-        let source = self.source();
-        let commit = self
-            .selected
-            .and_then(|index| source.as_ref().and_then(|source| source.commit(index)));
-
-        let left = div()
-            .flex()
-            .flex_col()
-            .w(px(DETAILS_WIDTH))
-            .flex_none()
-            .min_h_0()
-            .border_r_1()
-            .border_color(design.border)
-            .bg(design.panel)
-            .child(self.commit_details(commit, design))
-            .child(self.files_summary(design))
-            .child(self.file_list(design));
+        let left = if self.selection.is_multi() {
+            div()
+                .flex()
+                .flex_col()
+                .w(px(DETAILS_WIDTH))
+                .flex_none()
+                .min_h_0()
+                .border_r_1()
+                .border_color(design.border)
+                .bg(design.panel)
+                .child(self.commit_selection_summary(design))
+        } else {
+            let source = self.source();
+            let commit = self
+                .selected
+                .and_then(|index| source.as_ref().and_then(|source| source.commit(index)));
+            div()
+                .flex()
+                .flex_col()
+                .w(px(DETAILS_WIDTH))
+                .flex_none()
+                .min_h_0()
+                .border_r_1()
+                .border_color(design.border)
+                .bg(design.panel)
+                .child(self.commit_details(commit, design))
+                .child(self.files_summary(design))
+                .child(self.file_list(design))
+        };
 
         let right =
             div()

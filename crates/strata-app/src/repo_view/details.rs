@@ -16,6 +16,7 @@ use strata_core::session::QueryTicket;
 use strata_core::{ChangeKind, CommitStat, FileChange, FileStat, HeadInfo, Oid};
 
 use super::RepoView;
+use super::commit_selection::{SelectionSummary, summarize};
 use super::common::icon;
 use crate::data;
 use crate::data::Source;
@@ -189,6 +190,74 @@ impl RepoView {
             );
         }
         block.into_any_element()
+    }
+
+    /// The compact details block for a multi-selection. It replaces one
+    /// commit's details, because the files and totals below belong to a single
+    /// commit and would pick the focused row arbitrarily.
+    pub(super) fn commit_selection_summary(&self, design: &Design) -> AnyElement {
+        let Some(source) = self.source() else {
+            return div().into_any_element();
+        };
+        let entries: Vec<(String, i64)> = self
+            .selection
+            .rows()
+            .filter_map(|index| source.row(index))
+            .map(|row| (row.author.to_string(), row.time))
+            .collect();
+        let Some(summary) = summarize(
+            entries
+                .iter()
+                .map(|(author, time)| (author.as_str(), *time)),
+        ) else {
+            return div().into_any_element();
+        };
+        self.selection_summary_block(&summary, design)
+    }
+
+    fn selection_summary_block(&self, summary: &SelectionSummary, design: &Design) -> AnyElement {
+        let now = style::now_epoch();
+        let newest = style::date_label(summary.newest, now, design.date_format);
+        let oldest = style::date_label(summary.oldest, now, design.date_format);
+        let range = if oldest == newest {
+            oldest
+        } else {
+            format!("{oldest} – {newest}")
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_3()
+            .border_b_1()
+            .border_color(design.border)
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .line_height(gpui::relative(1.35))
+                    .child(format!("{} commits selected", summary.count)),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(12.0))
+                    .text_color(design.muted)
+                    .child(summary.authors.join(", ")),
+            )
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(design.muted)
+                    .child(range),
+            )
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(design.muted)
+                    .child("Right-click the selection to cherry-pick it onto this branch."),
+            )
+            .into_any_element()
     }
 
     /// "N files" and the commit's line counts once the stat has arrived; the

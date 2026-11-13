@@ -9,6 +9,7 @@
 mod blame_view;
 mod chrome;
 mod commit_list;
+mod commit_selection;
 mod common;
 mod details;
 mod diff_pane;
@@ -54,6 +55,7 @@ use crate::metrics::FrameMetrics;
 use crate::remote::Remote;
 use crate::search::SearchState;
 use crate::worktree_panel::{MainMode, WorktreePanel};
+use commit_selection::CommitSelection;
 
 use in_progress::{FinishedOperation, InProgress};
 
@@ -238,6 +240,14 @@ impl DiffSlot {
     }
 }
 
+/// The multi-pick this view started, kept until the operation reports back so
+/// the commits core skipped can be shown in the status bar.
+#[derive(Default)]
+struct PendingMultiPick {
+    total: usize,
+    skipped: Vec<String>,
+}
+
 /// The submodule and worktree lists the sidebar shows.
 ///
 /// Neither list is part of a [`RepoSnapshot`], so they are read through the
@@ -347,7 +357,11 @@ pub struct RepoView {
 
     /// Running maximum of graph widths, updated as chunks arrive.
     lanes: LaneWidth,
+    /// The focused row; the details pane and the single commit actions read it.
     pub(crate) selected: Option<usize>,
+    /// The rows selected in the commit list. Its focused row mirrors
+    /// `selected`, so single selection works exactly as it did before.
+    selection: CommitSelection,
     /// Commit whose changed files were requested; guards against reloading the
     /// same selection on every snapshot publish.
     selection_commit: Option<Oid>,
@@ -387,6 +401,8 @@ pub struct RepoView {
 
     last_command: Option<String>,
     status_error: Option<String>,
+    /// The multi-pick in flight, kept to report the commits core skipped.
+    multi_pick: Option<PendingMultiPick>,
     /// A transient message that is not a failure, such as which copy of a file
     /// the editor opened. Shown in the status bar while no error is.
     status_note: Option<String>,
@@ -506,6 +522,7 @@ impl RepoView {
             in_progress: InProgress::default(),
             lanes: LaneWidth::default(),
             selected: None,
+            selection: CommitSelection::default(),
             selection_commit: None,
             edit_selection: None,
             revealed_commit: None,
@@ -527,6 +544,7 @@ impl RepoView {
             fake_diffs: Rc::new(Vec::new()),
             last_command: None,
             status_error: None,
+            multi_pick: None,
             status_note: None,
             title,
             target_frame_ms: 1000.0 / 60.0,
@@ -879,6 +897,7 @@ impl RepoView {
                 // The label records which operation failed, so the status bar
                 // names it instead of showing a bare git message.
                 let label = self.branches.finish(id, error.as_deref());
+                let multi_pick = self.multi_pick.take();
                 if let Some(error) = error {
                     // A refused or failed edit left the selection where it was.
                     self.edit_selection = None;
@@ -886,6 +905,13 @@ impl RepoView {
                         Some(label) => format!("{label}: {}", one_line(&error)),
                         None => one_line(&error),
                     });
+                } else if let Some(pending) = multi_pick
+                    && let Some(note) =
+                        commit_selection::applied_note(pending.total, &pending.skipped)
+                {
+                    // The skipped picks are the one outcome git reports only in
+                    // the command output, so the status bar keeps it visible.
+                    self.status_note = Some(note);
                 }
                 if self.active
                     && let Some(retry) = self.branches.take_force_retry()
@@ -912,6 +938,11 @@ impl RepoView {
                 }
             }
             SessionEvent::OperationProgress { id, text, percent } => {
+                if let Some(pending) = &mut self.multi_pick
+                    && let Some(skipped) = commit_selection::parse_skipped(&text)
+                {
+                    pending.skipped = skipped;
+                }
                 self.remote.on_progress(id, &text, percent, cx, self.active)
             }
         }
@@ -976,6 +1007,12 @@ impl RepoView {
             }
             _ => None,
         };
+        if let Operation::CherryPickMany { commits } = &operation {
+            self.multi_pick = Some(PendingMultiPick {
+                total: commits.len(),
+                skipped: Vec::new(),
+            });
+        }
         let kind = FinishedOperation::of(&operation);
         let id = session.run(operation);
         self.in_progress.submitted(id, kind);
@@ -1109,13 +1146,27 @@ impl RepoView {
         if source.is_empty() {
             return;
         }
+        if self.selection.is_multi() {
+            // A reload that rewrote history moves the rows under the
+            // selection; remapping would be guesswork, so it collapses onto
+            // the focused commit and the single-selection rules below apply.
+            let focused_valid = self.selection_commit.is_some()
+                && self.selected.and_then(|index| source.commit_id(index)) == self.selection_commit;
+            let rows_valid = self.selection.rows().all(|index| index < source.len());
+            if focused_valid && rows_valid {
+                return;
+            }
+            self.selection.clear();
+        }
         match self.selected {
             None => self.select(Some(0), cx),
             Some(index) if index >= source.len() => self.select(Some(source.len() - 1), cx),
             Some(index) => {
-                // A reload can put a different commit at the same index.
+                // A reload can put a different commit at the same index, and a
+                // collapsed multi-selection has to be restored to one row.
                 let commit = source.commit_id(index);
-                if commit.is_some() && commit != self.selection_commit {
+                let single = self.selection.len() == 1 && self.selection.contains(index);
+                if commit.is_some() && (commit != self.selection_commit || !single) {
                     self.select(Some(index), cx);
                 }
             }
@@ -1128,10 +1179,22 @@ impl RepoView {
         };
         let index = index.filter(|index| *index < source.len());
         let commit = index.and_then(|index| source.commit_id(index));
-        if index == self.selected && commit == self.selection_commit {
+        let single = match index {
+            Some(index) => self.selection.len() == 1 && self.selection.contains(index),
+            None => self.selection.len() == 0,
+        };
+        if index == self.selected && commit == self.selection_commit && single {
             return;
         }
+        self.selection.select_one(index);
+        self.focus_commit(index, commit, cx);
+    }
 
+    /// Points the details pane and the single commit actions at `index`,
+    /// without touching the selected rows. A multi-selection changes its
+    /// focused row through this instead of [`Self::select`], which collapses
+    /// the selection.
+    fn focus_commit(&mut self, index: Option<usize>, commit: Option<Oid>, cx: &mut Context<Self>) {
         // Selecting a commit is the user moving off the sidebar ref they had
         // revealed; the reveal tint belongs to that jump only.
         self.branches.clear_revealed();
@@ -1160,6 +1223,70 @@ impl RepoView {
         }
         self.load_commit_stat(commit, cx);
         self.notify_if_active(cx);
+    }
+
+    /// A click on a commit row. Without a modifier it is exactly the old
+    /// single selection; Cmd/Ctrl and Shift act on the selected set.
+    pub(crate) fn click_commit(
+        &mut self,
+        index: usize,
+        position: usize,
+        shift: bool,
+        secondary: bool,
+        order: &[usize],
+        cx: &mut Context<Self>,
+    ) {
+        if !shift && !secondary {
+            self.select_result(index, position, cx);
+            return;
+        }
+        let previous = self.selected;
+        self.selection.click(index, shift, secondary, order);
+        let focused = self.selection.focused();
+        if focused == previous {
+            // Only the selected set changed; the focused commit and its diff
+            // stay on screen.
+            cx.notify();
+            return;
+        }
+        let commit =
+            focused.and_then(|focused| self.source().and_then(|source| source.commit_id(focused)));
+        self.focus_commit(focused, commit, cx);
+    }
+
+    /// Right-clicking a row outside the selection moves the selection there
+    /// before its menu opens, so the menu acts on what the user pointed at.
+    pub(crate) fn ensure_commit_selection(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.selection.contains(index) {
+            return;
+        }
+        self.select(Some(index), cx);
+    }
+
+    /// Shift+Up/Down: moves the focused row and extends the selected range.
+    pub(crate) fn extend_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let len = self.commit_count();
+        if len == 0 {
+            return;
+        }
+        // A filtered list ranges over its visible rows, in the order displayed.
+        let order: Vec<usize> = match self.search.filter() {
+            Some(rows) => rows.as_ref().clone(),
+            None => (0..len).collect(),
+        };
+        let previous = self.selected;
+        let Some(focused) = self.selection.extend_by(delta, &order) else {
+            return;
+        };
+        if let Some(position) = order.iter().position(|row| *row == focused) {
+            self.scroll_to_position(position);
+        }
+        if Some(focused) == previous {
+            cx.notify();
+            return;
+        }
+        let commit = self.source().and_then(|source| source.commit_id(focused));
+        self.focus_commit(Some(focused), commit, cx);
     }
 
     fn load_files(&mut self, commit: Oid, cx: &mut Context<Self>) {

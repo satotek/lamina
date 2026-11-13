@@ -33,6 +33,7 @@ use strata_core::session::{Operation, RepoSnapshot, ResetMode, Session};
 use strata_core::{ChangeKind, Error, HeadInfo, Oid, RefKind, RepoState, Result, WorktreeStatus};
 
 use super::RepoView;
+use super::commit_selection::{self, MultiPickRow};
 use super::edit_dialog;
 use super::rebase_dialog::{self, RebaseRequest};
 use crate::data::short_oid;
@@ -247,6 +248,31 @@ fn snapshot_parents(snapshot: &RepoSnapshot, id: Oid) -> Option<Vec<Oid>> {
     let index = *snapshot.commit_index.get(&id)?;
     let (commit, _) = snapshot.commits.get(index)?;
     Some(commit.parents.clone())
+}
+
+/// Every commit HEAD can reach, capped like the remote check: a menu only needs
+/// to know whether any selected commit is already on the branch.
+fn head_reachable_set(session: &Session) -> HashSet<Oid> {
+    let snapshot = session.snapshot();
+    let Some(head) = head_target(snapshot.head.as_ref()) else {
+        return HashSet::new();
+    };
+    let repo = session.repo().clone();
+    let mut reachable = HashSet::new();
+    let mut stack = vec![head];
+    while let Some(id) = stack.pop() {
+        if !reachable.insert(id) {
+            continue;
+        }
+        if reachable.len() > REMOTE_WALK_LIMIT {
+            break;
+        }
+        let parents = snapshot_parents(&snapshot, id).or_else(|| repo.parents(id).ok());
+        if let Some(parents) = parents {
+            stack.extend(parents);
+        }
+    }
+    reachable
 }
 
 /// Everything the edit entries need about one commit, read once when the menu
@@ -561,6 +587,19 @@ pub(crate) struct CommitTarget {
     pub(crate) tags: Vec<String>,
 }
 
+/// A multi-selection's pick, read when its context menu opens.
+///
+/// `commits` is already oldest first, so the menu cannot apply a pick in
+/// click order.
+pub(crate) struct MultiPickContext {
+    commits: Vec<Oid>,
+    /// The ids `Copy commit ids` writes, newline separated.
+    copy: String,
+    count: usize,
+    branch: String,
+    blocked: Option<&'static str>,
+}
+
 /// The context menu for one commit row.
 ///
 /// Clipboard entries are always available; the history actions need a real
@@ -570,10 +609,16 @@ pub(crate) fn commit_menu(
     mut menu: PopupMenu,
     target: CommitTarget,
     state: Option<MenuState>,
+    multi: Option<MultiPickContext>,
     entity: Entity<RepoView>,
     window: &mut Window,
     cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
+    // While several rows are selected, the single-commit entries have no one
+    // row to act on, so the menu offers the multi-pick instead.
+    if let Some(multi) = multi {
+        return multi_commit_menu(menu, &multi, entity);
+    }
     let copy_id = target
         .id
         .map_or_else(|| target.short.clone(), |commit| commit.to_string());
@@ -712,6 +757,37 @@ pub(crate) fn commit_menu(
     menu
 }
 
+/// The context menu for a multi-selection: the one pick it can run and the ids
+/// it can copy. Single-commit entries are left out rather than acting on the
+/// focused row, which the user did not necessarily point at.
+fn multi_commit_menu(
+    mut menu: PopupMenu,
+    multi: &MultiPickContext,
+    entity: Entity<RepoView>,
+) -> PopupMenu {
+    let copy = multi.copy.clone();
+    menu = menu
+        .item(PopupMenuItem::new("Copy commit ids").on_click(
+            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
+            },
+        ))
+        .separator();
+    let label = menu_label(
+        format!("Cherry-pick {} commits onto {}", multi.count, multi.branch),
+        multi.blocked,
+    );
+    let mut item = PopupMenuItem::new(label).disabled(multi.blocked.is_some());
+    if multi.blocked.is_none() {
+        let commits = multi.commits.clone();
+        item = item.on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+            let commits = commits.clone();
+            entity.update(cx, |view, cx| view.cherry_pick_many(commits, window, cx));
+        });
+    }
+    menu.item(item)
+}
+
 /// The "Edit commit" group. Every entry says why it is disabled, because a
 /// popup item has no tooltip.
 fn edit_group(
@@ -841,6 +917,84 @@ impl RepoView {
             MenuState::read(snapshot.head.as_ref(), snapshot.state, self.is_busy())
                 .with_worktree(&snapshot.status),
         )
+    }
+
+    /// The multi-selection's pick menu, or `None` while at most one row is
+    /// selected. The reachability walk runs once per menu open, not per frame.
+    pub(super) fn multi_pick_context(&self) -> Option<MultiPickContext> {
+        if !self.selection.is_multi() {
+            return None;
+        }
+        let source = self.source()?;
+        let order = self.selection.oldest_first();
+        let state = self.history_menu_state();
+        let branch = state
+            .as_ref()
+            .map_or_else(|| "HEAD".to_owned(), MenuState::branch_label);
+        let reachable = self
+            .session
+            .as_ref()
+            .map(head_reachable_set)
+            .unwrap_or_default();
+        let mut commits = Vec::new();
+        let mut copy = Vec::new();
+        let mut picks = Vec::new();
+        let mut has_real_commits = true;
+        for index in order {
+            match source.commit(index) {
+                Some(commit) => {
+                    commits.push(commit.id);
+                    copy.push(commit.id.to_string());
+                    picks.push(MultiPickRow {
+                        merge: commit.parents.len() > 1,
+                        reachable: reachable.contains(&commit.id),
+                    });
+                }
+                None => {
+                    // The synthetic source has ids to copy but nothing git can
+                    // pick; the menu stays disabled with the reason below.
+                    has_real_commits = false;
+                    if let Some(row) = source.row(index) {
+                        copy.push(row.id.to_string());
+                    }
+                }
+            }
+        }
+        let blocked = match &state {
+            Some(state) if has_real_commits => commit_selection::multi_pick_blocked(
+                &picks,
+                state.busy,
+                state.pending,
+                state.branch.is_none() && state.head.is_some(),
+            ),
+            Some(_) => Some("no commits to pick"),
+            None => Some("no repository is open"),
+        };
+        Some(MultiPickContext {
+            commits,
+            copy: copy.join("\n"),
+            count: self.selection.len(),
+            branch,
+            blocked,
+        })
+    }
+
+    /// Applies the selected commits oldest first on top of the current branch.
+    pub(crate) fn cherry_pick_many(
+        &mut self,
+        commits: Vec<Oid>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if commits.is_empty() {
+            return;
+        }
+        let count = commits.len();
+        let onto = self
+            .history_menu_state()
+            .map_or_else(|| "HEAD".to_owned(), |state| state.branch_label());
+        let label = format!("cherry-pick {count} commits onto {onto}");
+        self.run_operation(Operation::CherryPickMany { commits }, label, window, cx);
     }
 
     /// `(staged, unstaged)` path counts from the snapshot, for the hard-reset

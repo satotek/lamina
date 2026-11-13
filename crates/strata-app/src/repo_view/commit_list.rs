@@ -4,10 +4,12 @@
 //! The list is built from [`Source`](crate::data::Source), so the synthetic
 //! benchmark and a real repository share the same row renderer.
 
+use std::rc::Rc;
+
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, Div, FontWeight, InteractiveElement, IntoElement, ParentElement, Styled, div, px,
-    uniform_list,
+    AnyElement, Div, FontWeight, InteractiveElement, IntoElement, MouseButton, ParentElement,
+    Styled, div, px, uniform_list,
 };
 use strata_core::{Oid, RefKind};
 
@@ -40,7 +42,7 @@ impl RepoView {
         }
 
         let now = style::now_epoch();
-        let selected = self.selected;
+        let selection = self.selection.clone();
         let revealed = self.revealed_commit();
         let row_design = design.clone();
         let focus = self.focus.clone();
@@ -49,6 +51,12 @@ impl RepoView {
         let menu_state = self.history_menu_state();
         let filter = self.search.filter().cloned();
         let count = filter.as_ref().map_or(len, |rows| rows.len());
+        // The rows as displayed, which is what a shift range and arrow moves
+        // walk; a filtered list shows a subset of the history indices.
+        let order: Rc<Vec<usize>> = Rc::new(match &filter {
+            Some(rows) => rows.as_ref().clone(),
+            None => (0..len).collect(),
+        });
         let date_format = design.date_format;
         let show_remote = design.show_remote_branches;
         let show_tags = design.show_tags;
@@ -91,41 +99,35 @@ impl RepoView {
                     let date = style::date_label(row.time, now, date_format);
                     let filtered = filter.is_some();
                     let click_entity = entity.clone();
+                    let click_order = order.clone();
+                    let right_entity = entity.clone();
                     let id = ("commit-row", index);
                     // A ref revealed from the sidebar keeps its row tinted
                     // while it is not the selection.
                     let revealed = revealed.is_some_and(|commit| Some(commit) == target.id);
+                    let selected = selection.contains(index);
                     let element = if filtered {
                         // The graph is hidden while filtered: spaced-out rows
                         // would draw lanes that never existed between them.
-                        filtered_commit_row(
-                            id,
-                            &row,
-                            selected == Some(index),
-                            revealed,
-                            &date,
-                            &row_design,
-                        )
+                        filtered_commit_row(id, &row, selected, revealed, &date, &row_design)
                     } else {
-                        commit_row(
-                            id,
-                            &row,
-                            selected == Some(index),
-                            revealed,
-                            &date,
-                            &row_design,
-                        )
+                        commit_row(id, &row, selected, revealed, &date, &row_design)
                     }
                     .cursor_pointer()
-                    .on_click(move |_event, window, cx| {
+                    .on_click(move |event, window, cx| {
+                        let modifiers = event.modifiers();
+                        let shift = modifiers.shift;
+                        let secondary = modifiers.secondary(cx);
+                        let order = click_order.clone();
                         click_entity.update(cx, |this, cx| {
-                            if filtered {
-                                this.select_result(index, position, cx);
-                            } else {
-                                this.jump(index, cx);
-                            }
+                            this.click_commit(index, position, shift, secondary, &order, cx);
                             window.focus(&focus, cx);
                         });
+                    })
+                    // Right-clicking outside the selection selects that row,
+                    // so the menu never acts on rows the user did not point at.
+                    .on_mouse_down(MouseButton::Right, move |_, _, cx| {
+                        right_entity.update(cx, |this, cx| this.ensure_commit_selection(index, cx));
                     });
                     let menu_entity = entity;
                     let menu_state = menu_state.clone();
@@ -134,10 +136,12 @@ impl RepoView {
                         &row_design,
                         element,
                         move |menu, window, cx| {
+                            let multi = menu_entity.read(cx).multi_pick_context();
                             history_ops::commit_menu(
                                 menu,
                                 target.clone(),
                                 menu_state.clone(),
+                                multi,
                                 menu_entity.clone(),
                                 window,
                                 cx,
