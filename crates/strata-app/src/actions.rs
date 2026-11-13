@@ -39,6 +39,9 @@ actions!(
         /// Opens the command palette over the active window. Handled globally
         /// by the palette module.
         TogglePalette,
+        /// Returns to the parent repository this one was opened from. Handled
+        /// on `RepoView` when a parent exists on the navigation stack.
+        NavigateBack,
     ]
 );
 
@@ -78,6 +81,9 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("end", SelectLast, scope),
         KeyBinding::new("f12", ToggleFrameStats, scope),
         KeyBinding::new(PLATFORM_STASH, StashChanges, scope),
+        KeyBinding::new("alt-left", NavigateBack, scope),
+        #[cfg(target_os = "macos")]
+        KeyBinding::new("cmd-[", NavigateBack, scope),
         // Global: these work whichever window or panel has focus.
         KeyBinding::new(PLATFORM_SETTINGS, OpenSettings, None),
         KeyBinding::new(PLATFORM_OPEN, OpenRepository, None),

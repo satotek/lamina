@@ -425,6 +425,15 @@ struct ScrollAnchor {
     items: Option<Rc<Vec<SidebarItem>>>,
 }
 
+/// A selectable submodule or worktree row in the sidebar.
+///
+/// Selecting one highlights it and lets `Enter` open it in the current window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ExtraSelection {
+    Submodule(String),
+    Worktree(PathBuf),
+}
+
 /// Everything the branch UI owns between frames.
 #[derive(Default)]
 pub(crate) struct Branches {
@@ -434,6 +443,8 @@ pub(crate) struct Branches {
     /// The ref revealed last, drawn with the neutral tint until a commit is
     /// selected.
     reveal: RevealState,
+    /// Selected submodule or worktree row in the sidebar.
+    selected_extra: Option<ExtraSelection>,
     /// The ref history is limited to, as its short name, while a "show only"
     /// scope is active. The scope itself lives in the session.
     scope: Option<String>,
@@ -444,6 +455,9 @@ pub(crate) struct Branches {
     /// Last viewport size seen, so a dialog opened from an operation result can
     /// still paint a window-sized backdrop.
     viewport: Size<Pixels>,
+    /// Focus target for the sidebar section list, so `Enter` can open a
+    /// selected submodule or worktree row.
+    list_focus: Option<FocusHandle>,
     /// Focus target for dialog cards. Created once by the view because a
     /// `FocusHandle` needs an `App`, and reused: only one dialog is open and it
     /// is the only element tracking the handle while it lives.
@@ -560,6 +574,7 @@ impl Branches {
         self.restore_scroll(&items);
 
         let reveal = self.reveal.clone();
+        let selected_extra = self.selected_extra.clone();
         let list_colors = colors.clone();
         let list_entity = entity.clone();
         let list = uniform_list("sidebar-refs", items.len(), move |range, _window, _cx| {
@@ -569,6 +584,7 @@ impl Branches {
                         &items[index],
                         head.as_deref(),
                         &reveal,
+                        selected_extra.as_ref(),
                         enabled,
                         busy,
                         &list_colors,
@@ -582,13 +598,54 @@ impl Branches {
         .flex_1()
         .min_h_0();
 
-        let mut column = div()
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .min_w_0()
-            .child(list);
+        let mut column = div().flex().flex_col().flex_1().min_h_0().min_w_0();
+        if let Some(focus) = &self.list_focus {
+            let key_entity = entity.clone();
+            column = column
+                .track_focus(focus)
+                .on_key_down(move |event, window, cx| {
+                    let modifiers = event.keystroke.modifiers;
+                    let plain = !modifiers.alt
+                        && !modifiers.control
+                        && !modifiers.platform
+                        && !modifiers.shift
+                        && !modifiers.function;
+                    if !plain {
+                        return;
+                    }
+                    match event.keystroke.key.as_str() {
+                        "enter" => {
+                            let had_selection = key_entity.update(cx, |view, cx| {
+                                if view.branches.selected_extra().is_some() {
+                                    view.activate_selected_extra(window, cx);
+                                    true
+                                } else {
+                                    false
+                                }
+                            });
+                            if had_selection {
+                                cx.stop_propagation();
+                            }
+                        }
+                        "escape" => {
+                            let cleared = key_entity.update(cx, |view, cx| {
+                                if view.branches.selected_extra().is_some() {
+                                    view.branches.clear_selected_extra();
+                                    cx.notify();
+                                    true
+                                } else {
+                                    false
+                                }
+                            });
+                            if cleared {
+                                cx.stop_propagation();
+                            }
+                        }
+                        _ => {}
+                    }
+                });
+        }
+        column = column.child(list);
         if let Some(dialog) = self.dialog_overlay(colors, entity) {
             column = column.child(dialog);
         }
@@ -898,17 +955,32 @@ impl Branches {
 
     /// Marks the ref the history jumped to, replacing the previous highlight.
     pub(crate) fn reveal_ref(&mut self, kind: RefKind, short_name: &str) {
+        self.selected_extra = None;
         self.reveal.reveal_ref(kind, short_name);
     }
 
     /// Like [`Self::reveal_ref`] for `stash@{index}`.
     pub(crate) fn reveal_stash(&mut self, index: usize) {
+        self.selected_extra = None;
         self.reveal.reveal_stash(index);
     }
 
     /// Drops the reveal highlight, e.g. once a commit row is selected.
     pub(crate) fn clear_revealed(&mut self) {
         self.reveal.clear();
+    }
+
+    pub(crate) fn select_extra(&mut self, selection: ExtraSelection) {
+        self.reveal.clear();
+        self.selected_extra = Some(selection);
+    }
+
+    pub(crate) fn selected_extra(&self) -> Option<&ExtraSelection> {
+        self.selected_extra.as_ref()
+    }
+
+    pub(crate) fn clear_selected_extra(&mut self) {
+        self.selected_extra = None;
     }
 
     /// The ref history is limited to, as its short name, while "show only" is
@@ -936,6 +1008,16 @@ impl Branches {
 
     pub(crate) fn set_viewport(&mut self, viewport: Size<Pixels>) {
         self.viewport = viewport;
+    }
+
+    pub(crate) fn set_list_focus(&mut self, focus: FocusHandle) {
+        self.list_focus = Some(focus);
+    }
+
+    pub(crate) fn focus_list(&self, window: &mut Window, cx: &mut App) {
+        if let Some(focus) = &self.list_focus {
+            window.focus(focus, cx);
+        }
     }
 
     pub(crate) fn set_dialog_focus(&mut self, focus: FocusHandle) {
@@ -1018,6 +1100,7 @@ fn item_element(
     item: &SidebarItem,
     head: Option<&str>,
     reveal: &RevealState,
+    selected_extra: Option<&ExtraSelection>,
     enabled: bool,
     busy: bool,
     colors: &Colors,
@@ -1099,9 +1182,13 @@ fn item_element(
             path,
             detail,
             status,
-        } => submodule_row(
-            *index, name, path, detail, *status, enabled, busy, colors, entity,
-        ),
+        } => {
+            let selected =
+                matches!(selected_extra, Some(ExtraSelection::Submodule(sel)) if sel == path);
+            submodule_row(
+                *index, name, path, detail, *status, selected, enabled, busy, colors, entity,
+            )
+        }
         SidebarItem::Worktree {
             index,
             label,
@@ -1112,21 +1199,28 @@ fn item_element(
             locked,
             prunable,
             current,
-        } => worktree_row(
-            *index,
-            label,
-            path,
-            detail,
-            lock_reason.as_deref(),
-            *is_main,
-            *locked,
-            *prunable,
-            *current,
-            enabled,
-            busy,
-            colors,
-            entity,
-        ),
+        } => {
+            let selected = matches!(
+                selected_extra,
+                Some(ExtraSelection::Worktree(sel)) if same_path(sel, Path::new(path))
+            );
+            worktree_row(
+                *index,
+                label,
+                path,
+                detail,
+                lock_reason.as_deref(),
+                *is_main,
+                *locked,
+                *prunable,
+                *current,
+                selected,
+                enabled,
+                busy,
+                colors,
+                entity,
+            )
+        }
         SidebarItem::Placeholder { text, place } => {
             empty_row_at(text, place.indent(), colors).into_any_element()
         }
@@ -1666,6 +1760,7 @@ fn submodule_row(
     path: &str,
     detail: &str,
     status: SubmoduleStatus,
+    selected: bool,
     enabled: bool,
     busy: bool,
     colors: &Colors,
@@ -1674,7 +1769,7 @@ fn submodule_row(
     let tooltip_text = detail.to_owned();
     let mut row_element = crate::ui::list_row(
         ("submodule", index),
-        crate::ui::RowState::NORMAL,
+        crate::ui::RowState::NORMAL.selected(selected),
         &colors.design,
     )
     .h(px(ITEM_HEIGHT))
@@ -1694,11 +1789,20 @@ fn submodule_row(
     if status != SubmoduleStatus::Uninitialised {
         let click_entity = entity.clone();
         let click_path = path.to_owned();
-        row_element = row_element.cursor_pointer().on_click(move |_, window, cx| {
-            click_entity.update(cx, |view, cx| {
-                view.open_repository_path(Path::new(&click_path), window, cx)
+        row_element = row_element
+            .cursor_pointer()
+            .on_click(move |event, window, cx| {
+                let path = click_path.clone();
+                click_entity.update(cx, |view, cx| {
+                    if event.click_count() < 2 {
+                        view.branches.select_extra(ExtraSelection::Submodule(path));
+                        view.branches.focus_list(window, cx);
+                        cx.notify();
+                    } else {
+                        view.open_repository_in_window(Path::new(&path), window, cx);
+                    }
+                });
             });
-        });
     }
 
     if !enabled {
@@ -1712,12 +1816,32 @@ fn submodule_row(
         &colors.design,
         row_element,
         move |menu, _window, _cx| {
+            let open_blocked =
+                (status == SubmoduleStatus::Uninitialised).then_some("not initialised");
             let update_blocked = if status == SubmoduleStatus::Uninitialised {
                 Some("not initialised")
             } else {
                 busy.then_some("an operation is running")
             };
             let init_blocked = busy.then_some("an operation is running");
+            let open = {
+                let entity = menu_entity.clone();
+                let path = menu_path.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    entity.update(cx, |view, cx| {
+                        view.open_repository_in_window(Path::new(&path), window, cx)
+                    });
+                }
+            };
+            let open_new_window = {
+                let entity = menu_entity.clone();
+                let path = menu_path.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    entity.update(cx, |view, cx| {
+                        view.open_repository_in_new_window(Path::new(&path), window, cx)
+                    });
+                }
+            };
             let update = {
                 let entity = menu_entity.clone();
                 let path = menu_path.clone();
@@ -1736,11 +1860,23 @@ fn submodule_row(
                     entity.update(cx, |view, cx| view.update_submodule(path, true, window, cx));
                 }
             };
-            let menu = menu.item(
-                PopupMenuItem::new(crate::ui::menu_label("Update", update_blocked))
-                    .disabled(update_blocked.is_some())
-                    .on_click(update),
-            );
+            let menu = menu
+                .item(
+                    PopupMenuItem::new(crate::ui::menu_label("Open", open_blocked))
+                        .disabled(open_blocked.is_some())
+                        .on_click(open),
+                )
+                .item(
+                    PopupMenuItem::new(crate::ui::menu_label("Open in New Window", open_blocked))
+                        .disabled(open_blocked.is_some())
+                        .on_click(open_new_window),
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new(crate::ui::menu_label("Update", update_blocked))
+                        .disabled(update_blocked.is_some())
+                        .on_click(update),
+                );
             let menu = if status == SubmoduleStatus::Uninitialised {
                 menu.item(
                     PopupMenuItem::new(crate::ui::menu_label(
@@ -1779,6 +1915,7 @@ fn worktree_row(
     locked: bool,
     prunable: bool,
     current: bool,
+    selected: bool,
     enabled: bool,
     busy: bool,
     colors: &Colors,
@@ -1790,7 +1927,7 @@ fn worktree_row(
         // The checkout the window is showing reads like the HEAD branch; the
         // badge says "main" rather than the tint, because a linked worktree can
         // be the one on screen.
-        crate::ui::RowState::NORMAL.head(current),
+        crate::ui::RowState::NORMAL.head(current).selected(selected),
         &colors.design,
     )
     .h(px(ITEM_HEIGHT))
@@ -1832,11 +1969,20 @@ fn worktree_row(
     if !prunable {
         let click_entity = entity.clone();
         let click_path = path.to_owned();
-        row_element = row_element.cursor_pointer().on_click(move |_, window, cx| {
-            click_entity.update(cx, |view, cx| {
-                view.open_repository_path(Path::new(&click_path), window, cx)
+        row_element = row_element
+            .cursor_pointer()
+            .on_click(move |event, window, cx| {
+                let path = PathBuf::from(&click_path);
+                click_entity.update(cx, |view, cx| {
+                    if event.click_count() < 2 {
+                        view.branches.select_extra(ExtraSelection::Worktree(path));
+                        view.branches.focus_list(window, cx);
+                        cx.notify();
+                    } else if !current {
+                        view.open_repository_in_window(&path, window, cx);
+                    }
+                });
             });
-        });
     }
 
     if !enabled {
@@ -1851,7 +1997,14 @@ fn worktree_row(
         &colors.design,
         row_element,
         move |menu, _window, _cx| {
-            let open_blocked = prunable.then_some("this worktree is missing");
+            let open_in_window_blocked = if prunable {
+                Some("this worktree is missing")
+            } else if current {
+                Some("already open")
+            } else {
+                None
+            };
+            let open_new_window_blocked = prunable.then_some("this worktree is missing");
             let remove_blocked = if is_main {
                 Some("this is the main worktree")
             } else if locked {
@@ -1866,7 +2019,16 @@ fn worktree_row(
                 let path = copy_path.clone();
                 move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                     entity.update(cx, |view, cx| {
-                        view.open_repository_path(Path::new(&path), window, cx)
+                        view.open_repository_in_window(Path::new(&path), window, cx)
+                    });
+                }
+            };
+            let open_new_window = {
+                let entity = menu_entity.clone();
+                let path = copy_path.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    entity.update(cx, |view, cx| {
+                        view.open_repository_in_new_window(Path::new(&path), window, cx)
                     });
                 }
             };
@@ -1882,10 +2044,19 @@ fn worktree_row(
             };
             let copy_path = copy_path.clone();
             menu.item(
-                PopupMenuItem::new(crate::ui::menu_label("Open", open_blocked))
-                    .disabled(open_blocked.is_some())
+                PopupMenuItem::new(crate::ui::menu_label("Open", open_in_window_blocked))
+                    .disabled(open_in_window_blocked.is_some())
                     .on_click(open),
             )
+            .item(
+                PopupMenuItem::new(crate::ui::menu_label(
+                    "Open in New Window",
+                    open_new_window_blocked,
+                ))
+                .disabled(open_new_window_blocked.is_some())
+                .on_click(open_new_window),
+            )
+            .separator()
             .item(
                 // The main worktree, a locked one and a missing checkout all
                 // refuse `git worktree remove`; offering it would only
@@ -1970,7 +2141,7 @@ fn worktree_detail(worktree: &WorktreeInfo) -> String {
 /// differently (symlinks, a trailing separator), so both sides are canonicalized
 /// when they exist. A prunable worktree's path does not, and then git's own
 /// spelling is the only one there is.
-fn same_path(a: &Path, b: &Path) -> bool {
+pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
     match (a.canonicalize(), b.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
         _ => a == b,
@@ -3591,5 +3762,34 @@ mod tests {
             !Rc::ptr_eq(&cached, &rebuilt),
             "a new submodule/worktree answer rebuilds the sections"
         );
+    }
+
+    #[test]
+    fn extra_selection_and_reveal_exclude_each_other() {
+        let mut branches = Branches::default();
+        branches.reveal_ref(RefKind::LocalBranch, "main");
+        assert!(branches.reveal.is_ref(RefKind::LocalBranch, "main"));
+
+        branches.select_extra(ExtraSelection::Submodule("libs/ui".into()));
+        assert_eq!(
+            branches.selected_extra(),
+            Some(&ExtraSelection::Submodule("libs/ui".into()))
+        );
+        assert!(
+            !branches.reveal.is_ref(RefKind::LocalBranch, "main"),
+            "selecting an extra row clears any revealed ref"
+        );
+
+        branches.reveal_ref(RefKind::Tag, "v1.0");
+        assert_eq!(
+            branches.selected_extra(),
+            None,
+            "revealing a ref clears any selected submodule/worktree"
+        );
+
+        branches.select_extra(ExtraSelection::Worktree(PathBuf::from("/src/strata-docs")));
+        branches.reveal_stash(0);
+        assert_eq!(branches.selected_extra(), None);
+        assert!(branches.reveal.is_stash(0));
     }
 }

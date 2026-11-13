@@ -36,7 +36,7 @@ pub(super) struct CommitStatSlot {
 impl CommitStatSlot {
     /// Points the slot at `commit`, drops the previous totals and returns the
     /// ticket the session should cancel.
-    fn begin(&mut self, commit: Option<Oid>) -> Option<QueryTicket> {
+    pub(super) fn begin(&mut self, commit: Option<Oid>) -> Option<QueryTicket> {
         self.commit = commit;
         self.stat = None;
         self.ticket.take()

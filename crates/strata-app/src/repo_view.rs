@@ -132,6 +132,30 @@ impl Launch {
         }
     }
 
+    /// Test helper: opens a real [`Session`] whose background workers do not
+    /// wake tasks scheduled on GPUI's deterministic `TestScheduler`.
+    #[cfg(test)]
+    pub(crate) fn open_quiet(path: &Path, git_executable: Option<PathBuf>) -> Self {
+        let (_, events) = mpsc::unbounded();
+        match Session::open_with(path, SessionOptions { git_executable }, |_| {}) {
+            Ok(session) => {
+                let name = repo_name(&session);
+                let head = session.repo().head().ok();
+                let title = data::window_title(&name, head.as_ref());
+                Self::Repo {
+                    session: Box::new(session),
+                    name,
+                    title,
+                    events,
+                }
+            }
+            Err(error) => Self::Error {
+                path: display_path(path),
+                error: error.to_string(),
+            },
+        }
+    }
+
     pub fn title(&self) -> String {
         match self {
             Launch::Fake { .. } => "Strata — synthetic (main)".into(),
@@ -290,6 +314,11 @@ pub struct RepoView {
     fake: Option<Rc<FakeRepo>>,
     error: Option<(String, String)>,
     name: Option<String>,
+    /// The workspace hosting this view, weak so swapping the view releases it.
+    workspace: Option<WeakEntity<crate::workspace::Workspace>>,
+    /// Name of the parent repository on the navigation stack, if this view was
+    /// opened from a superproject or sibling worktree.
+    parent_name: Option<String>,
 
     /// Which view fills the area right of the sidebar.
     pub(crate) mode: MainMode,
@@ -406,7 +435,18 @@ impl Drop for RepoView {
 }
 
 impl RepoView {
+    #[cfg(test)]
     pub fn new(launch: Launch, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::new_in_workspace(launch, None, None, window, cx)
+    }
+
+    pub(crate) fn new_in_workspace(
+        launch: Launch,
+        workspace: Option<WeakEntity<crate::workspace::Workspace>>,
+        parent_name: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         let appearance = window
@@ -425,6 +465,8 @@ impl RepoView {
             fake: None,
             error: None,
             name: None,
+            workspace,
+            parent_name,
             mode: MainMode::History,
             worktree: WorktreePanel::default(),
             entity,
@@ -469,6 +511,7 @@ impl RepoView {
             _bridge: None,
         };
         view.branches.set_dialog_focus(cx.focus_handle());
+        view.branches.set_list_focus(cx.focus_handle());
 
         match launch {
             Launch::Fake { repo } => {
@@ -522,6 +565,15 @@ impl RepoView {
         view
     }
 
+    #[cfg(test)]
+    pub(crate) fn parent_name(&self) -> Option<&str> {
+        self.parent_name.as_deref()
+    }
+
+    pub(crate) fn repo_display_name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
     /// The view's own focus handle, for panels that hand focus back on close.
     pub(crate) fn view_focus(&self) -> FocusHandle {
         self.focus.clone()
@@ -545,6 +597,23 @@ impl RepoView {
     /// notification or dialog would land over the new repository.
     pub(crate) fn detach_session(&mut self) -> Option<Session> {
         self.cancel_file_history();
+        self.discard_blame();
+        self.cancel_diff();
+        self.files_epoch = self.files_epoch.wrapping_add(1);
+        self.tree.close();
+        let worktree_diff = self.worktree.cancel_diff();
+        let extra = self.extra_lists.cancel();
+        let search = self.search.reset();
+        let stat = self.stat.begin(None);
+        let in_progress = self.in_progress.clear_details();
+        if let Some(session) = self.session.as_ref() {
+            if let Some(ticket) = worktree_diff {
+                session.cancel_diff(ticket);
+            }
+            for ticket in [extra, search, stat, in_progress].into_iter().flatten() {
+                session.cancel_query(ticket);
+            }
+        }
         self._bridge.take();
         self.session.take()
     }
@@ -941,6 +1010,7 @@ impl RepoView {
         // Selecting a commit is the user moving off the sidebar ref they had
         // revealed; the reveal tint belongs to that jump only.
         self.branches.clear_revealed();
+        self.branches.clear_selected_extra();
         self.selected = index;
         self.selection_commit = commit;
         // The reveal mark belongs to the ref the sidebar showed, not to
@@ -1105,6 +1175,7 @@ impl RepoView {
             .map(|info| info.target);
         self.reveal_commit(target, window, cx);
         // After the jump, because selecting the commit clears the highlight.
+        self.branches.clear_selected_extra();
         self.branches.reveal_ref(kind, short_name);
         cx.notify();
     }
@@ -1126,6 +1197,7 @@ impl RepoView {
             .find(|stash| stash.index == index)
             .map(|stash| stash.id);
         self.reveal_commit(target, window, cx);
+        self.branches.clear_selected_extra();
         self.branches.reveal_stash(index);
         cx.notify();
     }

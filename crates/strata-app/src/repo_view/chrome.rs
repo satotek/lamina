@@ -15,8 +15,8 @@ use gpui_component::ActiveTheme as _;
 
 use super::{PAGE, RepoView};
 use crate::actions::{
-    self, OpenInEditor, OpenTerminalHere, SelectFirst, SelectLast, SelectNext, SelectPageDown,
-    SelectPageUp, SelectPrevious, StashChanges, ToggleFrameStats,
+    self, NavigateBack, OpenInEditor, OpenTerminalHere, SelectFirst, SelectLast, SelectNext,
+    SelectPageDown, SelectPageUp, SelectPrevious, StashChanges, ToggleFrameStats,
 };
 use crate::branches::CreateBranchFromHead;
 use crate::data::Source;
@@ -96,6 +96,11 @@ impl Render for RepoView {
             .on_action(cx.listener(|this, _: &PushBranch, window, cx| {
                 this.remote_command(Command::Push, window, cx)
             }));
+        if self.parent_name.is_some() {
+            root = root.on_action(cx.listener(|this, _: &NavigateBack, window, cx| {
+                this.navigate_back_to_parent(window, cx);
+            }));
+        }
         if let Some(font) = &design.ui_font {
             root = root.font_family(font.clone());
         }

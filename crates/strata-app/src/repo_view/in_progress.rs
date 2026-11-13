@@ -145,7 +145,7 @@ impl InProgress {
     }
 
     /// Clears cached details when the repository returns to `Normal`.
-    fn clear_details(&mut self) -> Option<QueryTicket> {
+    pub(super) fn clear_details(&mut self) -> Option<QueryTicket> {
         self.details = None;
         self.details_ticket.take()
     }

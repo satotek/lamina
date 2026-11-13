@@ -142,34 +142,110 @@ impl RepoView {
         );
     }
 
-    /// Opens `path` as a repository of its own, in its own window.
-    ///
-    /// The workspace owns the in-window "open" flow and a view cannot reach it,
-    /// so a submodule or worktree opens beside the repository it belongs to
-    /// instead of replacing it; that keeps the superproject on screen.
-    ///
-    /// A submodule's path comes from `.gitmodules` and is relative to the
-    /// superproject, so a relative path is resolved against the worktree here.
-    pub(crate) fn open_repository_path(
+    /// Resolves a submodule (relative to the working tree) or worktree path.
+    fn resolve_child_path(&self, path: &Path) -> PathBuf {
+        let workdir = self
+            .session
+            .as_ref()
+            .and_then(|session| session.repo().workdir().map(Path::to_path_buf));
+        resolve_repo_relative(workdir.as_deref(), path)
+    }
+
+    /// Opens `path` in the current window, pushing this repository onto the
+    /// workspace's navigation stack so the user can return to it.
+    pub(crate) fn open_repository_in_window(
         &mut self,
         path: &Path,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let resolved = if path.is_relative() {
-            self.session
-                .as_ref()
-                .and_then(|session| session.repo().workdir().map(|dir| dir.join(path)))
-                .unwrap_or_else(|| path.to_path_buf())
-        } else {
-            path.to_path_buf()
+        let resolved = self.resolve_child_path(path);
+        let Some(workspace) = self.workspace.clone() else {
+            // Standalone RepoView (e.g. a test without a Workspace) has no
+            // host to switch in place, so fall back to a new window.
+            self.open_repository_in_new_window(&resolved, window, cx);
+            return;
         };
+        // Defer so this RepoView is no longer borrowed when Workspace swaps it
+        // out and calls `detach_session` on it.
+        window.defer(cx, move |window, cx| {
+            let result = workspace.update(cx, |workspace, cx| {
+                workspace.open_child(&resolved, window, cx)
+            });
+            if let Ok(Err(message)) = result {
+                window.push_notification(
+                    Notification::error(message).title("Cannot open repository"),
+                    cx,
+                );
+            }
+        });
+    }
+
+    /// Opens `path` as a repository of its own, in a new window.
+    ///
+    /// A submodule's path comes from `.gitmodules` and is relative to the
+    /// superproject, so a relative path is resolved against the worktree here.
+    pub(crate) fn open_repository_in_new_window(
+        &mut self,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let resolved = self.resolve_child_path(path);
         match crate::picker::resolve_repository(&resolved) {
             Ok(root) => open_repository_window(root, cx),
             Err(message) => window.push_notification(
                 Notification::error(message).title("Cannot open repository"),
                 cx,
             ),
+        }
+    }
+
+    /// Returns to the parent repository this view was opened from, if any.
+    pub(crate) fn navigate_back_to_parent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.clone() else {
+            return;
+        };
+        window.defer(cx, move |window, cx| {
+            let result = workspace.update(cx, |workspace, cx| workspace.navigate_back(window, cx));
+            if let Ok(Err(message)) = result {
+                window.push_notification(
+                    Notification::error(message).title("Cannot open repository"),
+                    cx,
+                );
+            }
+        });
+    }
+
+    /// Opens whichever submodule or worktree row is currently selected in the
+    /// sidebar, in the current window (bound to `Enter` in the sidebar list).
+    pub(crate) fn activate_selected_extra(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(selected) = self.branches.selected_extra().cloned() else {
+            return;
+        };
+        match selected {
+            crate::branches::ExtraSelection::Submodule(path) => {
+                let openable = self.extra_lists.submodules.iter().any(|submodule| {
+                    submodule.path == path
+                        && submodule.status != strata_core::repo::SubmoduleStatus::Uninitialised
+                });
+                if openable {
+                    self.open_repository_in_window(Path::new(&path), window, cx);
+                }
+            }
+            crate::branches::ExtraSelection::Worktree(path) => {
+                let current_workdir = self.work_dir();
+                let openable = self.extra_lists.worktrees.iter().any(|worktree| {
+                    crate::branches::same_path(&worktree.path, &path)
+                        && !worktree.prunable
+                        && !current_workdir.as_deref().is_some_and(|current| {
+                            crate::branches::same_path(current, &worktree.path)
+                        })
+                });
+                if openable {
+                    self.open_repository_in_window(&path, window, cx);
+                }
+            }
         }
     }
 
@@ -631,6 +707,18 @@ fn open_repository_window(root: PathBuf, cx: &mut App) {
     }
 }
 
+/// Resolves a path reported by git (`submodule.path` is relative to the
+/// superproject's workdir, whereas `worktree.path` is already absolute).
+pub(crate) fn resolve_repo_relative(workdir: Option<&Path>, path: &Path) -> PathBuf {
+    if path.is_relative() {
+        workdir
+            .map(|dir| dir.join(path))
+            .unwrap_or_else(|| path.to_path_buf())
+    } else {
+        path.to_path_buf()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -660,6 +748,25 @@ mod tests {
         assert_eq!(
             default_worktree_path(Path::new("/src/strata"), "  "),
             PathBuf::from("/src/strata-worktree")
+        );
+    }
+
+    #[test]
+    fn relative_submodule_paths_resolve_against_the_superproject() {
+        assert_eq!(
+            resolve_repo_relative(Some(Path::new("/src/strata")), Path::new("libs/ui")),
+            PathBuf::from("/src/strata/libs/ui")
+        );
+        assert_eq!(
+            resolve_repo_relative(
+                Some(Path::new("/src/strata")),
+                Path::new("/src/strata-feat")
+            ),
+            PathBuf::from("/src/strata-feat")
+        );
+        assert_eq!(
+            resolve_repo_relative(None, Path::new("libs/ui")),
+            PathBuf::from("libs/ui")
         );
     }
 }

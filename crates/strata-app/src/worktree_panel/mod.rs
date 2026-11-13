@@ -738,6 +738,10 @@ impl WorktreePanel {
         true
     }
 
+    pub(crate) fn cancel_diff(&mut self) -> Option<DiffTicket> {
+        self.diff.cancel()
+    }
+
     fn run(&mut self, session: &Session, kind: PendingKind, operation: Operation) {
         let id = session.run(operation);
         self.pending = Some((id, kind));

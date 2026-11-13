@@ -28,7 +28,7 @@ use gpui_component::dialog::DialogEntrance;
 use gpui_component::input::{Input, InputEvent, InputState};
 
 use crate::actions::{
-    OpenInEditor, OpenRepository, OpenSettings, OpenTerminalHere, Quit, StashChanges,
+    NavigateBack, OpenInEditor, OpenRepository, OpenSettings, OpenTerminalHere, Quit, StashChanges,
     ToggleFrameStats, TogglePalette,
 };
 use crate::branches::CreateBranchFromHead;
@@ -102,6 +102,11 @@ const COMMANDS: &[Command] = &[
         label: "Open repository…",
         action: || Box::new(OpenRepository),
         needs_repo: false,
+    },
+    Command {
+        label: "Back to parent repository",
+        action: || Box::new(NavigateBack),
+        needs_repo: true,
     },
     Command {
         label: "Open settings",
