@@ -41,6 +41,8 @@ pub(crate) enum QueryKind {
     StreamingPath(String),
     /// Line counts of a commit against its first parent.
     CommitStat(Oid),
+    /// Submodules and linked worktrees, read directly from the repository.
+    SubmodulesAndWorktrees,
 }
 
 /// Ticket allocation and cancellation, shared between the session and the
@@ -116,6 +118,18 @@ fn answer(shared: Arc<Shared>, state: Arc<QueryState>, job: &QueryJob) -> Result
             shared.emit(SessionEvent::CommitStatReady {
                 ticket: job.ticket,
                 stat: Arc::new(stat),
+            });
+        }
+        QueryKind::SubmodulesAndWorktrees => {
+            let submodules = shared.repo.submodules()?;
+            let worktrees = shared.repo.worktrees()?;
+            if state.is_cancelled(job.ticket) || shared.is_shutdown() {
+                return Ok(());
+            }
+            shared.emit(SessionEvent::SubmodulesAndWorktreesReady {
+                ticket: job.ticket,
+                submodules: Arc::new(submodules),
+                worktrees: Arc::new(worktrees),
             });
         }
         QueryKind::Search(query) => {

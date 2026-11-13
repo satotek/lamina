@@ -5,7 +5,8 @@
 //! `upstream.rs` (tracking branches), `history.rs` (path-limited history),
 //! `message.rs` (commit and merge messages) and `remotes.rs` (configured
 //! remotes) are owned by separate tasks. `stat.rs` counts the lines a commit
-//! added and removed.
+//! added and removed. `submodules.rs` and `worktrees.rs` list the checkouts a
+//! repository owns beyond its own working tree.
 
 mod conflicts;
 mod history;
@@ -14,11 +15,15 @@ mod message;
 mod remotes;
 mod stat;
 mod status;
+mod submodules;
 mod tree;
 mod upstream;
+mod worktrees;
 
 pub use history::{PathHistory, PathHistoryEntries, PathHistoryEntry};
 pub use log::CommitWalk;
+pub use submodules::{SubmoduleInfo, SubmoduleStatus};
+pub use worktrees::WorktreeInfo;
 
 use std::path::{Path, PathBuf};
 

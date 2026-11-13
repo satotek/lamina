@@ -187,6 +187,12 @@ fn changes_refs(operation: &Operation) -> bool {
             | Operation::DeleteTag { .. }
             | Operation::ContinueInProgress
             | Operation::AbortInProgress
+            // Only the new-branch form adds a ref; the others check one out or
+            // add a detached worktree.
+            | Operation::WorktreeAdd {
+                new_branch: Some(_),
+                ..
+            }
     )
 }
 
@@ -285,6 +291,15 @@ fn execute(shared: &Shared, id: OperationId, operation: &Operation) -> Result<()
         Operation::DeleteTag { name } => git.delete_tag(name),
         Operation::ContinueInProgress => git.continue_in_progress(),
         Operation::AbortInProgress => git.abort_in_progress(),
+        Operation::SubmoduleUpdate { paths, init } => git.submodule_update(paths, *init),
+        Operation::WorktreeAdd {
+            path,
+            branch,
+            new_branch,
+            commit,
+        } => git.worktree_add(path, branch.as_deref(), new_branch.as_deref(), *commit),
+        Operation::WorktreeRemove { path, force } => git.worktree_remove(path, *force),
+        Operation::WorktreePrune => git.worktree_prune(),
     }
 }
 

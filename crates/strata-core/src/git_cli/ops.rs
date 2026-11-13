@@ -237,6 +237,89 @@ impl Git {
         self.run_unit(&args, None)
     }
 
+    /// Check out submodules at the commits the superproject records.
+    ///
+    /// An empty `paths` updates every submodule. `init` clones and registers
+    /// uninitialised ones first. A path list is passed after `--`, so a path
+    /// that looks like an option cannot be read as one.
+    pub fn submodule_update(&self, paths: &[impl AsRef<Path>], init: bool) -> Result<()> {
+        let paths = collect_paths(paths);
+        let mut args = vec!["submodule".to_owned(), "update".to_owned()];
+        if init {
+            args.push("--init".to_owned());
+        }
+        if !paths.is_empty() {
+            args.push("--".to_owned());
+            args.extend(paths.iter().map(|path| path_string(path)));
+        }
+        self.run_unit(&args, None)
+    }
+
+    /// Add a linked worktree at `path`.
+    ///
+    /// The three forms mirror git's: an existing `branch`, a `new_branch`
+    /// starting at `commit`, or `commit` alone for a detached checkout.
+    pub fn worktree_add(
+        &self,
+        path: &Path,
+        branch: Option<&str>,
+        new_branch: Option<&str>,
+        commit: Option<Oid>,
+    ) -> Result<()> {
+        let path = checked_worktree_path(path)?;
+        let branch = branch.map(|name| checked_ref(name, "branch")).transpose()?;
+        let new_branch = new_branch
+            .map(|name| checked_ref(name, "branch"))
+            .transpose()?;
+
+        let mut args = vec!["worktree".to_owned(), "add".to_owned()];
+        match (branch, new_branch, commit) {
+            (Some(branch), None, None) => {
+                args.push("--".to_owned());
+                args.push(path_string(path));
+                args.push(branch.to_owned());
+            }
+            (None, Some(new_branch), Some(commit)) => {
+                args.push("-b".to_owned());
+                args.push(new_branch.to_owned());
+                args.push("--".to_owned());
+                args.push(path_string(path));
+                args.push(commit.to_string());
+            }
+            (None, None, Some(commit)) => {
+                args.push("--detach".to_owned());
+                args.push("--".to_owned());
+                args.push(path_string(path));
+                args.push(commit.to_string());
+            }
+            _ => {
+                return Err(Error::other(
+                    "worktree add needs an existing branch, a new branch at a commit, or a detached commit",
+                ));
+            }
+        }
+        self.run_unit(&args, None)
+    }
+
+    /// Remove the linked worktree checked out at `path`. `force` also drops a
+    /// dirty worktree; a locked one still has to be unlocked first.
+    pub fn worktree_remove(&self, path: &Path, force: bool) -> Result<()> {
+        let path = checked_worktree_path(path)?;
+        let mut args = vec!["worktree".to_owned(), "remove".to_owned()];
+        if force {
+            args.push("--force".to_owned());
+        }
+        args.push("--".to_owned());
+        args.push(path_string(path));
+        self.run_unit(&args, None)
+    }
+
+    /// Drop registrations of worktrees whose checkout directory is gone.
+    pub fn worktree_prune(&self) -> Result<()> {
+        let args = vec!["worktree".to_owned(), "prune".to_owned()];
+        self.run_unit(&args, None)
+    }
+
     /// `remote == None` fetches every remote.
     pub fn fetch(&self, remote: Option<&str>, prune: bool) -> Result<()> {
         let remote = remote
@@ -484,6 +567,21 @@ fn path_string(path: &Path) -> String {
     {
         text.into_owned()
     }
+}
+
+/// Reject paths that git would read as an option. Everything else is left to
+/// git so its own message reaches the user.
+fn checked_worktree_path(path: &Path) -> Result<&Path> {
+    if path.as_os_str().is_empty() {
+        return Err(Error::other("worktree path is empty"));
+    }
+    if path.to_string_lossy().starts_with('-') {
+        return Err(Error::other(format!(
+            "worktree path must not start with `-`: {}",
+            path.display()
+        )));
+    }
+    Ok(path)
 }
 
 /// Append path arguments, switching to a NUL-separated pathspec file on stdin

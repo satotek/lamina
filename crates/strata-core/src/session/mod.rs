@@ -29,7 +29,7 @@ use crate::git_cli::{CommandRecord, Git};
 use crate::graph::{GraphRow, GraphRows};
 use crate::highlight::LineHighlights;
 use crate::patch::LineSelection;
-use crate::repo::Repo;
+use crate::repo::{Repo, SubmoduleInfo, WorktreeInfo};
 use crate::watch::RepoWatcher;
 use crate::{
     CommitInfo, CommitStat, ConflictEntry, Error, HeadInfo, Oid, RefInfo, RemoteInfo, RepoState,
@@ -342,6 +342,27 @@ pub enum Operation {
     ContinueInProgress,
     /// `--abort` for whichever operation is in progress.
     AbortInProgress,
+    /// `git submodule update [--init] -- <paths>`; an empty `paths` updates
+    /// every submodule.
+    SubmoduleUpdate {
+        paths: Vec<String>,
+        init: bool,
+    },
+    /// `git worktree add` at `path`: an existing `branch`, a `new_branch`
+    /// starting at `commit`, or `commit` alone for a detached checkout.
+    WorktreeAdd {
+        path: PathBuf,
+        branch: Option<String>,
+        new_branch: Option<String>,
+        commit: Option<Oid>,
+    },
+    /// `git worktree remove [--force] <path>`.
+    WorktreeRemove {
+        path: PathBuf,
+        force: bool,
+    },
+    /// `git worktree prune`.
+    WorktreePrune,
 }
 
 /// How far `Operation::Reset` rewinds.
@@ -441,6 +462,13 @@ pub enum SessionEvent {
     PathHistoryDone {
         ticket: QueryTicket,
         generation: u64,
+    },
+    /// Submodules and worktrees for a ticket from
+    /// [`Session::request_submodules_and_worktrees`].
+    SubmodulesAndWorktreesReady {
+        ticket: QueryTicket,
+        submodules: Arc<Vec<SubmoduleInfo>>,
+        worktrees: Arc<Vec<WorktreeInfo>>,
     },
 }
 
@@ -650,6 +678,18 @@ impl Session {
     /// ticket when the commit cannot be read.
     pub fn request_commit_stat(&self, commit: Oid) -> QueryTicket {
         self.queue_query(queries::QueryKind::CommitStat(commit))
+    }
+
+    /// Lists submodules and linked worktrees off the UI thread; answers with
+    /// [`SessionEvent::SubmodulesAndWorktreesReady`], or `QueryFailed` with the
+    /// same ticket when the repository cannot be read.
+    ///
+    /// Neither list is part of [`RepoSnapshot`], so re-request it after every
+    /// `SnapshotUpdated`, including the refreshes the filesystem watcher
+    /// triggers. Both reads only touch the repository, which keeps that
+    /// re-request as cheap as the refresh itself.
+    pub fn request_submodules_and_worktrees(&self) -> QueryTicket {
+        self.queue_query(queries::QueryKind::SubmodulesAndWorktrees)
     }
 
     pub fn cancel_query(&self, ticket: QueryTicket) {
