@@ -843,22 +843,30 @@ impl Workspace {
                 let select_ws = workspace_weak.clone();
                 let close_ws = workspace_weak.clone();
                 let reorder_ws = workspace_weak.clone();
+                // The active tab's fill already separates it from what is
+                // beside it; a divider belongs only between two quiet tabs.
+                let separator = index > 0 && !is_active && active_index != index - 1;
 
-                let mut item = crate::ui::tab(("repo-tab", index), index, label, is_active, design)
-                    .busy(busy)
-                    .on_select(move |_, window, cx| {
-                        let _ = select_ws.update(cx, |this, cx| this.select_tab(index, window, cx));
-                    })
-                    .on_close(move |window, cx| {
-                        let _ = close_ws.update(cx, |this, cx| this.close_tab(index, window, cx));
-                    })
-                    .on_reorder(move |from, to, window, cx| {
-                        let _ = reorder_ws
-                            .update(cx, |this, cx| this.reorder_tab(from, to, window, cx));
-                    });
+                let mut item =
+                    crate::ui::tab(("repo-tab", index), index, label.clone(), is_active, design)
+                        .separator(separator)
+                        .busy(busy)
+                        .tooltip(label)
+                        .on_select(move |_, window, cx| {
+                            let _ =
+                                select_ws.update(cx, |this, cx| this.select_tab(index, window, cx));
+                        })
+                        .on_close(move |window, cx| {
+                            let _ =
+                                close_ws.update(cx, |this, cx| this.close_tab(index, window, cx));
+                        })
+                        .on_reorder(move |from, to, window, cx| {
+                            let _ = reorder_ws
+                                .update(cx, |this, cx| this.reorder_tab(from, to, window, cx));
+                        });
 
                 if let Some(path) = &slot.path {
-                    item = item.tooltip(path.display().to_string());
+                    item = item.hint(path);
                 }
                 item
             })
