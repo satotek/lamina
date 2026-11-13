@@ -1,6 +1,10 @@
 //! Owned by the repo-log task: commit walk, refs, HEAD.
 
+mod walk;
+
 use std::collections::HashSet;
+
+use gix::objs::commit::ref_iter::Token as CommitToken;
 
 use super::Repo;
 use crate::{CommitInfo, Error, HeadInfo, RefInfo, RefKind, Result};
@@ -8,24 +12,24 @@ use crate::{CommitInfo, Error, HeadInfo, RefInfo, RefKind, Result};
 /// Streams commits reachable from HEAD and all refs, in topological order
 /// (children before parents), newest first among independent commits.
 ///
-/// This is `git log --all --date-order`. gix's topological walk with
-/// [`Sorting::DateOrder`](gix::traverse::commit::topo::Sorting::DateOrder) is the
-/// same algorithm git uses, and it needs the reachability graph up front, so the
-/// graph is built eagerly while the per-commit object reads stream lazily.
+/// This is `git log --all --date-order`. `gix`'s topological walk builds the
+/// whole reachability graph before yielding anything, so it is replaced by the
+/// incremental walk in `walk.rs`, which uses commit-graph generation numbers to
+/// emit the newest commits while older history is still being counted.
 pub struct CommitWalk {
     repo: gix::Repository,
-    topo: gix::traverse::commit::Topo<gix::OdbHandle, fn(&gix::oid) -> bool>,
+    walk: walk::Walk,
 }
 
 impl Iterator for CommitWalk {
     type Item = Result<CommitInfo>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let info = match self.topo.next()? {
-            Ok(info) => info,
-            Err(err) => return Some(Err(Error::gix(err))),
-        };
-        Some(commit_info(&self.repo, info.id).map_err(Error::gix))
+        match self.walk.next_id() {
+            Ok(Some(id)) => Some(commit_info(&self.repo, id)),
+            Ok(None) => None,
+            Err(err) => Some(Err(err)),
+        }
     }
 }
 
@@ -56,42 +60,32 @@ impl Repo {
 
     pub fn refs(&self) -> Result<Vec<RefInfo>> {
         let repo = self.local();
+        let graph = repo.commit_graph_if_enabled().ok().flatten();
         let mut refs = Vec::new();
 
         let platform = repo.references().map_err(Error::gix)?;
         let references = platform.all().map_err(Error::gix)?;
         for reference in references {
-            let mut reference = reference.map_err(Error::gix)?;
+            let reference = reference.map_err(Error::gix)?;
+            let inner = reference.detach();
             // Symbolic refs (notably `refs/remotes/origin/HEAD`) alias another ref and
             // would show up as duplicate entries in the UI.
-            if reference.target().kind() == gix::refs::Kind::Symbolic {
+            let gix::refs::Target::Object(target) = inner.target else {
                 continue;
-            }
-
-            let full_name = reference.name().to_string();
-            let kind = if full_name.starts_with("refs/heads/") {
-                RefKind::LocalBranch
-            } else if full_name.starts_with("refs/remotes/") {
-                RefKind::RemoteBranch
-            } else if full_name.starts_with("refs/tags/") {
-                RefKind::Tag
-            } else {
+            };
+            let Some(kind) = ref_kind(inner.name.as_bstr()) else {
                 continue;
             };
 
-            // Annotated tags point at a tag object; the UI needs the commit it names.
-            let target = match reference.peel_to_id() {
-                Ok(id) => id.detach(),
+            let target = match resolve_commit(&repo, graph.as_ref(), target, inner.peeled)? {
+                Some(target) => target,
                 // Dangling refs are skipped so one broken ref cannot hide the whole list.
-                Err(_) => continue,
+                None => continue,
             };
-            if !is_commit(&repo, target)? {
-                continue;
-            }
 
             refs.push(RefInfo {
-                short_name: reference.name().shorten().to_string(),
-                full_name,
+                short_name: inner.name.shorten().to_string(),
+                full_name: inner.name.as_bstr().to_string(),
                 kind,
                 target,
             });
@@ -107,21 +101,23 @@ impl Repo {
 
     pub fn walk_commits(&self) -> Result<CommitWalk> {
         let repo = self.local();
-        let tips = walk_tips(&repo)?;
         // A missing or corrupt commit-graph is not fatal: object reads still work.
-        let commit_graph = repo.commit_graph_if_enabled().ok().flatten();
+        let graph = repo.commit_graph_if_enabled().ok().flatten();
+        let tips = walk_tips(&repo, graph.as_ref())?;
+        let walk = walk::Walk::new(repo.objects.clone(), graph, &tips)?;
+        Ok(CommitWalk { repo, walk })
+    }
+}
 
-        let topo = gix::traverse::commit::topo::Builder::from_iters(
-            repo.objects.clone(),
-            tips,
-            None::<Vec<gix::ObjectId>>,
-        )
-        .sorting(gix::traverse::commit::topo::Sorting::DateOrder)
-        .with_commit_graph(commit_graph)
-        .build()
-        .map_err(Error::gix)?;
-
-        Ok(CommitWalk { repo, topo })
+fn ref_kind(full_name: &gix::bstr::BStr) -> Option<RefKind> {
+    if full_name.starts_with(b"refs/heads/") {
+        Some(RefKind::LocalBranch)
+    } else if full_name.starts_with(b"refs/remotes/") {
+        Some(RefKind::RemoteBranch)
+    } else if full_name.starts_with(b"refs/tags/") {
+        Some(RefKind::Tag)
+    } else {
+        None
     }
 }
 
@@ -133,7 +129,68 @@ fn ref_kind_rank(kind: RefKind) -> u8 {
     }
 }
 
-fn is_commit(repo: &gix::Repository, id: gix::ObjectId) -> Result<bool> {
+/// The commit a ref points at, if its target can be walked at all.
+///
+/// `peeled` is the packed-refs peel result for the ref. It is what makes
+/// enumerating tens of thousands of annotated tags cheap: the commit is known
+/// without reading the tag object. A ref without a peel result still has to be
+/// classified, because it may point at an annotated tag object or at a
+/// non-commit.
+fn resolve_commit(
+    repo: &gix::Repository,
+    graph: Option<&gix::commitgraph::Graph>,
+    target: gix::ObjectId,
+    peeled: Option<gix::ObjectId>,
+) -> Result<Option<gix::ObjectId>> {
+    let mut current = peeled.unwrap_or(target);
+    loop {
+        if is_commit(repo, graph, current)? {
+            return Ok(Some(current));
+        }
+        if peeled.is_some() {
+            // A packed peel result is already fully peeled, so this ref points
+            // at a tree or blob and cannot be part of the commit walk.
+            return Ok(None);
+        }
+        match peel_tag(repo, current)? {
+            Some(next) => current = next,
+            None => return Ok(None),
+        }
+    }
+}
+
+/// Follow one annotated tag. `None` means the object is not a tag, so the chain
+/// ends without reaching a commit.
+fn peel_tag(repo: &gix::Repository, id: gix::ObjectId) -> Result<Option<gix::ObjectId>> {
+    let object = match repo.find_object(id) {
+        Ok(object) => object,
+        // A missing object cannot be walked, but must not hide the other refs.
+        Err(err) if err.is_not_found() => return Ok(None),
+        Err(err) => return Err(Error::gix(err)),
+    };
+    if object.kind != gix::objs::Kind::Tag {
+        return Ok(None);
+    }
+    let tag = object.into_tag();
+    match tag.target_id() {
+        Ok(id) => Ok(Some(id.detach())),
+        Err(err) => Err(Error::gix(err)),
+    }
+}
+
+/// Whether `id` names a commit.
+///
+/// Commit-graph membership answers this without touching the object database,
+/// which matters when every ref target is checked. Without a graph only the
+/// object header is read.
+fn is_commit(
+    repo: &gix::Repository,
+    graph: Option<&gix::commitgraph::Graph>,
+    id: gix::ObjectId,
+) -> Result<bool> {
+    if graph.and_then(|graph| graph.commit_by_id(id)).is_some() {
+        return Ok(true);
+    }
     match repo.find_header(id) {
         Ok(header) => Ok(header.kind() == gix::objs::Kind::Commit),
         // A ref may point at a tag-to-tree, blob or a missing object; none can be walked.
@@ -143,58 +200,92 @@ fn is_commit(repo: &gix::Repository, id: gix::ObjectId) -> Result<bool> {
 }
 
 /// HEAD plus every ref target, deduplicated, matching the `--all` revision set.
-fn walk_tips(repo: &gix::Repository) -> Result<Vec<gix::ObjectId>> {
+fn walk_tips(
+    repo: &gix::Repository,
+    graph: Option<&gix::commitgraph::Graph>,
+) -> Result<Vec<gix::ObjectId>> {
+    let mut checked = HashSet::new();
     let mut seen = HashSet::new();
     let mut tips = Vec::new();
 
     let head = repo.head().map_err(Error::gix)?;
     if let Some(id) = head.id() {
-        push_tip(repo, &mut seen, &mut tips, id.detach())?;
+        let id = id.detach();
+        if is_commit(repo, graph, id)? && seen.insert(id) {
+            tips.push(id);
+        }
     }
+
     let platform = repo.references().map_err(Error::gix)?;
     let references = platform.all().map_err(Error::gix)?;
     for reference in references {
-        let Ok(mut reference) = reference else {
+        let Ok(reference) = reference else {
             continue;
         };
-        if let Ok(id) = reference.peel_to_id() {
-            push_tip(repo, &mut seen, &mut tips, id.detach())?;
+        let inner = reference.detach();
+        let gix::refs::Target::Object(target) = inner.target else {
+            // A symbolic ref only aliases a ref that is visited on its own.
+            continue;
+        };
+        // The same commit is usually the target of many refs, so classify each
+        // distinct target once. A peel result from packed-refs identifies the
+        // final object directly, skipping the tag object read.
+        let candidate = inner.peeled.unwrap_or(target);
+        if !checked.insert(candidate) {
+            continue;
+        }
+        if let Some(commit) = resolve_commit(repo, graph, target, inner.peeled)?
+            && seen.insert(commit)
+        {
+            tips.push(commit);
         }
     }
 
     Ok(tips)
 }
 
-fn push_tip(
-    repo: &gix::Repository,
-    seen: &mut HashSet<gix::ObjectId>,
-    tips: &mut Vec<gix::ObjectId>,
-    id: gix::ObjectId,
-) -> Result<()> {
-    if is_commit(repo, id)? && seen.insert(id) {
-        tips.push(id);
+fn commit_info(repo: &gix::Repository, id: gix::ObjectId) -> Result<CommitInfo> {
+    let object = repo.find_object(id).map_err(Error::gix)?;
+    if object.kind != gix::objs::Kind::Commit {
+        return Err(Error::other(format!("{id} is not a commit")));
     }
-    Ok(())
-}
 
-fn commit_info(repo: &gix::Repository, id: gix::ObjectId) -> gix::Result<CommitInfo> {
-    let commit = repo.find_object(id)?.into_commit();
-    let author = commit.author()?;
-    let committer = commit.committer()?;
+    // One pass over the commit data: `Commit`'s per-field accessors each re-parse
+    // the header, which doubles the cost of decoding every commit in the log.
+    let mut parents = Vec::new();
+    let mut author_name = String::new();
+    let mut author_email = String::new();
+    let mut author_time = 0;
+    let mut committer_time = 0;
+    let mut summary = String::new();
+    for token in gix::objs::CommitRefIter::from_bytes(&object.data, repo.object_hash()) {
+        match token.map_err(Error::gix)? {
+            CommitToken::Parent { id } => parents.push(id),
+            CommitToken::Author { signature } => {
+                author_name = signature.name.to_string();
+                author_email = signature.email.to_string();
+                // Malformed dates must not fail the whole log; git also tolerates them.
+                author_time = signature.time().map_or(0, |time| time.seconds);
+            }
+            CommitToken::Committer { signature } => {
+                committer_time = signature.time().map_or(0, |time| time.seconds);
+            }
+            CommitToken::Message(message) => {
+                summary = first_line(message);
+                break;
+            }
+            _ => {}
+        }
+    }
 
     Ok(CommitInfo {
         id,
-        parents: commit.parent_ids().map(|id| id.detach()).collect(),
-        summary: first_line(commit.message_raw()?),
-        author_name: author.name.to_string(),
-        author_email: author.email.to_string(),
-        // Malformed dates must not fail the whole log; git also tolerates them.
-        author_time: gix::date::parse_header(author.time)
-            .map(|time| time.seconds)
-            .unwrap_or(0),
-        committer_time: gix::date::parse_header(committer.time)
-            .map(|time| time.seconds)
-            .unwrap_or(0),
+        parents,
+        summary,
+        author_name,
+        author_email,
+        author_time,
+        committer_time,
     })
 }
 

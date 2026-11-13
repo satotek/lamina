@@ -52,7 +52,14 @@ impl Fixture {
     }
 
     fn run(&self, dir: &Path, args: &[&str], date: i64) -> String {
-        let output = Command::new("git")
+        self.run_with_input(dir, args, date, "")
+    }
+
+    fn run_with_input(&self, dir: &Path, args: &[&str], date: i64, input: &str) -> String {
+        use std::io::Write;
+        use std::process::Stdio;
+
+        let mut child = Command::new("git")
             .args(args)
             .current_dir(dir)
             .env("GIT_CONFIG_GLOBAL", &self.empty_config)
@@ -65,8 +72,18 @@ impl Fixture {
             .env("GIT_AUTHOR_DATE", format!("@{date} +0000"))
             .env("GIT_COMMITTER_DATE", format!("@{date} +0000"))
             .env("GIT_TERMINAL_PROMPT", "0")
-            .output()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .expect("git is runnable");
+        child
+            .stdin
+            .as_mut()
+            .expect("piped stdin")
+            .write_all(input.as_bytes())
+            .expect("write git stdin");
+        let output = child.wait_with_output().expect("git finishes");
 
         assert!(
             output.status.success(),
@@ -76,6 +93,10 @@ impl Fixture {
         String::from_utf8_lossy(&output.stdout)
             .trim_end()
             .to_string()
+    }
+
+    fn git_input(&self, args: &[&str], input: &str) -> String {
+        self.run_with_input(&self.repo, args, BASE_TIME, input)
     }
 
     fn commit(&self, file: &str, content: &str, date: i64, message: &str) -> String {
@@ -373,6 +394,119 @@ fn remote_tracking_branches_are_listed_without_head_alias() {
         ],
         "origin/HEAD is a symbolic alias and must be skipped"
     );
+}
+
+#[test]
+fn many_refs_walk_matches_git_log() {
+    let fixture = Fixture::new();
+    let mut commits = Vec::new();
+    for index in 0..40 {
+        commits.push(fixture.commit(
+            "file.txt",
+            &format!("{index}\n"),
+            BASE_TIME + 100 + index,
+            &format!("commit {index}"),
+        ));
+    }
+    fixture.git(&[
+        "tag",
+        "-a",
+        "annotated-base",
+        "-m",
+        "annotated",
+        &commits[0],
+    ]);
+
+    // Many refs share a handful of targets, so the walk has to deduplicate ref
+    // targets before checking objects; one git process creates them all.
+    let mut refs = String::new();
+    for index in 0..2000 {
+        let target = &commits[index % commits.len()];
+        refs.push_str(&format!("create refs/tags/many-{index:04} {target}\n"));
+    }
+    fixture.git_input(&["update-ref", "--stdin"], &refs);
+
+    let expected = fixture.git_log_all_date_order();
+    assert_eq!(fixture.walk_ids(), expected, "loose refs");
+
+    // packed-refs records the peeled target of every annotated tag, and a ref
+    // without one is known to point at a non-tag object.
+    fixture.git(&["pack-refs", "--all"]);
+    assert_eq!(fixture.walk_ids(), expected, "packed refs");
+
+    let listed = fixture.open().refs().expect("refs");
+    assert_eq!(
+        listed.iter().filter(|r| r.kind == RefKind::Tag).count(),
+        2001,
+        "the annotated tag and every lightweight tag are listed"
+    );
+}
+
+#[test]
+fn commit_graph_walk_matches_git_log() {
+    let fixture = Fixture::new();
+    let base = fixture.commit("main.txt", "base\n", BASE_TIME + 1000, "base");
+
+    fixture.git(&["checkout", "--quiet", "-b", "feature"]);
+    fixture.commit("feature.txt", "f1\n", BASE_TIME + 2000, "f1");
+    fixture.commit("feature.txt", "f2\n", BASE_TIME + 1100, "f2");
+
+    fixture.git(&["checkout", "--quiet", "main"]);
+    fixture.commit("main.txt", "c2\n", BASE_TIME + 3000, "c2");
+    fixture.commit("main.txt", "c3\n", BASE_TIME + 1200, "c3");
+    fixture.git_dated(
+        BASE_TIME + 4000,
+        &[
+            "merge",
+            "--quiet",
+            "--no-ff",
+            "-m",
+            "merge feature",
+            "feature",
+        ],
+    );
+    fixture.git(&["tag", "at-base", &base]);
+
+    fixture.git(&["commit-graph", "write", "--reachable", "--split"]);
+    assert_eq!(
+        fixture.walk_ids(),
+        fixture.git_log_all_date_order(),
+        "split commit-graph"
+    );
+
+    // Commits written after the graph are missing from it, which is what a
+    // repository looks like between fetches; both code paths must agree.
+    fixture.commit("main.txt", "late\n", BASE_TIME + 1500, "late");
+    fixture.git(&["checkout", "--quiet", "-b", "side", &base]);
+    fixture.commit("side.txt", "side\n", BASE_TIME + 1600, "side");
+    fixture.git(&["checkout", "--quiet", "main"]);
+    assert_eq!(
+        fixture.walk_ids(),
+        fixture.git_log_all_date_order(),
+        "history newer than the commit-graph"
+    );
+}
+
+#[test]
+fn non_commit_refs_are_ignored() {
+    let fixture = Fixture::new();
+    fixture.commit("file.txt", "one\n", BASE_TIME + 100, "first");
+    fixture.commit("file.txt", "two\n", BASE_TIME + 200, "second");
+
+    let blob = fixture.git_input(&["hash-object", "-w", "--stdin"], "raw\n");
+    let tree = fixture.git(&["rev-parse", "HEAD^{tree}"]);
+    fixture.git(&["tag", "blob-tag", &blob]);
+    fixture.git(&["tag", "tree-tag", &tree]);
+    fixture.git(&["tag", "-a", "annotated-blob", "-m", "a blob", &blob]);
+    fixture.git(&["pack-refs", "--all"]);
+
+    let refs = fixture.open().refs().expect("refs");
+    assert_eq!(
+        kinds_and_names(&refs),
+        vec![(RefKind::LocalBranch, "refs/heads/main".to_string())],
+        "refs that do not resolve to a commit are not listed"
+    );
+    assert_eq!(fixture.walk_ids(), fixture.git_log_all_date_order());
 }
 
 #[test]
