@@ -11,12 +11,11 @@ use gpui::{
     App, AppContext as _, Entity, IntoElement, ParentElement, PathPromptOptions, SharedString,
     Styled, Subscription, Window, px,
 };
-use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::setting::{
     NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage,
 };
-use gpui_component::{Disableable as _, Sizable as _, h_flex, v_flex};
+use gpui_component::{Sizable as _, h_flex, v_flex};
 
 use super::change::{self, Section};
 use crate::settings::{self, DateFormat, DiffLayout, Settings, ThemeMode};
@@ -369,13 +368,11 @@ fn shell(section: Section) -> SettingPage {
     SettingPage::new(section.title())
         .resettable(false)
         .title_suffix(move |_, _cx| {
-            Button::new(SharedString::from(format!(
-                "reset-{}",
-                section.title().to_lowercase()
-            )))
-            .xsmall()
-            .outline()
-            .label("Reset section")
+            crate::ui::button(
+                SharedString::from(format!("reset-{}", section.title().to_lowercase())),
+                "Reset section",
+            )
+            .size(crate::ui::ButtonSize::Tiny)
             .on_click(move |_, _, cx| {
                 settings::update(cx, |settings| change::reset_section(settings, section));
                 cx.refresh_windows();
@@ -493,18 +490,20 @@ fn text_field(
             field = field.child(h_flex().gap_1().flex_wrap().children(
                 suggestions.iter().enumerate().map(|(index, suggestion)| {
                     let input = input.clone();
-                    Button::new(SharedString::from(format!("{key}-suggestion-{index}")))
-                        .xsmall()
-                        .ghost()
-                        .label(*suggestion)
-                        .disabled(options.is_disabled())
-                        .on_click(move |_, window, cx| {
-                            settings::update(cx, |settings| set(settings, suggestion));
-                            input.update(cx, |input, cx| {
-                                input.set_value(*suggestion, window, cx);
-                            });
-                            cx.refresh_windows();
-                        })
+                    crate::ui::button(
+                        SharedString::from(format!("{key}-suggestion-{index}")),
+                        *suggestion,
+                    )
+                    .size(crate::ui::ButtonSize::Tiny)
+                    .ghost()
+                    .disabled(options.is_disabled())
+                    .on_click(move |_, window, cx| {
+                        settings::update(cx, |settings| set(settings, suggestion));
+                        input.update(cx, |input, cx| {
+                            input.set_value(*suggestion, window, cx);
+                        });
+                        cx.refresh_windows();
+                    })
                 }),
             ));
         }
@@ -537,10 +536,8 @@ fn git_field() -> SettingField<SharedString> {
                     .disabled(options.is_disabled()),
             )
             .child(
-                Button::new("git-executable-browse")
-                    .small()
-                    .outline()
-                    .label("Browse…")
+                crate::ui::button("git-executable-browse", "Browse…")
+                    .size(crate::ui::ButtonSize::Small)
                     .disabled(options.is_disabled())
                     .on_click(move |_, _, cx| {
                         let paths = cx.prompt_for_paths(PathPromptOptions {

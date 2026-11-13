@@ -6,8 +6,7 @@
 //! come from here so a change lands in one place.
 
 use gpui::{
-    AnyElement, FontWeight, Hsla, IntoElement, ParentElement as _, SharedString, Styled as _, div,
-    px, rgb,
+    AnyElement, Hsla, IntoElement, ParentElement as _, SharedString, Styled as _, div, px, rgb,
 };
 use gpui::{Bounds, canvas, fill, point};
 use gpui_component::{Icon, Sizable as _, Theme};
@@ -383,44 +382,6 @@ pub fn kind_colors(kind: ChangeKind, design: &Design) -> (Hsla, Hsla) {
         }
         ChangeKind::Renamed | ChangeKind::Copied => (design.accent_soft, design.accent_text),
     }
-}
-
-/// The 18 px kind badge used by file rows in both the history and the
-/// working-tree views.
-pub fn file_badge(kind: ChangeKind, design: &Design) -> AnyElement {
-    let (background, foreground) = kind_colors(kind, design);
-    div()
-        .flex()
-        .flex_none()
-        .items_center()
-        .justify_center()
-        .w(px(18.0))
-        .h(px(18.0))
-        .rounded(px(4.0))
-        .bg(background)
-        .text_size(px(10.0))
-        .font_weight(FontWeight::BOLD)
-        .text_color(foreground)
-        .child(kind_marker(kind))
-        .into_any_element()
-}
-
-/// A round initials avatar.
-pub fn avatar(text: &str, color: Hsla, size: f32) -> AnyElement {
-    div()
-        .flex()
-        .flex_none()
-        .items_center()
-        .justify_center()
-        .w(px(size))
-        .h(px(size))
-        .rounded_full()
-        .bg(color)
-        .text_color(hex(0xffffff))
-        .text_size(px(size * 0.5))
-        .font_weight(FontWeight::SEMIBOLD)
-        .child(text.to_owned())
-        .into_any_element()
 }
 
 /// Splits `crates/app/src/main.rs` into `("main.rs", "crates/app/src")`.

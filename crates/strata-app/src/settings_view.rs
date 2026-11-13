@@ -16,10 +16,8 @@ use gpui::{
     InteractiveElement as _, IntoElement, ParentElement, Render, Styled, TitlebarOptions, Window,
     WindowBounds, WindowDecorations, WindowOptions, div, px, size,
 };
-use gpui_component::Disableable as _;
-use gpui_component::button::Button;
 use gpui_component::setting::Settings as SettingsPages;
-use gpui_component::{ActiveTheme as _, Sizable as _, TitleBar, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, TitleBar, h_flex, v_flex};
 
 use crate::actions::OpenSettings;
 use crate::settings;
@@ -124,10 +122,8 @@ impl SettingsView {
                     .child(label),
             )
             .child(
-                Button::new("open-settings-folder")
-                    .xsmall()
-                    .outline()
-                    .label("Open folder")
+                crate::ui::button("open-settings-folder", "Open folder")
+                    .size(crate::ui::ButtonSize::Tiny)
                     .disabled(path.is_none())
                     .on_click(move |_, _, cx| {
                         if let Some(folder) =

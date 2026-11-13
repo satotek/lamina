@@ -12,11 +12,10 @@ use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, FontWeight, Hsla, InteractiveElement, IntoElement,
-    ParentElement, SharedString, Styled, UniformListScrollHandle, Window, div, px, uniform_list,
+    AnyElement, App, Context, Entity, FontWeight, Hsla, IntoElement, ParentElement, SharedString,
+    Styled, UniformListScrollHandle, Window, div, px, uniform_list,
 };
-use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::{ActiveTheme as _, Sizable as _, Theme, spinner::Spinner};
+use gpui_component::{ActiveTheme as _, Theme, spinner::Spinner};
 use strata_core::session::{DiffRequest, DiffTicket, DiffView, QueryTicket};
 
 use crate::data;
@@ -359,10 +358,9 @@ impl RepoView {
 
         let back = {
             let entity = entity.clone();
-            Button::new("file-history-back")
-                .xsmall()
+            crate::ui::button("file-history-back", "‹ History")
+                .size(crate::ui::ButtonSize::Tiny)
                 .ghost()
-                .label("‹ History")
                 .on_click(move |_, window, cx| {
                     entity.update(cx, |this, cx| {
                         this.close_file_history(window, cx);
@@ -498,54 +496,48 @@ impl RepoView {
                             style::now_epoch(),
                             list_colors.design.date_format,
                         );
-                        let mut element = div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .h(px(28.0))
-                            .w_full()
-                            .px_3()
-                            .text_size(px(list_colors.design.small()))
-                            .text_color(list_colors.foreground)
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .child(row.summary.to_string()),
-                            )
-                            .child(
-                                div()
-                                    .w(px(100.0))
-                                    .flex_none()
-                                    .truncate()
-                                    .text_color(list_colors.muted_foreground)
-                                    .child(row.author.to_string()),
-                            )
-                            .child(
-                                div()
-                                    .w(px(104.0))
-                                    .flex_none()
-                                    .text_color(list_colors.muted_foreground)
-                                    .child(date),
-                            )
-                            .child(
-                                div()
-                                    .w(px(58.0))
-                                    .flex_none()
-                                    .font_family(list_colors.mono.clone())
-                                    .text_color(list_colors.muted_foreground)
-                                    .child(row.id.to_string()),
-                            );
-                        if selected == Some(index) {
-                            element = element
-                                .bg(list_colors.selection)
-                                .border_l_2()
-                                .border_color(list_colors.accent);
-                        }
+                        let element = crate::ui::list_row(
+                            ("file-history-row", position),
+                            crate::ui::RowState::NORMAL.selected(selected == Some(index)),
+                            &list_colors.design,
+                        )
+                        .gap_3()
+                        .mx(px(0.0))
+                        .w_full()
+                        .px_3()
+                        .text_size(px(list_colors.design.small()))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .child(row.summary.to_string()),
+                        )
+                        .child(
+                            div()
+                                .w(px(100.0))
+                                .flex_none()
+                                .truncate()
+                                .text_color(list_colors.muted_foreground)
+                                .child(row.author.to_string()),
+                        )
+                        .child(
+                            div()
+                                .w(px(104.0))
+                                .flex_none()
+                                .text_color(list_colors.muted_foreground)
+                                .child(date),
+                        )
+                        .child(
+                            div()
+                                .w(px(58.0))
+                                .flex_none()
+                                .font_family(list_colors.mono.clone())
+                                .text_color(list_colors.muted_foreground)
+                                .child(row.id.to_string()),
+                        );
                         let entity = entity.clone();
                         element
-                            .id(("file-history-row", position))
                             .cursor_pointer()
                             .on_click(move |_event, _window, cx| {
                                 entity.update(cx, |this, cx| {
@@ -612,19 +604,19 @@ impl RepoView {
             );
 
         let body = if let Some(error) = &history.diff_error {
-            message(error, colors.danger)
+            message(error, colors.danger, colors)
         } else if history.selected.is_none() {
-            message("Select a commit", colors.muted_foreground)
+            message("Select a commit", colors.muted_foreground, colors)
         } else if let Some(view) = &history.view {
             if view.diff.binary {
-                message("Binary file", colors.muted_foreground)
+                message("Binary file", colors.muted_foreground, colors)
             } else if history.diff_rows.is_empty() {
-                message("No textual changes", colors.muted_foreground)
+                message("No textual changes", colors.muted_foreground, colors)
             } else {
                 self.history_diff_rows(colors, diff_colors, cx)
             }
         } else {
-            message("computing diff…", colors.muted_foreground)
+            message("computing diff…", colors.muted_foreground, colors)
         };
 
         div()
@@ -662,42 +654,24 @@ impl RepoView {
 fn list_message(text: &str, color: Hsla, colors: &Colors) -> AnyElement {
     div()
         .flex()
-        .flex_col()
-        .items_center()
-        .justify_center()
         .w(px(LIST_WIDTH))
         .flex_none()
-        .p_4()
         .border_r_1()
         .border_color(colors.border)
-        .text_size(px(11.0))
-        .text_color(color)
-        .child(text.to_owned())
+        .child(crate::ui::message(text, color, &colors.design))
         .into_any_element()
 }
 
-fn message(text: &str, color: Hsla) -> AnyElement {
-    div()
-        .flex()
-        .flex_1()
-        .min_h_0()
-        .items_center()
-        .justify_center()
-        .p_4()
-        .text_size(px(12.0))
-        .text_color(color)
-        .child(text.to_owned())
-        .into_any_element()
+fn message(text: &str, color: Hsla, colors: &Colors) -> AnyElement {
+    crate::ui::message(text, color, &colors.design).into_any_element()
 }
 
 #[derive(Clone)]
 struct Colors {
     design: Design,
     background: Hsla,
-    foreground: Hsla,
     muted_foreground: Hsla,
     border: Hsla,
-    selection: Hsla,
     title_bar: Hsla,
     accent: Hsla,
     danger: Hsla,
@@ -709,10 +683,8 @@ impl Colors {
         let design = Design::new(theme, settings);
         Self {
             background: design.background,
-            foreground: design.text,
             muted_foreground: design.muted,
             border: design.border,
-            selection: design.row_selected,
             title_bar: design.chrome,
             accent: design.accent,
             danger: design.remove_text,

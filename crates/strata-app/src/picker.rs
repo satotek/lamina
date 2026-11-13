@@ -15,17 +15,19 @@ use std::rc::Rc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable as _, FontWeight,
-    Hsla, InteractiveElement, IntoElement, KeyBinding, ParentElement, PathPromptOptions, Render,
+    InteractiveElement, IntoElement, KeyBinding, ParentElement, PathPromptOptions, Render,
     ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled, Subscription,
     UniformListScrollHandle, Window, actions, div, px, uniform_list,
 };
-use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{ActiveTheme as _, TitleBar};
 use strata_core::repo::Repo;
 
 use crate::recent::{RecentRepositories, RecentRepository};
 use crate::scrollbar::WithScrollbar as _;
+use crate::settings::Settings;
+use crate::style::Design;
+use crate::ui;
 use crate::workspace::Workspace;
 
 /// Welcome screen: the whole window, and the only keyboard focus.
@@ -326,12 +328,12 @@ impl Picker {
         self.focus.focus(window, cx);
     }
 
-    fn body(&self, cx: &App, palette: &Palette) -> AnyElement {
+    fn body(&self, cx: &App, design: &Design) -> AnyElement {
         let filtered = self.filtered(cx);
         let selected = self.selected;
         let entries = self.recents.clone();
         let list_entity = self.entity.clone();
-        let list_palette = palette.clone();
+        let list_design = design.clone();
         let now = crate::recent::now_seconds();
         let count = filtered.len();
         let filtered = Rc::new(filtered);
@@ -342,30 +344,26 @@ impl Picker {
 
         let mut column = div().flex().flex_col().gap_2().w_full();
         if self.mode == Mode::Page {
-            column = column
-                .child(
-                    div()
-                        .text_size(px(22.0))
-                        .font_weight(FontWeight::BOLD)
-                        .child("Strata"),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(palette.muted_foreground)
-                        .child(
-                            "Open a repository to browse its history, working tree and stashes.",
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .pt_1()
-                        .child(open_native_button(&self.entity, self.mode))
-                        .child(path_toggle_button(&self.entity, self.mode, self.path_mode)),
-                );
+            column =
+                column
+                    .child(
+                        div()
+                            .text_size(px(22.0))
+                            .font_weight(FontWeight::BOLD)
+                            .child("Strata"),
+                    )
+                    .child(div().text_size(px(12.0)).text_color(design.muted).child(
+                        "Open a repository to browse its history, working tree and stashes.",
+                    ))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .pt_1()
+                            .child(open_native_button(&self.entity, self.mode))
+                            .child(path_toggle_button(&self.entity, self.mode, self.path_mode)),
+                    );
         }
 
         column = column.child(
@@ -382,34 +380,20 @@ impl Picker {
         );
 
         column = column.child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .pt_1()
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(palette.muted_foreground)
-                        .child("RECENT REPOSITORIES"),
-                )
-                .child(
-                    div()
-                        .text_size(px(10.0))
-                        .text_color(palette.muted_foreground)
-                        .child(self.recents.len().to_string()),
-                ),
+            div().flex().items_center().justify_between().pt_1().child(
+                ui::section_header("picker-recent", "RECENT REPOSITORIES", design)
+                    .count(self.recents.len())
+                    .px(px(0.0))
+                    .h(px(20.0)),
+            ),
         );
 
         if let Some(error) = &self.error {
-            column = column.child(
-                div()
-                    .max_w(px(520.0))
-                    .text_size(px(11.0))
-                    .text_color(palette.danger)
-                    .child(error.clone()),
-            );
+            column = column.child(div().max_w(px(520.0)).child(ui::banner(
+                ui::BannerKind::Danger,
+                error.clone(),
+                design,
+            )));
         }
 
         if count == 0 {
@@ -417,7 +401,7 @@ impl Picker {
                 div()
                     .pt_2()
                     .text_size(px(11.5))
-                    .text_color(palette.muted_foreground)
+                    .text_color(design.muted)
                     .child(if self.recents.is_empty() {
                         "No recent repositories yet."
                     } else {
@@ -442,7 +426,7 @@ impl Picker {
                             position == selected,
                             now,
                             list_entity.clone(),
-                            &list_palette,
+                            &list_design,
                         )
                     })
                     .collect::<Vec<_>>()
@@ -459,7 +443,7 @@ impl Picker {
                 div()
                     .pt_1()
                     .text_size(px(10.5))
-                    .text_color(palette.muted_foreground)
+                    .text_color(design.muted)
                     .child(format!(
                         "↑/↓ choose · Enter open · {MODIFIER}+O open… · {MODIFIER}+L type a path"
                     )),
@@ -477,26 +461,24 @@ impl Picker {
 
 /// The system chooser button. Element ids carry the mode because the welcome
 /// screen and the dialog can be on screen at the same time.
-fn open_native_button(entity: &Entity<Picker>, mode: Mode) -> Button {
+fn open_native_button(entity: &Entity<Picker>, mode: Mode) -> ui::UiButton {
     let entity = entity.clone();
-    Button::new(format!("picker-open-native-{mode:?}"))
-        .label("Open repository…")
-        .primary()
-        .on_click(move |_, window, cx| {
+    ui::button(format!("picker-open-native-{mode:?}"), "Open repository…").on_click(
+        move |_, window, cx| {
             entity.update(cx, |picker, cx| picker.open_native(window, cx));
-        })
+        },
+    )
 }
 
 /// Switches the text field between filtering the list and taking a path.
-fn path_toggle_button(entity: &Entity<Picker>, mode: Mode, path_mode: bool) -> Button {
+fn path_toggle_button(entity: &Entity<Picker>, mode: Mode, path_mode: bool) -> ui::UiButton {
     let entity = entity.clone();
     let label: SharedString = if path_mode {
         "Use the recent list".into()
     } else {
         "Type a path…".into()
     };
-    Button::new(format!("picker-toggle-path-{mode:?}"))
-        .label(label)
+    ui::button(format!("picker-toggle-path-{mode:?}"), label)
         .ghost()
         .on_click(move |_, window, cx| {
             entity.update(cx, |picker, cx| picker.toggle_path_entry(window, cx));
@@ -510,7 +492,7 @@ fn recent_row(
     selected: bool,
     now: u64,
     entity: Entity<Picker>,
-    palette: &Palette,
+    design: &Design,
 ) -> AnyElement {
     let group = format!("recent-{position}");
     let name = entry.name();
@@ -543,14 +525,14 @@ fn recent_row(
                     div()
                         .truncate()
                         .text_size(px(12.0))
-                        .text_color(palette.foreground)
+                        .text_color(design.text)
                         .child(name),
                 )
                 .child(
                     div()
                         .truncate()
                         .text_size(px(10.5))
-                        .text_color(palette.muted_foreground)
+                        .text_color(design.muted)
                         .child(path),
                 ),
         )
@@ -558,7 +540,7 @@ fn recent_row(
             div()
                 .flex_none()
                 .text_size(px(10.5))
-                .text_color(palette.muted_foreground)
+                .text_color(design.muted)
                 .child(opened),
         );
 
@@ -570,7 +552,7 @@ fn recent_row(
         .rounded_sm()
         .cursor_pointer()
         .text_size(px(12.0))
-        .text_color(palette.muted_foreground)
+        .text_color(design.muted)
         // Hidden until the row is hovered, so the list reads as names rather
         // than names with buttons. It stays clickable once shown.
         .opacity(0.0)
@@ -589,27 +571,27 @@ fn recent_row(
         .w_full()
         .px_2()
         .rounded_sm()
-        .hover(|style| style.bg(palette.selection))
+        .hover(|style| style.bg(design.row_selected))
         .child(open)
         .child(remove);
     if selected {
-        row = row.bg(palette.selection);
+        row = row.bg(design.row_selected);
     }
     row.into_any_element()
 }
 
 impl Render for Picker {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let palette = Palette::from_theme(cx.theme());
-        let body = self.body(cx, &palette);
+        let design = Design::new(cx.theme(), Settings::get(cx));
+        let body = self.body(cx, &design);
 
         match self.mode {
             Mode::Page => div()
                 .size_full()
                 .flex()
                 .flex_col()
-                .bg(palette.background)
-                .text_color(palette.foreground)
+                .bg(design.background)
+                .text_color(design.text)
                 .track_focus(&self.focus)
                 .key_context(PICKER_PAGE)
                 .on_action(cx.listener(|this, _: &PickerPrevious, _, cx| this.step(-1, cx)))
@@ -628,7 +610,7 @@ impl Render for Picker {
                         div()
                             .px_3()
                             .text_size(px(11.0))
-                            .text_color(palette.muted_foreground)
+                            .text_color(design.muted)
                             .child("Welcome"),
                     ),
                 )
@@ -658,33 +640,11 @@ impl Render for Picker {
                     div()
                         .pb_1()
                         .text_size(px(11.0))
-                        .text_color(palette.muted_foreground)
+                        .text_color(design.muted)
                         .child("Choose a repository to open in this window."),
                 )
                 .child(body)
                 .into_any_element(),
-        }
-    }
-}
-
-/// The colours the picker paints with, from the shared theme.
-#[derive(Clone)]
-struct Palette {
-    background: Hsla,
-    foreground: Hsla,
-    muted_foreground: Hsla,
-    selection: Hsla,
-    danger: Hsla,
-}
-
-impl Palette {
-    fn from_theme(theme: &gpui_component::Theme) -> Self {
-        Self {
-            background: theme.background,
-            foreground: theme.foreground,
-            muted_foreground: theme.muted_foreground,
-            selection: theme.list_active,
-            danger: theme.danger,
         }
     }
 }

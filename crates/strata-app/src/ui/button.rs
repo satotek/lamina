@@ -1,0 +1,207 @@
+//! Buttons: the one place the app decides what a button looks like.
+//!
+//! Every button is a [`gpui_component::button::Button`] underneath, so it keeps
+//! that component's focus ring, keyboard activation, disabled styling and
+//! accessibility metadata — and its theme palette, which is what keeps buttons
+//! consistent with the inputs, checkboxes and dialogs beside them. This module
+//! only names the four roles the app uses and the four sizes it draws, so a
+//! caller writes `ui::button(...).danger()` instead of picking colours.
+
+use std::rc::Rc;
+
+use gpui::{
+    AnyElement, App, ClickEvent, ElementId, IntoElement, ParentElement as _, RenderOnce,
+    SharedString, StyleRefinement, Styled, Window,
+};
+use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::{Disableable as _, Icon, Sizable as _, Size, StyledExt as _};
+
+/// What a button means, which decides its fill.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ButtonKind {
+    /// A filled button: the one thing the surface wants the user to do.
+    #[default]
+    Primary,
+    /// A destructive action, in the theme's danger colour, so it never reads as
+    /// the safe default.
+    Danger,
+    /// An ordinary bordered button.
+    Normal,
+    /// A borderless button for toolbars and header actions.
+    Ghost,
+}
+
+/// How much room a button takes.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ButtonSize {
+    /// The component's extra-small size (20 px), for a button inside a diff row.
+    Tiny,
+    /// 24 px: list headers and inline actions.
+    #[default]
+    Small,
+    /// 32 px: dialog footers and the commit box.
+    Medium,
+}
+
+type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+
+/// A button built from a [`ButtonKind`] and a [`ButtonSize`].
+///
+/// The builder stores intent and builds the component at render time, so the
+/// order of `.kind()` and `.on_click()` never matters.
+#[derive(IntoElement)]
+pub struct UiButton {
+    id: ElementId,
+    label: Option<SharedString>,
+    icon: Option<Icon>,
+    kind: ButtonKind,
+    size: ButtonSize,
+    disabled: bool,
+    tooltip: Option<SharedString>,
+    on_click: Option<ClickHandler>,
+    children: Vec<AnyElement>,
+    style: StyleRefinement,
+}
+
+/// A labelled button; `Primary` unless the caller says otherwise.
+pub fn button(id: impl Into<ElementId>, label: impl Into<SharedString>) -> UiButton {
+    UiButton::new(id).label(label)
+}
+
+/// A square, icon-only button. The accessible name comes from its tooltip.
+pub fn icon_button(id: impl Into<ElementId>, icon: impl Into<Icon>) -> UiButton {
+    UiButton::new(id).icon(icon)
+}
+
+/// A button a caller fills with its own content, for the few shapes that are
+/// more than an icon and a label (the title bar's icon-over-label actions).
+pub fn content_button(id: impl Into<ElementId>) -> UiButton {
+    UiButton::new(id)
+}
+
+impl UiButton {
+    fn new(id: impl Into<ElementId>) -> Self {
+        Self {
+            id: id.into(),
+            label: None,
+            icon: None,
+            kind: ButtonKind::default(),
+            size: ButtonSize::default(),
+            disabled: false,
+            tooltip: None,
+            on_click: None,
+            children: Vec::new(),
+            style: StyleRefinement::default(),
+        }
+    }
+
+    pub fn label(mut self, label: impl Into<SharedString>) -> Self {
+        self.label = Some(label.into());
+        self
+    }
+
+    pub fn icon(mut self, icon: impl Into<Icon>) -> Self {
+        self.icon = Some(icon.into());
+        self
+    }
+
+    pub fn kind(mut self, kind: ButtonKind) -> Self {
+        self.kind = kind;
+        self
+    }
+
+    pub fn size(mut self, size: ButtonSize) -> Self {
+        self.size = size;
+        self
+    }
+
+    /// Shorthand for [`UiButton::kind`] with [`ButtonKind::Danger`].
+    pub fn danger(self) -> Self {
+        self.kind(ButtonKind::Danger)
+    }
+
+    /// Shorthand for [`UiButton::kind`] with [`ButtonKind::Ghost`].
+    pub fn ghost(self) -> Self {
+        self.kind(ButtonKind::Ghost)
+    }
+
+    pub fn disabled(mut self, disabled: bool) -> Self {
+        self.disabled = disabled;
+        self
+    }
+
+    pub fn tooltip(mut self, tooltip: impl Into<SharedString>) -> Self {
+        self.tooltip = Some(tooltip.into());
+        self
+    }
+
+    pub fn on_click(
+        mut self,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_click = Some(Rc::new(handler));
+        self
+    }
+
+    /// Appends content after the label, for a key hint or a badge.
+    pub fn child(mut self, child: impl IntoElement) -> Self {
+        self.children.push(child.into_any_element());
+        self
+    }
+}
+
+impl Styled for UiButton {
+    fn style(&mut self) -> &mut StyleRefinement {
+        &mut self.style
+    }
+}
+
+impl RenderOnce for UiButton {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let Self {
+            id,
+            label,
+            icon,
+            kind,
+            size,
+            disabled,
+            tooltip,
+            on_click,
+            children,
+            style,
+        } = self;
+
+        let mut button = Button::new(id);
+        let labelled = label.is_some();
+        if let Some(label) = label {
+            button = button.label(label);
+        }
+        if let Some(icon) = icon {
+            button = button.icon(icon);
+        }
+        button = match kind {
+            ButtonKind::Primary => button.primary(),
+            ButtonKind::Danger => button.danger(),
+            ButtonKind::Normal => button,
+            ButtonKind::Ghost => button.ghost(),
+        };
+        button = button.with_size(match size {
+            ButtonSize::Tiny => Size::XSmall,
+            ButtonSize::Small => Size::Small,
+            ButtonSize::Medium => Size::Medium,
+        });
+        button = button.disabled(disabled);
+        if let Some(tooltip) = tooltip {
+            button = button.tooltip(tooltip.clone());
+            // An icon-only button has no label for a screen reader to announce,
+            // so its tooltip doubles as the accessible name.
+            if !labelled {
+                button = button.accessibility_label(tooltip);
+            }
+        }
+        if let Some(on_click) = on_click {
+            button = button.on_click(move |event, window, cx| on_click(event, window, cx));
+        }
+        button.children(children).refine_style(&style)
+    }
+}

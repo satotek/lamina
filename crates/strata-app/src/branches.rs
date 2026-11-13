@@ -11,19 +11,17 @@ use std::collections::HashMap;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, Entity, FocusHandle, FontWeight, Hsla,
-    InteractiveElement, IntoElement, KeyBinding, ParentElement, Pixels, Size,
+    AnyElement, App, ClickEvent, Context, Div, ElementId, Entity, FocusHandle, FontWeight, Hsla,
+    InteractiveElement, IntoElement, KeyBinding, ParentElement, Pixels, Size, Stateful,
     StatefulInteractiveElement as _, Styled, Window, actions, anchored, deferred, div, hsla, point,
     px,
 };
 use gpui_component::{
-    Icon, Sizable as _,
-    button::{Button, ButtonVariants as _},
+    Icon,
     checkbox::Checkbox,
     input::{Input, InputState},
     menu::{ContextMenuExt as _, PopupMenuItem},
 };
-use gpui_kit_assets::IconName;
 use strata_core::session::{Operation, OperationId};
 use strata_core::{RefKind, UpstreamInfo};
 
@@ -161,18 +159,16 @@ pub(crate) struct Branches {
     /// `FocusHandle` needs an `App`, and reused: only one dialog is open and it
     /// is the only element tracking the handle while it lives.
     dialog_focus: Option<FocusHandle>,
+    /// A branch git refused to delete because it is not fully merged. The view
+    /// offers the forced delete through [`crate::ui::confirm`], which needs a
+    /// window the session event does not have.
+    force_delete: Option<String>,
 }
 
 struct Running {
     label: String,
-    /// Set for a delete, which can be offered again with `force`.
-    delete: Option<RunningDelete>,
-}
-
-struct RunningDelete {
-    name: String,
-    forced: bool,
-    viewport: Size<Pixels>,
+    /// Set for an unforced delete, which can be offered again with `force`.
+    delete: Option<String>,
 }
 
 struct Dialog {
@@ -185,20 +181,12 @@ struct Dialog {
 
 enum DialogKind {
     Create(CreateForm),
-    Delete(DeleteForm),
 }
 
 struct CreateForm {
     input: Entity<InputState>,
     start: BranchStart,
     checkout: bool,
-    error: Option<String>,
-}
-
-struct DeleteForm {
-    name: String,
-    /// `true` once the plain delete has failed and the button must force.
-    force: bool,
     error: Option<String>,
 }
 
@@ -298,15 +286,20 @@ impl Branches {
                     Section::Tags => {
                         let tag = name.clone();
                         let entity = entity.clone();
-                        row_with_icon(Some(style::glyph::TAG), name, colors)
-                            .id(("tag", index))
-                            .cursor_pointer()
-                            .on_click(move |_, window, cx| {
-                                entity.update(cx, |view, cx| {
-                                    view.reveal_ref(RefKind::Tag, &tag, window, cx)
-                                });
-                            })
-                            .into_any_element()
+                        row_with_icon(
+                            ("tag", index),
+                            Some(style::glyph::TAG),
+                            name,
+                            crate::ui::RowState::NORMAL,
+                            colors,
+                        )
+                        .cursor_pointer()
+                        .on_click(move |_, window, cx| {
+                            entity.update(cx, |view, cx| {
+                                view.reveal_ref(RefKind::Tag, &tag, window, cx)
+                            });
+                        })
+                        .into_any_element()
                     }
                     // Stash rows are listed in stash@{N} order. A click shows the
                     // stash commit in the history; the menu applies, pops or
@@ -314,13 +307,14 @@ impl Branches {
                     Section::Stashes => {
                         let menu_source = entity.clone();
                         let click_entity = entity.clone();
-                        let row_element = row(name, colors)
-                            .id(("stash", index))
-                            .cursor_pointer()
-                            .on_click(move |_, window, cx| {
-                                click_entity
-                                    .update(cx, |view, cx| view.reveal_stash(index, window, cx));
-                            });
+                        let row_element =
+                            row(("stash", index), name, crate::ui::RowState::NORMAL, colors)
+                                .cursor_pointer()
+                                .on_click(move |_, window, cx| {
+                                    click_entity.update(cx, |view, cx| {
+                                        view.reveal_stash(index, window, cx)
+                                    });
+                                });
                         if !enabled {
                             row_element.into_any_element()
                         } else {
@@ -379,39 +373,24 @@ impl Branches {
     ) -> AnyElement {
         let open = !self.collapsed[section.index()];
         let index = section.index();
-        let mut header = div()
-            .id(("branch-section", index))
-            .flex()
-            .items_center()
-            .gap(px(6.0))
-            .h(px(26.0))
-            .px_2()
-            .rounded(px(7.0))
-            .cursor_pointer()
-            .text_size(px(colors.design.tiny()))
-            .font_weight(FontWeight::SEMIBOLD)
-            .text_color(colors.muted_foreground)
-            .hover(|style| style.bg(colors.design.selected))
-            .child(icon(
-                if open {
-                    IconName::ChevronDown
-                } else {
-                    IconName::ChevronRight
-                },
-                12.0,
-                colors.muted_foreground,
-            ))
-            .child(glyph(section.icon(), 14.0, colors.muted_foreground))
-            .child(div().flex_1().min_w_0().truncate().child(section.title()))
-            .child(
-                div()
-                    .flex_none()
-                    .text_size(px(10.0))
-                    .font_weight(FontWeight::NORMAL)
-                    .child(count.to_string()),
-            );
+        let entity = entity.clone();
+        let mut header =
+            crate::ui::section_header(("branch-section", index), section.title(), &colors.design)
+                .count(count)
+                .disclosure(open)
+                .icon(style::glyph_icon(
+                    section.icon(),
+                    14.0,
+                    colors.muted_foreground,
+                ))
+                .on_click(move |_, cx| {
+                    entity.update(cx, |view, cx| {
+                        view.branches.toggle(index);
+                        cx.notify();
+                    });
+                });
         if busy && section == Section::Local {
-            header = header.child(
+            header = header.trailing(
                 div()
                     .flex_none()
                     .text_size(px(9.0))
@@ -419,16 +398,7 @@ impl Branches {
                     .child("working…"),
             );
         }
-
-        let entity = entity.clone();
-        header
-            .on_click(move |_, _, cx| {
-                entity.update(cx, |view, cx| {
-                    view.branches.toggle(index);
-                    cx.notify();
-                });
-            })
-            .into_any_element()
+        header.into_any_element()
     }
 
     /// A remote's own collapsing header, above its branch list.
@@ -443,43 +413,24 @@ impl Branches {
         let group = group.to_owned();
         let click_group = group.clone();
         let entity = entity.clone();
-        div()
-            .id(format!("remote-group-{group}"))
-            .flex()
-            .items_center()
-            .gap(px(8.0))
-            .h(px(28.0))
-            .px_2()
-            .rounded(px(7.0))
-            .cursor_pointer()
+        crate::ui::section_header(format!("remote-group-{group}"), group, &colors.design)
+            .count(count)
+            .disclosure(!collapsed)
+            .icon(style::glyph_icon(
+                style::glyph::CLOUD,
+                14.0,
+                colors.sidebar_foreground,
+            ))
             .text_size(px(colors.design.small()))
             .text_color(colors.sidebar_foreground)
-            .hover(|style| style.bg(colors.design.selected))
-            .on_click(move |_, _, cx| {
+            .h(px(28.0))
+            .on_click(move |_, cx| {
                 let group = click_group.clone();
                 entity.update(cx, |view, cx| {
                     view.branches.toggle_remote_group(group);
                     cx.notify();
                 });
             })
-            .child(icon(
-                if collapsed {
-                    IconName::ChevronRight
-                } else {
-                    IconName::ChevronDown
-                },
-                12.0,
-                colors.muted_foreground,
-            ))
-            .child(glyph(style::glyph::CLOUD, 14.0, colors.sidebar_foreground))
-            .child(div().flex_1().min_w_0().truncate().child(group))
-            .child(
-                div()
-                    .flex_none()
-                    .text_size(px(10.0))
-                    .text_color(colors.muted_foreground)
-                    .child(count.to_string()),
-            )
             .into_any_element()
     }
 
@@ -495,13 +446,14 @@ impl Branches {
         colors: &Colors,
         entity: &Entity<RepoView>,
     ) -> AnyElement {
-        let mut row = row_with_icon(Some(style::glyph::BRANCH), name, colors)
-            .id(("local-branch", index))
-            .cursor_pointer()
-            .when(active, |row| {
-                row.bg(colors.design.selected)
-                    .font_weight(FontWeight::SEMIBOLD)
-            });
+        let mut row = row_with_icon(
+            ("local-branch", index),
+            Some(style::glyph::BRANCH),
+            name,
+            crate::ui::RowState::NORMAL.head(active),
+            colors,
+        )
+        .cursor_pointer();
         if let Some(label) = upstream.and_then(upstream_label) {
             row = row.child(
                 div()
@@ -603,7 +555,7 @@ impl Branches {
                         move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                             let branch = branch.clone();
                             entity.update(cx, |view, cx| {
-                                view.open_delete_dialog(branch, window, cx);
+                                view.confirm_delete_branch(branch, window, cx);
                             });
                         }
                     }),
@@ -624,7 +576,13 @@ impl Branches {
         entity: &Entity<RepoView>,
     ) -> AnyElement {
         let label = local_name_for_remote(name).unwrap_or(name);
-        let row_element = row(label, colors).id(("remote-branch", index)).pl(px(42.0));
+        let row_element = row(
+            ("remote-branch", index),
+            label,
+            crate::ui::RowState::NORMAL,
+            colors,
+        )
+        .pl(px(42.0));
         let Some(local_name) = local_name_for_remote(name).map(str::to_owned) else {
             return row_element.into_any_element();
         };
@@ -715,10 +673,8 @@ impl Branches {
 
     fn dialog_overlay(&self, colors: &Colors, entity: &Entity<RepoView>) -> Option<AnyElement> {
         let dialog = self.dialog.as_ref()?;
-        let card = match &dialog.kind {
-            DialogKind::Create(form) => create_card(form, colors, entity, dialog.focus.as_ref()),
-            DialogKind::Delete(form) => delete_card(form, colors, entity, dialog.focus.as_ref()),
-        };
+        let DialogKind::Create(form) = &dialog.kind;
+        let card = create_card(form, colors, entity, dialog.focus.as_ref());
         let viewport = dialog.viewport;
 
         // A deferred layer so the dialog is not clipped by the sidebar. The app
@@ -743,19 +699,15 @@ impl Branches {
         )
     }
 
-    pub(crate) fn start(
-        &mut self,
-        id: OperationId,
-        label: String,
-        delete: Option<(String, bool)>,
-        viewport: Size<Pixels>,
-    ) {
-        let delete = delete.map(|(name, forced)| RunningDelete {
-            name,
-            forced,
-            viewport,
-        });
+    pub(crate) fn start(&mut self, id: OperationId, label: String, delete: Option<(String, bool)>) {
+        // A forced delete that fails again is reported, not offered a third time.
+        let delete = delete.and_then(|(name, forced)| (!forced).then_some(name));
         self.running.insert(id, Running { label, delete });
+    }
+
+    /// Takes the branch to offer a forced delete for, if git refused one.
+    pub(crate) fn take_force_delete(&mut self) -> Option<String> {
+        self.force_delete.take()
     }
 
     /// Records that an operation finished. Returns the label it was started
@@ -763,19 +715,10 @@ impl Branches {
     /// the force-delete offer when git refused an unforced delete.
     pub(crate) fn finish(&mut self, id: OperationId, error: Option<&str>) -> Option<String> {
         let running = self.running.remove(&id)?;
-        if let (Some(error), Some(delete)) = (error, running.delete)
-            && !delete.forced
+        if let (Some(error), Some(name)) = (error, running.delete)
             && is_not_fully_merged(error)
         {
-            self.dialog = Some(Dialog {
-                kind: DialogKind::Delete(DeleteForm {
-                    name: delete.name,
-                    force: true,
-                    error: Some("The branch is not fully merged.".to_owned()),
-                }),
-                viewport: delete.viewport,
-                focus: self.dialog_focus.clone(),
-            });
+            self.force_delete = Some(name);
         }
         Some(running.label)
     }
@@ -807,29 +750,12 @@ impl Branches {
         self.dialog_focus = Some(focus);
     }
 
-    /// The handle a dialog card tracks, if the view has created one.
-    pub(crate) fn dialog_focus(&self) -> Option<FocusHandle> {
-        self.dialog_focus.clone()
-    }
-
     pub(crate) fn open_create(&mut self, input: Entity<InputState>, start: BranchStart) {
         self.dialog = Some(Dialog {
             kind: DialogKind::Create(CreateForm {
                 input,
                 start,
                 checkout: true,
-                error: None,
-            }),
-            viewport: self.viewport,
-            focus: self.dialog_focus.clone(),
-        });
-    }
-
-    pub(crate) fn open_delete(&mut self, name: String) {
-        self.dialog = Some(Dialog {
-            kind: DialogKind::Delete(DeleteForm {
-                name,
-                force: false,
                 error: None,
             }),
             viewport: self.viewport,
@@ -863,9 +789,10 @@ impl Branches {
 
     /// The create dialog's input, validated. `None` when it is not open.
     pub(crate) fn create_request(&self, cx: &App) -> Option<Result<CreateRequest, String>> {
-        let DialogKind::Create(form) = &self.dialog.as_ref()?.kind else {
-            return None;
-        };
+        let Dialog {
+            kind: DialogKind::Create(form),
+            ..
+        } = self.dialog.as_ref()?;
         let name = form.input.read(cx).value().to_string();
         Some(match validate_branch_name(&name) {
             Ok(()) => Ok(CreateRequest {
@@ -875,14 +802,6 @@ impl Branches {
             }),
             Err(message) => Err(message.to_owned()),
         })
-    }
-
-    /// The delete dialog's target, or `None` when it is not open.
-    pub(crate) fn delete_request(&self) -> Option<(String, bool)> {
-        let DialogKind::Delete(form) = &self.dialog.as_ref()?.kind else {
-            return None;
-        };
-        Some((form.name.clone(), form.force))
     }
 }
 
@@ -921,30 +840,33 @@ fn checkout_remote(
     }
 }
 
-fn row(name: &str, colors: &Colors) -> Div {
-    row_with_icon(None, name, colors)
+fn row(
+    id: impl Into<ElementId>,
+    name: &str,
+    state: crate::ui::RowState,
+    colors: &Colors,
+) -> Stateful<Div> {
+    row_with_icon(id, None, name, state, colors)
 }
 
-fn row_with_icon(item_icon: Option<&'static [u8]>, name: &str, colors: &Colors) -> Div {
+fn row_with_icon(
+    id: impl Into<ElementId>,
+    item_icon: Option<&'static [u8]>,
+    name: &str,
+    state: crate::ui::RowState,
+    colors: &Colors,
+) -> Stateful<Div> {
     let name = strip_stash_prefix(name);
-    div()
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap_2()
+    let row = crate::ui::list_row(id, state, &colors.design)
         .h(px(28.0))
-        .px_2()
         .rounded(px(7.0))
         .text_size(px(colors.design.small()))
-        .text_color(colors.sidebar_foreground)
-        .when_some(item_icon, |row, item_icon| {
-            row.child(glyph(item_icon, 14.0, colors.muted_foreground))
-        })
-        .child(div().flex_1().min_w_0().truncate().child(name.to_owned()))
-}
-
-fn icon(name: IconName, size: f32, color: Hsla) -> Icon {
-    Icon::new(name).with_size(px(size)).text_color(color)
+        .text_color(colors.sidebar_foreground);
+    let row = match item_icon {
+        Some(item_icon) => row.child(glyph(item_icon, 14.0, colors.muted_foreground)),
+        None => row,
+    };
+    row.child(div().flex_1().min_w_0().truncate().child(name.to_owned()))
 }
 
 fn glyph(data: &'static [u8], size: f32, color: Hsla) -> Icon {
@@ -1057,83 +979,13 @@ fn create_card(
             .gap_2()
             .pt_1()
             .child(
-                Button::new("branch-create-cancel")
-                    .label("Cancel")
+                crate::ui::button("branch-create-cancel", "Cancel")
+                    .size(crate::ui::ButtonSize::Medium)
                     .on_click(cancel),
             )
             .child(
-                Button::new("branch-create-ok")
-                    .label("Create branch")
-                    .primary()
-                    .on_click(confirm),
-            ),
-    )
-    .into_any_element()
-}
-
-fn delete_card(
-    form: &DeleteForm,
-    colors: &Colors,
-    entity: &Entity<RepoView>,
-    focus: Option<&FocusHandle>,
-) -> AnyElement {
-    let confirm = {
-        let entity = entity.clone();
-        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-            entity.update(cx, |view, cx| view.submit_branch_dialog(window, cx));
-        }
-    };
-    let cancel = {
-        let entity = entity.clone();
-        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-            entity.update(cx, |view, cx| {
-                view.branches.close_dialog();
-                view.focus_root(window, cx);
-                cx.notify();
-            });
-        }
-    };
-
-    let mut card = dialog_card(colors, entity, focus)
-        .child(
-            div()
-                .text_size(px(13.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(format!("Delete branch {}", form.name)),
-        )
-        .child(
-            div()
-                .text_size(px(11.0))
-                .text_color(colors.muted_foreground)
-                .child(if form.force {
-                    "The branch is not fully merged. Forcing the delete loses the commits it points at."
-                } else {
-                    "Delete this branch? Its commits stay in the repository until they are garbage collected."
-                }),
-        );
-    if let Some(error) = &form.error {
-        card = card.child(
-            div()
-                .text_size(px(11.0))
-                .text_color(colors.danger)
-                .child(error.clone()),
-        );
-    }
-    card.child(
-        div()
-            .flex()
-            .justify_end()
-            .gap_2()
-            .pt_1()
-            .child(
-                Button::new("branch-delete-cancel")
-                    .label("Cancel")
-                    .on_click(cancel),
-            )
-            .child(
-                Button::new("branch-delete-ok")
-                    .label(if form.force { "Force delete" } else { "Delete" })
-                    .danger()
+                crate::ui::button("branch-create-ok", "Create branch")
+                    .size(crate::ui::ButtonSize::Medium)
                     .on_click(confirm),
             ),
     )
@@ -1174,6 +1026,38 @@ fn dialog_card(colors: &Colors, entity: &Entity<RepoView>, focus: Option<&FocusH
         .key_context(BRANCH_DIALOG)
         .on_action(confirm)
         .on_action(cancel)
+}
+
+/// Offers the forced delete after git refused to delete an unmerged branch.
+///
+/// The session event that learns about the refusal has no window, so the dialog
+/// is opened on the active one. It always asks, even when confirmations are off:
+/// the forced delete is a different, stronger action than the one the user
+/// chose, and skipping the ask would silently escalate it.
+pub(crate) fn offer_force_delete(entity: Entity<RepoView>, name: String, cx: &mut App) {
+    let Some(handle) = cx
+        .active_window()
+        .or_else(|| cx.windows().into_iter().next())
+    else {
+        log::warn!("cannot offer the forced delete without a window");
+        return;
+    };
+    let _ = handle.update(cx, |_, window, cx| {
+        crate::ui::confirm(
+            window,
+            cx,
+            crate::ui::Confirm::new(
+                format!("Delete branch {name}?"),
+                "The branch is not fully merged. Forcing the delete loses the commits it points at.",
+            )
+            .ok_label("Force delete")
+            .always_ask(),
+            move |window, cx| {
+                let name = name.clone();
+                entity.update(cx, |view, cx| view.delete_branch(name, true, window, cx));
+            },
+        );
+    });
 }
 
 /// `git check-ref-format` rules that apply to `refs/heads/<name>`, plus the one
@@ -1380,13 +1264,12 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_unforced_delete_opens_the_force_offer() {
+    fn a_failed_unforced_delete_leaves_a_force_offer() {
         let mut branches = Branches::default();
         branches.start(
             OperationId(7),
             "delete branch topic".to_owned(),
             Some(("topic".to_owned(), false)),
-            Size::default(),
         );
         let label = branches.finish(
             OperationId(7),
@@ -1394,9 +1277,14 @@ mod tests {
         );
         assert_eq!(label.as_deref(), Some("delete branch topic"));
         assert_eq!(
-            branches.delete_request(),
-            Some(("topic".to_owned(), true)),
+            branches.take_force_delete().as_deref(),
+            Some("topic"),
             "the offer must rerun the delete with force"
+        );
+        assert_eq!(
+            branches.take_force_delete(),
+            None,
+            "the offer is taken once, so it cannot reopen by itself"
         );
     }
 
@@ -1407,12 +1295,11 @@ mod tests {
             OperationId(8),
             "delete branch topic".to_owned(),
             Some(("topic".to_owned(), true)),
-            Size::default(),
         );
         branches.finish(
             OperationId(8),
             Some("error: the branch 'topic' is not fully merged"),
         );
-        assert_eq!(branches.delete_request(), None);
+        assert_eq!(branches.take_force_delete(), None);
     }
 }

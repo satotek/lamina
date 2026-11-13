@@ -10,10 +10,9 @@ use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Entity, FocusHandle, FontWeight, Hsla,
-    InteractiveElement, IntoElement, KeyBinding, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, UniformListScrollHandle, Window, actions,
-    div, px, uniform_list,
+    AnyElement, App, Context, Entity, FocusHandle, FontWeight, Hsla, InteractiveElement,
+    IntoElement, KeyBinding, ParentElement, SharedString, StatefulInteractiveElement, Styled,
+    Subscription, UniformListScrollHandle, Window, actions, div, px, uniform_list,
 };
 use gpui_component::input::{InputEvent, Textarea, TextareaState};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
@@ -202,14 +201,6 @@ impl PendingKind {
     }
 }
 
-/// A destructive action waiting for confirmation.
-struct Confirm {
-    title: String,
-    detail: String,
-    operation: Operation,
-    kind: PendingKind,
-}
-
 /// State of the working-tree view. Rendering reads it, [`RepoView`] updates it
 /// from session events and user input.
 #[derive(Default)]
@@ -246,7 +237,6 @@ pub struct WorktreePanel {
     pending: Option<(OperationId, PendingKind)>,
     /// Set while a submitted operation has not refreshed the status yet.
     dirty: bool,
-    confirm: Option<Confirm>,
     error: Option<String>,
     notice: Option<String>,
 
@@ -457,21 +447,6 @@ impl WorktreePanel {
         self.dirty = true;
         self.error = None;
         self.notice = None;
-    }
-
-    fn begin_confirm(
-        &mut self,
-        title: impl Into<String>,
-        detail: impl Into<String>,
-        kind: PendingKind,
-        operation: Operation,
-    ) {
-        self.confirm = Some(Confirm {
-            title: title.into(),
-            detail: detail.into(),
-            operation,
-            kind,
-        });
     }
 
     fn set_amend(
@@ -747,28 +722,68 @@ impl RepoView {
         cx.notify();
     }
 
+    /// Asks before throwing away one path's working-tree changes.
+    ///
+    /// The confirmation is a real dialog, not an overlay: it holds focus, so
+    /// `Enter` and `Esc` belong to it and nothing behind it can act while it is
+    /// open. Nothing is remembered here either, so a cancelled dialog cannot
+    /// come back on a later frame.
     pub(crate) fn discard_worktree_path(
         &mut self,
         path: String,
         untracked: bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if untracked {
-            self.worktree.begin_confirm(
+        let (title, detail, ok_label, kind, operation) = if untracked {
+            (
                 format!("Delete {path}?"),
-                "The untracked file is removed from disk.",
+                "The untracked file is removed from disk.".to_owned(),
+                "Delete",
                 PendingKind::Delete,
                 Operation::DeleteUntracked(vec![path]),
-            );
+            )
         } else {
-            self.worktree.begin_confirm(
+            (
                 format!("Discard changes to {path}?"),
-                "The working-tree changes are lost; this cannot be undone.",
+                "The working-tree changes are lost; this cannot be undone.".to_owned(),
+                "Discard",
                 PendingKind::Discard,
                 Operation::DiscardPaths(vec![path]),
-            );
-        }
-        cx.notify();
+            )
+        };
+        self.ask_destructive(
+            window,
+            cx,
+            crate::ui::Confirm::new(title, detail).ok_label(ok_label),
+            kind,
+            operation,
+        );
+    }
+
+    /// Opens the confirmation dialog for `operation`, which runs only when the
+    /// user accepts it (or immediately, when the settings turn confirmations
+    /// off).
+    fn ask_destructive(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        confirm: crate::ui::Confirm,
+        kind: PendingKind,
+        operation: Operation,
+    ) {
+        // A dialog hands focus back to whatever had it when it opened. The
+        // context menu that usually offers these is already closing and its
+        // focus handle dies with it, so give the dialog the panel's handle and
+        // the panel keeps its keys (Enter, s, u) after the dialog closes.
+        let focus = self.worktree.ensure_focus(cx);
+        window.focus(&focus, cx);
+        let entity = cx.entity();
+        crate::ui::confirm(window, cx, confirm, move |_, cx| {
+            entity.update(cx, |view, cx| {
+                view.run_confirmed(kind, operation.clone(), cx);
+            });
+        });
     }
 
     pub(crate) fn stage_all_worktree(&mut self, cx: &mut Context<Self>) {
@@ -814,6 +829,7 @@ impl RepoView {
         &mut self,
         hunk: usize,
         action: HunkAction,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let Some(selected) = self.worktree.selected.clone() else {
@@ -826,10 +842,15 @@ impl RepoView {
         if selection.is_empty() {
             return;
         }
-        self.line_operation_for(selected, selection, action, cx);
+        self.line_operation_for(selected, selection, action, window, cx);
     }
 
-    pub(crate) fn line_operation(&mut self, action: LineAction, cx: &mut Context<Self>) {
+    pub(crate) fn line_operation(
+        &mut self,
+        action: LineAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(selected) = self.worktree.selected.clone() else {
             return;
         };
@@ -837,7 +858,7 @@ impl RepoView {
         if selection.is_empty() {
             return;
         }
-        self.line_operation_for(selected, selection, action.into(), cx);
+        self.line_operation_for(selected, selection, action.into(), window, cx);
     }
 
     fn line_operation_for(
@@ -845,31 +866,38 @@ impl RepoView {
         selected: Selected,
         selection: LineSelection,
         action: HunkAction,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let path = selected.path.clone();
+        let operation = match (selected.side, action) {
+            (Side::Unstaged, HunkAction::Stage) => Operation::StageLines { path, selection },
+            (Side::Staged, HunkAction::Unstage) => Operation::UnstageLines { path, selection },
+            (Side::Unstaged, HunkAction::Discard) => {
+                self.ask_destructive(
+                    window,
+                    cx,
+                    crate::ui::Confirm::new(
+                        "Discard selected lines?",
+                        "The selected changes are removed from the working tree.",
+                    )
+                    .ok_label("Discard"),
+                    PendingKind::Discard,
+                    Operation::DiscardLines { path, selection },
+                );
+                return;
+            }
+            _ => return,
+        };
         let Some(session) = self.session.as_ref() else {
             return;
         };
-        let path = selected.path.clone();
-        match (selected.side, action) {
-            (Side::Unstaged, HunkAction::Stage) => self.worktree.run(
-                session,
-                PendingKind::Stage,
-                Operation::StageLines { path, selection },
-            ),
-            (Side::Staged, HunkAction::Unstage) => self.worktree.run(
-                session,
-                PendingKind::Unstage,
-                Operation::UnstageLines { path, selection },
-            ),
-            (Side::Unstaged, HunkAction::Discard) => self.worktree.begin_confirm(
-                "Discard selected lines?",
-                "The selected changes are removed from the working tree.",
-                PendingKind::Discard,
-                Operation::DiscardLines { path, selection },
-            ),
-            _ => return,
-        }
+        let kind = match action {
+            HunkAction::Stage => PendingKind::Stage,
+            HunkAction::Unstage => PendingKind::Unstage,
+            HunkAction::Discard => unreachable!("handled above"),
+        };
+        self.worktree.run(session, kind, operation);
         cx.notify();
     }
 
@@ -921,19 +949,12 @@ impl RepoView {
         cx.notify();
     }
 
-    pub(crate) fn confirm_worktree(&mut self, cx: &mut Context<Self>) {
-        let Some(confirm) = self.worktree.confirm.take() else {
-            return;
-        };
+    /// Runs a destructive operation the user confirmed in [`crate::ui::confirm`].
+    fn run_confirmed(&mut self, kind: PendingKind, operation: Operation, cx: &mut Context<Self>) {
         let Some(session) = self.session.as_ref() else {
             return;
         };
-        self.worktree.run(session, confirm.kind, confirm.operation);
-        cx.notify();
-    }
-
-    pub(crate) fn cancel_worktree_confirm(&mut self, cx: &mut Context<Self>) {
-        self.worktree.confirm = None;
+        self.worktree.run(session, kind, operation);
         cx.notify();
     }
 }
@@ -1085,10 +1106,8 @@ struct Colors {
     design: Design,
     background: Hsla,
     foreground: Hsla,
-    muted: Hsla,
     muted_foreground: Hsla,
     border: Hsla,
-    selection: Hsla,
     title_bar: Hsla,
     accent: Hsla,
     accent_foreground: Hsla,
@@ -1104,10 +1123,8 @@ impl Colors {
         Self {
             background: design.background,
             foreground: design.text,
-            muted: design.field,
             muted_foreground: design.muted,
             border: design.border,
-            selection: design.row_selected,
             title_bar: design.chrome,
             accent: design.accent,
             accent_foreground: design.on_accent,
@@ -1139,42 +1156,24 @@ fn file_row(
         selected.is_some_and(|selected| selected.side == side && selected.path == path);
     let (name, dir) = style::path_parts(&path);
 
-    let mut row = div()
-        .flex()
-        .items_center()
-        .gap_2()
-        .h(px(ROW_HEIGHT))
-        .mx(px(6.0))
-        .px_2()
-        .rounded(px(6.0))
-        .text_size(px(colors.design.small() + 0.5))
-        .child(style::file_badge(kind, &colors.design))
-        .child(
+    let row = crate::ui::list_row(
+        gpui::ElementId::named_usize(format!("worktree-file-{}", side as u8), index),
+        crate::ui::RowState::NORMAL.selected(is_selected),
+        &colors.design,
+    )
+    .child(crate::ui::change_badge(kind, &colors.design))
+    .child(div().flex_1().min_w_0().truncate().child(name.to_owned()))
+    .when_some(dir, |row, dir| {
+        row.child(
             div()
-                .flex_1()
-                .min_w_0()
+                .max_w(px(120.0))
+                .flex_none()
                 .truncate()
-                .text_color(if is_selected {
-                    colors.design.accent_text
-                } else {
-                    colors.foreground
-                })
-                .child(name.to_owned()),
+                .text_size(px(11.0))
+                .text_color(colors.muted_foreground)
+                .child(dir.to_owned()),
         )
-        .when_some(dir, |row, dir| {
-            row.child(
-                div()
-                    .max_w(px(120.0))
-                    .flex_none()
-                    .truncate()
-                    .text_size(px(11.0))
-                    .text_color(colors.muted_foreground)
-                    .child(dir.to_owned()),
-            )
-        });
-    if is_selected {
-        row = row.bg(colors.selection);
-    }
+    });
 
     let click_entity = entity.clone();
     let click_path = path.clone();
@@ -1182,63 +1181,62 @@ fn file_row(
     let menu_entity = entity.clone();
     let menu_path = path;
 
-    row.id(gpui::ElementId::named_usize(
-        format!("worktree-file-{}", side as u8),
-        index,
-    ))
-    .cursor_pointer()
-    .on_click(move |event, window, cx| {
-        let path = click_path.clone();
-        click_entity.update(cx, |this, cx| {
-            this.select_worktree_file(side, path.clone(), window, cx);
-            if event.click_count() >= 2 {
-                this.toggle_worktree_selection(cx);
-            }
-        });
-    })
-    .context_menu(move |menu, _window, _cx| {
-        let mut menu = menu;
-        match side {
-            Side::Unstaged => {
-                let stage_entity = menu_entity.clone();
-                let stage_path = menu_path.clone();
-                menu = menu.item(PopupMenuItem::new("Stage").on_click(move |_, _window, cx| {
-                    let path = stage_path.clone();
-                    stage_entity.update(cx, |this, cx| this.stage_worktree_path(path.clone(), cx));
-                }));
+    row.cursor_pointer()
+        .on_click(move |event, window, cx| {
+            let path = click_path.clone();
+            click_entity.update(cx, |this, cx| {
+                this.select_worktree_file(side, path.clone(), window, cx);
+                if event.click_count() >= 2 {
+                    this.toggle_worktree_selection(cx);
+                }
+            });
+        })
+        .context_menu(move |menu, _window, _cx| {
+            let mut menu = menu;
+            match side {
+                Side::Unstaged => {
+                    let stage_entity = menu_entity.clone();
+                    let stage_path = menu_path.clone();
+                    menu =
+                        menu.item(PopupMenuItem::new("Stage").on_click(move |_, _window, cx| {
+                            let path = stage_path.clone();
+                            stage_entity
+                                .update(cx, |this, cx| this.stage_worktree_path(path.clone(), cx));
+                        }));
 
-                let discard_entity = menu_entity.clone();
-                let discard_path = menu_path.clone();
-                let label = if untracked {
-                    "Delete file…"
-                } else {
-                    "Discard changes…"
-                };
-                menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _window, cx| {
-                    let path = discard_path.clone();
-                    discard_entity.update(cx, |this, cx| {
-                        this.discard_worktree_path(path.clone(), untracked, cx)
-                    });
-                }));
+                    let discard_entity = menu_entity.clone();
+                    let discard_path = menu_path.clone();
+                    let label = if untracked {
+                        "Delete file…"
+                    } else {
+                        "Discard changes…"
+                    };
+                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                        let path = discard_path.clone();
+                        discard_entity.update(cx, |this, cx| {
+                            this.discard_worktree_path(path.clone(), untracked, window, cx)
+                        });
+                    }));
+                }
+                Side::Staged => {
+                    let unstage_entity = menu_entity.clone();
+                    let unstage_path = menu_path.clone();
+                    menu = menu.item(PopupMenuItem::new("Unstage").on_click(
+                        move |_, _window, cx| {
+                            let path = unstage_path.clone();
+                            unstage_entity.update(cx, |this, cx| {
+                                this.unstage_worktree_path(path.clone(), cx)
+                            });
+                        },
+                    ));
+                }
+                // The conflict section has no context menu; its actions live in
+                // the conflict view.
+                Side::Conflict => {}
             }
-            Side::Staged => {
-                let unstage_entity = menu_entity.clone();
-                let unstage_path = menu_path.clone();
-                menu = menu.item(
-                    PopupMenuItem::new("Unstage").on_click(move |_, _window, cx| {
-                        let path = unstage_path.clone();
-                        unstage_entity
-                            .update(cx, |this, cx| this.unstage_worktree_path(path.clone(), cx));
-                    }),
-                );
-            }
-            // The conflict section has no context menu; its actions live in
-            // the conflict view.
-            Side::Conflict => {}
-        }
-        menu
-    })
-    .into_any_element()
+            menu
+        })
+        .into_any_element()
 }
 
 #[allow(
@@ -1262,57 +1260,46 @@ fn hunk_header_row(
     let buttons = match side {
         Some(Side::Unstaged) => {
             let stage_entity = entity.clone();
-            let stage_colors = colors.clone();
             let discard_entity = entity.clone();
-            let discard_colors = colors.clone();
             let discard_hunk = hunk;
             div()
                 .flex()
                 .items_center()
                 .gap_1()
                 .pr_1()
-                .child(chip_button_compact(
-                    ("hunk-stage", row),
-                    "Stage hunk",
-                    false,
-                    &stage_colors,
-                    move |_, _, cx| {
-                        stage_entity.update(cx, |this, cx| {
-                            this.hunk_operation(hunk, HunkAction::Stage, cx)
-                        });
-                    },
-                ))
-                .child(chip_button_compact(
-                    ("hunk-discard", row),
-                    "Discard",
-                    true,
-                    &discard_colors,
-                    move |_, _, cx| {
-                        discard_entity.update(cx, |this, cx| {
-                            this.hunk_operation(discard_hunk, HunkAction::Discard, cx)
-                        });
-                    },
-                ))
+                .child(
+                    crate::ui::button(("hunk-stage", row), "Stage hunk")
+                        .size(crate::ui::ButtonSize::Tiny)
+                        .kind(crate::ui::ButtonKind::Normal)
+                        .on_click(move |_, window, cx| {
+                            stage_entity.update(cx, |this, cx| {
+                                this.hunk_operation(hunk, HunkAction::Stage, window, cx)
+                            });
+                        }),
+                )
+                .child(
+                    crate::ui::button(("hunk-discard", row), "Discard")
+                        .size(crate::ui::ButtonSize::Tiny)
+                        .danger()
+                        .on_click(move |_, window, cx| {
+                            discard_entity.update(cx, |this, cx| {
+                                this.hunk_operation(discard_hunk, HunkAction::Discard, window, cx)
+                            });
+                        }),
+                )
         }
         Some(Side::Staged) => {
             let unstage_entity = entity.clone();
-            let unstage_colors = colors.clone();
-            div()
-                .flex()
-                .items_center()
-                .gap_1()
-                .pr_1()
-                .child(chip_button_compact(
-                    ("hunk-unstage", row),
-                    "Unstage hunk",
-                    false,
-                    &unstage_colors,
-                    move |_, _, cx| {
+            div().flex().items_center().gap_1().pr_1().child(
+                crate::ui::button(("hunk-unstage", row), "Unstage hunk")
+                    .size(crate::ui::ButtonSize::Tiny)
+                    .kind(crate::ui::ButtonKind::Normal)
+                    .on_click(move |_, window, cx| {
                         unstage_entity.update(cx, |this, cx| {
-                            this.hunk_operation(hunk, HunkAction::Unstage, cx)
+                            this.hunk_operation(hunk, HunkAction::Unstage, window, cx)
                         });
-                    },
-                ))
+                    }),
+            )
         }
         Some(Side::Conflict) => div(),
         None => div(),
@@ -1343,173 +1330,6 @@ fn hunk_header_row(
         .into_any_element()
 }
 
-fn chip_button(
-    id: impl Into<gpui::ElementId>,
-    label: impl Into<SharedString>,
-    enabled: bool,
-    colors: &Colors,
-    handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> AnyElement {
-    let mut button = div()
-        .id(id)
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .h(px(24.0))
-        .px(px(9.0))
-        .rounded(px(6.0))
-        .border_1()
-        .border_color(colors.border)
-        .text_size(px(colors.design.small()))
-        .text_color(if enabled {
-            colors.foreground
-        } else {
-            colors.muted_foreground
-        })
-        .bg(colors.muted);
-    if enabled {
-        button = button.cursor_pointer().on_click(handler);
-    }
-    button.child(label.into()).into_any_element()
-}
-
-/// The hunk header's buttons: same look, sized for a 20 px diff row.
-fn chip_button_compact(
-    id: impl Into<gpui::ElementId>,
-    label: impl Into<SharedString>,
-    danger: bool,
-    colors: &Colors,
-    handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> AnyElement {
-    div()
-        .id(id)
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .h(px(16.0))
-        .px(px(6.0))
-        .rounded(px(4.0))
-        .border_1()
-        .border_color(colors.border)
-        .text_size(px(10.0))
-        .text_color(if danger {
-            colors.danger
-        } else {
-            colors.foreground
-        })
-        .bg(colors.muted)
-        .cursor_pointer()
-        .on_click(handler)
-        .child(label.into())
-        .into_any_element()
-}
-
-fn primary_button(
-    id: impl Into<gpui::ElementId>,
-    label: impl Into<SharedString>,
-    enabled: bool,
-    colors: &Colors,
-    handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> AnyElement {
-    let mut button = div()
-        .id(id)
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .h(px(28.0))
-        .px(px(14.0))
-        .rounded(px(7.0))
-        .text_size(px(colors.design.small()))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(if enabled {
-            colors.accent_foreground
-        } else {
-            colors.muted_foreground
-        })
-        .bg(if enabled { colors.accent } else { colors.muted });
-    if enabled {
-        button = button.cursor_pointer().on_click(handler);
-    }
-    button.child(label.into()).into_any_element()
-}
-
-fn confirm_overlay(entity: Entity<RepoView>, confirm: &Confirm, colors: &Colors) -> AnyElement {
-    let cancel_entity = entity.clone();
-    let cancel_colors = colors.clone();
-    let accept_entity = entity;
-    let accept_colors = colors.clone();
-    let label = match confirm.kind {
-        PendingKind::Delete => "Delete",
-        _ => "Discard",
-    };
-    let label: SharedString = label.into();
-
-    div()
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .bg(colors.background.opacity(0.55))
-        .occlude()
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .gap_2()
-                .w(px(420.0))
-                .p_4()
-                .rounded_md()
-                .bg(colors.title_bar)
-                .border_1()
-                .border_color(colors.border)
-                .text_size(px(12.0))
-                .text_color(colors.foreground)
-                .child(
-                    div()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .child(confirm.title.clone()),
-                )
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(colors.muted_foreground)
-                        .child(confirm.detail.clone()),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .justify_end()
-                        .gap_2()
-                        .child(chip_button(
-                            "confirm-cancel",
-                            "Cancel",
-                            true,
-                            &cancel_colors,
-                            move |_, _, cx| {
-                                cancel_entity
-                                    .update(cx, |this, cx| this.cancel_worktree_confirm(cx));
-                            },
-                        ))
-                        .child(primary_button(
-                            "confirm-accept",
-                            label,
-                            true,
-                            &accept_colors,
-                            move |_, _, cx| {
-                                accept_entity.update(cx, |this, cx| this.confirm_worktree(cx));
-                            },
-                        )),
-                ),
-        )
-        .into_any_element()
-}
-
 /// `--fake` has no session, but the view still opens; it explains why it is
 /// empty and keeps a way back to the synthetic history.
 fn synthetic_state(
@@ -1520,16 +1340,11 @@ fn synthetic_state(
 ) -> AnyElement {
     let back = {
         let entity = entity.clone();
-        let colors = colors.clone();
-        chip_button(
-            "show-history-synthetic",
-            "← History",
-            true,
-            &colors,
-            move |_, window, cx| {
+        crate::ui::button("show-history-synthetic", "← History")
+            .ghost()
+            .on_click(move |_, window, cx| {
                 entity.update(cx, |this, cx| this.close_worktree(window, cx));
-            },
-        )
+            })
     };
     let mut root = div()
         .flex()
@@ -1555,37 +1370,11 @@ fn synthetic_state(
             .border_color(colors.border)
             .child(back),
     )
-    .child(empty_state("No working tree in synthetic mode", colors))
+    .child(crate::ui::empty_state(
+        "No working tree in synthetic mode",
+        &colors.design,
+    ))
     .into_any_element()
-}
-
-fn empty_state(text: &str, colors: &Colors) -> AnyElement {
-    div()
-        .flex()
-        .flex_1()
-        .min_h_0()
-        .items_center()
-        .justify_center()
-        .text_size(px(12.0))
-        .text_color(colors.muted_foreground)
-        .bg(colors.background)
-        .child(text.to_owned())
-        .into_any_element()
-}
-
-fn message_pane(text: &str, color: Hsla, colors: &Colors) -> AnyElement {
-    div()
-        .flex()
-        .flex_1()
-        .min_h_0()
-        .items_center()
-        .justify_center()
-        .p_4()
-        .text_size(px(12.0))
-        .text_color(color)
-        .bg(colors.background)
-        .child(text.to_owned())
-        .into_any_element()
 }
 
 /// The highlights for the side of the line that is drawn, as in the history
@@ -1693,10 +1482,6 @@ impl WorktreePanel {
             .child(body)
             .child(self.commit_box(entity.clone(), snapshot, cx, &colors));
 
-        if let Some(confirm) = &self.confirm {
-            root = root.child(confirm_overlay(entity, confirm, &colors));
-        }
-
         root.into_any_element()
     }
 
@@ -1710,65 +1495,32 @@ impl WorktreePanel {
         colors: &Colors,
     ) -> Option<AnyElement> {
         let state = self.conflicts.banner_state(snapshot)?;
-        let mut buttons = div().flex().items_center().gap_2().flex_none();
+        let mut banner =
+            crate::ui::banner(crate::ui::BannerKind::Warning, state.text, &colors.design);
+        // Abort is the escape hatch, so it reads as an ordinary button; Continue
+        // is the one the banner is asking for.
         if state.can_abort {
-            let button_colors = colors.clone();
-            buttons = buttons.child(chip_button(
-                "merge-abort",
-                "Abort merge…",
-                true,
-                &button_colors,
-                {
-                    let entity = entity.clone();
-                    move |_, window, cx| {
-                        crate::conflicts::confirm_abort_merge(entity.clone(), window, cx);
-                    }
+            let abort = entity.clone();
+            banner = banner.action(crate::ui::button("merge-abort", "Abort merge…").on_click(
+                move |_, window, cx| {
+                    crate::conflicts::confirm_abort_merge(abort.clone(), window, cx);
                 },
             ));
         }
         if state.can_continue {
-            let button_colors = colors.clone();
-            buttons = buttons.child(primary_button(
-                "merge-continue",
-                "Continue merge",
-                true,
-                &button_colors,
-                {
-                    let entity = entity.clone();
-                    move |_, _, cx| {
-                        entity.update(cx, |this, cx| this.continue_merge(cx));
-                    }
-                },
-            ));
+            let continue_merge = entity.clone();
+            banner = banner.action(
+                crate::ui::button("merge-continue", "Continue merge").on_click(move |_, _, cx| {
+                    continue_merge.update(cx, |this, cx| this.continue_merge(cx));
+                }),
+            );
         } else if state.can_abort {
             // Keep the row from jumping when the button appears; a disabled
             // Continue also explains why the merge cannot finish yet.
-            let button_colors = colors.clone();
-            buttons = buttons.child(primary_button(
-                "merge-continue",
-                "Continue merge",
-                false,
-                &button_colors,
-                |_, _, _| {},
-            ));
+            banner =
+                banner.action(crate::ui::button("merge-continue", "Continue merge").disabled(true));
         }
-
-        Some(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .flex_none()
-                .px_3()
-                .py_1()
-                .bg(colors.warning.opacity(0.18))
-                .text_size(px(11.0))
-                .text_color(colors.warning)
-                .child(div().flex_1().min_w_0().truncate().child(state.text))
-                .child(buttons)
-                .into_any_element(),
-        )
+        Some(banner.into_any_element())
     }
 
     fn lists(
@@ -1824,51 +1576,47 @@ impl WorktreePanel {
         let button = match side {
             Side::Unstaged => {
                 let entity = entity.clone();
-                let colors = colors.clone();
-                chip_button(
+                crate::ui::button(
                     gpui::ElementId::named_usize("stage-all", side as usize),
                     "Stage all",
-                    !files.is_empty(),
-                    &colors,
-                    move |_, _, cx| {
-                        entity.update(cx, |this, cx| this.stage_all_worktree(cx));
-                    },
                 )
+                .kind(crate::ui::ButtonKind::Normal)
+                .disabled(files.is_empty())
+                .on_click(move |_, _, cx| {
+                    entity.update(cx, |this, cx| this.stage_all_worktree(cx));
+                })
+                .into_any_element()
             }
             Side::Staged => {
                 let entity = entity.clone();
-                let colors = colors.clone();
-                chip_button(
+                crate::ui::button(
                     gpui::ElementId::named_usize("unstage-all", side as usize),
                     "Unstage all",
-                    !files.is_empty(),
-                    &colors,
-                    move |_, _, cx| {
-                        entity.update(cx, |this, cx| this.unstage_all_worktree(cx));
-                    },
                 )
+                .kind(crate::ui::ButtonKind::Normal)
+                .disabled(files.is_empty())
+                .on_click(move |_, _, cx| {
+                    entity.update(cx, |this, cx| this.unstage_all_worktree(cx));
+                })
+                .into_any_element()
             }
             // The conflicts section has its own renderer.
             Side::Conflict => div().into_any_element(),
         };
 
         let mut section = div().flex().flex_col().flex_none().min_h_0().child(
-            div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .px_3()
-                .pt_3()
-                .pb_1p5()
-                .child(
-                    div()
-                        .text_size(px(colors.design.tiny()))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(colors.muted_foreground)
-                        .child(format!("{title} · {}", files.len())),
-                )
-                .child(button),
+            crate::ui::section_header(
+                gpui::ElementId::named_usize("file-section", side as usize),
+                title,
+                &colors.design,
+            )
+            .count(files.len())
+            .trailing(button)
+            .px_3()
+            .pt_3()
+            .pb_1p5()
+            .h(px(24.0))
+            .rounded(px(0.0)),
         );
 
         if files.is_empty() {
@@ -1973,7 +1721,7 @@ impl WorktreePanel {
             .border_color(colors.border)
             .text_size(px(12.0));
         if let Some(kind) = kind {
-            header = header.child(style::file_badge(kind, &colors.design));
+            header = header.child(crate::ui::change_badge(kind, &colors.design));
         }
         header = header
             .child(
@@ -2008,14 +1756,23 @@ impl WorktreePanel {
         }
 
         let body = match (&self.diff_error, self.diff.view()) {
-            (Some(error), _) => message_pane(error, colors.danger, colors),
-            (None, None) => message_pane("computing diff…", colors.muted_foreground, colors),
+            (Some(error), _) => {
+                crate::ui::message(error, colors.danger, &colors.design).into_any_element()
+            }
+            (None, None) => {
+                crate::ui::message("computing diff…", colors.muted_foreground, &colors.design)
+                    .into_any_element()
+            }
             (None, Some(view)) if view.diff.binary => {
-                message_pane("Binary file", colors.muted_foreground, colors)
+                crate::ui::message("Binary file", colors.muted_foreground, &colors.design)
+                    .into_any_element()
             }
-            (None, Some(_)) if self.rows.is_empty() => {
-                message_pane("No textual changes", colors.muted_foreground, colors)
-            }
+            (None, Some(_)) if self.rows.is_empty() => crate::ui::message(
+                "No textual changes",
+                colors.muted_foreground,
+                &colors.design,
+            )
+            .into_any_element(),
             (None, Some(view)) => self.diff_list(entity, view, theme, colors),
         };
 
@@ -2052,29 +1809,25 @@ impl WorktreePanel {
             Side::Staged => (format!("Unstage {count} line(s)"), LineAction::Unstage),
             Side::Conflict => return div().into_any_element(),
         };
-        let colors_for_button = colors.clone();
         let main_entity = entity.clone();
-        actions = actions.child(chip_button(
-            "line-action-main",
-            label,
-            true,
-            &colors_for_button,
-            move |_, _, cx| {
-                main_entity.update(cx, |this, cx| this.line_operation(action, cx));
-            },
-        ));
+        actions = actions.child(
+            crate::ui::button("line-action-main", label)
+                .kind(crate::ui::ButtonKind::Normal)
+                .on_click(move |_, window, cx| {
+                    main_entity.update(cx, |this, cx| this.line_operation(action, window, cx));
+                }),
+        );
         if selected.side == Side::Unstaged {
-            let entity = entity.clone();
-            let colors_for_button = colors.clone();
-            actions = actions.child(chip_button(
-                "line-action-discard",
-                "Discard",
-                true,
-                &colors_for_button,
-                move |_, _, cx| {
-                    entity.update(cx, |this, cx| this.line_operation(LineAction::Discard, cx));
-                },
-            ));
+            let discard_entity = entity.clone();
+            actions = actions.child(
+                crate::ui::button("line-action-discard", "Discard")
+                    .danger()
+                    .on_click(move |_, window, cx| {
+                        discard_entity.update(cx, |this, cx| {
+                            this.line_operation(LineAction::Discard, window, cx)
+                        });
+                    }),
+            );
         }
         actions.into_any_element()
     }
@@ -2206,55 +1959,32 @@ impl WorktreePanel {
 
         let commit_button = {
             let entity = entity.clone();
-            let mut button = div()
-                .id("commit-button")
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap_2()
-                .h(px(32.0))
-                .px(px(14.0))
-                .rounded(px(7.0))
-                .text_size(px(12.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(if enabled {
-                    colors.accent_foreground
-                } else {
-                    colors.muted_foreground
-                })
-                .bg(if enabled { colors.accent } else { colors.muted })
-                .child(format!(
-                    "Commit {staged} file{}",
-                    if staged == 1 { "" } else { "s" }
-                ))
-                .child(
-                    div()
-                        .px(px(5.0))
-                        .py(px(1.0))
-                        .rounded(px(4.0))
-                        .bg(colors.accent_foreground.opacity(0.18))
-                        .text_size(px(10.5))
-                        .child(commit_key_label()),
-                );
-            if enabled {
-                button = button.cursor_pointer().on_click(move |_, _, cx| {
-                    entity.update(cx, |this, cx| this.commit_worktree(cx));
-                });
-            }
-            button
+            crate::ui::button(
+                "commit-button",
+                format!("Commit {staged} file{}", if staged == 1 { "" } else { "s" }),
+            )
+            .size(crate::ui::ButtonSize::Medium)
+            .disabled(!enabled)
+            .child(
+                div()
+                    .px(px(5.0))
+                    .py(px(1.0))
+                    .rounded(px(4.0))
+                    .bg(colors.accent_foreground.opacity(0.18))
+                    .text_size(px(10.5))
+                    .child(commit_key_label()),
+            )
+            .on_click(move |_, _, cx| {
+                entity.update(cx, |this, cx| this.commit_worktree(cx));
+            })
         };
         let history_button = {
             let entity = entity.clone();
-            let colors = colors.clone();
-            chip_button(
-                "show-history",
-                "← History",
-                true,
-                &colors,
-                move |_, window, cx| {
+            crate::ui::button("show-history", "← History")
+                .ghost()
+                .on_click(move |_, window, cx| {
                     entity.update(cx, |this, cx| this.close_worktree(window, cx));
-                },
-            )
+                })
         };
 
         let status = match (&self.error, &self.notice) {

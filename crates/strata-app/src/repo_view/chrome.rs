@@ -14,8 +14,6 @@ use gpui::{
     AnyElement, App, ClickEvent, ClipboardItem, Context, Div, FontWeight, Hsla, InteractiveElement,
     IntoElement, ParentElement, Render, Styled, Window, div, px, uniform_list,
 };
-use gpui_component::Disableable as _;
-use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use gpui_component::{ActiveTheme, Icon, Sizable as _, TitleBar};
@@ -311,9 +309,8 @@ impl RepoView {
             .child(stash_button(design))
             .child(separator)
             .child(
-                Button::new("terminal-placeholder")
+                crate::ui::icon_button("terminal-placeholder", IconName::SquareTerminal)
                     .ghost()
-                    .icon(IconName::SquareTerminal)
                     .w(px(32.0))
                     .h(px(32.0))
                     .text_color(design.muted)
@@ -321,9 +318,8 @@ impl RepoView {
                     .disabled(true),
             )
             .child(
-                Button::new("open-settings")
+                crate::ui::icon_button("open-settings", IconName::Settings)
                     .ghost()
-                    .icon(IconName::Settings)
                     .w(px(32.0))
                     .h(px(32.0))
                     .text_color(design.muted)
@@ -540,10 +536,12 @@ impl RepoView {
                     let date = style::date_label(row.time, now, date_format);
                     let filtered = filter.is_some();
                     let click_entity = entity.clone();
+                    let id = ("commit-row", index);
                     let element = if filtered {
                         // The graph is hidden while filtered: spaced-out rows
                         // would draw lanes that never existed between them.
                         filtered_commit_row(
+                            id,
                             &row,
                             selected == Some(index),
                             graph_width,
@@ -551,9 +549,8 @@ impl RepoView {
                             &row_design,
                         )
                     } else {
-                        commit_row(&row, selected == Some(index), lanes, &date, &row_design)
+                        commit_row(id, &row, selected == Some(index), lanes, &date, &row_design)
                     }
-                    .id(("commit-row", index))
                     .cursor_pointer()
                     .on_click(move |_event, window, cx| {
                         click_entity.update(cx, |this, cx| {
@@ -648,21 +645,18 @@ impl RepoView {
                 Field::Summary,
                 self.search.fields(),
                 entity.clone(),
-                design,
             ))
             .child(search_chip(
                 "author",
                 Field::Author,
                 self.search.fields(),
                 entity.clone(),
-                design,
             ))
             .child(search_chip(
                 "hash",
                 Field::Hash,
                 self.search.fields(),
                 entity,
-                design,
             ))
             .child(div().flex_1());
 
@@ -797,7 +791,7 @@ impl RepoView {
                     .gap_2()
                     .text_size(px(12.0))
                     .text_color(design.muted)
-                    .child(style::avatar(&initials, avatar_color, 18.0))
+                    .child(crate::ui::avatar(initials.clone(), avatar_color, 18.0))
                     .child(
                         div()
                             .flex_1()
@@ -939,7 +933,7 @@ impl RepoView {
             .border_color(design.border)
             .text_size(px(12.0))
             .child(match kind {
-                Some(kind) => style::file_badge(kind, design),
+                Some(kind) => crate::ui::change_badge(kind, design),
                 None => div().into_any_element(),
             })
             .child(
@@ -1004,47 +998,28 @@ impl RepoView {
                     let (path, kind) = &entries[index];
                     let (name, dir) = style::path_parts(path);
                     let is_selected = selected == Some(index);
-                    let mut row = div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .h(px(28.0))
-                        .mx(px(6.0))
-                        .px_2()
-                        .rounded(px(6.0))
-                        .text_size(px(12.5))
-                        .child(style::file_badge(*kind, &list_design))
-                        .child(
+                    let row = crate::ui::list_row(
+                        ("changed-file", index),
+                        crate::ui::RowState::NORMAL.selected(is_selected),
+                        &list_design,
+                    )
+                    .child(crate::ui::change_badge(*kind, &list_design))
+                    .child(div().flex_1().min_w_0().truncate().child(name.to_owned()))
+                    .when_some(dir, |row, dir| {
+                        row.child(
                             div()
-                                .flex_1()
-                                .min_w_0()
+                                .max_w(px(110.0))
+                                .flex_none()
                                 .truncate()
-                                .text_color(if is_selected {
-                                    list_design.accent_text
-                                } else {
-                                    list_design.text
-                                })
-                                .child(name.to_owned()),
+                                .text_size(px(11.0))
+                                .text_color(list_design.muted)
+                                .child(dir.to_owned()),
                         )
-                        .when_some(dir, |row, dir| {
-                            row.child(
-                                div()
-                                    .max_w(px(110.0))
-                                    .flex_none()
-                                    .truncate()
-                                    .text_size(px(11.0))
-                                    .text_color(list_design.muted)
-                                    .child(dir.to_owned()),
-                            )
-                        });
-                    if is_selected {
-                        row = row.bg(list_design.row_selected);
-                    }
+                    });
                     let click_entity = entity.clone();
                     let menu_entity = entity;
                     let menu_path = path.clone();
                     row.cursor_pointer()
-                        .id(("changed-file", index))
                         .on_click(move |_event, _window, cx| {
                             click_entity.update(cx, |this, cx| this.select_file(index, cx));
                         })
@@ -1288,23 +1263,22 @@ fn commit_header(design: &Design, graph_width: f32) -> AnyElement {
         .into_any_element()
 }
 
-fn commit_row(data: &RowData<'_>, selected: bool, lanes: u16, date: &str, design: &Design) -> Div {
+fn commit_row(
+    id: impl Into<gpui::ElementId>,
+    data: &RowData<'_>,
+    selected: bool,
+    lanes: u16,
+    date: &str,
+    design: &Design,
+) -> gpui::Stateful<Div> {
     let avatar_color = design.avatar_color(&data.email);
     let initials = style::initials(&data.author);
-    div()
-        .flex()
-        .items_center()
+    crate::ui::list_row(id, crate::ui::RowState::NORMAL.selected(selected), design)
         .gap_3()
         .h(px(graph_canvas::ROW_HEIGHT))
         .w_full()
+        .mx(px(0.0))
         .px_3()
-        .border_l_2()
-        .border_color(if selected {
-            design.accent
-        } else {
-            Hsla::transparent_black()
-        })
-        .when(selected, |row| row.bg(design.row_selected))
         .child(graph_canvas::graph_column(data.graph, design.lane, lanes))
         .child(
             div()
@@ -1345,7 +1319,7 @@ fn commit_row(data: &RowData<'_>, selected: bool, lanes: u16, date: &str, design
                 .items_center()
                 .gap(px(7.0))
                 .overflow_hidden()
-                .child(style::avatar(&initials, avatar_color, 18.0))
+                .child(crate::ui::avatar(initials.clone(), avatar_color, 18.0))
                 .child(
                     div()
                         .min_w_0()
@@ -1379,28 +1353,21 @@ fn commit_row(data: &RowData<'_>, selected: bool, lanes: u16, date: &str, design
 /// the columns stay aligned, but nothing is painted in it: the matching commits
 /// are not adjacent in history, so lanes between them would be fiction.
 fn filtered_commit_row(
+    id: impl Into<gpui::ElementId>,
     data: &RowData<'_>,
     selected: bool,
     graph_width: f32,
     date: &str,
     design: &Design,
-) -> Div {
+) -> gpui::Stateful<Div> {
     let avatar_color = design.avatar_color(&data.email);
     let initials = style::initials(&data.author);
-    div()
-        .flex()
-        .items_center()
+    crate::ui::list_row(id, crate::ui::RowState::NORMAL.selected(selected), design)
         .gap_3()
         .h(px(graph_canvas::ROW_HEIGHT))
         .w_full()
+        .mx(px(0.0))
         .px_3()
-        .border_l_2()
-        .border_color(if selected {
-            design.accent
-        } else {
-            Hsla::transparent_black()
-        })
-        .when(selected, |row| row.bg(design.row_selected))
         .child(div().w(px(graph_width)).flex_none())
         .child(
             div()
@@ -1438,7 +1405,7 @@ fn filtered_commit_row(
                 .items_center()
                 .gap(px(7.0))
                 .overflow_hidden()
-                .child(style::avatar(&initials, avatar_color, 18.0))
+                .child(crate::ui::avatar(initials.clone(), avatar_color, 18.0))
                 .child(
                     div()
                         .min_w_0()
@@ -1474,91 +1441,32 @@ fn search_chip(
     field: Field,
     fields: crate::search::Fields,
     entity: gpui::Entity<RepoView>,
-    design: &Design,
 ) -> AnyElement {
     let on = fields.enabled(field);
-    div()
-        .id(format!("search-chip-{label}"))
-        .flex_none()
-        .px_1p5()
-        .py_0p5()
-        .rounded(px(5.0))
-        .cursor_pointer()
-        .bg(if on { design.accent } else { design.field })
-        .text_size(px(10.0))
-        .text_color(if on { design.on_accent } else { design.muted })
-        .child(label)
+    crate::ui::button(format!("search-chip-{label}"), label)
+        .size(crate::ui::ButtonSize::Tiny)
+        .kind(if on {
+            crate::ui::ButtonKind::Primary
+        } else {
+            crate::ui::ButtonKind::Ghost
+        })
+        .tooltip(format!("Match {label}"))
         .on_click(move |_event, _window, cx| {
             entity.update(cx, |this, cx| this.toggle_search_field(field, cx));
         })
         .into_any_element()
 }
 
-fn badge_chip(badge: &Badge<'_>, design: &Design) -> Div {
-    let (background, foreground, glyph_data) = match badge.kind {
-        RefKind::LocalBranch if badge.head => {
-            (design.accent, design.on_accent, style::glyph::BRANCH)
-        }
-        RefKind::LocalBranch => (design.accent_soft, design.accent_text, style::glyph::BRANCH),
-        RefKind::RemoteBranch => (
-            design.remote_background,
-            design.remote_text,
-            style::glyph::CLOUD,
-        ),
-        RefKind::Tag => (design.tag_background, design.tag_text, style::glyph::TAG),
-    };
-
-    div()
-        .flex()
-        .items_center()
-        .gap(px(4.0))
-        .flex_none()
-        .h(px(18.0))
-        .px(px(7.0))
-        .rounded_full()
-        .bg(background)
-        .text_size(px(11.0))
-        .font_weight(if badge.head || badge.kind == RefKind::Tag {
-            FontWeight::SEMIBOLD
-        } else {
-            FontWeight::MEDIUM
-        })
-        .text_color(foreground)
-        .child(glyph(glyph_data, 11.0, foreground))
-        .child(
-            div()
-                .max_w(px(130.0))
-                .truncate()
-                .child(badge.label.to_string()),
-        )
+fn badge_chip(badge: &Badge<'_>, design: &Design) -> AnyElement {
+    crate::ui::ref_badge(badge.kind, badge.head, badge.label.to_string(), design)
 }
 
 fn empty_pane(text: &str, design: &Design) -> AnyElement {
-    div()
-        .flex()
-        .flex_1()
-        .min_h_0()
-        .items_center()
-        .justify_center()
-        .text_size(px(12.0))
-        .text_color(design.muted)
-        .child(text.to_owned())
-        .into_any_element()
+    crate::ui::empty_state(text, design).into_any_element()
 }
 
 fn message(text: &str, color: Hsla, design: &Design) -> AnyElement {
-    div()
-        .flex()
-        .flex_1()
-        .min_h_0()
-        .items_center()
-        .justify_center()
-        .p_4()
-        .text_size(px(12.0))
-        .text_color(color)
-        .bg(design.background)
-        .child(text.to_owned())
-        .into_any_element()
+    crate::ui::message(text, color, design).into_any_element()
 }
 
 fn icon(name: IconName, size: f32, color: Hsla) -> Icon {
@@ -1572,40 +1480,29 @@ fn glyph(data: &'static [u8], size: f32, color: Hsla) -> Icon {
 /// The title bar's Stash action: the same icon-over-label shape as the remote
 /// buttons, but it dispatches an action instead of running a git command here.
 fn stash_button(design: &Design) -> AnyElement {
-    div()
-        .id("stash-button")
-        .flex()
-        .flex_col()
-        .items_center()
-        .justify_center()
-        .gap(px(2.0))
+    crate::ui::content_button("stash-button")
+        .ghost()
         .w(px(52.0))
         .h(px(40.0))
-        .rounded(px(7.0))
         .text_size(px(10.0))
-        .text_color(design.text)
-        .cursor_pointer()
-        .hover(|style| style.bg(design.field))
         .on_click(|_, window, cx| {
             window.dispatch_action(Box::new(actions::StashChanges), cx);
         })
-        .child(glyph(style::glyph::ARCHIVE, 16.0, design.text))
-        .child("Stash")
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(2.0))
+                .child(glyph(style::glyph::ARCHIVE, 16.0, design.text))
+                .child("Stash"),
+        )
         .into_any_element()
 }
 
 /// A keyboard hint chip, matching the design's `Ctrl F`.
 fn kbd(label: &'static str, design: &Design) -> AnyElement {
-    div()
-        .flex_none()
-        .px(px(6.0))
-        .py(px(1.0))
-        .rounded(px(4.0))
-        .border_1()
-        .border_color(design.border)
-        .text_size(px(11.0))
-        .child(label)
-        .into_any_element()
+    crate::ui::kbd(label, design)
 }
 
 #[cfg(not(target_os = "macos"))]

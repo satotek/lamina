@@ -12,7 +12,6 @@ use gpui::{
     App, AppContext as _, Context, Entity, Focusable as _, IntoElement, ParentElement, Render,
     Styled, Subscription, Window, div, px,
 };
-use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::dialog::DialogFooter;
 use gpui_component::input::{Input, InputEvent, InputState};
@@ -88,14 +87,13 @@ impl RepoView {
                 .footer(
                     DialogFooter::new()
                         .child(
-                            Button::new("stash-cancel")
-                                .label("Cancel")
+                            crate::ui::button("stash-cancel", "Cancel")
+                                .size(crate::ui::ButtonSize::Medium)
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
-                            Button::new("stash-submit")
-                                .label("Stash changes")
-                                .primary()
+                            crate::ui::button("stash-submit", "Stash changes")
+                                .size(crate::ui::ButtonSize::Medium)
                                 .on_click(move |_, window, cx| {
                                     footer.update(cx, |dialog, cx| dialog.submit(window, cx));
                                 }),
@@ -167,22 +165,19 @@ impl RepoView {
         // hands focus back to whatever was focused when it opened.
         self.focus_root(window, cx);
         let entity = self.entity.clone();
-        window.open_alert_dialog(cx, move |dialog, _, _| {
-            let entity = entity.clone();
-            dialog
-                .title(format!("Drop stash@{{{index}}}?"))
-                .description(
-                    "The stashed changes are deleted. Unlike a pop, the changes are not \
-                     applied to the working tree first.",
-                )
-                .confirm()
-                .ok_text("Drop stash")
-                .ok_variant(gpui_component::button::ButtonVariant::Danger)
-                .on_ok(move |_, window, cx| {
-                    entity.update(cx, |view, cx| view.stash_drop(index, window, cx));
-                    true
-                })
-        });
+        crate::ui::confirm(
+            window,
+            cx,
+            crate::ui::Confirm::new(
+                format!("Drop stash@{{{index}}}?"),
+                "The stashed changes are deleted. Unlike a pop, the changes are not \
+                 applied to the working tree first.",
+            )
+            .ok_label("Drop stash"),
+            move |window, cx| {
+                entity.update(cx, |view, cx| view.stash_drop(index, window, cx));
+            },
+        );
     }
 
     fn stash_drop(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {

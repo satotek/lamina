@@ -20,10 +20,9 @@ use gpui::{
     AnyElement, App, Context, Entity, FontWeight, Hsla, IntoElement, KeyBinding, Window, actions,
     div, px, relative,
 };
-use gpui_component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_component::dialog::DialogFooter;
 use gpui_component::notification::Notification;
-use gpui_component::{Disableable as _, Icon, Sizable as _, WindowExt as _};
+use gpui_component::{Icon, Sizable as _, WindowExt as _};
 use gpui_kit_assets::IconName;
 use strata_core::session::{Operation, OperationId, RepoSnapshot};
 use strata_core::{HeadInfo, RefInfo, RefKind, UpstreamInfo};
@@ -490,24 +489,22 @@ fn open_force_dialog(
     window: &mut Window,
     cx: &mut App,
 ) {
-    window.open_alert_dialog(cx, move |dialog, _, _| {
-        let entity = entity.clone();
-        let confirmed = offer.clone();
-        dialog
-            .title("Push rejected")
-            .description(format!(
+    crate::ui::confirm(
+        window,
+        cx,
+        crate::ui::Confirm::new(
+            "Push rejected",
+            format!(
                 "{} has commits that {} does not have. Force pushing with lease replaces only what you have already fetched.",
                 offer.remote, offer.branch
-            ))
-            .confirm()
-            .ok_text("Force push (with lease)")
-            .ok_variant(ButtonVariant::Danger)
-            .on_ok(move |_, _window, cx| {
-                let confirmed = confirmed.clone();
-                entity.update(cx, |view, cx| view.force_push(confirmed, cx));
-                true
-            })
-    });
+            ),
+        )
+        .ok_label("Force push (with lease)"),
+        move |_, cx| {
+            let confirmed = offer.clone();
+            entity.update(cx, |view, cx| view.force_push(confirmed, cx));
+        },
+    );
 }
 
 impl RepoView {
@@ -558,7 +555,7 @@ impl RepoView {
                         .child(count.to_string()),
                 );
             }
-            Button::new(id)
+            crate::ui::content_button(id)
                 .ghost()
                 .w(px(52.0))
                 .h(px(40.0))
@@ -763,8 +760,8 @@ impl RepoView {
         let entity = self.entity.clone();
         window.open_alert_dialog(cx, move |dialog, _, _| {
             let mut footer = DialogFooter::new().child(
-                Button::new("publish-cancel")
-                    .label("Cancel")
+                crate::ui::button("publish-cancel", "Cancel")
+                    .size(crate::ui::ButtonSize::Medium)
                     .on_click(|_, window, cx| window.close_dialog(cx)),
             );
             for remote in &remotes {
@@ -772,9 +769,13 @@ impl RepoView {
                 let branch = branch.clone();
                 let target = remote.clone();
                 footer = footer.child(
-                    Button::new(format!("publish-{remote}"))
-                        .label(format!("Push to {remote}"))
-                        .when(remote == "origin", |button| button.primary())
+                    crate::ui::button(format!("publish-{remote}"), format!("Push to {remote}"))
+                        .size(crate::ui::ButtonSize::Medium)
+                        .kind(if remote == "origin" {
+                            crate::ui::ButtonKind::Primary
+                        } else {
+                            crate::ui::ButtonKind::Normal
+                        })
                         .on_click(move |_, window, cx| {
                             window.close_dialog(cx);
                             let remote = target.clone();

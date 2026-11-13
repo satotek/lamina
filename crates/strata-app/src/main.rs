@@ -29,6 +29,7 @@ mod settings;
 mod settings_view;
 mod stash;
 mod style;
+mod ui;
 mod workspace;
 mod worktree_panel;
 
@@ -86,20 +87,28 @@ enum Start {
     Path(PathBuf),
     /// `strata --fake [N]`: the synthetic render benchmark.
     Fake(usize),
+    /// `strata --gallery`: every shared UI part, with no repository.
+    Gallery,
     /// No argument: the last repository when restoring is on, else the welcome
     /// screen.
     Welcome,
 }
 
 fn open_window(start: Start, cx: &mut App) {
+    let gallery = matches!(start, Start::Gallery);
     let launch = match start {
         Start::Path(path) => Some(Launch::open(&path)),
         Start::Fake(count) => Some(Launch::fake(count)),
+        Start::Gallery => None,
         Start::Welcome => workspace::restored_launch(cx),
     };
-    let title = launch
-        .as_ref()
-        .map_or_else(|| "Strata".to_owned(), Launch::title);
+    let title = if gallery {
+        "Strata UI gallery".to_owned()
+    } else {
+        launch
+            .as_ref()
+            .map_or_else(|| "Strata".to_owned(), Launch::title)
+    };
 
     let bounds = Bounds::centered(None, size(px(1360.0), px(860.0)), cx);
     cx.open_window(
@@ -119,7 +128,12 @@ fn open_window(start: Start, cx: &mut App) {
         },
         move |window, cx| {
             settings::apply_theme(Some(window), cx);
-            {
+            if gallery {
+                // The gallery is a window of its own: it reads the theme and the
+                // settings and nothing else, so it opens without a repository.
+                let content = cx.new(|cx| ui::gallery::Gallery::new(window, cx));
+                cx.new(|cx| Root::new(content, window, cx))
+            } else {
                 // The workspace owns whichever view fills the window, so the
                 // picker can replace a repository (and its session) in place.
                 let content = cx.new(|cx| Workspace::new(launch, window, cx));
@@ -146,12 +160,14 @@ fn parse_args() -> Start {
                 .unwrap_or(fake::COMMIT_COUNT);
             Start::Fake(count)
         }
+        "--gallery" => Start::Gallery,
         "-h" | "--help" => {
             println!(
-                "usage: strata [PATH]\n       strata --fake [N]\n\n\
+                "usage: strata [PATH]\n       strata --fake [N]\n       strata --gallery\n\n\
                  Without PATH, Strata reopens the last repository when restoring is enabled\n\
                  and shows the welcome screen otherwise.\n\
-                 --fake renders N synthetic commits (default {}) for the render benchmark.",
+                 --fake renders N synthetic commits (default {}) for the render benchmark.\n\
+                 --gallery shows every shared UI part, and needs no repository.",
                 fake::COMMIT_COUNT
             );
             std::process::exit(0);

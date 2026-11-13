@@ -22,6 +22,8 @@ Rust workspace: `crates/strata-core` (UI-independent) and `crates/strata-app` (G
   `cargo clippy -p strata-core --all-targets -- -D warnings` and `cargo test -p strata-core`;
   it never builds `strata-app` (GPUI is several GB). App tasks use `--workspace`.
 - Before finishing: `cargo fmt` plus the clippy and test commands above.
+- In strata-app, buttons, dialogs, list rows, badges and banners come from `crate::ui`;
+  add a part there instead of styling a `div()` in a feature module.
 
 ## Parallel work
 

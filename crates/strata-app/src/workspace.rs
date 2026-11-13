@@ -16,7 +16,6 @@ use gpui::{
     ParentElement, Render, Styled, Window, div, px,
 };
 use gpui_component::WindowExt as _;
-use gpui_component::button::Button;
 use gpui_component::dialog::DialogFooter;
 use strata_core::session::Session;
 
@@ -146,16 +145,16 @@ impl Workspace {
                 .footer(
                     DialogFooter::new()
                         .child(
-                            Button::new("picker-dialog-open")
-                                .label("Open repository…")
+                            crate::ui::button("picker-dialog-open", "Open repository…")
+                                .size(crate::ui::ButtonSize::Medium)
                                 .on_click(move |_, window, cx| {
                                     footer_picker
                                         .update(cx, |picker, cx| picker.open_native(window, cx));
                                 }),
                         )
                         .child(
-                            Button::new("picker-dialog-cancel")
-                                .label("Cancel")
+                            crate::ui::button("picker-dialog-cancel", "Cancel")
+                                .size(crate::ui::ButtonSize::Medium)
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         ),
                 )

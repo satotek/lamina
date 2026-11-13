@@ -418,7 +418,6 @@ impl RepoView {
                 self.remote.on_finished(id, error.as_deref(), cx);
                 // The label records which operation failed, so the status bar
                 // names it instead of showing a bare git message.
-                let had_dialog = self.branches.dialog_open();
                 let label = self.branches.finish(id, error.as_deref());
                 if let Some(error) = error {
                     self.status_error = Some(match label {
@@ -426,10 +425,10 @@ impl RepoView {
                         None => one_line(&error),
                     });
                 }
-                if !had_dialog && self.branches.dialog_open() {
-                    // The force-delete offer opens here rather than in a click
-                    // handler, so it has to take focus for its keys to work.
-                    self.focus_dialog(cx);
+                if let Some(name) = self.branches.take_force_delete() {
+                    // The offer opens from an operation result, which has no
+                    // window of its own, so it is routed through the active one.
+                    crate::branches::offer_force_delete(cx.entity(), name, cx);
                 }
                 cx.notify();
             }
@@ -459,7 +458,7 @@ impl RepoView {
         &mut self,
         operation: Operation,
         label: impl Into<String>,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.session.is_none() || self.is_busy() {
@@ -474,8 +473,7 @@ impl RepoView {
             _ => None,
         };
         let id = session.run(operation);
-        self.branches
-            .start(id, label, delete, window.viewport_size());
+        self.branches.start(id, label, delete);
         cx.notify();
     }
 
@@ -519,7 +517,11 @@ impl RepoView {
         cx.notify();
     }
 
-    pub(crate) fn open_delete_dialog(
+    /// Asks before deleting a branch, then runs the delete.
+    ///
+    /// This is a dialog layer, not a card drawn over the sidebar, so it holds
+    /// focus and `Esc` cancels it instead of reaching the view behind it.
+    pub(crate) fn confirm_delete_branch(
         &mut self,
         name: String,
         window: &mut Window,
@@ -528,12 +530,37 @@ impl RepoView {
         if self.session.is_none() {
             return;
         }
-        self.branches.set_viewport(window.viewport_size());
-        self.branches.open_delete(name);
-        if let Some(focus) = self.branches.dialog_focus() {
-            window.defer(cx, move |window, cx| focus.focus(window, cx));
-        }
-        cx.notify();
+        // The dialog restores focus to whatever had it when it opened; the
+        // context menu that offered the delete is closing, so hand it the
+        // view's own handle instead.
+        self.focus_root(window, cx);
+        let entity = self.entity.clone();
+        crate::ui::confirm(
+            window,
+            cx,
+            crate::ui::Confirm::new(
+                format!("Delete branch {name}?"),
+                "Its commits stay in the repository until they are garbage collected.",
+            )
+            .ok_label("Delete"),
+            move |window, cx| {
+                let name = name.clone();
+                entity.update(cx, |view, cx| view.delete_branch(name, false, window, cx));
+            },
+        );
+    }
+
+    /// Runs the delete; `force` is the recovery offered after git refused an
+    /// unmerged branch.
+    pub(crate) fn delete_branch(
+        &mut self,
+        name: String,
+        force: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let label = format!("delete branch {name}");
+        self.run_operation(Operation::DeleteBranch { name, force }, label, window, cx);
     }
 
     /// Confirms whichever branch dialog is open.
@@ -560,32 +587,12 @@ impl RepoView {
                     cx.notify();
                 }
             }
-            return;
-        }
-        if let Some((name, force)) = self.branches.delete_request() {
-            let label = format!("delete branch {name}");
-            self.branches.close_dialog();
-            self.focus_root(window, cx);
-            self.run_operation(Operation::DeleteBranch { name, force }, label, window, cx);
         }
     }
 
     /// Returns focus from a dialog to the commit list, which owns the keys.
     pub(crate) fn focus_root(&self, window: &mut Window, cx: &mut App) {
         window.focus(&self.focus, cx);
-    }
-
-    /// Moves focus to the open dialog's card, if one is open.
-    fn focus_dialog(&self, cx: &mut Context<Self>) {
-        let Some(focus) = self.branches.dialog_focus() else {
-            return;
-        };
-        // The event arrives off the window's own update, but the window still
-        // has to be reachable through the app.
-        let Some(handle) = cx.windows().into_iter().next() else {
-            return;
-        };
-        let _ = handle.update(cx, |_, window, cx| focus.focus(window, cx));
     }
 
     /// Keeps the selection valid as commits arrive or the history is replaced.

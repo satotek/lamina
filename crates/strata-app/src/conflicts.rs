@@ -13,14 +13,12 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, ClickEvent, Context, ElementId, Entity, Hsla, InteractiveElement, IntoElement,
-    KeyBinding, ParentElement, SharedString, StatefulInteractiveElement, Styled,
-    UniformListScrollHandle, Window, actions, div, px, uniform_list,
+    AnyElement, App, Context, Entity, Hsla, InteractiveElement, IntoElement, KeyBinding,
+    ParentElement, SharedString, StatefulInteractiveElement, Styled, UniformListScrollHandle,
+    Window, actions, div, px, uniform_list,
 };
 use gpui_component::ActiveTheme as _;
 use gpui_component::Theme;
-use gpui_component::WindowExt as _;
-use gpui_component::button::ButtonVariant;
 use strata_core::diff::{DiffOptions, LineKind, diff_text};
 use strata_core::session::{ConflictSide, Operation, OperationId, RepoSnapshot};
 use strata_core::{ChangeKind, ConflictEntry, ConflictKind, ConflictSides, RepoState};
@@ -800,22 +798,18 @@ impl RepoView {
 
 /// Asks before throwing away the work done in a stopped merge.
 pub(crate) fn confirm_abort_merge(entity: Entity<RepoView>, window: &mut Window, cx: &mut App) {
-    window.open_alert_dialog(cx, move |alert, _window, _cx| {
-        let entity = entity.clone();
-        alert
-            .title("Abort the merge?")
-            .description(
-                "Git restores HEAD and the worktree from before the merge. Conflicts resolved so far are lost.",
-            )
-            .show_cancel(true)
-            .cancel_text("Keep resolving")
-            .ok_text("Abort merge")
-            .ok_variant(ButtonVariant::Danger)
-            .on_ok(move |_, _, cx| {
-                entity.update(cx, |this, cx| this.abort_merge(cx));
-                true
-            })
-    });
+    crate::ui::confirm(
+        window,
+        cx,
+        crate::ui::Confirm::new(
+            "Abort the merge?",
+            "Git restores HEAD and the worktree from before the merge. Conflicts resolved so far are lost.",
+        )
+        .ok_label("Abort merge"),
+        move |_, cx| {
+            entity.update(cx, |this, cx| this.abort_merge(cx));
+        },
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -830,9 +824,6 @@ struct Colors {
     muted: Hsla,
     muted_foreground: Hsla,
     border: Hsla,
-    selection: Hsla,
-    accent: Hsla,
-    accent_foreground: Hsla,
     danger: Hsla,
     warning: Hsla,
     success: Hsla,
@@ -849,9 +840,6 @@ impl Colors {
             muted: design.field,
             muted_foreground: design.muted,
             border: design.border,
-            selection: design.row_selected,
-            accent: design.accent,
-            accent_foreground: design.on_accent,
             danger: design.remove_text,
             warning: design.tag_text,
             success: design.add_text,
@@ -860,62 +848,6 @@ impl Colors {
             design,
         }
     }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Tone {
-    Normal,
-    Primary,
-    Danger,
-}
-
-fn button(
-    id: impl Into<ElementId>,
-    label: impl Into<SharedString>,
-    enabled: bool,
-    tone: Tone,
-    colors: &Colors,
-    handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> AnyElement {
-    let (background, foreground) = match (enabled, tone) {
-        (false, _) => (colors.muted, colors.muted_foreground),
-        (true, Tone::Primary) => (colors.accent, colors.accent_foreground),
-        (true, Tone::Danger) => (colors.danger, colors.accent_foreground),
-        (true, Tone::Normal) => (colors.muted, colors.foreground),
-    };
-    let mut element = div()
-        .id(id)
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .h(px(24.0))
-        .px(px(9.0))
-        .rounded(px(6.0))
-        .border_1()
-        .border_color(colors.border)
-        .text_size(px(12.0))
-        .text_color(foreground)
-        .bg(background);
-    if enabled {
-        element = element.cursor_pointer().on_click(handler);
-    }
-    element.child(label.into()).into_any_element()
-}
-
-fn message(text: &str, color: Hsla, colors: &Colors) -> AnyElement {
-    div()
-        .flex()
-        .flex_1()
-        .min_h_0()
-        .items_center()
-        .justify_center()
-        .p_4()
-        .text_size(px(12.0))
-        .text_color(color)
-        .bg(colors.background)
-        .child(text.to_owned())
-        .into_any_element()
 }
 
 fn conflict_row(
@@ -931,58 +863,43 @@ fn conflict_row(
     let click_path = path.clone();
 
     let (name, dir) = style::path_parts(&path);
-    let mut row = div()
-        .id(("conflict-file", index))
-        .flex()
-        .items_center()
-        .gap_2()
-        .h(px(ROW_HEIGHT))
-        .mx(px(6.0))
-        .px_2()
-        .rounded(px(6.0))
-        .text_size(px(colors.design.small() + 0.5))
-        .cursor_pointer()
-        .on_click(move |_, window, cx| {
-            let path = click_path.clone();
-            entity.update(cx, |this, cx| {
-                this.select_conflict_file(path.clone(), window, cx)
-            });
-        })
-        .child(style::file_badge(ChangeKind::Conflicted, &colors.design))
-        .child(
+    crate::ui::list_row(
+        ("conflict-file", index),
+        crate::ui::RowState::NORMAL.selected(is_selected),
+        &colors.design,
+    )
+    .h(px(ROW_HEIGHT))
+    .cursor_pointer()
+    .on_click(move |_, window, cx| {
+        let path = click_path.clone();
+        entity.update(cx, |this, cx| {
+            this.select_conflict_file(path.clone(), window, cx)
+        });
+    })
+    .child(crate::ui::change_badge(
+        ChangeKind::Conflicted,
+        &colors.design,
+    ))
+    .child(div().flex_1().min_w_0().truncate().child(name.to_owned()))
+    .when_some(dir, |row, dir| {
+        row.child(
             div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .text_color(if is_selected {
-                    colors.design.accent_text
-                } else {
-                    colors.foreground
-                })
-                .child(name.to_owned()),
-        )
-        .when_some(dir, |row, dir| {
-            row.child(
-                div()
-                    .max_w(px(120.0))
-                    .flex_none()
-                    .truncate()
-                    .text_size(px(11.0))
-                    .text_color(colors.muted_foreground)
-                    .child(dir.to_owned()),
-            )
-        })
-        .child(
-            div()
+                .max_w(px(120.0))
                 .flex_none()
-                .text_size(px(9.5))
+                .truncate()
+                .text_size(px(11.0))
                 .text_color(colors.muted_foreground)
-                .child(kind_label(kind)),
-        );
-    if is_selected {
-        row = row.bg(colors.selection);
-    }
-    row.into_any_element()
+                .child(dir.to_owned()),
+        )
+    })
+    .child(
+        div()
+            .flex_none()
+            .text_size(px(9.5))
+            .text_color(colors.muted_foreground)
+            .child(kind_label(kind)),
+    )
+    .into_any_element()
 }
 
 impl Conflicts {
@@ -1089,7 +1006,10 @@ impl Conflicts {
                     .items_center()
                     .gap_2()
                     .min_w_0()
-                    .child(style::file_badge(ChangeKind::Conflicted, &colors.design))
+                    .child(crate::ui::change_badge(
+                        ChangeKind::Conflicted,
+                        &colors.design,
+                    ))
                     .child(div().truncate().child(name.to_owned()))
                     .when_some(dir, |row, dir| {
                         row.child(
@@ -1133,49 +1053,36 @@ impl Conflicts {
         if let Some(kind) = kind {
             for (index, choice) in choices(kind).into_iter().enumerate() {
                 let entity = entity.clone();
-                let button_colors = colors.clone();
-                toolbar = toolbar.child(button(
-                    ("conflict-choice", index),
-                    choice.label,
-                    ready,
-                    if choice.destructive {
-                        Tone::Danger
-                    } else {
-                        Tone::Normal
-                    },
-                    &button_colors,
-                    move |_, _, cx| {
-                        entity.update(cx, |this, cx| this.use_conflict_side(choice.side, cx));
-                    },
-                ));
+                toolbar = toolbar.child(
+                    crate::ui::button(("conflict-choice", index), choice.label)
+                        .disabled(!ready)
+                        .when(choice.destructive, crate::ui::UiButton::danger)
+                        .on_click(move |_, _, cx| {
+                            entity.update(cx, |this, cx| this.use_conflict_side(choice.side, cx));
+                        }),
+                );
             }
             toolbar = toolbar
-                .child(button(
-                    "conflict-mergetool",
-                    "Open in merge tool",
-                    ready,
-                    Tone::Normal,
-                    &colors,
-                    {
-                        let entity = entity.clone();
-                        move |_, _, cx| {
-                            entity.update(cx, |this, cx| this.open_merge_tool(cx));
-                        }
-                    },
-                ))
-                .child(button(
-                    "conflict-mark-resolved",
-                    "Mark as resolved",
-                    ready,
-                    Tone::Primary,
-                    &colors,
-                    {
-                        let entity = entity.clone();
-                        move |_, _, cx| {
-                            entity.update(cx, |this, cx| this.mark_conflict_resolved(cx));
-                        }
-                    },
-                ));
+                .child(
+                    crate::ui::button("conflict-mergetool", "Open in merge tool")
+                        .disabled(!ready)
+                        .on_click({
+                            let entity = entity.clone();
+                            move |_, _, cx| {
+                                entity.update(cx, |this, cx| this.open_merge_tool(cx));
+                            }
+                        }),
+                )
+                .child(
+                    crate::ui::button("conflict-mark-resolved", "Mark as resolved")
+                        .disabled(!ready)
+                        .on_click({
+                            let entity = entity.clone();
+                            move |_, _, cx| {
+                                entity.update(cx, |this, cx| this.mark_conflict_resolved(cx));
+                            }
+                        }),
+                );
         }
 
         let mut column = div()
@@ -1189,35 +1096,33 @@ impl Conflicts {
         if self.marker_warning.as_deref() == Some(path) {
             column = column.child(self.marker_warning_bar(entity.clone(), &colors));
         } else if loaded.is_some_and(|loaded| loaded.data.worktree_markers) {
-            column = column.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .flex_none()
-                    .px_3()
-                    .py_1()
-                    .bg(colors.warning.opacity(0.18))
-                    .text_size(px(10.5))
-                    .text_color(colors.warning)
-                    .child(
-                        "The file on disk still has conflict markers; edit it, then mark it resolved.",
-                    ),
-            );
+            column = column.child(crate::ui::banner(
+                crate::ui::BannerKind::Warning,
+                "The file on disk still has conflict markers; edit it, then mark it resolved.",
+                &colors.design,
+            ));
         }
 
         column = column.child(match (&self.error, loaded) {
-            (Some(error), _) => message(error, colors.danger, &colors),
-            (None, None) => message("reading conflict…", colors.muted_foreground, &colors),
-            (None, Some(loaded)) if loaded.data.binary => message(
+            (Some(error), _) => {
+                crate::ui::message(error, colors.danger, &colors.design).into_any_element()
+            }
+            (None, None) => {
+                crate::ui::message("reading conflict…", colors.muted_foreground, &colors.design)
+                    .into_any_element()
+            }
+            (None, Some(loaded)) if loaded.data.binary => crate::ui::message(
                 "Binary conflict — choose a whole version above.",
                 colors.muted_foreground,
-                &colors,
-            ),
-            (None, Some(loaded)) if loaded.data.regions.is_empty() => message(
+                &colors.design,
+            )
+            .into_any_element(),
+            (None, Some(loaded)) if loaded.data.regions.is_empty() => crate::ui::message(
                 "No textual differences between the sides.",
                 colors.muted_foreground,
-                &colors,
-            ),
+                &colors.design,
+            )
+            .into_any_element(),
             (None, Some(loaded)) => self.regions(&loaded.data.regions, &colors),
         });
 
@@ -1248,52 +1153,28 @@ impl Conflicts {
     }
 
     fn marker_warning_bar(&self, entity: Entity<RepoView>, colors: &Colors) -> AnyElement {
-        div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap_2()
-            .flex_none()
-            .px_3()
-            .py_1()
-            .bg(colors.danger.opacity(0.18))
-            .text_size(px(10.5))
-            .text_color(colors.danger)
-            .child("This file still contains <<<<<<< conflict markers. Mark it resolved anyway?")
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .flex_none()
-                    .child(button(
-                        "marker-cancel",
-                        "Cancel",
-                        true,
-                        Tone::Normal,
-                        colors,
-                        {
-                            let entity = entity.clone();
-                            move |_, _, cx| {
-                                entity.update(cx, |this, cx| this.dismiss_marker_warning(cx));
-                            }
-                        },
-                    ))
-                    .child(button(
-                        "marker-confirm",
-                        "Mark resolved anyway",
-                        true,
-                        Tone::Danger,
-                        colors,
-                        {
-                            let entity = entity.clone();
-                            move |_, _, cx| {
-                                entity.update(cx, |this, cx| this.stage_resolved_conflict(cx));
-                            }
-                        },
-                    )),
-            )
-            .into_any_element()
+        let cancel = {
+            let entity = entity.clone();
+            crate::ui::button("marker-cancel", "Cancel").on_click(move |_, _, cx| {
+                entity.update(cx, |this, cx| this.dismiss_marker_warning(cx));
+            })
+        };
+        let resolve = {
+            let entity = entity.clone();
+            crate::ui::button("marker-confirm", "Mark resolved anyway")
+                .danger()
+                .on_click(move |_, _, cx| {
+                    entity.update(cx, |this, cx| this.stage_resolved_conflict(cx));
+                })
+        };
+        crate::ui::banner(
+            crate::ui::BannerKind::Danger,
+            "This file still contains <<<<<<< conflict markers. Mark it resolved anyway?",
+            &colors.design,
+        )
+        .action(cancel)
+        .action(resolve)
+        .into_any_element()
     }
 
     fn regions(&self, regions: &[Region], colors: &Colors) -> AnyElement {
