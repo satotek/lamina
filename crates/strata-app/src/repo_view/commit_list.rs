@@ -43,8 +43,6 @@ impl RepoView {
         let now = style::now_epoch();
         let selected = self.selected;
         let revealed = self.revealed_commit();
-        let lanes = self.lanes.max();
-        let graph_width = graph_canvas::column_width(lanes);
         let row_design = design.clone();
         let focus = self.focus.clone();
         // The menu itself is built in `history_ops`; its rules only need the
@@ -106,7 +104,6 @@ impl RepoView {
                             &row,
                             selected == Some(index),
                             revealed,
-                            graph_width,
                             &date,
                             &row_design,
                         )
@@ -116,7 +113,6 @@ impl RepoView {
                             &row,
                             selected == Some(index),
                             revealed,
-                            lanes,
                             &date,
                             &row_design,
                         )
@@ -160,7 +156,7 @@ impl RepoView {
         };
 
         let mut column = div().flex().flex_col().flex_1().min_h_0().min_w_0();
-        column = column.child(commit_header(design, graph_width));
+        column = column.child(commit_header(design));
         if self.search.is_active() {
             column = column.child(self.search_bar(entity, design));
         }
@@ -244,21 +240,23 @@ impl RepoView {
 }
 
 /// The column headings above the commit list.
-fn commit_header(design: &Design, graph_width: f32) -> AnyElement {
+///
+/// The graph has no heading of its own: every row indents its text by its own
+/// graph width, so there is no single left edge a "Graph" label could mark.
+fn commit_header(design: &Design) -> AnyElement {
     div()
         .flex()
         .items_center()
         .gap_3()
         .h(px(28.0))
         .flex_none()
-        .pl(px(17.0))
+        .pl(px(20.0))
         .pr(px(13.0))
         .border_b_1()
         .border_color(design.border)
         .text_size(px(design.tiny()))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(design.muted)
-        .child(div().w(px(graph_width)).flex_none().child("Graph"))
         .child(div().flex_1().min_w_0().child("Description"))
         .child(div().w(px(AUTHOR_WIDTH)).flex_none().child("Author"))
         .child(div().w(px(DATE_WIDTH)).flex_none().child("Date"))
@@ -280,19 +278,28 @@ fn commit_row(
     data: &RowData<'_>,
     selected: bool,
     revealed: bool,
-    lanes: u16,
     date: &str,
     design: &Design,
 ) -> gpui::Stateful<Div> {
     let avatar_color = design.avatar_color(&data.email);
     let initials = style::initials(&data.author);
-    crate::ui::list_row(id, row_state(selected, revealed), design)
+    let state = row_state(selected, revealed);
+    // The graph fades into the row's own fill, following the same precedence
+    // as `ui::list_row`: selection, then reveal, then the list background.
+    let fade = if selected {
+        design.row_selected
+    } else if revealed {
+        design.field
+    } else {
+        design.background
+    };
+    crate::ui::list_row(id, state, design)
         .gap_3()
         .h(px(graph_canvas::ROW_HEIGHT))
         .w_full()
         .mx(px(0.0))
         .px_3()
-        .child(graph_canvas::graph_column(data.graph, design.lane, lanes))
+        .child(graph_canvas::graph_column(data.graph, design.lane, fade))
         .child(
             div()
                 .flex_1()
@@ -362,15 +369,14 @@ fn commit_row(
         )
 }
 
-/// A commit row in the filtered result set. The graph column keeps its width so
-/// the columns stay aligned, but nothing is painted in it: the matching commits
-/// are not adjacent in history, so lanes between them would be fiction.
+/// A commit row in the filtered result set. A small fixed indent stands in for
+/// the graph, which is hidden: the matching commits are not adjacent in
+/// history, so lanes between them would be fiction.
 fn filtered_commit_row(
     id: impl Into<gpui::ElementId>,
     data: &RowData<'_>,
     selected: bool,
     revealed: bool,
-    graph_width: f32,
     date: &str,
     design: &Design,
 ) -> gpui::Stateful<Div> {
@@ -382,7 +388,7 @@ fn filtered_commit_row(
         .w_full()
         .mx(px(0.0))
         .px_3()
-        .child(div().w(px(graph_width)).flex_none())
+        .child(div().w(px(graph_canvas::search_indent())).flex_none())
         .child(
             div()
                 .flex_1()

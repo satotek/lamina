@@ -309,11 +309,12 @@ pub fn window_title(repo: &str, head: Option<&HeadInfo>) -> String {
 
 /// The widest graph row seen so far.
 ///
-/// The commit graph column has one width for every row, otherwise lanes would
-/// move horizontally when a wider row scrolls into view. History arrives in
-/// chunks, so the width only ever grows: each snapshot is asked for the rows
-/// after `scanned` and nothing is revisited. A reload that replaces the commit
-/// list with a different one restarts the scan.
+/// History arrives in chunks, so the width only ever grows: each snapshot is
+/// asked for the rows after `scanned` and nothing is revisited. A reload that
+/// replaces the commit list with a different one restarts the scan.
+///
+/// Rows indent themselves from their own width, so no column is sized from this
+/// maximum; the tests keep asserting that the chunked scan works.
 #[derive(Debug, Default)]
 pub struct LaneWidth {
     max: u16,
@@ -322,7 +323,7 @@ pub struct LaneWidth {
 }
 
 impl LaneWidth {
-    /// Widens the column for a producer that already knows its maximum, such as
+    /// Widens the scan for a producer that already knows its maximum, such as
     /// the synthetic graph.
     pub fn observe_max(&mut self, width: u16) {
         self.max = self.max.max(width);
@@ -344,8 +345,9 @@ impl LaneWidth {
         self.scanned = commits.len();
     }
 
-    /// At least one lane so an empty (or still loading) list keeps room for the
-    /// first column.
+    /// At least one lane so an empty (or still loading) list still scans a
+    /// lane. Only the tests read it now that rows size their own graph.
+    #[cfg(test)]
     pub fn max(&self) -> u16 {
         self.max.max(1)
     }
