@@ -50,6 +50,8 @@ pub struct DiffColors {
     pub emphasis_added: Hsla,
     pub emphasis_removed: Hsla,
     pub header: Hsla,
+    /// Accent for the lines picked for a partial stage or discard.
+    pub selection: Hsla,
     /// One colour per [`HighlightKind`], indexed by its discriminant.
     syntax: [Hsla; 16],
 }
@@ -107,6 +109,7 @@ impl DiffColors {
             emphasis_added: theme.success.opacity(if dark { 0.42 } else { 0.30 }),
             emphasis_removed: theme.danger.opacity(if dark { 0.42 } else { 0.30 }),
             header: theme.muted.opacity(if dark { 0.55 } else { 0.45 }),
+            selection: theme.primary,
             syntax,
         }
     }
@@ -116,11 +119,29 @@ impl DiffColors {
     }
 }
 
+/// Decoration for one row of a diff that is also a staging surface.
+#[derive(Clone, Copy, Default)]
+pub struct RowOptions {
+    /// `Some(picked)` for a changed line the user can select, `None` for
+    /// context lines and hunk headers.
+    pub pick: Option<bool>,
+}
+
 pub fn render_row(
     row: &Row,
     colors: &DiffColors,
     mono: &SharedString,
     highlights: Option<&LineHighlights>,
+) -> AnyElement {
+    render_row_with(row, colors, mono, highlights, RowOptions::default())
+}
+
+pub fn render_row_with(
+    row: &Row,
+    colors: &DiffColors,
+    mono: &SharedString,
+    highlights: Option<&LineHighlights>,
+    options: RowOptions,
 ) -> AnyElement {
     match row {
         Row::HunkHeader {
@@ -148,6 +169,7 @@ pub fn render_row(
                 LineKind::Removed => (Some(colors.removed), "-", colors.emphasis_removed),
                 LineKind::Context => (None, " ", colors.emphasis_added),
             };
+            let picked = options.pick == Some(true);
 
             let mut content = div().flex().flex_none().whitespace_nowrap();
             for piece in segments(&line.content, &line.emphasis, highlights) {
@@ -161,29 +183,47 @@ pub fn render_row(
                 content = content.child(span);
             }
 
+            // The pick column and the left border are always present, so text
+            // does not shift sideways when a line becomes selected.
             let mut row = div()
                 .flex()
                 .items_center()
                 .h(px(ROW_HEIGHT))
                 .w_full()
+                .border_l_2()
+                .border_color(if picked {
+                    colors.selection
+                } else {
+                    Hsla::transparent_black()
+                })
                 .font_family(mono.clone())
                 .text_size(px(12.))
                 .text_color(colors.text);
             if let Some(background) = row_bg {
                 row = row.bg(background);
+            } else if picked {
+                row = row.bg(colors.selection.opacity(0.14));
             }
 
-            row.child(gutter(line.old_lineno, colors))
-                .child(gutter(line.new_lineno, colors))
-                .child(
-                    div()
-                        .w(px(14.))
-                        .flex_none()
-                        .text_color(colors.muted)
-                        .child(marker),
-                )
-                .child(content)
-                .into_any_element()
+            row.child(
+                div()
+                    .w(px(14.))
+                    .flex_none()
+                    .text_size(px(10.))
+                    .text_color(colors.selection)
+                    .child(if picked { "✓" } else { "" }),
+            )
+            .child(gutter(line.old_lineno, colors))
+            .child(gutter(line.new_lineno, colors))
+            .child(
+                div()
+                    .w(px(14.))
+                    .flex_none()
+                    .text_color(colors.muted)
+                    .child(marker),
+            )
+            .child(content)
+            .into_any_element()
         }
     }
 }

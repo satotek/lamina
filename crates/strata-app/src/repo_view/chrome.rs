@@ -25,6 +25,7 @@ use crate::actions::{
 use crate::data::{self, Badge, RowData, Source};
 use crate::diff_view::{self, DiffColors, Row as DiffRow};
 use crate::graph_canvas;
+use crate::worktree_panel::MainMode;
 
 const SIDEBAR_WIDTH: f32 = 240.0;
 const FILE_LIST_WIDTH: f32 = 260.0;
@@ -80,6 +81,19 @@ impl Render for RepoView {
         if let Some((path, error)) = &self.error {
             root = root.child(self.error_screen(path, error, &palette));
         } else {
+            let sidebar = self.sidebar(cx, &palette);
+            let main = match self.mode {
+                MainMode::History => div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_w_0()
+                    .min_h_0()
+                    .child(self.commit_pane(entity.clone(), &palette))
+                    .child(self.diff_pane(entity.clone(), cx.theme(), &palette))
+                    .into_any_element(),
+                MainMode::Worktree => self.worktree_view(entity.clone(), window, cx),
+            };
             root = root
                 .child(
                     div()
@@ -87,17 +101,8 @@ impl Render for RepoView {
                         .flex_1()
                         .min_h_0()
                         .min_w_0()
-                        .child(self.sidebar(&palette))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .flex_1()
-                                .min_w_0()
-                                .min_h_0()
-                                .child(self.commit_pane(entity.clone(), &palette))
-                                .child(self.diff_pane(entity, cx.theme(), &palette)),
-                        ),
+                        .child(sidebar)
+                        .child(main),
                 )
                 .child(self.status_bar(&palette));
         }
@@ -170,7 +175,7 @@ impl RepoView {
             .into_any_element()
     }
 
-    fn sidebar(&self, palette: &Palette) -> AnyElement {
+    fn sidebar(&self, cx: &mut Context<Self>, palette: &Palette) -> AnyElement {
         div()
             .flex()
             .flex_col()
@@ -182,36 +187,63 @@ impl RepoView {
             .bg(palette.sidebar)
             .border_r_1()
             .border_color(palette.border)
-            .child(self.working_tree_section(palette))
+            .child(self.working_tree_section(cx, palette))
             .child(self.ref_sections(palette))
             .into_any_element()
     }
 
-    /// The working-tree entry at the top of the sidebar.
-    fn working_tree_section(&self, palette: &Palette) -> AnyElement {
+    /// The working-tree entry at the top of the sidebar; clicking it switches
+    /// the main area to the staging view.
+    fn working_tree_section(&self, cx: &mut Context<Self>, palette: &Palette) -> AnyElement {
         let (staged, unstaged) = self
             .source()
             .map_or((0, 0), |source| source.sidebar().working_tree);
+        let active = self.mode == MainMode::Worktree;
 
-        div()
-            .flex()
-            .flex_col()
-            .child(section_title("WORKING TREE", None, palette))
-            .child(
-                div()
-                    .px_3()
-                    .pb_2()
-                    .text_size(px(11.0))
-                    .text_color(if staged + unstaged == 0 {
-                        palette.muted_foreground
-                    } else {
-                        palette.foreground
-                    })
-                    .child(format!(
-                        "Working tree: {staged} staged, {unstaged} unstaged"
-                    )),
-            )
-            .into_any_element()
+        let mut entry =
+            div()
+                .id("working-tree-entry")
+                .flex()
+                .flex_col()
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
+                    this.open_worktree(window, cx)
+                }))
+                .child(section_title("WORKING TREE", None, palette))
+                .child(
+                    div()
+                        .px_3()
+                        .pb_2()
+                        .text_size(px(11.0))
+                        .text_color(if staged + unstaged == 0 {
+                            palette.muted_foreground
+                        } else {
+                            palette.foreground
+                        })
+                        .child(format!(
+                            "Working tree: {staged} staged, {unstaged} unstaged"
+                        )),
+                )
+                .child(
+                    div()
+                        .px_3()
+                        .pb_2()
+                        .text_size(px(10.0))
+                        .text_color(if active {
+                            palette.accent
+                        } else {
+                            palette.muted_foreground
+                        })
+                        .child(if active {
+                            "staging view open"
+                        } else {
+                            "click to stage and commit"
+                        }),
+                );
+        if active {
+            entry = entry.bg(palette.selection);
+        }
+        entry.into_any_element()
     }
 
     /// Branches, remotes, tags and stashes below the working-tree entry.

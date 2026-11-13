@@ -26,6 +26,7 @@ use crate::data::{self, LaneWidth, Source};
 use crate::diff_view::{self, Row as DiffRow};
 use crate::fake::{self, FakeRepo};
 use crate::metrics::FrameMetrics;
+use crate::worktree_panel::{MainMode, WorktreePanel};
 
 /// Height of the diff pane below the commit list.
 const DIFF_HEIGHT: f32 = 360.0;
@@ -169,10 +170,15 @@ impl DiffSlot {
 }
 
 pub struct RepoView {
-    session: Option<Session>,
+    pub(crate) session: Option<Session>,
     fake: Option<Rc<FakeRepo>>,
     error: Option<(String, String)>,
     name: Option<String>,
+
+    /// Which view fills the area right of the sidebar.
+    pub(crate) mode: MainMode,
+    /// Staging state and rendering, in its own module.
+    pub(crate) worktree: WorktreePanel,
 
     /// Running maximum of graph widths, updated as chunks arrive.
     lanes: LaneWidth,
@@ -226,6 +232,8 @@ impl RepoView {
             fake: None,
             error: None,
             name: None,
+            mode: MainMode::History,
+            worktree: WorktreePanel::default(),
             lanes: LaneWidth::default(),
             selected: None,
             selection_commit: None,
@@ -294,6 +302,11 @@ impl RepoView {
         view
     }
 
+    /// The view's own focus handle, for panels that hand focus back on close.
+    pub(crate) fn view_focus(&self) -> FocusHandle {
+        self.focus.clone()
+    }
+
     fn source(&self) -> Option<Source> {
         if let Some(fake) = &self.fake {
             Some(Source::Fake(Rc::clone(fake)))
@@ -312,9 +325,14 @@ impl RepoView {
         match event {
             SessionEvent::SnapshotUpdated { .. } => {
                 self.sync_selection(cx);
+                self.sync_worktree(cx);
                 cx.notify();
             }
             SessionEvent::DiffReady { ticket, view } => {
+                if self.worktree.on_diff_ready(ticket, &view) {
+                    cx.notify();
+                    return;
+                }
                 if !self.diff.accept(ticket, Arc::clone(&view)) {
                     return;
                 }
@@ -325,6 +343,10 @@ impl RepoView {
                 cx.notify();
             }
             SessionEvent::DiffFailed { ticket, error } => {
+                if self.worktree.on_diff_failed(ticket, &error) {
+                    cx.notify();
+                    return;
+                }
                 if !self.diff.fail(ticket) {
                     return;
                 }
@@ -340,15 +362,17 @@ impl RepoView {
                 self.status_error = Some(error);
                 cx.notify();
             }
-            SessionEvent::OperationFinished {
-                error: Some(error), ..
-            } => {
-                self.status_error = Some(error);
-                cx.notify();
+            SessionEvent::OperationFinished { id, error } => {
+                let ours = self.worktree.on_operation_finished(id, error.as_deref());
+                if let Some(error) = error {
+                    self.status_error = Some(error);
+                    cx.notify();
+                } else if ours {
+                    cx.notify();
+                }
             }
             // Progress and query results get their UI with remote operations and search.
             SessionEvent::OperationStarted { .. }
-            | SessionEvent::OperationFinished { .. }
             | SessionEvent::OperationProgress { .. }
             | SessionEvent::QueryReady { .. }
             | SessionEvent::QueryFailed { .. } => {}
