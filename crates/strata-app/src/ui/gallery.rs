@@ -81,6 +81,7 @@ impl Render for Gallery {
                                     ThemeMode::Dark
                                 };
                                 Theme::change(mode, Some(window), cx);
+                                crate::style::sync_component_buttons(cx);
                             })),
                     ),
             );

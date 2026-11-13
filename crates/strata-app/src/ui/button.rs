@@ -16,8 +16,6 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{Disableable as _, Icon, Sizable as _, Size, StyledExt as _};
 
-use crate::style;
-
 /// What a button means, which decides its fill.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum ButtonKind {
@@ -171,7 +169,7 @@ impl Styled for UiButton {
 }
 
 impl RenderOnce for UiButton {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let Self {
             id,
             label,
@@ -185,8 +183,6 @@ impl RenderOnce for UiButton {
             children,
             style,
         } = self;
-
-        style::sync_component_buttons(cx);
 
         let mut button = Button::new(id);
         let labelled = label.is_some();
