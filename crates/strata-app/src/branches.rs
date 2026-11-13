@@ -22,8 +22,8 @@ use gpui_component::{
     input::{Input, InputState},
     menu::{ContextMenuExt as _, PopupMenuItem},
 };
-use strata_core::session::{Operation, OperationId};
-use strata_core::{RefKind, UpstreamInfo};
+use strata_core::session::{HistoryScope, Operation, OperationId};
+use strata_core::{RefKind, RemoteInfo, UpstreamInfo};
 
 use crate::actions::REPO_VIEW;
 use crate::data::SidebarData;
@@ -118,7 +118,7 @@ impl Section {
     fn empty_label(self) -> &'static str {
         match self {
             Section::Local => "no local branches",
-            Section::Remote => "no remote branches",
+            Section::Remote => "no remotes",
             Section::Tags => "no tags",
             Section::Stashes => "no stashes",
         }
@@ -142,12 +142,60 @@ pub(crate) struct BranchStart {
     pub(crate) label: String,
 }
 
+/// The sidebar entry whose tip the history last jumped to.
+///
+/// It stays highlighted until another ref is revealed or a commit row is
+/// selected; the highlight says where the view came from, not what is checked
+/// out, which is why it is kept apart from HEAD.
+#[derive(Default)]
+pub(crate) struct RevealState {
+    revealed: Option<RevealedRef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RevealedRef {
+    Ref(RefKind, String),
+    Stash(usize),
+}
+
+impl RevealState {
+    fn reveal_ref(&mut self, kind: RefKind, short_name: &str) {
+        self.revealed = Some(RevealedRef::Ref(kind, short_name.to_owned()));
+    }
+
+    fn reveal_stash(&mut self, index: usize) {
+        self.revealed = Some(RevealedRef::Stash(index));
+    }
+
+    fn clear(&mut self) {
+        self.revealed = None;
+    }
+
+    fn is_ref(&self, kind: RefKind, short_name: &str) -> bool {
+        matches!(
+            &self.revealed,
+            Some(RevealedRef::Ref(revealed_kind, name))
+                if *revealed_kind == kind && name == short_name
+        )
+    }
+
+    fn is_stash(&self, index: usize) -> bool {
+        matches!(self.revealed, Some(RevealedRef::Stash(revealed)) if revealed == index)
+    }
+}
+
 /// Everything the branch UI owns between frames.
 #[derive(Default)]
 pub(crate) struct Branches {
     collapsed: [bool; 4],
     /// Remote name -> collapsed, so each remote's branch list folds on its own.
     remote_groups: HashMap<String, bool>,
+    /// The ref revealed last, drawn with the neutral tint until a commit is
+    /// selected.
+    reveal: RevealState,
+    /// The ref history is limited to, as its short name, while a "show only"
+    /// scope is active. The scope itself lives in the session.
+    scope: Option<String>,
     dialog: Option<Dialog>,
     /// Operations this module started, keyed by the id the session returned.
     /// The label is what the status bar prefixes a failure with.
@@ -200,10 +248,12 @@ pub(crate) struct CreateRequest {
 impl Branches {
     /// Renders the scrollable ref sections and, when one is open, the dialog on
     /// top of the window.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn render(
         &self,
         data: &SidebarData,
         upstreams: &HashMap<String, UpstreamInfo>,
+        remotes: &[RemoteInfo],
         enabled: bool,
         busy: bool,
         colors: &Colors,
@@ -236,25 +286,30 @@ impl Branches {
             if self.collapsed[section.index()] {
                 continue;
             }
-            if entries.is_empty() {
-                column = column.child(empty_row(section.empty_label(), colors));
-                continue;
-            }
 
             // Remote branches are grouped under their remote, which is the
-            // first path component of `origin/main`.
+            // first path component of `origin/main`. A configured remote is
+            // listed even before anything was fetched from it.
             if section == Section::Remote {
-                for (group, branches) in remote_groups(entries) {
-                    column = column.child(self.remote_group_header(
-                        &group,
-                        branches.len(),
-                        colors,
-                        entity,
-                    ));
-                    if self.remote_groups.get(&group).copied().unwrap_or(false) {
+                if entries.is_empty() && remotes.is_empty() {
+                    column = column.child(empty_row(section.empty_label(), colors));
+                    continue;
+                }
+                for group in remote_groups(entries, remotes) {
+                    column = column.child(self.remote_group_header(&group, colors, entity));
+                    if self
+                        .remote_groups
+                        .get(&group.name)
+                        .copied()
+                        .unwrap_or(false)
+                    {
                         continue;
                     }
-                    for name in &branches {
+                    if group.branches.is_empty() {
+                        column = column.child(remote_empty_row("no branches fetched yet", colors));
+                        continue;
+                    }
+                    for name in &group.branches {
                         column = column.child(self.remote_row(
                             name,
                             remote_row_index,
@@ -267,6 +322,11 @@ impl Branches {
                         remote_row_index += 1;
                     }
                 }
+                continue;
+            }
+
+            if entries.is_empty() {
+                column = column.child(empty_row(section.empty_label(), colors));
                 continue;
             }
 
@@ -286,11 +346,14 @@ impl Branches {
                     Section::Tags => {
                         let tag = name.clone();
                         let entity = entity.clone();
-                        row_with_icon(
+                        let menu_entity = entity.clone();
+                        let menu_tag = tag.clone();
+                        let row_element = row_with_icon(
                             ("tag", index),
                             Some(style::glyph::TAG),
                             name,
-                            crate::ui::RowState::NORMAL,
+                            crate::ui::RowState::NORMAL
+                                .revealed(self.reveal.is_ref(RefKind::Tag, name)),
                             colors,
                         )
                         .cursor_pointer()
@@ -298,8 +361,35 @@ impl Branches {
                             entity.update(cx, |view, cx| {
                                 view.reveal_ref(RefKind::Tag, &tag, window, cx)
                             });
-                        })
-                        .into_any_element()
+                        });
+                        if !enabled {
+                            row_element.into_any_element()
+                        } else {
+                            row_element
+                                .context_menu(move |menu, _window, _cx| {
+                                    menu.item(
+                                        PopupMenuItem::new("Show only this tag")
+                                            .disabled(busy)
+                                            .on_click({
+                                                let entity = menu_entity.clone();
+                                                let tag = menu_tag.clone();
+                                                move |_: &ClickEvent,
+                                                      _window: &mut Window,
+                                                      cx: &mut App| {
+                                                    let tag = tag.clone();
+                                                    entity.update(cx, |view, cx| {
+                                                        view.show_only_ref(
+                                                            RefKind::Tag,
+                                                            &tag,
+                                                            cx,
+                                                        )
+                                                    });
+                                                }
+                                            }),
+                                    )
+                                })
+                                .into_any_element()
+                        }
                     }
                     // Stash rows are listed in stash@{N} order. A click shows the
                     // stash commit in the history; the menu applies, pops or
@@ -307,14 +397,17 @@ impl Branches {
                     Section::Stashes => {
                         let menu_source = entity.clone();
                         let click_entity = entity.clone();
-                        let row_element =
-                            row(("stash", index), name, crate::ui::RowState::NORMAL, colors)
-                                .cursor_pointer()
-                                .on_click(move |_, window, cx| {
-                                    click_entity.update(cx, |view, cx| {
-                                        view.reveal_stash(index, window, cx)
-                                    });
-                                });
+                        let row_element = row(
+                            ("stash", index),
+                            name,
+                            crate::ui::RowState::NORMAL.revealed(self.reveal.is_stash(index)),
+                            colors,
+                        )
+                        .cursor_pointer()
+                        .on_click(move |_, window, cx| {
+                            click_entity
+                                .update(cx, |view, cx| view.reveal_stash(index, window, cx));
+                        });
                         if !enabled {
                             row_element.into_any_element()
                         } else {
@@ -404,34 +497,57 @@ impl Branches {
     /// A remote's own collapsing header, above its branch list.
     fn remote_group_header(
         &self,
-        group: &str,
-        count: usize,
+        group: &RemoteGroup,
         colors: &Colors,
         entity: &Entity<RepoView>,
     ) -> AnyElement {
-        let collapsed = self.remote_groups.get(group).copied().unwrap_or(false);
-        let group = group.to_owned();
-        let click_group = group.clone();
+        let collapsed = self
+            .remote_groups
+            .get(&group.name)
+            .copied()
+            .unwrap_or(false);
+        let click_group = group.name.clone();
         let entity = entity.clone();
-        crate::ui::section_header(format!("remote-group-{group}"), group, &colors.design)
-            .count(count)
-            .disclosure(!collapsed)
-            .icon(style::glyph_icon(
-                style::glyph::CLOUD,
-                14.0,
-                colors.sidebar_foreground,
-            ))
-            .text_size(px(colors.design.small()))
-            .text_color(colors.sidebar_foreground)
-            .h(px(28.0))
-            .on_click(move |_, cx| {
-                let group = click_group.clone();
-                entity.update(cx, |view, cx| {
-                    view.branches.toggle_remote_group(group);
-                    cx.notify();
-                });
-            })
-            .into_any_element()
+        let mut header = crate::ui::section_header(
+            format!("remote-group-{}", group.name),
+            group.name.clone(),
+            &colors.design,
+        )
+        .disclosure(!collapsed)
+        .icon(style::glyph_icon(
+            style::glyph::CLOUD,
+            14.0,
+            colors.sidebar_foreground,
+        ))
+        .text_size(px(colors.design.small()))
+        .text_color(colors.sidebar_foreground)
+        .h(px(28.0))
+        .on_click(move |_, cx| {
+            let group = click_group.clone();
+            entity.update(cx, |view, cx| {
+                view.branches.toggle_remote_group(group);
+                cx.notify();
+            });
+        });
+        if !group.branches.is_empty() {
+            header = header.count(group.branches.len());
+        }
+        match &group.fetch_url {
+            Some(url) => {
+                let url = url.clone();
+                // The header's own elements consume the click, so the tooltip
+                // goes on a wrapper that is as wide as the row.
+                div()
+                    .id(format!("remote-group-url-{}", group.name))
+                    .w_full()
+                    .tooltip(move |window, cx| {
+                        gpui_component::tooltip::Tooltip::new(url.clone()).build(window, cx)
+                    })
+                    .child(header)
+                    .into_any_element()
+            }
+            None => header.into_any_element(),
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -450,7 +566,9 @@ impl Branches {
             ("local-branch", index),
             Some(style::glyph::BRANCH),
             name,
-            crate::ui::RowState::NORMAL.head(active),
+            crate::ui::RowState::NORMAL
+                .head(active)
+                .revealed(self.reveal.is_ref(RefKind::LocalBranch, name)),
             colors,
         )
         .cursor_pointer();
@@ -506,6 +624,16 @@ impl Branches {
                         }
                     }),
             )
+            .item(PopupMenuItem::new("Show only this branch").on_click({
+                let entity = entity_menu.clone();
+                let branch = branch.clone();
+                move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                    let branch = branch.clone();
+                    entity.update(cx, |view, cx| {
+                        view.show_only_ref(RefKind::LocalBranch, &branch, cx)
+                    });
+                }
+            }))
             .item(
                 PopupMenuItem::new("Merge into current branch")
                     .disabled(busy || active)
@@ -579,7 +707,7 @@ impl Branches {
         let row_element = row(
             ("remote-branch", index),
             label,
-            crate::ui::RowState::NORMAL,
+            crate::ui::RowState::NORMAL.revealed(self.reveal.is_ref(RefKind::RemoteBranch, name)),
             colors,
         )
         .pl(px(42.0));
@@ -625,6 +753,16 @@ impl Branches {
                         let target = target.clone();
                         entity.update(cx, |view, cx| {
                             checkout_remote(view, &remote, &target, existing, window, cx)
+                        });
+                    }
+                }))
+                .item(PopupMenuItem::new("Show only this branch").on_click({
+                    let entity = entity_menu.clone();
+                    let remote = remote.clone();
+                    move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                        let remote = remote.clone();
+                        entity.update(cx, |view, cx| {
+                            view.show_only_ref(RefKind::RemoteBranch, &remote, cx)
                         });
                     }
                 }))
@@ -731,6 +869,31 @@ impl Branches {
         self.dialog.is_some()
     }
 
+    /// Marks the ref the history jumped to, replacing the previous highlight.
+    pub(crate) fn reveal_ref(&mut self, kind: RefKind, short_name: &str) {
+        self.reveal.reveal_ref(kind, short_name);
+    }
+
+    /// Like [`Self::reveal_ref`] for `stash@{index}`.
+    pub(crate) fn reveal_stash(&mut self, index: usize) {
+        self.reveal.reveal_stash(index);
+    }
+
+    /// Drops the reveal highlight, e.g. once a commit row is selected.
+    pub(crate) fn clear_revealed(&mut self) {
+        self.reveal.clear();
+    }
+
+    /// The ref history is limited to, as its short name, while "show only" is
+    /// active. `None` means the whole history.
+    pub(crate) fn scope_name(&self) -> Option<String> {
+        self.scope.clone()
+    }
+
+    pub(crate) fn set_scope(&mut self, name: Option<String>) {
+        self.scope = name;
+    }
+
     pub(crate) fn toggle(&mut self, index: usize) {
         if let Some(collapsed) = self.collapsed.get_mut(index) {
             *collapsed = !*collapsed;
@@ -802,6 +965,44 @@ impl Branches {
             }),
             Err(message) => Err(message.to_owned()),
         })
+    }
+}
+
+impl RepoView {
+    /// Reloads history limited to `short_name`'s history and remembers the name
+    /// for the sidebar banner. The full ref name is what the walk resolves, so
+    /// a branch that is not `refs/heads/...` still reads exactly.
+    pub(crate) fn show_only_ref(
+        &mut self,
+        kind: RefKind,
+        short_name: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let spec = session
+            .snapshot()
+            .refs
+            .iter()
+            .find(|info| info.kind == kind && info.short_name == short_name)
+            .map(|info| info.full_name.clone())
+            .unwrap_or_else(|| short_name.to_owned());
+        session.set_history_scope(HistoryScope::Refs(vec![spec]));
+        self.branches.set_scope(Some(short_name.to_owned()));
+        self.branches.clear_revealed();
+        cx.notify();
+    }
+
+    /// Restores every ref as a history starting point, undoing "show only".
+    pub(crate) fn show_all_refs(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        session.set_history_scope(HistoryScope::All);
+        self.branches.set_scope(None);
+        self.branches.clear_revealed();
+        cx.notify();
     }
 }
 
@@ -885,23 +1086,56 @@ fn strip_stash_prefix(name: &str) -> &str {
     }
 }
 
+/// One remote's branch list in the sidebar.
+#[derive(Debug, PartialEq, Eq)]
+struct RemoteGroup {
+    name: String,
+    /// Shown as the header's tooltip, so a remote that has never been fetched
+    /// still tells the user where it points.
+    fetch_url: Option<String>,
+    branches: Vec<String>,
+}
+
 /// `origin/main`, `origin/feat/x`, `upstream/main` grouped by their first path
-/// component, preserving the order the refs arrived in.
-fn remote_groups(entries: &[String]) -> Vec<(String, Vec<String>)> {
-    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+/// component. Every configured remote gets a group even without branches, and
+/// a remote-tracking ref for a remote that is no longer configured still gets
+/// one so it cannot silently disappear.
+fn remote_groups(entries: &[String], remotes: &[RemoteInfo]) -> Vec<RemoteGroup> {
+    let mut groups: Vec<RemoteGroup> = remotes
+        .iter()
+        .map(|remote| RemoteGroup {
+            name: remote.name.clone(),
+            fetch_url: remote.fetch_url.clone(),
+            branches: Vec::new(),
+        })
+        .collect();
     for name in entries {
         let group = name.split('/').next().unwrap_or(name).to_owned();
-        match groups.iter_mut().find(|(existing, _)| *existing == group) {
-            Some((_, branches)) => branches.push(name.clone()),
-            None => groups.push((group, vec![name.clone()])),
+        match groups.iter_mut().find(|existing| existing.name == group) {
+            Some(existing) => existing.branches.push(name.clone()),
+            None => groups.push(RemoteGroup {
+                name: group,
+                fetch_url: None,
+                branches: vec![name.clone()],
+            }),
         }
     }
     groups
 }
 
 fn empty_row(text: &str, colors: &Colors) -> Div {
+    empty_row_at(text, px(38.0), colors)
+}
+
+/// The "nothing fetched yet" line under a remote's header, aligned with the
+/// branch rows instead of the section labels.
+fn remote_empty_row(text: &str, colors: &Colors) -> Div {
+    empty_row_at(text, px(42.0), colors)
+}
+
+fn empty_row_at(text: &str, indent: Pixels, colors: &Colors) -> Div {
     div()
-        .pl(px(38.0))
+        .pl(indent)
         .pr_2()
         .h(px(24.0))
         .flex()
@@ -1235,6 +1469,77 @@ mod tests {
         );
         assert_eq!(strip_stash_prefix("main"), "main");
         assert_eq!(strip_stash_prefix("stash@{0}"), "stash@{0}");
+    }
+
+    #[test]
+    fn revealing_a_ref_moves_the_highlight_until_a_commit_is_selected() {
+        let mut reveal = RevealState::default();
+        assert!(!reveal.is_ref(RefKind::LocalBranch, "main"));
+
+        reveal.reveal_ref(RefKind::LocalBranch, "main");
+        assert!(reveal.is_ref(RefKind::LocalBranch, "main"));
+
+        // Another ref replaces the highlight instead of adding to it.
+        reveal.reveal_ref(RefKind::RemoteBranch, "origin/main");
+        assert!(!reveal.is_ref(RefKind::LocalBranch, "main"));
+        assert!(reveal.is_ref(RefKind::RemoteBranch, "origin/main"));
+
+        reveal.reveal_stash(2);
+        assert!(!reveal.is_ref(RefKind::RemoteBranch, "origin/main"));
+        assert!(reveal.is_stash(2));
+        assert!(!reveal.is_stash(1));
+
+        // Selecting a commit clears whichever row was revealed.
+        reveal.clear();
+        assert!(!reveal.is_stash(2));
+        assert!(!reveal.is_ref(RefKind::LocalBranch, "main"));
+    }
+
+    fn remote(name: &str, fetch_url: Option<&str>) -> RemoteInfo {
+        RemoteInfo {
+            name: name.to_owned(),
+            fetch_url: fetch_url.map(str::to_owned),
+            push_url: None,
+        }
+    }
+
+    #[test]
+    fn every_configured_remote_gets_a_group_even_without_branches() {
+        let remotes = [
+            remote("backup", Some("/tmp/backup.git")),
+            remote("origin", Some("https://example.invalid/repo.git")),
+        ];
+        let entries = vec!["origin/main".to_owned(), "origin/feature".to_owned()];
+
+        let groups = remote_groups(&entries, &remotes);
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].name, "backup");
+        assert!(
+            groups[0].branches.is_empty(),
+            "a never-fetched remote must still be listed"
+        );
+        assert_eq!(
+            groups[0].fetch_url.as_deref(),
+            Some("/tmp/backup.git"),
+            "the header tooltip needs the fetch URL"
+        );
+        assert_eq!(groups[1].name, "origin");
+        assert_eq!(groups[1].branches, ["origin/main", "origin/feature"]);
+    }
+
+    #[test]
+    fn a_remote_tracking_ref_without_a_configured_remote_keeps_its_group() {
+        let entries = vec!["gone/main".to_owned()];
+        let groups = remote_groups(&entries, &[]);
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].name, "gone");
+        assert_eq!(groups[0].branches, ["gone/main"]);
+        assert_eq!(groups[0].fetch_url, None);
+    }
+
+    #[test]
+    fn no_configured_remotes_and_no_refs_means_no_groups() {
+        assert!(remote_groups(&[], &[]).is_empty());
     }
 
     #[test]

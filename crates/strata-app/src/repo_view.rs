@@ -707,6 +707,9 @@ impl RepoView {
             return;
         }
 
+        // Selecting a commit is the user moving off the sidebar ref they had
+        // revealed; the reveal tint belongs to that jump only.
+        self.branches.clear_revealed();
         self.selected = index;
         self.selection_commit = commit;
         // The reveal mark belongs to the ref the sidebar showed, not to
@@ -867,6 +870,9 @@ impl RepoView {
             .find(|info| info.kind == kind && info.short_name == short_name)
             .map(|info| info.target);
         self.reveal_commit(target, window, cx);
+        // After the jump, because selecting the commit clears the highlight.
+        self.branches.reveal_ref(kind, short_name);
+        cx.notify();
     }
 
     /// Like [`Self::reveal_ref`] for `stash@{index}`.
@@ -886,6 +892,8 @@ impl RepoView {
             .find(|stash| stash.index == index)
             .map(|stash| stash.id);
         self.reveal_commit(target, window, cx);
+        self.branches.reveal_stash(index);
+        cx.notify();
     }
 
     fn reveal_commit(&mut self, target: Option<Oid>, window: &mut Window, cx: &mut Context<Self>) {
