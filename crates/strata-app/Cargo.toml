@@ -10,3 +10,17 @@ path = "src/main.rs"
 
 [dependencies]
 strata-core.workspace = true
+
+# GPUI itself is published to crates.io under `gpui-pre` by the GPUI Kit
+# maintainers; the library is still named `gpui`, so the package rename keeps
+# `use gpui::…` working. `=0.3.12` matches what gpui-component pins.
+gpui = { package = "gpui-pre", version = "=0.3.12" }
+gpui-platform = { package = "gpui-pre-platform", version = "=0.3.12", features = [
+    "wayland",
+    "x11",
+] }
+gpui-component = "0.9.1"
+
+# GPUI logs through `log`; without a logger its warnings (display server,
+# GPU adapter, window creation) are silent, which makes headless triage blind.
+env_logger = "0.11"

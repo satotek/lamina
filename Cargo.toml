@@ -9,3 +9,9 @@ license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
 strata-core = { path = "crates/strata-core" }
+
+# The phase-0 benchmark has to be judged on release builds, where frame pacing
+# is not dominated by unoptimised element layout.
+[profile.release]
+opt-level = 3
+lto = "thin"
