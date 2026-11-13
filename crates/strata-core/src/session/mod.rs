@@ -211,6 +211,15 @@ pub struct CommitQuery {
     pub in_hash: bool,
 }
 
+/// One commit returned by [`Session::path_history_streaming`], paired with the
+/// repository-relative path the file had at that commit (which differs from the
+/// queried path before a rename).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathHistoryCommit {
+    pub commit: CommitInfo,
+    pub path: String,
+}
+
 /// Which starting points the commit walk uses.
 ///
 /// History loading reloads from this scope, so a UI that offers "show only this
@@ -500,17 +509,17 @@ pub enum SessionEvent {
         ticket: QueryTicket,
         error: String,
     },
-    /// One batch of a streaming path history, in walk order. `entries` are rows
-    /// into `snapshot.commits` at `generation`, exactly like `QueryReady`.
+    /// One batch of a streaming path history, in walk order.
+    ///
+    /// Unlike [`QueryReady`](Self::QueryReady), this walk runs independently of
+    /// graph snapshots, so incoming history chunks never invalidate its rows.
     PathHistoryBatch {
         ticket: QueryTicket,
-        generation: u64,
-        entries: Arc<Vec<usize>>,
+        entries: Arc<Vec<PathHistoryCommit>>,
     },
     /// The streaming path walk finished; every entry has already arrived.
     PathHistoryDone {
         ticket: QueryTicket,
-        generation: u64,
     },
     /// Submodules and worktrees for a ticket from
     /// [`Session::request_submodules_and_worktrees`].
@@ -728,11 +737,13 @@ impl Session {
         self.queue_query(queries::QueryKind::Path(path))
     }
 
-    /// Like [`path_history`](Self::path_history), but delivers the rows while
-    /// the walk runs: `PathHistoryBatch` events in walk order, then
-    /// `PathHistoryDone`. Concatenating the batches gives the same rows
-    /// `path_history` answers with. Cancelling the ticket stops the walk and
-    /// suppresses further batches and the done event.
+    /// Streams commits that changed `path` (file or directory) while the walk
+    /// runs: `PathHistoryBatch` events in walk order, then `PathHistoryDone`.
+    ///
+    /// Runs its own path walk directly against the repository rather than
+    /// indexing the loaded [`RepoSnapshot`], so snapshot updates during the
+    /// initial history walk never invalidate or restart it. Cancelling the
+    /// ticket stops the walk and suppresses further batches and the done event.
     pub fn path_history_streaming(&self, path: String) -> QueryTicket {
         self.queue_query(queries::QueryKind::StreamingPath(path))
     }

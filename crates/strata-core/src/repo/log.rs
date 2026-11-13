@@ -410,7 +410,7 @@ fn walk_tips(
     Ok(tips)
 }
 
-fn commit_info(
+pub(crate) fn commit_info(
     repo: &gix::Repository,
     id: gix::ObjectId,
     object_buf: &mut Vec<u8>,

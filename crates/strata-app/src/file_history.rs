@@ -2,21 +2,14 @@
 //! commit.
 //!
 //! The list comes from `Session::path_history_streaming`, which walks history on
-//! the session's query worker and reports rows in batches, so a long history
-//! fills in while the walk runs. The diff comes from `DiffRequest::Commit`.
-//! Both are keyed by ticket, so a late answer can never replace the view for a
-//! newer selection.
-//!
-//! Renames are followed by the session, but its batches carry row indices only.
-//! The name a commit knew the file under therefore comes from a second,
-//! rename-following walk run on the background executor, once per path: a row
-//! whose commit used another name says so, and its diff is opened under that
-//! name rather than the one the view was opened with.
+//! the session's query worker and reports commits (along with the path each
+//! commit knew the file under) in batches, independently of graph snapshots, so
+//! a long history fills in while both walks run. The diff comes from
+//! `DiffRequest::Commit`. Both are keyed by ticket, so a late answer can never
+//! replace the view for a newer selection.
 
-use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use gpui::prelude::*;
 use gpui::{
@@ -24,47 +17,66 @@ use gpui::{
     Styled, UniformListScrollHandle, Window, div, px, uniform_list,
 };
 use gpui_component::{ActiveTheme as _, Theme, spinner::Spinner};
-use strata_core::Oid;
-use strata_core::session::{DiffRequest, DiffTicket, DiffView, QueryTicket};
+use strata_core::session::{
+    DiffRequest, DiffTicket, DiffView, PathHistoryCommit, QueryTicket, RepoSnapshot,
+};
+use strata_core::{HeadInfo, Oid, RefInfo, StashInfo};
 
 use crate::data;
 use crate::diff_view::{self, DiffColors, Row as DiffRow};
 use crate::repo_view::{RepoView, history_diff_options};
 use crate::scrollbar::WithScrollbar as _;
-use crate::search::{QuerySlot, Ready};
 use crate::settings::Settings;
 use crate::style::{self, Design};
 
 const LIST_WIDTH: f32 = 520.0;
 
-/// Bound on the rename map: the walk runs to the end of history, but the names
-/// kept are only useful for commits the list can show, and a repository with
-/// millions of commits must not turn a file view into a memory leak.
-const NAME_LIMIT: usize = 100_000;
+/// Head and ref pointers observed when a file-history walk started, used to
+/// decide whether a `SnapshotUpdated` event reflects moved refs rather than an
+/// append-only chunk from the initial history walk.
+struct SnapshotHeads {
+    head: Option<HeadInfo>,
+    refs: Arc<Vec<RefInfo>>,
+    stashes: Arc<Vec<StashInfo>>,
+}
+
+impl SnapshotHeads {
+    fn from_snapshot(snapshot: &RepoSnapshot) -> Self {
+        Self {
+            head: snapshot.head.clone(),
+            refs: Arc::clone(&snapshot.refs),
+            stashes: Arc::clone(&snapshot.stashes),
+        }
+    }
+
+    fn changed(&self, snapshot: &RepoSnapshot) -> bool {
+        if self.head != snapshot.head {
+            return true;
+        }
+        if !Arc::ptr_eq(&self.refs, &snapshot.refs) && *self.refs != *snapshot.refs {
+            return true;
+        }
+        if !Arc::ptr_eq(&self.stashes, &snapshot.stashes) && *self.stashes != *snapshot.stashes {
+            return true;
+        }
+        false
+    }
+}
 
 /// State of the file-history view. Rendering reads it; [`RepoView`] updates it
 /// from session events and input.
 pub(crate) struct FileHistory {
     pub(crate) path: String,
-    slot: QuerySlot,
     /// Rows gathered from the streaming walk, newest first.
     walk: BatchRows,
-    /// Commit -> path the file had at that commit, once the rename walk
-    /// answers. Shared so the list closure can read it without copying.
-    names: Arc<HashMap<Oid, String>>,
-    /// Stops the rename walk when the view closes or the path changes.
-    names_stop: Arc<AtomicBool>,
-    /// True while the rename walk runs; it is started once per path.
-    names_walking: bool,
-    /// Snapshot row index of the commit whose diff is shown.
-    pub(crate) selected: Option<usize>,
+    /// Heads and refs active when the current walk started.
+    heads: Option<SnapshotHeads>,
+    /// Commit whose diff is shown.
+    pub(crate) selected: Option<Oid>,
     scroll: UniformListScrollHandle,
     diff_scroll: UniformListScrollHandle,
 
     diff_ticket: Option<DiffTicket>,
-    /// Path the visible diff was requested with, so a name that arrives late
-    /// re-requests the same commit under the name it had then.
-    diff_path: Option<String>,
     view: Option<Arc<DiffView>>,
     diff_rows: Rc<Vec<DiffRow>>,
     diff_error: Option<String>,
@@ -76,16 +88,12 @@ impl FileHistory {
     fn new(path: String) -> Self {
         Self {
             path,
-            slot: QuerySlot::default(),
             walk: BatchRows::default(),
-            names: Arc::new(HashMap::new()),
-            names_stop: Arc::new(AtomicBool::new(false)),
-            names_walking: false,
+            heads: None,
             selected: None,
             scroll: UniformListScrollHandle::default(),
             diff_scroll: UniformListScrollHandle::default(),
             diff_ticket: None,
-            diff_path: None,
             view: None,
             diff_rows: Rc::new(Vec::new()),
             diff_error: None,
@@ -93,11 +101,11 @@ impl FileHistory {
         }
     }
 
-    pub(crate) fn rows(&self) -> &[usize] {
+    pub(crate) fn rows(&self) -> &[PathHistoryCommit] {
         &self.walk.rows
     }
 
-    fn rows_shared(&self) -> Arc<Vec<usize>> {
+    fn rows_shared(&self) -> Arc<Vec<PathHistoryCommit>> {
         Arc::clone(&self.walk.rows)
     }
 
@@ -105,13 +113,20 @@ impl FileHistory {
         self.walk.ticket.is_some()
     }
 
-    /// The path `index`'s commit knew the file under, falling back to the path
-    /// the view was opened with until the rename walk has answered.
-    pub(crate) fn path_at(&self, index: usize, source: Option<&data::Source>) -> String {
-        let named = source
-            .and_then(|source| source.commit_id(index))
-            .and_then(|commit| self.names.get(&commit).cloned());
-        named.unwrap_or_else(|| self.path.clone())
+    fn entry_for(&self, commit: Oid) -> Option<&PathHistoryCommit> {
+        self.rows().iter().find(|entry| entry.commit.id == commit)
+    }
+
+    pub(crate) fn path_for(&self, commit: Oid) -> String {
+        self.entry_for(commit)
+            .map_or_else(|| self.path.clone(), |entry| entry.path.clone())
+    }
+
+    pub(crate) fn selected_commit_and_path(&self) -> Option<(Oid, String)> {
+        let commit = self
+            .selected
+            .or_else(|| self.rows().first().map(|entry| entry.commit.id))?;
+        Some((commit, self.path_for(commit)))
     }
 }
 
@@ -120,60 +135,40 @@ impl FileHistory {
 /// The query worker emits batches and a done event, and a ticket can be
 /// cancelled or replaced by a newer selection at any point in between; keeping
 /// the ticket next to the rows makes "is this batch still mine?" a single
-/// comparison instead of a race. Rows also belong to a snapshot generation, so
-/// a batch for a replaced snapshot is dropped rather than shown as the wrong
-/// commits.
+/// comparison instead of a race.
 #[derive(Debug, Default)]
 struct BatchRows {
     ticket: Option<QueryTicket>,
     /// Shared with the list closure, which appends nothing but must not copy
     /// the whole history on every frame.
-    rows: Arc<Vec<usize>>,
-}
-
-/// What one batch meant to the walk.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Batch {
-    /// The rows were appended.
-    Appended(usize),
-    /// A batch for a ticket that is no longer the one being walked.
-    Ignored,
-    /// The current ticket, but its rows point into a replaced snapshot.
-    Stale,
+    rows: Arc<Vec<PathHistoryCommit>>,
 }
 
 impl BatchRows {
     /// Starts a walk, replacing whatever the previous one had gathered.
-    fn begin(&mut self, ticket: QueryTicket) {
-        self.ticket = Some(ticket);
+    fn begin(&mut self, ticket: QueryTicket) -> Option<QueryTicket> {
         self.rows = Arc::new(Vec::new());
+        self.ticket.replace(ticket)
     }
 
-    /// Replaces the rows with a complete answer, for the non-streaming query.
-    fn replace(&mut self, rows: &[usize]) {
-        self.ticket = None;
-        self.rows = Arc::new(rows.to_vec());
-    }
-
-    fn append(
-        &mut self,
-        ticket: QueryTicket,
-        generation: u64,
-        current_generation: u64,
-        entries: &[usize],
-    ) -> Batch {
+    fn append(&mut self, ticket: QueryTicket, entries: &[PathHistoryCommit]) -> bool {
         if self.ticket != Some(ticket) {
-            return Batch::Ignored;
-        }
-        if generation != current_generation {
-            return Batch::Stale;
+            return false;
         }
         Arc::make_mut(&mut self.rows).extend_from_slice(entries);
-        Batch::Appended(entries.len())
+        true
     }
 
     /// True when `ticket` is the walk's; the ticket is released either way.
     fn done(&mut self, ticket: QueryTicket) -> bool {
+        if self.ticket != Some(ticket) {
+            return false;
+        }
+        self.ticket = None;
+        true
+    }
+
+    fn fail(&mut self, ticket: QueryTicket) -> bool {
         if self.ticket != Some(ticket) {
             return false;
         }
@@ -188,10 +183,10 @@ impl BatchRows {
 
 /// Keeps the current selection when it is still in the list, otherwise takes
 /// the newest match.
-fn choose_selection(rows: &[usize], current: Option<usize>) -> Option<usize> {
+fn choose_selection(rows: &[PathHistoryCommit], current: Option<Oid>) -> Option<Oid> {
     match current {
-        Some(current) if rows.contains(&current) => Some(current),
-        _ => rows.first().copied(),
+        Some(current) if rows.iter().any(|entry| entry.commit.id == current) => Some(current),
+        _ => rows.first().map(|entry| entry.commit.id),
     }
 }
 
@@ -232,51 +227,19 @@ impl RepoView {
         let Some(session) = self.session.as_ref() else {
             return;
         };
-        let ticket = session.path_history_streaming(path.clone());
-        let repo = session.repo().clone();
+        let ticket = session.path_history_streaming(path);
+        let snapshot = session.snapshot();
         let Some(history) = self.file_history.as_mut() else {
             return;
         };
-        if let Some(previous) = history.slot.begin(ticket) {
+        if let Some(previous) = history.walk.begin(ticket) {
             session.cancel_query(previous);
         }
-        history.walk.begin(ticket);
+        history.heads = snapshot
+            .head
+            .is_some()
+            .then(|| SnapshotHeads::from_snapshot(&snapshot));
         history.error = None;
-        // The batches name rows, not paths, so the names come from a walk of
-        // their own. It is keyed by commit and kept across snapshot refreshes,
-        // which is why it only starts once per opened path.
-        if !history.names_walking && history.names.is_empty() {
-            history.names_walking = true;
-            let stop = Arc::clone(&history.names_stop);
-            // The answer carries the view's own stop flag, so a walk started
-            // for an earlier view of the same path cannot land in this one.
-            let token = Arc::clone(&history.names_stop);
-            let walk_path = path.clone();
-            let answer_path = path;
-            cx.spawn(async move |this, cx| {
-                let names = cx
-                    .background_executor()
-                    .spawn(async move {
-                        let mut names: HashMap<Oid, String> = HashMap::new();
-                        let Ok(entries) = repo.path_history_entries(&walk_path) else {
-                            return names;
-                        };
-                        for entry in entries {
-                            if stop.load(Ordering::Relaxed) || names.len() >= NAME_LIMIT {
-                                break;
-                            }
-                            let Ok(entry) = entry else { break };
-                            names.insert(entry.commit, entry.path);
-                        }
-                        names
-                    })
-                    .await;
-                let _ = this.update(cx, |this, cx| {
-                    this.file_history_names(&answer_path, &token, names, cx);
-                });
-            })
-            .detach();
-        }
         cx.notify();
     }
 
@@ -296,20 +259,15 @@ impl RepoView {
         true
     }
 
-    /// Cancels the outstanding query, rename walk and diff without touching
-    /// focus.
+    /// Cancels the outstanding query and diff without touching focus.
     pub(crate) fn cancel_file_history(&mut self) {
         let Some(history) = self.file_history.as_mut() else {
             return;
         };
-        history.names_stop.store(true, Ordering::Relaxed);
-        let query = history.slot.cancel();
-        let stream = history.walk.cancel();
+        let query = history.walk.cancel();
         let diff = history.diff_ticket.take();
         if let Some(session) = self.session.as_ref() {
-            // `slot` and the walk hold the same ticket; cancelling it twice is
-            // harmless and keeps the close path from depending on that.
-            if let Some(ticket) = query.or(stream) {
+            if let Some(ticket) = query {
                 session.cancel_query(ticket);
             }
             if let Some(ticket) = diff {
@@ -330,150 +288,60 @@ impl RepoView {
     pub(crate) fn file_history_batch(
         &mut self,
         ticket: QueryTicket,
-        generation: u64,
-        entries: &[usize],
+        entries: &[PathHistoryCommit],
         cx: &mut Context<Self>,
     ) -> bool {
-        let current = self.current_generation();
-        let Some(history) = self.file_history.as_mut() else {
-            return false;
+        let request_diff = {
+            let Some(history) = self.file_history.as_mut() else {
+                return false;
+            };
+            if !history.walk.append(ticket, entries) {
+                return false;
+            }
+            if history.selected.is_none()
+                && let Some(first) = history.rows().first().map(|entry| entry.commit.id)
+            {
+                history.selected = Some(first);
+                true
+            } else {
+                false
+            }
         };
-        match history.walk.append(ticket, generation, current, entries) {
-            Batch::Ignored => false,
-            Batch::Appended(_) => {
-                cx.notify();
-                true
-            }
-            Batch::Stale => {
-                // The rows index a snapshot that has been replaced; walking
-                // again is the only way to get rows that select anything.
-                self.start_file_history(cx);
-                true
-            }
+        cx.notify();
+        if request_diff {
+            self.request_history_diff(cx);
         }
+        true
     }
 
     /// The walk reached the end of history.
     pub(crate) fn file_history_done(
         &mut self,
         ticket: QueryTicket,
-        generation: u64,
         cx: &mut Context<Self>,
     ) -> bool {
-        let current = self.current_generation();
-        let Some(history) = self.file_history.as_mut() else {
-            return false;
-        };
-        if !history.walk.done(ticket) {
-            return false;
-        }
-        match history.slot.accept(ticket, generation, current) {
-            Ready::Ignored => false,
-            Ready::Stale => {
-                self.start_file_history(cx);
-                true
-            }
-            Ready::Applied => {
-                let previous = history.selected;
-                history.selected = choose_selection(history.rows(), previous);
-                let moved = history.selected != previous;
-                if moved {
-                    history.view = None;
-                    history.diff_rows = Rc::new(Vec::new());
-                    history.diff_error = None;
-                }
-                cx.notify();
-                if moved {
-                    self.request_history_diff(cx);
-                }
-                true
-            }
-        }
-    }
-
-    /// The rename walk answered. It is keyed by path, so an answer for a path
-    /// the view has since left is dropped.
-    pub(crate) fn file_history_names(
-        &mut self,
-        path: &str,
-        token: &Arc<AtomicBool>,
-        names: HashMap<Oid, String>,
-        cx: &mut Context<Self>,
-    ) {
-        let selected = {
+        let moved = {
             let Some(history) = self.file_history.as_mut() else {
-                return;
+                return false;
             };
-            if history.path != path || !Arc::ptr_eq(&history.names_stop, token) {
-                return;
+            if !history.walk.done(ticket) {
+                return false;
             }
-            history.names_walking = false;
-            if names.is_empty() {
-                // Cancelled or unreadable: the rows fall back to the path the
-                // view was opened with, which is right for every commit before
-                // the first rename.
-                return;
+            let previous = history.selected;
+            history.selected = choose_selection(history.rows(), previous);
+            let moved = history.selected != previous;
+            if moved {
+                history.view = None;
+                history.diff_rows = Rc::new(Vec::new());
+                history.diff_error = None;
             }
-            history.names = Arc::new(names);
-            history.selected
+            moved
         };
         cx.notify();
-        // A commit selected before the names arrived may have been asked for
-        // under the wrong name.
-        let Some(index) = selected else {
-            return;
-        };
-        let resolved = self
-            .file_history
-            .as_ref()
-            .map(|history| history.path_at(index, self.source().as_ref()))
-            .unwrap_or_default();
-        let requested = self
-            .file_history
-            .as_ref()
-            .and_then(|it| it.diff_path.clone());
-        if requested.as_deref() != Some(resolved.as_str()) {
+        if moved {
             self.request_history_diff(cx);
         }
-    }
-
-    /// The non-streaming `path_history` answer, kept for the query events the
-    /// view still receives from other searches.
-    pub(crate) fn file_history_ready(
-        &mut self,
-        ticket: QueryTicket,
-        generation: u64,
-        rows: &Arc<Vec<usize>>,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let current = self.current_generation();
-        let Some(history) = self.file_history.as_mut() else {
-            return false;
-        };
-        match history.slot.accept(ticket, generation, current) {
-            Ready::Ignored => false,
-            Ready::Stale => {
-                self.start_file_history(cx);
-                true
-            }
-            Ready::Applied => {
-                history.walk.replace(rows);
-                history.error = None;
-                let previous = history.selected;
-                history.selected = choose_selection(history.rows(), previous);
-                let moved = history.selected != previous;
-                if moved {
-                    history.view = None;
-                    history.diff_rows = Rc::new(Vec::new());
-                    history.diff_error = None;
-                }
-                cx.notify();
-                if moved {
-                    self.request_history_diff(cx);
-                }
-                true
-            }
-        }
+        true
     }
 
     pub(crate) fn file_history_failed(
@@ -485,10 +353,9 @@ impl RepoView {
         let Some(history) = self.file_history.as_mut() else {
             return false;
         };
-        if !history.slot.fail(ticket) {
+        if !history.walk.fail(ticket) {
             return false;
         }
-        history.walk.cancel();
         history.error = Some(error.to_owned());
         cx.notify();
         true
@@ -533,27 +400,44 @@ impl RepoView {
         true
     }
 
-    /// File history is a query over loaded commits too, so a new chunk means
-    /// the walk has to be repeated to include it.
+    /// Restarts the walk only when HEAD, refs, or stashes actually changed.
+    /// Append-only snapshot publishes during the initial history walk leave the
+    /// path-history walk running uninterrupted.
     pub(crate) fn file_history_on_snapshot(&mut self, cx: &mut Context<Self>) {
-        let Some(history) = self.file_history.as_ref() else {
+        let Some(session) = self.session.as_ref() else {
             return;
         };
-        if self.mode != crate::worktree_panel::MainMode::History {
+        if self.file_history.is_none() || self.mode != crate::worktree_panel::MainMode::History {
             return;
         }
-        if history.slot.needs_refresh(self.current_generation()) {
+        let snapshot = session.snapshot();
+        if snapshot.head.is_none() {
+            return;
+        }
+        let restart = {
+            let Some(history) = self.file_history.as_mut() else {
+                return;
+            };
+            match &history.heads {
+                Some(recorded) => recorded.changed(&snapshot),
+                None => {
+                    history.heads = Some(SnapshotHeads::from_snapshot(&snapshot));
+                    false
+                }
+            }
+        };
+        if restart {
             self.start_file_history(cx);
         }
     }
 
     /// Selects a commit and asks for that commit's diff of the path.
-    pub(crate) fn select_history_commit(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.file_history.as_ref().and_then(|it| it.selected) == Some(index) {
+    pub(crate) fn select_history_commit(&mut self, commit: Oid, cx: &mut Context<Self>) {
+        if self.file_history.as_ref().and_then(|it| it.selected) == Some(commit) {
             return;
         }
         if let Some(history) = self.file_history.as_mut() {
-            history.selected = Some(index);
+            history.selected = Some(commit);
             history.view = None;
             history.diff_rows = Rc::new(Vec::new());
             history.diff_error = None;
@@ -571,59 +455,41 @@ impl RepoView {
         }
         let position = history
             .selected
-            .and_then(|index| rows.iter().position(|row| *row == index))
+            .and_then(|commit| rows.iter().position(|entry| entry.commit.id == commit))
             .map_or(0, |position| {
                 (position as isize + delta).clamp(0, rows.len() as isize - 1) as usize
             });
-        let Some(index) = rows.get(position).copied() else {
+        let Some(commit) = rows.get(position).map(|entry| entry.commit.id) else {
             return;
         };
         history
             .scroll
             .scroll_to_item(position, gpui::ScrollStrategy::Center);
-        self.select_history_commit(index, cx);
+        self.select_history_commit(commit, cx);
     }
 
     /// Requests the selected commit's diff of the path with the settings'
     /// comparison options, under the name the file had in that commit.
     pub(crate) fn request_history_diff(&mut self, cx: &mut Context<Self>) {
-        let Some(index) = self.file_history.as_ref().and_then(|it| it.selected) else {
-            return;
-        };
-        let Some(commit) = self.source().and_then(|source| source.commit_id(index)) else {
-            return;
-        };
-        let path = self
-            .file_history
-            .as_ref()
-            .map(|history| history.path_at(index, self.source().as_ref()))
-            .unwrap_or_default();
         let (Some(session), Some(history)) = (self.session.as_ref(), self.file_history.as_mut())
         else {
             return;
         };
+        let Some(commit) = history.selected else {
+            return;
+        };
+        let path = history.path_for(commit);
         let ticket = session.request_diff_with(
-            DiffRequest::Commit {
-                commit,
-                path: path.clone(),
-            },
+            DiffRequest::Commit { commit, path },
             history_diff_options(cx),
         );
         if let Some(previous) = history.diff_ticket.replace(ticket) {
             session.cancel_diff(previous);
         }
-        history.diff_path = Some(path);
         history.view = None;
         history.diff_rows = Rc::new(Vec::new());
         history.diff_error = None;
         cx.notify();
-    }
-
-    /// The snapshot generation the rows must belong to.
-    fn current_generation(&self) -> u64 {
-        self.session
-            .as_ref()
-            .map_or(0, |session| session.snapshot().generation)
     }
 
     /// The whole main area while a file history is open.
@@ -736,9 +602,6 @@ impl RepoView {
         let Some(history) = self.file_history.as_ref() else {
             return div().into_any_element();
         };
-        let Some(source) = self.source() else {
-            return div().into_any_element();
-        };
         if let Some(error) = &history.error {
             return list_message(error, colors.danger, colors);
         }
@@ -765,7 +628,7 @@ impl RepoView {
         }
         if history.rows().is_empty() {
             return list_message(
-                "No loaded commit touches this path",
+                "No commit touches this path",
                 colors.muted_foreground,
                 colors,
             );
@@ -774,7 +637,6 @@ impl RepoView {
         let selected = history.selected;
         let list_colors = colors.clone();
         let rows = history.rows_shared();
-        let names = Arc::clone(&history.names);
         let requested = history.path.clone();
         let count = rows.len() + usize::from(walking);
         uniform_list("file-history-commits", count, move |range, _window, _cx| {
@@ -783,25 +645,18 @@ impl RepoView {
                     if position >= rows.len() {
                         return loading_row(&list_colors);
                     }
-                    let index = rows[position];
-                    let Some(row) = source.row(index) else {
-                        return div().into_any_element();
-                    };
+                    let entry = &rows[position];
+                    let commit = &entry.commit;
+                    let commit_id = commit.id;
                     let date = style::date_label(
-                        row.time,
+                        commit.author_time,
                         style::now_epoch(),
                         list_colors.design.date_format,
                     );
-                    let rename = rename_label(
-                        &requested,
-                        source
-                            .commit_id(index)
-                            .and_then(|commit| names.get(&commit))
-                            .map(String::as_str),
-                    );
+                    let rename = rename_label(&requested, Some(entry.path.as_str()));
                     let element = crate::ui::list_row(
                         ("file-history-row", position),
-                        crate::ui::RowState::NORMAL.selected(selected == Some(index)),
+                        crate::ui::RowState::NORMAL.selected(selected == Some(commit_id)),
                         &list_colors.design,
                     )
                     // Two lines: the summary, and the name the file had there
@@ -821,7 +676,7 @@ impl RepoView {
                             .flex()
                             .flex_col()
                             .gap_0p5()
-                            .child(div().min_w_0().truncate().child(row.summary.to_string()))
+                            .child(div().min_w_0().truncate().child(commit.summary.clone()))
                             .children(rename.map(|rename| {
                                 div()
                                     .min_w_0()
@@ -837,7 +692,7 @@ impl RepoView {
                             .flex_none()
                             .truncate()
                             .text_color(list_colors.muted_foreground)
-                            .child(row.author.to_string()),
+                            .child(commit.author_name.clone()),
                     )
                     .child(
                         div()
@@ -853,14 +708,14 @@ impl RepoView {
                             .flex_none()
                             .font_family(list_colors.mono.clone())
                             .text_color(list_colors.muted_foreground)
-                            .child(row.id.to_string()),
+                            .child(data::short_oid(commit_id)),
                     );
                     let entity = entity.clone();
                     element
                         .cursor_pointer()
                         .on_click(move |_event, _window, cx| {
                             entity.update(cx, |this, cx| {
-                                this.select_history_commit(index, cx);
+                                this.select_history_commit(commit_id, cx);
                             });
                         })
                         .into_any_element()
@@ -885,13 +740,8 @@ impl RepoView {
         let Some(history) = self.file_history.as_ref() else {
             return div().into_any_element();
         };
-        let commit = history
-            .selected
-            .and_then(|index| self.source().and_then(|source| source.commit_id(index)));
-        let path = history.selected.map_or_else(
-            || history.path.clone(),
-            |index| history.path_at(index, self.source().as_ref()),
-        );
+        let commit = history.selected;
+        let path = commit.map_or_else(|| history.path.clone(), |id| history.path_for(id));
 
         let header = div()
             .flex()
@@ -1038,18 +888,64 @@ impl Colors {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use strata_core::session::CommitList;
+    use strata_core::{CommitInfo, RefKind, RepoState, WorktreeStatus};
+
+    fn oid(n: u8) -> Oid {
+        let mut bytes = [0u8; 20];
+        bytes[19] = n;
+        Oid::from(bytes)
+    }
+
+    fn entry(n: u8) -> PathHistoryCommit {
+        PathHistoryCommit {
+            commit: CommitInfo {
+                id: oid(n),
+                parents: Vec::new(),
+                summary: format!("commit {n}"),
+                author_name: "Test".to_owned(),
+                author_email: "test@example.com".to_owned(),
+                author_time: i64::from(n),
+                committer_time: i64::from(n),
+            },
+            path: "file.txt".to_owned(),
+        }
+    }
+
+    fn snapshot_with(
+        head: Option<HeadInfo>,
+        refs: Arc<Vec<RefInfo>>,
+        generation: u64,
+    ) -> RepoSnapshot {
+        RepoSnapshot {
+            generation,
+            head,
+            refs,
+            refs_by_commit: Arc::new(HashMap::new()),
+            commits: CommitList::default(),
+            commit_index: Arc::new(HashMap::new()),
+            status: Arc::new(WorktreeStatus::default()),
+            stashes: Arc::new(Vec::new()),
+            upstreams: Arc::new(HashMap::new()),
+            remotes: Vec::new(),
+            state: RepoState::Normal,
+            conflicts: Arc::new(Vec::new()),
+            busy: None,
+        }
+    }
 
     #[test]
     fn selection_keeps_a_listed_commit_and_otherwise_takes_the_newest() {
-        let rows = [4, 7, 9];
-        assert_eq!(choose_selection(&rows, Some(7)), Some(7));
+        let rows = [entry(4), entry(7), entry(9)];
+        assert_eq!(choose_selection(&rows, Some(oid(7))), Some(oid(7)));
         assert_eq!(
-            choose_selection(&rows, Some(8)),
-            Some(4),
+            choose_selection(&rows, Some(oid(8))),
+            Some(oid(4)),
             "a commit that left the list falls back to the newest match"
         );
-        assert_eq!(choose_selection(&rows, None), Some(4));
-        assert_eq!(choose_selection(&[], Some(7)), None);
+        assert_eq!(choose_selection(&rows, None), Some(oid(4)));
+        assert_eq!(choose_selection(&[], Some(oid(7))), None);
         assert_eq!(choose_selection(&[], None), None);
     }
 
@@ -1057,12 +953,10 @@ mod tests {
     fn batches_append_to_the_walk_that_owns_them() {
         let mut walk = BatchRows::default();
         walk.begin(QueryTicket(1));
-        assert_eq!(
-            walk.append(QueryTicket(1), 3, 3, &[10, 11]),
-            Batch::Appended(2)
-        );
-        assert_eq!(walk.append(QueryTicket(1), 3, 3, &[12]), Batch::Appended(1));
-        assert_eq!(*walk.rows, vec![10, 11, 12]);
+        assert!(walk.append(QueryTicket(1), &[entry(10), entry(11)]));
+        assert!(walk.append(QueryTicket(1), &[entry(12)]));
+        let ids: Vec<_> = walk.rows.iter().map(|it| it.commit.id).collect();
+        assert_eq!(ids, vec![oid(10), oid(11), oid(12)]);
         assert!(walk.done(QueryTicket(1)));
         assert_eq!(walk.ticket, None);
         assert!(!walk.rows.is_empty());
@@ -1072,38 +966,56 @@ mod tests {
     fn batches_from_a_replaced_ticket_are_dropped() {
         let mut walk = BatchRows::default();
         walk.begin(QueryTicket(1));
-        walk.append(QueryTicket(1), 3, 3, &[10]);
-        walk.begin(QueryTicket(2));
-        assert_eq!(
-            walk.append(QueryTicket(1), 3, 3, &[11]),
-            Batch::Ignored,
+        walk.append(QueryTicket(1), &[entry(10)]);
+        assert_eq!(walk.begin(QueryTicket(2)), Some(QueryTicket(1)));
+        assert!(
+            !walk.append(QueryTicket(1), &[entry(11)]),
             "a late batch for the previous selection must not append"
         );
         assert!(walk.rows.is_empty());
         assert!(!walk.done(QueryTicket(1)), "and it cannot finish the walk");
-        assert_eq!(walk.append(QueryTicket(2), 3, 3, &[20]), Batch::Appended(1));
+        assert!(walk.append(QueryTicket(2), &[entry(20)]));
     }
 
     #[test]
-    fn batches_for_a_replaced_snapshot_are_stale() {
-        let mut walk = BatchRows::default();
-        walk.begin(QueryTicket(4));
-        assert_eq!(walk.append(QueryTicket(4), 2, 3, &[7]), Batch::Stale);
-        assert!(
-            walk.rows.is_empty(),
-            "rows of another generation select the wrong commits"
+    fn snapshot_heads_ignore_append_only_updates_and_detect_ref_or_head_changes() {
+        let head = Some(HeadInfo::Branch {
+            short_name: "main".to_owned(),
+            target: Some(oid(1)),
+        });
+        let refs = Arc::new(vec![RefInfo {
+            full_name: "refs/heads/main".to_owned(),
+            short_name: "main".to_owned(),
+            kind: RefKind::LocalBranch,
+            target: oid(1),
+        }]);
+        let initial = snapshot_with(head.clone(), Arc::clone(&refs), 1);
+        let recorded = SnapshotHeads::from_snapshot(&initial);
+
+        // Next chunk during initial walk: generation bumps, same head/refs/stashes.
+        let chunk = snapshot_with(head.clone(), Arc::clone(&refs), 2);
+        assert!(!recorded.changed(&chunk));
+
+        // Ref target moved: must trigger restart.
+        let updated_refs = Arc::new(vec![RefInfo {
+            full_name: "refs/heads/main".to_owned(),
+            short_name: "main".to_owned(),
+            kind: RefKind::LocalBranch,
+            target: oid(2),
+        }]);
+        let moved_ref = snapshot_with(head, updated_refs, 3);
+        assert!(recorded.changed(&moved_ref));
+
+        // HEAD moved: must trigger restart.
+        let moved_head = snapshot_with(
+            Some(HeadInfo::Branch {
+                short_name: "topic".to_owned(),
+                target: Some(oid(3)),
+            }),
+            refs,
+            4,
         );
-        assert_eq!(walk.append(QueryTicket(4), 3, 3, &[8]), Batch::Appended(1));
-    }
-
-    #[test]
-    fn a_complete_answer_replaces_the_streamed_rows() {
-        let mut walk = BatchRows::default();
-        walk.begin(QueryTicket(5));
-        walk.append(QueryTicket(5), 1, 1, &[1, 2]);
-        walk.replace(&[3, 4]);
-        assert_eq!(*walk.rows, vec![3, 4]);
-        assert!(!walk.done(QueryTicket(5)));
+        assert!(recorded.changed(&moved_head));
     }
 
     #[test]

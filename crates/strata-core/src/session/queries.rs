@@ -13,7 +13,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::session::publish::Shared;
-use crate::session::{CommitList, CommitQuery, QueryTicket, RepoSnapshot, SessionEvent};
+use crate::session::{
+    CommitList, CommitQuery, PathHistoryCommit, QueryTicket, RepoSnapshot, SessionEvent,
+};
 use crate::{CommitInfo, Oid, Result};
 
 /// A hash prefix shorter than this matches too much to be a useful filter.
@@ -22,7 +24,7 @@ const MIN_HASH_CHARS: usize = 4;
 /// Cancellation is polled between batches so a long search stops promptly.
 const CANCEL_CHECK_ROWS: usize = 4_096;
 
-/// A streaming path walk sends whatever it has after this many visited commits,
+/// A streaming path walk sends whatever it has after this many matched commits,
 /// and at least every [`PATH_BATCH_INTERVAL`], so the file history fills in while
 /// an old history is still being walked.
 const PATH_BATCH_COMMITS: usize = 1_024;
@@ -109,8 +111,6 @@ pub(crate) fn run(shared: Arc<Shared>, state: Arc<QueryState>, jobs: Receiver<Qu
 }
 
 fn answer(shared: Arc<Shared>, state: Arc<QueryState>, job: &QueryJob) -> Result<()> {
-    let snapshot = shared.snapshot();
-    let generation = snapshot.generation;
     match &job.kind {
         QueryKind::CommitStat(commit) => {
             let stat = shared.repo.commit_stat(*commit)?;
@@ -145,6 +145,8 @@ fn answer(shared: Arc<Shared>, state: Arc<QueryState>, job: &QueryJob) -> Result
             });
         }
         QueryKind::Search(query) => {
+            let snapshot = shared.snapshot();
+            let generation = snapshot.generation;
             let Some(rows) = search(&snapshot.commits, query, || state.is_cancelled(job.ticket))
             else {
                 return Ok(());
@@ -152,32 +154,17 @@ fn answer(shared: Arc<Shared>, state: Arc<QueryState>, job: &QueryJob) -> Result
             emit_ready(&shared, &state, job.ticket, generation, rows);
         }
         QueryKind::Path(path) => {
+            let snapshot = shared.snapshot();
+            let generation = snapshot.generation;
             // A path that never matches keeps the walk busy for the whole
             // history, so cancellation has to reach the walk itself.
-            let Some(rows) = path_rows(&shared, &state, job.ticket, &snapshot, path, None)? else {
+            let Some(rows) = path_rows(&shared, &state, job.ticket, &snapshot, path)? else {
                 return Ok(());
             };
             emit_ready(&shared, &state, job.ticket, generation, rows);
         }
         QueryKind::StreamingPath(path) => {
-            let mut stream = BatchStream::new(
-                Arc::clone(&shared),
-                Arc::clone(&state),
-                job.ticket,
-                generation,
-            );
-            let Some(rows) = path_rows(
-                &shared,
-                &state,
-                job.ticket,
-                &snapshot,
-                path,
-                Some(&mut stream),
-            )?
-            else {
-                return Ok(());
-            };
-            stream.finish(rows);
+            stream_path_history(&shared, &state, job.ticket, path)?;
         }
     }
     Ok(())
@@ -204,16 +191,12 @@ fn emit_ready(
 
 /// Matching rows of `snapshot` for a path walk, in walk order. `None` when the
 /// ticket was cancelled or the session is shutting down.
-///
-/// A `stream` delivers rows as they accumulate, so a long history does not stay
-/// empty until the walk ends; the caller gets back the tail that was not sent.
 fn path_rows(
     shared: &Arc<Shared>,
     state: &Arc<QueryState>,
     ticket: QueryTicket,
     snapshot: &RepoSnapshot,
     path: &str,
-    mut stream: Option<&mut BatchStream>,
 ) -> Result<Option<Vec<usize>>> {
     let cancelled = {
         let shared = Arc::clone(shared);
@@ -222,8 +205,6 @@ fn path_rows(
     };
     let mut history = shared.repo.path_history_cancellable(path, cancelled)?;
     let mut rows = Vec::new();
-    let mut walked = 0usize;
-    let mut last_batch = Instant::now();
     // Drive the walk by hand so cancellation and shutdown are noticed between
     // commits instead of only when a matching row arrives.
     loop {
@@ -234,24 +215,62 @@ fn path_rows(
             break;
         };
         let id = id?;
-        walked += 1;
         // Commits outside the snapshot were never loaded at this generation, so
         // they have no row to select.
         if let Some(&row) = snapshot.commit_index.get(&id) {
             rows.push(row);
         }
-        if let Some(stream) = stream.as_mut()
-            && !rows.is_empty()
-            && (walked.is_multiple_of(PATH_BATCH_COMMITS)
-                || last_batch.elapsed() >= PATH_BATCH_INTERVAL)
+    }
+    Ok(Some(rows))
+}
+
+/// Walks `path` directly against the repository, streaming `PathHistoryBatch`
+/// events in walk order without depending on graph snapshots.
+fn stream_path_history(
+    shared: &Arc<Shared>,
+    state: &Arc<QueryState>,
+    ticket: QueryTicket,
+    path: &str,
+) -> Result<()> {
+    let cancelled = {
+        let shared = Arc::clone(shared);
+        let state = Arc::clone(state);
+        Arc::new(move || state.is_cancelled(ticket) || shared.is_shutdown())
+    };
+    let mut history = shared
+        .repo
+        .path_history_entries_cancellable(path, cancelled)?;
+    let stream = BatchStream::new(Arc::clone(shared), Arc::clone(state), ticket);
+    let mut batch = Vec::new();
+    let mut parents_buf = Vec::new();
+    let mut last_batch = Instant::now();
+    let mut sent_first = false;
+    loop {
+        if state.is_cancelled(ticket) || shared.is_shutdown() {
+            return Ok(());
+        }
+        let Some(entry) = history.next() else {
+            break;
+        };
+        let entry = entry?;
+        let commit = history.read_commit_info(entry.commit, &mut parents_buf)?;
+        batch.push(PathHistoryCommit {
+            commit,
+            path: entry.path,
+        });
+        if !sent_first
+            || batch.len() >= PATH_BATCH_COMMITS
+            || last_batch.elapsed() >= PATH_BATCH_INTERVAL
         {
-            if !stream.batch(std::mem::take(&mut rows)) {
-                return Ok(None);
+            if !stream.batch(std::mem::take(&mut batch)) {
+                return Ok(());
             }
+            sent_first = true;
             last_batch = Instant::now();
         }
     }
-    Ok(Some(rows))
+    stream.finish(batch);
+    Ok(())
 }
 
 /// Batched delivery of a streaming path walk. Holding the shared state, not a
@@ -260,39 +279,31 @@ struct BatchStream {
     shared: Arc<Shared>,
     state: Arc<QueryState>,
     ticket: QueryTicket,
-    generation: u64,
 }
 
 impl BatchStream {
-    fn new(
-        shared: Arc<Shared>,
-        state: Arc<QueryState>,
-        ticket: QueryTicket,
-        generation: u64,
-    ) -> Self {
+    fn new(shared: Arc<Shared>, state: Arc<QueryState>, ticket: QueryTicket) -> Self {
         Self {
             shared,
             state,
             ticket,
-            generation,
         }
     }
 
     /// Sends one batch. `false` means the walk must stop without emitting more.
-    fn batch(&self, entries: Vec<usize>) -> bool {
+    fn batch(&self, entries: Vec<PathHistoryCommit>) -> bool {
         if self.state.is_cancelled(self.ticket) || self.shared.is_shutdown() {
             return false;
         }
         self.shared.emit(SessionEvent::PathHistoryBatch {
             ticket: self.ticket,
-            generation: self.generation,
             entries: Arc::new(entries),
         });
         true
     }
 
     /// Sends the tail and then `PathHistoryDone`, unless the walk was cancelled.
-    fn finish(&self, rows: Vec<usize>) {
+    fn finish(&self, rows: Vec<PathHistoryCommit>) {
         if !rows.is_empty() && !self.batch(rows) {
             return;
         }
@@ -301,7 +312,6 @@ impl BatchStream {
         }
         self.shared.emit(SessionEvent::PathHistoryDone {
             ticket: self.ticket,
-            generation: self.generation,
         });
     }
 }

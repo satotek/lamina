@@ -608,20 +608,13 @@ impl RepoView {
 
     /// Blames the selected entry of the open file history at its own commit.
     pub(crate) fn blame_file_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(source) = self.source() else {
+        let Some((commit, path)) = self
+            .file_history
+            .as_ref()
+            .and_then(crate::file_history::FileHistory::selected_commit_and_path)
+        else {
             return;
         };
-        let Some(history) = self.file_history.as_ref() else {
-            return;
-        };
-        let index = history.selected.or_else(|| history.rows().first().copied());
-        let Some(index) = index else {
-            return;
-        };
-        let Some(commit) = source.commit_id(index) else {
-            return;
-        };
-        let path = history.path_at(index, Some(&source));
         self.discard_file_history();
         self.open_blame(commit, path, window, cx);
     }

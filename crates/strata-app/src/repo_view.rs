@@ -544,6 +544,7 @@ impl RepoView {
     /// the old session must not reach the window any more, where its
     /// notification or dialog would land over the new repository.
     pub(crate) fn detach_session(&mut self) -> Option<Session> {
+        self.cancel_file_history();
         self._bridge.take();
         self.session.take()
     }
@@ -613,9 +614,7 @@ impl RepoView {
                 generation,
                 rows,
             } => {
-                if !self.search_ready(ticket, generation, &rows, cx) {
-                    self.file_history_ready(ticket, generation, &rows, cx);
-                }
+                self.search_ready(ticket, generation, &rows, cx);
             }
             SessionEvent::QueryFailed { ticket, error } => {
                 // A failed re-read only leaves the previous lists in place; the
@@ -634,15 +633,11 @@ impl RepoView {
                     cx.notify();
                 }
             }
-            SessionEvent::PathHistoryBatch {
-                ticket,
-                generation,
-                entries,
-            } => {
-                self.file_history_batch(ticket, generation, &entries, cx);
+            SessionEvent::PathHistoryBatch { ticket, entries } => {
+                self.file_history_batch(ticket, &entries, cx);
             }
-            SessionEvent::PathHistoryDone { ticket, generation } => {
-                self.file_history_done(ticket, generation, cx);
+            SessionEvent::PathHistoryDone { ticket } => {
+                self.file_history_done(ticket, cx);
             }
             SessionEvent::BlameProgress {
                 ticket,

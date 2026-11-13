@@ -12,7 +12,9 @@ use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use strata_core::repo::Repo;
-use strata_core::session::{CommitQuery, QueryTicket, RepoSnapshot, Session, SessionEvent};
+use strata_core::session::{
+    CommitQuery, PathHistoryCommit, QueryTicket, RepoSnapshot, Session, SessionEvent,
+};
 use tempfile::TempDir;
 
 const BASE_TIME: i64 = 1_700_000_000;
@@ -222,6 +224,14 @@ struct Harness {
 
 impl Harness {
     fn open(fixture: Fixture, commits: usize) -> Self {
+        let harness = Self::open_partial(fixture);
+        harness.wait_for_complete(commits);
+        harness
+    }
+
+    /// Opens the session and waits only until the first commits land, while the
+    /// initial history walk is still running on a multi-chunk repository.
+    fn open_partial(fixture: Fixture) -> Self {
         let (tx, rx) = mpsc::channel();
         let session = Session::open(fixture.path(), move |event| {
             let _ = tx.send(event);
@@ -232,7 +242,7 @@ impl Harness {
             events: rx,
             _fixture: fixture,
         };
-        harness.wait_for_complete(commits);
+        harness.wait_until(|snapshot| !snapshot.commits.is_empty());
         harness
     }
 
@@ -282,34 +292,21 @@ impl Harness {
         }
     }
 
-    /// Generation and batch entries of a streaming path history, in arrival
-    /// order, stopping at `PathHistoryDone`.
-    fn wait_for_stream(&self, ticket: QueryTicket) -> (u64, Vec<Vec<usize>>) {
+    /// Batch entries of a streaming path history, in arrival order, stopping at
+    /// `PathHistoryDone`.
+    fn wait_for_stream(&self, ticket: QueryTicket) -> Vec<Vec<PathHistoryCommit>> {
         let deadline = Instant::now() + TIMEOUT;
-        let mut batches: Vec<(u64, Vec<usize>)> = Vec::new();
+        let mut batches: Vec<Vec<PathHistoryCommit>> = Vec::new();
         loop {
             let now = Instant::now();
             assert!(now < deadline, "timed out waiting for {ticket:?}");
             match self.events.recv_timeout(deadline - now) {
                 Ok(SessionEvent::PathHistoryBatch {
                     ticket: got,
-                    generation,
                     entries,
-                }) if got == ticket => batches.push((generation, entries.as_ref().clone())),
-                Ok(SessionEvent::PathHistoryDone {
-                    ticket: got,
-                    generation,
-                }) if got == ticket => {
-                    assert!(
-                        batches
-                            .iter()
-                            .all(|(batch_generation, _)| *batch_generation == generation),
-                        "a batch belongs to another snapshot generation"
-                    );
-                    return (
-                        generation,
-                        batches.into_iter().map(|(_, entries)| entries).collect(),
-                    );
+                }) if got == ticket => batches.push(entries.as_ref().clone()),
+                Ok(SessionEvent::PathHistoryDone { ticket: got }) if got == ticket => {
+                    return batches;
                 }
                 Ok(SessionEvent::QueryFailed { ticket: got, error }) if got == ticket => {
                     panic!("query {ticket:?} failed: {error}")
@@ -322,7 +319,7 @@ impl Harness {
     }
 
     /// Waits for the first batch of a streaming walk.
-    fn wait_for_batch(&self, ticket: QueryTicket) -> Vec<usize> {
+    fn wait_for_batch(&self, ticket: QueryTicket) -> Vec<PathHistoryCommit> {
         let deadline = Instant::now() + TIMEOUT;
         loop {
             let now = Instant::now();
@@ -331,9 +328,8 @@ impl Harness {
                 Ok(SessionEvent::PathHistoryBatch {
                     ticket: got,
                     entries,
-                    ..
                 }) if got == ticket => return entries.as_ref().clone(),
-                Ok(SessionEvent::PathHistoryDone { ticket: got, .. }) if got == ticket => {
+                Ok(SessionEvent::PathHistoryDone { ticket: got }) if got == ticket => {
                     panic!("the walk finished before a batch was seen")
                 }
                 Ok(_) => {}
@@ -851,20 +847,24 @@ fn streaming_path_history_batches_concatenate_to_the_full_result() {
     let fixture = Fixture::new();
     fixture.fast_import(5_000);
     let harness = Harness::open(fixture, 5_000);
+    let snapshot = harness.session.snapshot();
 
     let ticket = harness.session.path_history("file.txt".to_string());
-    let (generation, rows) = harness.wait_for_query(ticket);
+    let (_, rows) = harness.wait_for_query(ticket);
     assert_eq!(rows.len(), 5_000, "every commit changed the file");
     assert!(
         rows.windows(2).all(|pair| pair[0] < pair[1]),
         "the non-streaming rows are in walk order"
     );
+    let expected_ids: Vec<_> = rows
+        .iter()
+        .map(|&row| snapshot.commits.get(row).expect("row").0.id)
+        .collect();
 
     let ticket = harness
         .session
         .path_history_streaming("file.txt".to_string());
-    let (stream_generation, batches) = harness.wait_for_stream(ticket);
-    assert!(stream_generation >= generation);
+    let batches = harness.wait_for_stream(ticket);
     assert!(
         batches.len() > 1,
         "the walk should be split into batches, got {}",
@@ -874,17 +874,177 @@ fn streaming_path_history_batches_concatenate_to_the_full_result() {
     let mut flattened = Vec::new();
     for batch in &batches {
         assert!(!batch.is_empty(), "a batch carried no rows");
-        // Batches are contiguous slices of one ordered row list: no row repeats
-        // and no row goes backwards.
-        if let (Some(previous), Some(next)) = (flattened.last(), batch.first()) {
-            assert!(previous < next, "batches are out of order");
+        for entry in batch {
+            assert_eq!(entry.path, "file.txt");
+            flattened.push(entry.commit.id);
         }
-        flattened.extend_from_slice(batch);
     }
     assert_eq!(
-        flattened, rows,
+        flattened, expected_ids,
         "streaming and non-streaming path history disagree"
     );
+}
+
+#[test]
+fn streaming_path_history_started_during_initial_walk_finishes_complete_list() {
+    let fixture = Fixture::new();
+    // 20,000 commits across many snapshot chunks (FIRST_COMMIT_CHUNK = 200,
+    // COMMIT_CHUNK = 4,096). Every 20th commit changes `target.txt`, including
+    // commit 0 (the oldest commit, well outside the first snapshot).
+    let mut stream = String::new();
+    for index in 0..20_000 {
+        let mark = index + 1;
+        stream.push_str(&format!("blob\nmark :{mark}\ndata 6\n{index:06}\n"));
+        let message = format!("commit {index}");
+        stream.push_str("commit refs/heads/main\n");
+        stream.push_str(&format!(
+            "committer Strata Test <strata@example.com> {} +0000\n",
+            BASE_TIME + index as i64
+        ));
+        stream.push_str(&format!("data {}\n{}\n", message.len(), message));
+        let file = if index % 20 == 0 {
+            "target.txt"
+        } else {
+            "other.txt"
+        };
+        stream.push_str(&format!("M 100644 :{mark} {file}\n\n"));
+    }
+    fixture.git_input(&["fast-import", "--quiet"], &stream);
+    fixture.git(&["reset", "--hard", "HEAD"]);
+
+    let expected: Vec<String> = fixture.history("target.txt");
+    assert_eq!(expected.len(), 1_000);
+    assert_eq!(expected, fixture.git_history("target.txt"));
+
+    let harness = Harness::open_partial(fixture);
+    let initial = harness.session.snapshot();
+    assert!(
+        !initial.commits.complete,
+        "expected the initial walk to still be running after the first chunk (loaded {})",
+        initial.commits.len()
+    );
+
+    let ticket = harness
+        .session
+        .path_history_streaming("target.txt".to_string());
+
+    let deadline = Instant::now() + TIMEOUT;
+    let mut batches: Vec<PathHistoryCommit> = Vec::new();
+    let mut done_count = 0usize;
+    let mut later_snapshots = 0usize;
+    loop {
+        let complete = harness.session.snapshot().commits.complete;
+        if done_count > 0 && complete {
+            break;
+        }
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "timed out waiting for streaming path history and initial walk (done={done_count}, complete={complete})"
+        );
+        match harness.events.recv_timeout(deadline - now) {
+            Ok(SessionEvent::SnapshotUpdated { generation }) if generation > initial.generation => {
+                later_snapshots += 1;
+            }
+            Ok(SessionEvent::PathHistoryBatch {
+                ticket: got,
+                entries,
+            }) if got == ticket => {
+                assert_eq!(done_count, 0, "received batch after PathHistoryDone");
+                batches.extend(entries.iter().cloned());
+            }
+            Ok(SessionEvent::PathHistoryDone { ticket: got }) if got == ticket => {
+                done_count += 1;
+            }
+            Ok(SessionEvent::QueryFailed { ticket: got, error }) if got == ticket => {
+                panic!("streaming path history failed: {error}");
+            }
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => panic!("session event channel closed"),
+        }
+    }
+
+    assert!(
+        later_snapshots > 0,
+        "expected later SnapshotUpdated events during/after the query"
+    );
+    assert_eq!(done_count, 1);
+
+    let got_ids: Vec<String> = batches
+        .iter()
+        .map(|entry| entry.commit.id.to_string())
+        .collect();
+    assert_eq!(
+        got_ids, expected,
+        "path history started mid-walk must return the complete list without restarting"
+    );
+    assert!(batches.iter().all(|entry| entry.path == "target.txt"));
+}
+
+#[test]
+fn streaming_path_history_during_initial_walk_follows_renames() {
+    let fixture = Fixture::new();
+    let mut stream = String::new();
+    // Commits 0..10 touch `old.txt`, commit 10 renames to `new.txt`, and
+    // commits 11..10,000 touch `other.txt` (with commit 9,999 also touching `new.txt`)
+    // so the initial walk publishes multiple chunks while the query runs.
+    for index in 0..10_000 {
+        let mark = index + 1;
+        let payload = format!("line {index:06}\nmore content to make rename detection clear\n");
+        stream.push_str(&format!(
+            "blob\nmark :{mark}\ndata {}\n{payload}",
+            payload.len()
+        ));
+        let message = format!("commit {index}");
+        stream.push_str("commit refs/heads/main\n");
+        stream.push_str(&format!(
+            "committer Strata Test <strata@example.com> {} +0000\n",
+            BASE_TIME + index as i64
+        ));
+        stream.push_str(&format!("data {}\n{}\n", message.len(), message));
+        if index < 10 {
+            stream.push_str(&format!("M 100644 :{mark} old.txt\n\n"));
+        } else if index == 10 {
+            stream.push_str("D old.txt\n");
+            stream.push_str(&format!("M 100644 :{mark} new.txt\n\n"));
+        } else if index == 9_999 {
+            stream.push_str(&format!("M 100644 :{mark} new.txt\n\n"));
+        } else {
+            stream.push_str(&format!("M 100644 :{mark} other.txt\n\n"));
+        }
+    }
+    fixture.git_input(&["fast-import", "--quiet"], &stream);
+    fixture.git(&["reset", "--hard", "HEAD"]);
+
+    let expected: Vec<(String, String)> = fixture
+        .open()
+        .path_history_entries("new.txt")
+        .expect("path history entries")
+        .map(|entry| {
+            let entry = entry.expect("entry");
+            (entry.commit.to_string(), entry.path)
+        })
+        .collect();
+    assert_eq!(expected.len(), 12);
+    assert_eq!(expected[0].1, "new.txt");
+    assert_eq!(expected[1].1, "new.txt");
+    assert!(expected[2..].iter().all(|(_, path)| path == "old.txt"));
+
+    let harness = Harness::open_partial(fixture);
+    assert!(!harness.session.snapshot().commits.complete);
+
+    let ticket = harness
+        .session
+        .path_history_streaming("new.txt".to_string());
+    let batches = harness.wait_for_stream(ticket);
+    let got: Vec<(String, String)> = batches
+        .into_iter()
+        .flatten()
+        .map(|entry| (entry.commit.id.to_string(), entry.path))
+        .collect();
+    assert_eq!(got, expected);
+    harness.wait_for_complete(10_000);
 }
 
 #[test]
@@ -916,6 +1076,30 @@ fn cancelling_a_streaming_path_history_stops_further_batches() {
             _ => {}
         }
     }
+}
+
+#[test]
+fn cancelling_streaming_path_history_during_initial_walk_leaves_walk_running() {
+    let fixture = Fixture::new();
+    fixture.fast_import(20_000);
+    let harness = Harness::open_partial(fixture);
+    assert!(!harness.session.snapshot().commits.complete);
+
+    let ticket = harness
+        .session
+        .path_history_streaming("file.txt".to_string());
+    let first = harness.wait_for_batch(ticket);
+    assert!(!first.is_empty());
+
+    harness.session.cancel_query(ticket);
+
+    harness.wait_for_complete(20_000);
+    let _ = harness.stream_events(ticket, Duration::from_millis(150));
+    let after = harness.stream_events(ticket, Duration::from_millis(250));
+    assert!(
+        after.is_empty(),
+        "a cancelled stream emitted events after cancel: {after:?}"
+    );
 }
 
 #[test]

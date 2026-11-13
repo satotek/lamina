@@ -20,7 +20,7 @@ use gix::objs::{FindExt, TreeRefIter};
 use super::Repo;
 use super::log::CancelCheck;
 use super::log::PathWalk;
-use crate::{Error, Oid, Result};
+use crate::{CommitInfo, Error, Oid, Result};
 
 /// Resolved entries are kept per tree id. In linear history a commit's tree is
 /// its child's parent tree, so the next row is usually a cache hit.
@@ -119,6 +119,14 @@ impl Iterator for PathHistoryEntries {
 }
 
 impl PathHistoryEntries {
+    pub(crate) fn read_commit_info(
+        &mut self,
+        id: Oid,
+        parents_buf: &mut Vec<Oid>,
+    ) -> Result<CommitInfo> {
+        super::log::commit_info(&self.repo, id, &mut self.odb_buf, parents_buf)
+    }
+
     fn is_cancelled(&self) -> bool {
         match &self.cancelled {
             Some(cancelled) => cancelled(),
@@ -328,6 +336,16 @@ impl Repo {
         cancelled: CancelCheck,
     ) -> Result<PathHistory> {
         self.path_history_with_cancel(path, Some(cancelled))
+    }
+
+    /// [`path_history_entries`](Self::path_history_entries) that stops once
+    /// `cancelled` returns `true`, even between commits that do not match the path.
+    pub(crate) fn path_history_entries_cancellable(
+        &self,
+        path: &str,
+        cancelled: CancelCheck,
+    ) -> Result<PathHistoryEntries> {
+        self.path_history_entries_with_cancel(path, Some(cancelled))
     }
 
     fn path_history_with_cancel(
