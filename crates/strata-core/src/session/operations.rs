@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::Result;
 use crate::diff::{DiffOptions, diff_text};
@@ -17,6 +17,67 @@ use crate::session::{Operation, OperationId, SessionEvent, head_file, worktree_a
 /// A wedged status refresh must not block the operation queue forever. The
 /// limit is far above any real status scan.
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Git emits progress far faster than a UI can render it; 20 events per second
+/// keeps the bar moving without flooding the event channel.
+const PROGRESS_INTERVAL: Duration = Duration::from_millis(50);
+
+/// Throttles git's progress lines into `OperationProgress` events while keeping
+/// the last line, which is always reported when the command ends: it carries
+/// the outcome ("main -> origin/main") the intermediate counters do not.
+struct ProgressReporter<'a> {
+    shared: &'a Shared,
+    id: OperationId,
+    last: Option<(String, Option<u8>)>,
+    emitted: Option<(String, Option<u8>)>,
+    emitted_at: Option<Instant>,
+}
+
+impl<'a> ProgressReporter<'a> {
+    fn new(shared: &'a Shared, id: OperationId) -> Self {
+        Self {
+            shared,
+            id,
+            last: None,
+            emitted: None,
+            emitted_at: None,
+        }
+    }
+
+    fn line(&mut self, text: &str, percent: Option<u8>) {
+        let text = text.trim();
+        if text.is_empty() {
+            return;
+        }
+        self.last = Some((text.to_owned(), percent));
+        let due = self
+            .emitted_at
+            .is_none_or(|at| at.elapsed() >= PROGRESS_INTERVAL);
+        if due {
+            self.emit_last();
+        }
+    }
+
+    /// The final line is reported even if the throttle would have dropped it.
+    fn finish(mut self) {
+        if self.last != self.emitted {
+            self.emit_last();
+        }
+    }
+
+    fn emit_last(&mut self) {
+        let Some((text, percent)) = self.last.clone() else {
+            return;
+        };
+        self.shared.emit(SessionEvent::OperationProgress {
+            id: self.id,
+            text: text.clone(),
+            percent,
+        });
+        self.emitted = Some((text, percent));
+        self.emitted_at = Some(Instant::now());
+    }
+}
 
 pub(crate) struct OperationJob {
     pub(crate) id: OperationId,
@@ -47,7 +108,7 @@ fn run_one(
     shared.publish(|snapshot| snapshot.busy = Some(job.id));
     shared.emit(SessionEvent::OperationStarted { id: job.id });
 
-    let result = execute(shared, &job.operation);
+    let result = execute(shared, job.id, &job.operation);
 
     // Refreshes held back during the command are dropped if the session
     // forgets them here: a status scan cannot see a ref that moved. Held
@@ -111,7 +172,7 @@ fn changes_refs(operation: &Operation) -> bool {
     )
 }
 
-fn execute(shared: &Shared, operation: &Operation) -> Result<()> {
+fn execute(shared: &Shared, id: OperationId, operation: &Operation) -> Result<()> {
     let git = &shared.git;
     match operation {
         Operation::StagePaths(paths) => git.stage_paths(paths),
@@ -141,19 +202,38 @@ fn execute(shared: &Shared, operation: &Operation) -> Result<()> {
             checkout,
         } => git.create_branch(name, start_point.as_deref(), *checkout),
         Operation::DeleteBranch { name, force } => git.delete_branch(name, *force),
-        Operation::Fetch { remote, prune } => git.fetch(remote.as_deref(), *prune),
-        Operation::Pull { rebase } => git.pull(*rebase),
+        Operation::Fetch { remote, prune } => {
+            let mut progress = ProgressReporter::new(shared, id);
+            let result = git.fetch_with_progress(remote.as_deref(), *prune, |text, percent| {
+                progress.line(text, percent)
+            });
+            progress.finish();
+            result
+        }
+        Operation::Pull { rebase } => {
+            let mut progress = ProgressReporter::new(shared, id);
+            let result =
+                git.pull_with_progress(*rebase, |text, percent| progress.line(text, percent));
+            progress.finish();
+            result
+        }
         Operation::Push {
             remote,
             branch,
             set_upstream,
             force_with_lease,
-        } => git.push(
-            remote.as_deref(),
-            branch.as_deref(),
-            *set_upstream,
-            *force_with_lease,
-        ),
+        } => {
+            let mut progress = ProgressReporter::new(shared, id);
+            let result = git.push_with_progress(
+                remote.as_deref(),
+                branch.as_deref(),
+                *set_upstream,
+                *force_with_lease,
+                |text, percent| progress.line(text, percent),
+            );
+            progress.finish();
+            result
+        }
         Operation::StashPush {
             message,
             include_untracked,

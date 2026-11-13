@@ -10,6 +10,7 @@
 
 mod command_log;
 mod ops;
+mod progress;
 
 pub use command_log::{CommandLog, CommandRecord, MAX_CAPTURE_BYTES, MAX_LOG_ENTRIES, StreamLine};
 pub use ops::{ApplyMode, CommitOptions, StashEntry};
