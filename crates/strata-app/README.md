@@ -9,7 +9,8 @@ graph and a highlighted diff smoothly on macOS, Windows and Linux.
 ## Usage
 
 ```sh
-strata [PATH]       # repository containing PATH (default: current directory)
+strata [PATH]       # repository containing PATH; without it, the last
+                    # repository opened, or the welcome screen
 strata --fake [N]   # N synthetic commits (default 200000)
 ```
 
