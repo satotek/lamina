@@ -482,12 +482,10 @@ fn first_parent(repo: &Repo, commit: Oid) -> Result<Option<Oid>> {
     Ok(commit.parent_ids().next().map(|id| id.detach()))
 }
 
-/// The worktree side of a diff in the form git hashes into a blob.
-///
-/// Another task is adding `Repo::file_in_worktree_as_git` (autocrlf and
-/// attributes): swap this call for it once it lands.
+/// The worktree side of a diff in the form git hashes into a blob, so CRLF
+/// checkouts (autocrlf, eol attributes) do not show every line as changed.
 fn worktree_as_git(repo: &Repo, path: &str) -> Result<Option<Vec<u8>>> {
-    repo.file_in_worktree(path)
+    repo.file_in_worktree_as_git(path)
 }
 
 /// Watcher callback: a ref or HEAD move needs a new walk, a worktree or index
