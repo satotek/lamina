@@ -18,10 +18,9 @@ use gpui_component::Disableable as _;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
-use gpui_component::{ActiveTheme, Icon, Sizable as _, Theme, TitleBar};
+use gpui_component::{ActiveTheme, Icon, Sizable as _, TitleBar};
 use gpui_kit_assets::IconName;
 use strata_core::diff::LineKind;
-use strata_core::highlight::LineHighlights;
 use strata_core::session::DiffView;
 use strata_core::{ChangeKind, FileChange, HeadInfo, RefKind};
 
@@ -143,7 +142,7 @@ impl Render for RepoView {
                         .min_w_0()
                         .min_h_0()
                         .child(self.commit_pane(entity.clone(), &design))
-                        .child(self.diff_pane(cx.theme(), &design))
+                        .child(self.diff_pane(&design, cx))
                         .into_any_element(),
                     MainMode::Worktree => self.worktree_view(entity.clone(), window, cx),
                 }
@@ -687,7 +686,7 @@ impl RepoView {
         .into_any_element()
     }
 
-    fn diff_pane(&self, theme: &Theme, design: &Design) -> AnyElement {
+    fn diff_pane(&self, design: &Design, cx: &mut App) -> AnyElement {
         let rows = if self.fake.is_some() {
             self.selected
                 .and_then(|index| self.fake_diffs.get(index % self.fake_diffs.len().max(1)))
@@ -722,9 +721,9 @@ impl RepoView {
             .min_h_0()
             .child(self.diff_header(design, rows.len()))
             .child(if self.fake.is_some() {
-                self.diff_rows_list(rows, None, theme, design)
+                self.diff_rows_list(rows, None, design, cx)
             } else {
-                self.real_diff_body(theme, design)
+                self.real_diff_body(design, cx)
             });
 
         div()
@@ -972,7 +971,7 @@ impl RepoView {
             .into_any_element()
     }
 
-    fn real_diff_body(&self, theme: &Theme, design: &Design) -> AnyElement {
+    fn real_diff_body(&self, design: &Design, cx: &mut App) -> AnyElement {
         if let Some(error) = &self.files_error {
             return message(error, design.remove_text, design);
         }
@@ -982,7 +981,7 @@ impl RepoView {
         if files.is_empty() {
             return message("No changes in this commit", design.muted, design);
         }
-        self.diff_content(theme, design)
+        self.diff_content(design, cx)
     }
 
     fn file_list(&self, design: &Design) -> AnyElement {
@@ -1072,7 +1071,7 @@ impl RepoView {
         .into_any_element()
     }
 
-    fn diff_content(&self, theme: &Theme, design: &Design) -> AnyElement {
+    fn diff_content(&self, design: &Design, cx: &mut App) -> AnyElement {
         if let Some(error) = &self.diff_error {
             return message(error, design.remove_text, design);
         }
@@ -1085,32 +1084,25 @@ impl RepoView {
         if self.diff_rows.is_empty() {
             return message("No textual changes", design.muted, design);
         }
-        self.diff_rows_list(Rc::clone(&self.diff_rows), Some(view), theme, design)
+        self.diff_rows_list(Rc::clone(&self.diff_rows), Some(view), design, cx)
     }
 
     fn diff_rows_list(
         &self,
         rows: Rc<Vec<DiffRow>>,
         view: Option<std::sync::Arc<DiffView>>,
-        theme: &Theme,
         design: &Design,
+        cx: &mut App,
     ) -> AnyElement {
-        let colors = DiffColors::from_theme(theme);
-        let mono = design.mono.clone();
-        uniform_list("diff", rows.len(), move |range, _window, _cx| {
-            range
-                .map(|index| {
-                    let row = &rows[index];
-                    let highlights = view.as_ref().and_then(|view| line_highlights(row, view));
-                    diff_view::render_row(row, &colors, &mono, highlights)
-                })
-                .collect::<Vec<_>>()
-        })
-        .track_scroll(&self.diff_scroll)
-        .with_scrollbar(&self.diff_scroll)
-        .flex_1()
-        .min_h_0()
-        .into_any_element()
+        diff_view::diff_list(
+            "diff",
+            rows,
+            view,
+            DiffColors::from_theme(cx.theme()),
+            design.mono.clone(),
+            &self.diff_scroll,
+            cx,
+        )
     }
 
     fn status_bar(&self, design: &Design) -> AnyElement {
@@ -1624,18 +1616,4 @@ fn search_key_label() -> &'static str {
 #[cfg(target_os = "macos")]
 fn search_key_label() -> &'static str {
     "⌘F"
-}
-
-/// The highlights for the side of the line that is drawn. Context lines exist
-/// on both sides, so the new side is used and the old one is only a fallback.
-fn line_highlights<'a>(row: &DiffRow, view: &'a DiffView) -> Option<&'a LineHighlights> {
-    let DiffRow::Line(line) = row else {
-        return None;
-    };
-    let (highlights, number) = match line.kind {
-        LineKind::Removed => (&view.old_highlights, line.old_lineno),
-        LineKind::Added => (&view.new_highlights, line.new_lineno),
-        LineKind::Context => (&view.new_highlights, line.new_lineno.or(line.old_lineno)),
-    };
-    highlights.get(number?.checked_sub(1)? as usize)
 }

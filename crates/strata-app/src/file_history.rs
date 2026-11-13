@@ -12,13 +12,11 @@ use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, Context, Entity, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement,
-    SharedString, Styled, UniformListScrollHandle, Window, div, px, uniform_list,
+    AnyElement, App, Context, Entity, FontWeight, Hsla, InteractiveElement, IntoElement,
+    ParentElement, SharedString, Styled, UniformListScrollHandle, Window, div, px, uniform_list,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{ActiveTheme as _, Sizable as _, Theme, spinner::Spinner};
-use strata_core::diff::LineKind;
-use strata_core::highlight::LineHighlights;
 use strata_core::session::{DiffRequest, DiffTicket, DiffView, QueryTicket};
 
 use crate::data;
@@ -420,7 +418,7 @@ impl RepoView {
 
         let diff_colors = DiffColors::from_theme(cx.theme());
         let list = self.file_history_list(entity.clone(), &colors);
-        let diff = self.file_history_diff(&colors, &diff_colors);
+        let diff = self.file_history_diff(&colors, &diff_colors, cx);
 
         div()
             .flex()
@@ -568,7 +566,12 @@ impl RepoView {
         .into_any_element()
     }
 
-    fn file_history_diff(&self, colors: &Colors, diff_colors: &DiffColors) -> AnyElement {
+    fn file_history_diff(
+        &self,
+        colors: &Colors,
+        diff_colors: &DiffColors,
+        cx: &mut App,
+    ) -> AnyElement {
         let Some(history) = self.file_history.as_ref() else {
             return div().into_any_element();
         };
@@ -618,7 +621,7 @@ impl RepoView {
             } else if history.diff_rows.is_empty() {
                 message("No textual changes", colors.muted_foreground)
             } else {
-                self.history_diff_rows(colors, diff_colors)
+                self.history_diff_rows(colors, diff_colors, cx)
             }
         } else {
             message("computing diff…", colors.muted_foreground)
@@ -635,32 +638,24 @@ impl RepoView {
             .into_any_element()
     }
 
-    fn history_diff_rows(&self, colors: &Colors, diff_colors: &DiffColors) -> AnyElement {
+    fn history_diff_rows(
+        &self,
+        colors: &Colors,
+        diff_colors: &DiffColors,
+        cx: &mut App,
+    ) -> AnyElement {
         let Some(history) = self.file_history.as_ref() else {
             return div().into_any_element();
         };
-        let rows = Rc::clone(&history.diff_rows);
-        let view = history.view.clone();
-        let diff_colors = *diff_colors;
-        let mono = colors.mono.clone();
-        uniform_list(
+        diff_view::diff_list(
             "file-history-diff",
-            rows.len(),
-            move |range, _window, _cx| {
-                range
-                    .map(|index| {
-                        let row = &rows[index];
-                        let highlights = view.as_ref().and_then(|view| line_highlights(row, view));
-                        diff_view::render_row(row, &diff_colors, &mono, highlights)
-                    })
-                    .collect::<Vec<_>>()
-            },
+            Rc::clone(&history.diff_rows),
+            history.view.clone(),
+            *diff_colors,
+            colors.mono.clone(),
+            &history.diff_scroll,
+            cx,
         )
-        .track_scroll(&history.diff_scroll)
-        .with_scrollbar(&history.diff_scroll)
-        .flex_1()
-        .min_h_0()
-        .into_any_element()
     }
 }
 
@@ -693,20 +688,6 @@ fn message(text: &str, color: Hsla) -> AnyElement {
         .text_color(color)
         .child(text.to_owned())
         .into_any_element()
-}
-
-/// The highlights for the side of the line that is drawn, as the history diff
-/// pane does: context lines use the new side too.
-fn line_highlights<'a>(row: &DiffRow, view: &'a DiffView) -> Option<&'a LineHighlights> {
-    let DiffRow::Line(line) = row else {
-        return None;
-    };
-    let (highlights, number) = match line.kind {
-        LineKind::Removed => (&view.old_highlights, line.old_lineno),
-        LineKind::Added => (&view.new_highlights, line.new_lineno),
-        LineKind::Context => (&view.new_highlights, line.new_lineno.or(line.old_lineno)),
-    };
-    highlights.get(number?.checked_sub(1)? as usize)
 }
 
 #[derive(Clone)]

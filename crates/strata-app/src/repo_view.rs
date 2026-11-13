@@ -323,6 +323,7 @@ impl RepoView {
                 }));
                 view.session = Some(session);
                 view.search.init_input(window, cx);
+                crate::autofetch::start(window.window_handle(), cx);
             }
             Launch::Error { path, error } => view.error = Some((path, error)),
         }

@@ -10,6 +10,7 @@
 //! A path that is not a repository keeps the error screen instead of exiting.
 
 mod actions;
+mod autofetch;
 mod branches;
 mod conflicts;
 mod data;
@@ -25,6 +26,7 @@ mod repo_view;
 mod scrollbar;
 mod search;
 mod settings;
+mod settings_view;
 mod stash;
 mod style;
 mod workspace;
@@ -52,6 +54,7 @@ fn main() {
             gpui_component::init(cx);
             settings::init(cx);
             actions::bind(cx);
+            settings_view::bind(cx);
             worktree_panel::bind(cx);
             branches::bind(cx);
             conflicts::bind(cx);

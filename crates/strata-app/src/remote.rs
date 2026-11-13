@@ -669,7 +669,8 @@ impl RepoView {
         }
     }
 
-    /// Fetches every remote, pruning branches that were deleted on it.
+    /// Fetches every remote, pruning branches that were deleted on it unless
+    /// the user turned pruning off.
     ///
     /// Fetching only the current branch's remote would leave every other
     /// remote's badges stale, and prune is what stops a branch deleted on the
@@ -678,7 +679,7 @@ impl RepoView {
         self.start_remote(
             Operation::Fetch {
                 remote: None,
-                prune: true,
+                prune: crate::settings::Settings::get(cx).behaviour.prune_on_fetch,
             },
             Kind::Fetch,
             "Fetched all remotes".to_owned(),

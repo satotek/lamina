@@ -242,6 +242,11 @@ fn settings_path() -> Option<PathBuf> {
         .map(|dir| dir.join("settings.json"))
 }
 
+/// The file the settings are saved to, for the settings window to show.
+pub fn settings_file() -> Option<PathBuf> {
+    settings_path()
+}
+
 /// Loads the settings into the app global. Call once at startup, before any
 /// window opens.
 pub fn init(cx: &mut App) {
@@ -263,7 +268,6 @@ pub fn apply_theme(window: Option<&mut Window>, cx: &mut App) {
 
 /// Changes the settings, notifies `observe_global::<Settings>` observers and
 /// saves the result off the UI thread.
-#[allow(dead_code, reason = "the settings screen is the first caller")]
 pub fn update(cx: &mut App, change: impl FnOnce(&mut Settings)) {
     cx.update_global::<Settings, _>(|settings, _| change(settings));
     let snapshot = Settings::get(cx).clone();

@@ -1241,12 +1241,17 @@ fn file_row(
     .into_any_element()
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one call per hunk header; a struct would only rename the fields"
+)]
 fn hunk_header_row(
     entity: &Entity<RepoView>,
     row: usize,
     position: &RowPosition,
     side: Option<Side>,
     (old_start, old_len, new_start, new_len): (u32, u32, u32, u32),
+    height: f32,
     diff_colors: &DiffColors,
     colors: &Colors,
 ) -> AnyElement {
@@ -1316,7 +1321,7 @@ fn hunk_header_row(
     div()
         .flex()
         .items_center()
-        .h(px(diff_view::ROW_HEIGHT))
+        .h(px(height))
         .w_full()
         .bg(colors.design.panel)
         .border_t_1()
@@ -2089,7 +2094,8 @@ impl WorktreePanel {
         let side = self.selected.as_ref().map(|selected| selected.side);
         let list_colors = colors.clone();
 
-        uniform_list("worktree-diff", rows.len(), move |range, _window, _cx| {
+        uniform_list("worktree-diff", rows.len(), move |range, _window, cx| {
+            let style = diff_view::DiffStyle::from_settings(cx, &mono).one_line_per_row();
             range
                 .map(|index| {
                     let row = &rows[index];
@@ -2106,6 +2112,7 @@ impl WorktreePanel {
                             &row.position,
                             side,
                             (*old_start, *old_len, *new_start, *new_len),
+                            style.row_height(),
                             &diff_colors,
                             &list_colors,
                         ),
@@ -2124,7 +2131,7 @@ impl WorktreePanel {
                                 .child(diff_view::render_row_with(
                                     &row.row,
                                     &diff_colors,
-                                    &mono,
+                                    &style,
                                     highlights,
                                     RowOptions { pick },
                                 ))
