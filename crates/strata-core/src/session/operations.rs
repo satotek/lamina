@@ -171,6 +171,13 @@ fn changes_refs(operation: &Operation) -> bool {
             | Operation::Merge { .. }
             | Operation::MergeAbort
             | Operation::MergeContinue
+            | Operation::CherryPick { .. }
+            | Operation::Revert { .. }
+            | Operation::Reset { .. }
+            | Operation::CreateTag { .. }
+            | Operation::DeleteTag { .. }
+            | Operation::ContinueInProgress
+            | Operation::AbortInProgress
     )
 }
 
@@ -251,6 +258,15 @@ fn execute(shared: &Shared, id: OperationId, operation: &Operation) -> Result<()
         Operation::MarkResolved(paths) => git.mark_resolved(paths),
         Operation::MergeContinue => git.merge_continue(),
         Operation::OpenMergetool { path } => git.mergetool(path),
+        // Implemented by the history-operations task.
+        Operation::ResolveWithContent { .. }
+        | Operation::CherryPick { .. }
+        | Operation::Revert { .. }
+        | Operation::Reset { .. }
+        | Operation::CreateTag { .. }
+        | Operation::DeleteTag { .. }
+        | Operation::ContinueInProgress
+        | Operation::AbortInProgress => Err(Error::other("not implemented yet")),
     }
 }
 

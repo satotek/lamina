@@ -271,6 +271,50 @@ pub enum Operation {
     OpenMergetool {
         path: String,
     },
+    /// Write `content` as the resolved worktree file and stage it. Used when
+    /// conflicts are resolved region by region in the app.
+    ResolveWithContent {
+        path: String,
+        content: Vec<u8>,
+    },
+    /// `git cherry-pick <commit>` (`-m 1` for a merge). Conflicts stop it like a merge.
+    CherryPick {
+        commit: Oid,
+    },
+    /// `git revert --no-edit <commit>` (`-m 1` for a merge).
+    Revert {
+        commit: Oid,
+    },
+    /// `git reset --<mode> <target>` on the current branch.
+    Reset {
+        target: Oid,
+        mode: ResetMode,
+    },
+    /// A lightweight tag when `message` is `None`, an annotated one otherwise.
+    CreateTag {
+        name: String,
+        target: Oid,
+        message: Option<String>,
+    },
+    DeleteTag {
+        name: String,
+    },
+    /// `--continue` for whichever of merge, rebase, cherry-pick, revert or
+    /// `am` is in progress (see `RepoSnapshot::state`).
+    ContinueInProgress,
+    /// `--abort` for whichever operation is in progress.
+    AbortInProgress,
+}
+
+/// How far `Operation::Reset` rewinds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ResetMode {
+    /// Move the branch only; index and worktree keep the changes staged.
+    Soft,
+    /// Move the branch and reset the index; worktree changes stay unstaged.
+    Mixed,
+    /// Move the branch and discard index and worktree changes.
+    Hard,
 }
 
 /// Which pair of sides to diff.
