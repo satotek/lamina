@@ -6,14 +6,15 @@
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, ClickEvent, Div, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    Styled, Window, div, px, uniform_list,
+    AnyElement, Div, FontWeight, InteractiveElement, IntoElement, ParentElement, Styled, div, px,
+    uniform_list,
 };
-use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
-use strata_core::RefKind;
+use gpui_component::menu::ContextMenuExt as _;
+use strata_core::{Oid, RefKind};
 
+use super::history_ops::{self, CommitTarget};
 use super::{RepoView, one_line};
-use crate::data::{self, Badge, RowData};
+use crate::data::{Badge, RowData};
 use crate::graph_canvas;
 use crate::scrollbar::WithScrollbar as _;
 use crate::search::{Field, SEARCH_BAR};
@@ -24,6 +25,12 @@ const DATE_WIDTH: f32 = 96.0;
 const COMMIT_WIDTH: f32 = 64.0;
 
 impl RepoView {
+    /// Commit of the ref the sidebar last revealed. The field lives on
+    /// [`RepoView`] because `reveal_ref` and `reveal_stash` set it there.
+    pub(super) fn revealed_commit(&self) -> Option<Oid> {
+        self.revealed_commit
+    }
+
     pub(super) fn commit_pane(&self, entity: gpui::Entity<Self>, design: &Design) -> AnyElement {
         let Some(source) = self.source() else {
             return empty_pane("No repository", design);
@@ -35,13 +42,14 @@ impl RepoView {
 
         let now = style::now_epoch();
         let selected = self.selected;
+        let revealed = self.revealed_commit();
         let lanes = self.lanes.max();
         let graph_width = graph_canvas::column_width(lanes);
         let row_design = design.clone();
         let focus = self.focus.clone();
-        // Branch creation from a commit row is only meaningful for a real
-        // repository, and only when no operation is in flight.
-        let branch_menu = self.session.is_some() && !self.is_busy();
+        // The menu itself is built in `history_ops`; its rules only need the
+        // snapshot, taken once per frame rather than per row.
+        let menu_state = self.history_menu_state();
         let filter = self.search.filter().cloned();
         let count = filter.as_ref().map_or(len, |rows| rows.len());
         let date_format = design.date_format;
@@ -63,6 +71,19 @@ impl RepoView {
                     let Some(mut row) = source_for_list.row(index) else {
                         return div().into_any_element();
                     };
+                    // The menu offers a delete for each tag on the commit, so
+                    // collect them before the badge filters hide any.
+                    let target = CommitTarget {
+                        id: source_for_list.commit_id(index),
+                        short: row.id.to_string(),
+                        summary: row.summary.to_string(),
+                        tags: row
+                            .badges
+                            .iter()
+                            .filter(|badge| badge.kind == RefKind::Tag)
+                            .map(|badge| badge.label.to_string())
+                            .collect(),
+                    };
                     if !show_remote {
                         row.badges
                             .retain(|badge| badge.kind != RefKind::RemoteBranch);
@@ -74,6 +95,9 @@ impl RepoView {
                     let filtered = filter.is_some();
                     let click_entity = entity.clone();
                     let id = ("commit-row", index);
+                    // A ref revealed from the sidebar keeps its row tinted
+                    // while it is not the selection.
+                    let revealed = revealed.is_some_and(|commit| Some(commit) == target.id);
                     let element = if filtered {
                         // The graph is hidden while filtered: spaced-out rows
                         // would draw lanes that never existed between them.
@@ -81,12 +105,21 @@ impl RepoView {
                             id,
                             &row,
                             selected == Some(index),
+                            revealed,
                             graph_width,
                             &date,
                             &row_design,
                         )
                     } else {
-                        commit_row(id, &row, selected == Some(index), lanes, &date, &row_design)
+                        commit_row(
+                            id,
+                            &row,
+                            selected == Some(index),
+                            revealed,
+                            lanes,
+                            &date,
+                            &row_design,
+                        )
                     }
                     .cursor_pointer()
                     .on_click(move |_event, window, cx| {
@@ -99,26 +132,18 @@ impl RepoView {
                             window.focus(&focus, cx);
                         });
                     });
-                    let Some(commit) = source_for_list.commit_id(index).filter(|_| branch_menu)
-                    else {
-                        return element.into_any_element();
-                    };
-                    let entity = entity.clone();
+                    let menu_entity = entity;
+                    let menu_state = menu_state.clone();
                     element
-                        .context_menu(move |menu, _window, _cx| {
-                            let point = commit.to_string();
-                            let from = format!("from commit {}", data::short_oid(commit));
-                            let open = {
-                                let entity = entity.clone();
-                                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                                    let point = point.clone();
-                                    let from = from.clone();
-                                    entity.update(cx, |this, cx| {
-                                        this.open_create_dialog(Some(point), from, window, cx);
-                                    });
-                                }
-                            };
-                            menu.item(PopupMenuItem::new("Create branch here…").on_click(open))
+                        .context_menu(move |menu, window, cx| {
+                            history_ops::commit_menu(
+                                menu,
+                                target.clone(),
+                                menu_state.clone(),
+                                menu_entity.clone(),
+                                window,
+                                cx,
+                            )
                         })
                         .into_any_element()
                 })
@@ -241,17 +266,27 @@ fn commit_header(design: &Design, graph_width: f32) -> AnyElement {
         .into_any_element()
 }
 
+/// The row state both commit-row shapes paint with. `ui::list_row` gives the
+/// selection precedence over the revealed tint, so a revealed row reads as
+/// selected while it is also the selection.
+fn row_state(selected: bool, revealed: bool) -> crate::ui::RowState {
+    crate::ui::RowState::NORMAL
+        .selected(selected)
+        .revealed(revealed)
+}
+
 fn commit_row(
     id: impl Into<gpui::ElementId>,
     data: &RowData<'_>,
     selected: bool,
+    revealed: bool,
     lanes: u16,
     date: &str,
     design: &Design,
 ) -> gpui::Stateful<Div> {
     let avatar_color = design.avatar_color(&data.email);
     let initials = style::initials(&data.author);
-    crate::ui::list_row(id, crate::ui::RowState::NORMAL.selected(selected), design)
+    crate::ui::list_row(id, row_state(selected, revealed), design)
         .gap_3()
         .h(px(graph_canvas::ROW_HEIGHT))
         .w_full()
@@ -334,13 +369,14 @@ fn filtered_commit_row(
     id: impl Into<gpui::ElementId>,
     data: &RowData<'_>,
     selected: bool,
+    revealed: bool,
     graph_width: f32,
     date: &str,
     design: &Design,
 ) -> gpui::Stateful<Div> {
     let avatar_color = design.avatar_color(&data.email);
     let initials = style::initials(&data.author);
-    crate::ui::list_row(id, crate::ui::RowState::NORMAL.selected(selected), design)
+    crate::ui::list_row(id, row_state(selected, revealed), design)
         .gap_3()
         .h(px(graph_canvas::ROW_HEIGHT))
         .w_full()

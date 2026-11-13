@@ -11,6 +11,7 @@ mod commit_list;
 mod common;
 mod details;
 mod diff_pane;
+mod history_ops;
 mod in_progress;
 mod sidebar;
 mod status_bar;
@@ -241,6 +242,10 @@ pub struct RepoView {
     /// Commit whose changed files were requested; guards against reloading the
     /// same selection on every snapshot publish.
     selection_commit: Option<Oid>,
+    /// Commit of the ref the sidebar last revealed. Its row keeps the revealed
+    /// tint so the target of a branch, tag or stash stays visible; selecting
+    /// another commit clears it.
+    revealed_commit: Option<Oid>,
     commit_scroll: UniformListScrollHandle,
     diff_scroll: UniformListScrollHandle,
     file_scroll: UniformListScrollHandle,
@@ -309,6 +314,7 @@ impl RepoView {
             lanes: LaneWidth::default(),
             selected: None,
             selection_commit: None,
+            revealed_commit: None,
             commit_scroll: UniformListScrollHandle::default(),
             diff_scroll: UniformListScrollHandle::default(),
             file_scroll: UniformListScrollHandle::default(),
@@ -703,6 +709,11 @@ impl RepoView {
 
         self.selected = index;
         self.selection_commit = commit;
+        // The reveal mark belongs to the ref the sidebar showed, not to
+        // whatever the user selected next.
+        if self.revealed_commit != commit {
+            self.revealed_commit = None;
+        }
         self.selected_file = None;
         self.files = None;
         self.files_error = None;
@@ -897,6 +908,8 @@ impl RepoView {
             self.clear_search(window, cx);
         }
         self.jump(index, cx);
+        // Set after the jump: `select` clears a mark that points elsewhere.
+        self.revealed_commit = target;
     }
 
     /// Scrolls the commit list to a row without changing the selection. While a
