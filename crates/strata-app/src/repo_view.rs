@@ -447,6 +447,11 @@ impl RepoView {
                     self.file_history_failed(ticket, &error, cx);
                 }
             }
+            // Nothing requests these yet: the details pane's commit-wide stat
+            // and the streaming file history are wired up in later changes.
+            SessionEvent::CommitStatReady { .. }
+            | SessionEvent::PathHistoryBatch { .. }
+            | SessionEvent::PathHistoryDone { .. } => {}
             SessionEvent::CommandLogged(record) => {
                 self.last_command = Some(command_line(&record));
                 cx.notify();
