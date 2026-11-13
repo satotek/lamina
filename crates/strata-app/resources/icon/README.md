@@ -6,3 +6,7 @@ downscales: `strata-64.svg` keeps one commit, and `strata-32.svg` /
 
 `strata.ico` is generated from them and checked in, so a Windows build needs
 no image tools. Run `./generate.sh` after changing an SVG.
+
+`wordmark.py` regenerates `assets/icons/wordmark.svg`, the title bar's "STRATA"
+wordmark, as outlines so it looks the same on every platform. Its docstring
+has the command.
