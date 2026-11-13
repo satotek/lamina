@@ -32,3 +32,11 @@ env_logger = "0.11"
 # Only for `mpsc`: session events arrive on background threads and are drained
 # by one foreground task, so the UI never blocks on git work.
 futures = "0.3"
+
+# App settings are one JSON file in the platform config directory.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+
+[dev-dependencies]
+tempfile = "3.27.0"

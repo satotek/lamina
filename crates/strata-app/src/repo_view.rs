@@ -18,7 +18,6 @@ use gpui::{
     App, AppContext as _, Context, Entity, FocusHandle, Focusable as _, ScrollStrategy,
     Subscription, Task, UniformListScrollHandle, Window,
 };
-use gpui_component::Theme;
 use gpui_component::input::InputState;
 use strata_core::git_cli::CommandRecord;
 use strata_core::session::{DiffRequest, DiffTicket, DiffView, Operation, Session, SessionEvent};
@@ -238,9 +237,8 @@ impl RepoView {
     pub fn new(launch: Launch, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        let appearance = window.observe_window_appearance(|window, cx| {
-            Theme::sync_system_appearance(Some(window), cx)
-        });
+        let appearance = window
+            .observe_window_appearance(|window, cx| crate::settings::apply_theme(Some(window), cx));
         let smoke = std::env::var_os("STRATA_SMOKE").is_some();
         let title = launch.title();
         let entity = cx.entity();

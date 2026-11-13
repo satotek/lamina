@@ -18,6 +18,7 @@ mod remote;
 mod repo_view;
 mod scrollbar;
 mod search;
+mod settings;
 mod worktree_panel;
 
 use std::path::Path;
@@ -40,6 +41,7 @@ fn main() {
         .with_assets(gpui_kit_assets::Assets)
         .run(move |cx: &mut App| {
             gpui_component::init(cx);
+            settings::init(cx);
             actions::bind(cx);
             worktree_panel::bind(cx);
             branches::bind(cx);
@@ -65,7 +67,7 @@ fn main() {
                     ..TitleBar::window_options()
                 },
                 move |window, cx| {
-                    gpui_component::Theme::sync_system_appearance(Some(window), cx);
+                    settings::apply_theme(Some(window), cx);
                     {
                         let view = cx.new(|cx| RepoView::new(launch, window, cx));
                         // Root hosts gpui-component's dialog, notification and

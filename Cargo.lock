@@ -7320,7 +7320,11 @@ dependencies = [
  "gpui-kit-assets",
  "gpui-pre",
  "gpui-pre-platform",
+ "log",
+ "serde",
+ "serde_json",
  "strata-core",
+ "tempfile",
 ]
 
 [[package]]
