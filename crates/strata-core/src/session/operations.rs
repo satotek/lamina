@@ -173,6 +173,7 @@ fn changes_refs(operation: &Operation) -> bool {
             | Operation::Pull { .. }
             | Operation::Push { .. }
             | Operation::StashPush { .. }
+            | Operation::StashPushPaths { .. }
             | Operation::StashPop { .. }
             | Operation::StashApply { .. }
             | Operation::StashDrop { .. }
@@ -195,6 +196,7 @@ fn execute(shared: &Shared, id: OperationId, operation: &Operation) -> Result<()
         Operation::StagePaths(paths) => git.stage_paths(paths),
         Operation::UnstagePaths(paths) => git.unstage_paths(paths),
         Operation::DiscardPaths(paths) => git.discard_paths(paths),
+        Operation::DiscardStagedPaths { paths } => git.discard_staged_paths(paths),
         Operation::DeleteUntracked(paths) => git.delete_untracked(paths),
         Operation::StageLines { path, selection } => {
             apply_lines(shared, path, selection, PatchMode::Stage)
@@ -255,6 +257,11 @@ fn execute(shared: &Shared, id: OperationId, operation: &Operation) -> Result<()
             message,
             include_untracked,
         } => git.stash_push(message.as_deref(), *include_untracked),
+        Operation::StashPushPaths {
+            message,
+            include_untracked,
+            paths,
+        } => git.stash_push_paths(message.as_deref(), *include_untracked, paths),
         Operation::StashPop { index } => git.stash_pop(*index),
         Operation::StashApply { index } => git.stash_apply(*index),
         Operation::StashDrop { index } => git.stash_drop(*index),

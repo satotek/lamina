@@ -109,6 +109,36 @@ pub struct StashInfo {
     pub index: usize,
     pub id: Oid,
     pub message: String,
+    /// When the stash was created, in seconds since the Unix epoch.
+    pub created_time: i64,
+    /// The branch the stash was made on, parsed from the stash message.
+    /// `None` when HEAD was detached ("WIP on (no branch)") or the message
+    /// does not name a branch.
+    pub branch: Option<String>,
+}
+
+/// Line counts of one file changed by a commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileStat {
+    /// Repository-relative path using `/` separators.
+    pub path: String,
+    /// Previous path for a rename or copy; `None` otherwise.
+    pub old_path: Option<String>,
+    pub added: u64,
+    pub removed: u64,
+    /// A binary file has no line counts; `added` and `removed` are both 0.
+    pub binary: bool,
+}
+
+/// Line counts of a commit against its first parent, or against the empty tree
+/// for a root commit.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CommitStat {
+    /// Sorted by `path`.
+    pub files: Vec<FileStat>,
+    /// Totals over `files`; binary files add nothing.
+    pub added: u64,
+    pub removed: u64,
 }
 
 /// Tracking state of a local branch against its upstream.

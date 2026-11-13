@@ -4,13 +4,15 @@
 //! blob/file content), `conflicts.rs` (repository state, conflicted paths),
 //! `upstream.rs` (tracking branches), `history.rs` (path-limited history),
 //! `message.rs` (commit and merge messages) and `remotes.rs` (configured
-//! remotes) are owned by separate tasks.
+//! remotes) are owned by separate tasks. `stat.rs` counts the lines a commit
+//! added and removed.
 
 mod conflicts;
 mod history;
 mod log;
 mod message;
 mod remotes;
+mod stat;
 mod status;
 mod tree;
 mod upstream;

@@ -1,8 +1,10 @@
-//! The query worker: commit search and path-limited history off the UI thread.
+//! The query worker: commit search, path-limited history and commit stats off
+//! the UI thread.
 //!
-//! Both queries read the published snapshot and answer with row indices into
-//! it, tagged with the snapshot generation they saw. A query cancelled before
-//! its answer is ready emits nothing at all.
+//! The two history queries read the published snapshot and answer with row
+//! indices into it, tagged with the snapshot generation they saw. A commit stat
+//! reads the repository directly and answers with its own event. A query
+//! cancelled before its answer is ready emits nothing at all.
 
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -37,6 +39,8 @@ pub(crate) enum QueryKind {
     Path(String),
     /// `PathHistoryBatch` per batch while the walk runs, then `PathHistoryDone`.
     StreamingPath(String),
+    /// Line counts of a commit against its first parent.
+    CommitStat(Oid),
 }
 
 /// Ticket allocation and cancellation, shared between the session and the
@@ -104,6 +108,16 @@ fn answer(shared: Arc<Shared>, state: Arc<QueryState>, job: &QueryJob) -> Result
     let snapshot = shared.snapshot();
     let generation = snapshot.generation;
     match &job.kind {
+        QueryKind::CommitStat(commit) => {
+            let stat = shared.repo.commit_stat(*commit)?;
+            if state.is_cancelled(job.ticket) || shared.is_shutdown() {
+                return Ok(());
+            }
+            shared.emit(SessionEvent::CommitStatReady {
+                ticket: job.ticket,
+                stat: Arc::new(stat),
+            });
+        }
         QueryKind::Search(query) => {
             let Some(rows) = search(&snapshot.commits, query, || state.is_cancelled(job.ticket))
             else {

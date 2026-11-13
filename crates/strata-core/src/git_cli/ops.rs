@@ -1,5 +1,7 @@
 //! Thin wrappers for the mutating git commands the UI needs.
 
+use std::collections::HashSet;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use crate::{Error, Oid, Result};
@@ -79,6 +81,64 @@ impl Git {
         let mut args = vec!["restore".to_owned(), "--worktree".to_owned()];
         let stdin = push_pathspecs(&mut args, &paths);
         self.run_unit(&args, stdin)
+    }
+
+    /// Discard the staged and the worktree changes at `paths` in one step: the
+    /// index and the worktree are both restored from HEAD.
+    ///
+    /// A path that is only in the index (added with `git add`, absent from
+    /// HEAD) has no HEAD content to restore from, so it is removed from the
+    /// index and deleted from the worktree instead. On an unborn branch every
+    /// staged path is such a file, and this deletes them.
+    ///
+    /// Long lists are split into chunks because each `git diff`/`git restore`
+    /// invocation takes its paths on the command line, which Windows caps at
+    /// roughly 32 KiB.
+    pub fn discard_staged_paths(&self, paths: &[impl AsRef<Path>]) -> Result<()> {
+        let paths = collect_paths(paths);
+        if paths.is_empty() {
+            return Ok(());
+        }
+        for chunk in chunks_by_bytes(&paths, MAX_INLINE_PATHSPECS, MAX_INLINE_PATHSPEC_BYTES) {
+            let added = self.added_to_index(chunk)?;
+            let mut remove = Vec::new();
+            let mut restore = Vec::new();
+            for path in chunk {
+                let text = path_string(path);
+                if added.contains(&text) {
+                    remove.push(text);
+                } else {
+                    restore.push(path.clone());
+                }
+            }
+
+            if !remove.is_empty() {
+                let mut args = vec![
+                    "rm".to_owned(),
+                    "--cached".to_owned(),
+                    "--ignore-unmatch".to_owned(),
+                    "-r".to_owned(),
+                    "--".to_owned(),
+                ];
+                args.extend(remove.iter().cloned());
+                self.run_unit(&args, None)?;
+                for path in &remove {
+                    remove_worktree_file(&self.workdir, path)?;
+                }
+            }
+
+            if !restore.is_empty() {
+                let mut args = vec![
+                    "restore".to_owned(),
+                    "--source=HEAD".to_owned(),
+                    "--staged".to_owned(),
+                    "--worktree".to_owned(),
+                ];
+                let stdin = push_pathspecs(&mut args, &restore);
+                self.run_unit(&args, stdin)?;
+            }
+        }
+        Ok(())
     }
 
     /// Remove untracked files (and directories) at the given paths.
@@ -252,6 +312,29 @@ impl Git {
     }
 
     pub fn stash_push(&self, message: Option<&str>, include_untracked: bool) -> Result<()> {
+        self.stash_push_with(message, include_untracked, &[])
+    }
+
+    /// Stash only the changes at `paths`, as `git stash push -- <paths>`.
+    ///
+    /// An empty `paths` stashes everything, like
+    /// [`stash_push`](Self::stash_push). Other worktree changes are left alone.
+    pub fn stash_push_paths(
+        &self,
+        message: Option<&str>,
+        include_untracked: bool,
+        paths: &[impl AsRef<Path>],
+    ) -> Result<()> {
+        let paths = collect_paths(paths);
+        self.stash_push_with(message, include_untracked, &paths)
+    }
+
+    fn stash_push_with(
+        &self,
+        message: Option<&str>,
+        include_untracked: bool,
+        paths: &[PathBuf],
+    ) -> Result<()> {
         let mut args = vec!["stash".to_owned(), "push".to_owned()];
         if include_untracked {
             args.push("-u".to_owned());
@@ -260,7 +343,12 @@ impl Git {
             args.push("-m".to_owned());
             args.push(message.to_owned());
         }
-        self.run_unit(&args, None)
+        let stdin = if paths.is_empty() {
+            None
+        } else {
+            push_pathspecs(&mut args, paths)
+        };
+        self.run_unit(&args, stdin)
     }
 
     pub fn stash_apply(&self, index: usize) -> Result<()> {
@@ -284,6 +372,50 @@ impl Git {
         let output = self.run(&["stash", "list", "--format=%gd%x00%H%x00%gs"], None)?;
         Ok(parse_stash_list(&String::from_utf8_lossy(&output.stdout)))
     }
+
+    /// The subset of `paths` that the index adds relative to HEAD.
+    ///
+    /// These have no HEAD content, so `git restore --source=HEAD` cannot put
+    /// them back and the caller has to remove them instead. On an unborn branch
+    /// `git diff --cached` still works and reports every index entry as added.
+    fn added_to_index(&self, paths: &[PathBuf]) -> Result<HashSet<String>> {
+        let mut args = vec![
+            "diff".to_owned(),
+            "--cached".to_owned(),
+            "--name-only".to_owned(),
+            // NUL separators keep unusual file names intact.
+            "-z".to_owned(),
+            // A staged rename is a delete plus an add, not a rewrite: its new
+            // path must be removed rather than restored.
+            "--no-renames".to_owned(),
+            "--diff-filter=A".to_owned(),
+            "--".to_owned(),
+        ];
+        args.extend(paths.iter().map(|path| path_string(path)));
+        let output = self.run(&args, None)?;
+        Ok(output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|entry| !entry.is_empty())
+            .map(|entry| String::from_utf8_lossy(entry).into_owned())
+            .collect())
+    }
+}
+
+/// Delete the worktree copy of a path that only existed in the index.
+///
+/// A path that is already gone is fine: the staged change is discarded either way.
+fn remove_worktree_file(workdir: &Path, path: &str) -> Result<()> {
+    let absolute = workdir.join(path);
+    match std::fs::symlink_metadata(&absolute) {
+        // `git rm --cached` can leave a directory behind when a staged file
+        // replaced one; remove its contents so no empty tree lingers.
+        Ok(metadata) if metadata.is_dir() => std::fs::remove_dir_all(&absolute)?,
+        Ok(_) => std::fs::remove_file(&absolute)?,
+        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) => return Err(Error::Io(error)),
+    }
+    Ok(())
 }
 
 fn stash_ref(index: usize) -> String {

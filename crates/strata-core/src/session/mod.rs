@@ -32,8 +32,8 @@ use crate::patch::LineSelection;
 use crate::repo::Repo;
 use crate::watch::RepoWatcher;
 use crate::{
-    CommitInfo, ConflictEntry, Error, HeadInfo, Oid, RefInfo, RemoteInfo, RepoState, Result,
-    StashInfo, UpstreamInfo, WorktreeStatus,
+    CommitInfo, CommitStat, ConflictEntry, Error, HeadInfo, Oid, RefInfo, RemoteInfo, RepoState,
+    Result, StashInfo, UpstreamInfo, WorktreeStatus,
 };
 
 pub use crate::diff::DiffOptions;
@@ -213,6 +213,15 @@ pub enum Operation {
     StagePaths(Vec<String>),
     UnstagePaths(Vec<String>),
     DiscardPaths(Vec<String>),
+    /// Discard the staged and the worktree changes at `paths` in one step,
+    /// restoring the index and the worktree from HEAD.
+    ///
+    /// A path that is only in the index (added, absent from HEAD) is removed
+    /// from the index and deleted from the worktree instead, because HEAD has
+    /// no content to restore. On an unborn branch that applies to every path.
+    DiscardStagedPaths {
+        paths: Vec<String>,
+    },
     DeleteUntracked(Vec<String>),
     /// Stage selected lines of the current index -> worktree diff of `path`.
     StageLines {
@@ -262,6 +271,14 @@ pub enum Operation {
     StashPush {
         message: Option<String>,
         include_untracked: bool,
+    },
+    /// `git stash push -- <paths>`: stash only the changes at `paths` and
+    /// leave the rest of the worktree alone. An empty `paths` stashes
+    /// everything, like [`Operation::StashPush`].
+    StashPushPaths {
+        message: Option<String>,
+        include_untracked: bool,
+        paths: Vec<String>,
     },
     StashPop {
         index: usize,
@@ -402,6 +419,12 @@ pub enum SessionEvent {
         ticket: QueryTicket,
         generation: u64,
         rows: Arc<Vec<usize>>,
+    },
+    /// Line counts of a commit against its first parent, for a ticket from
+    /// [`Session::request_commit_stat`].
+    CommitStatReady {
+        ticket: QueryTicket,
+        stat: Arc<CommitStat>,
     },
     QueryFailed {
         ticket: QueryTicket,
@@ -619,6 +642,14 @@ impl Session {
     /// suppresses further batches and the done event.
     pub fn path_history_streaming(&self, path: String) -> QueryTicket {
         self.queue_query(queries::QueryKind::StreamingPath(path))
+    }
+
+    /// Added and removed line counts of `commit` against its first parent (or
+    /// the empty tree for a root commit), computed off the UI thread; answers
+    /// with [`SessionEvent::CommitStatReady`], or `QueryFailed` with the same
+    /// ticket when the commit cannot be read.
+    pub fn request_commit_stat(&self, commit: Oid) -> QueryTicket {
+        self.queue_query(queries::QueryKind::CommitStat(commit))
     }
 
     pub fn cancel_query(&self, ticket: QueryTicket) {

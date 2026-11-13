@@ -68,10 +68,13 @@ impl Repo {
         let mut stashes = Vec::new();
         for line in lines {
             let line = line.map_err(|err| Error::other(err.to_string()))?;
+            let message = line.message.to_string();
             stashes.push(StashInfo {
                 index: stashes.len(),
                 id: line.new_oid,
-                message: line.message.to_string(),
+                branch: stash_branch(&message),
+                created_time: line.signature.time.seconds,
+                message,
             });
         }
         Ok(stashes)
@@ -199,6 +202,23 @@ impl Repo {
         let walk = walk::Walk::new(repo.objects.clone(), graph, &tips, cancelled)?;
         Ok(CommitWalk { repo, walk })
     }
+}
+
+/// The branch a stash message names: git writes `WIP on <branch>: ...` for a
+/// plain `git stash push` and `On <branch>: ...` when a message was given (and
+/// when the entry was created with `git stash store`). `(no branch)` is what
+/// git writes for a detached HEAD.
+fn stash_branch(message: &str) -> Option<String> {
+    let rest = message
+        .strip_prefix("WIP on ")
+        .or_else(|| message.strip_prefix("On "))?;
+    // Branch names cannot contain a colon, so the first one ends the name.
+    let (branch, _) = rest.split_once(':')?;
+    let branch = branch.trim();
+    if branch.is_empty() || branch == "(no branch)" {
+        return None;
+    }
+    Some(branch.to_owned())
 }
 
 fn ref_kind(full_name: &gix::bstr::BStr) -> Option<RefKind> {
