@@ -1327,3 +1327,370 @@ fn cancelling_session_blame_kills_in_flight_git_process() {
         .success();
     assert!(!alive, "git child {pid} should have been killed");
 }
+
+#[test]
+fn request_blame_streams_progress_before_ready_on_large_history() {
+    use std::collections::{HashMap, HashSet};
+
+    // Build 600 commits (> GIX_MAX_DEPTH = 256) each adding one unique line so
+    // `git blame --incremental` emits 600 hunks (> PROGRESS_BATCH_HUNKS = 500)
+    // and is guaranteed to emit at least one BlameProgress with hunks before
+    // BlameReady.
+    let repo = TestRepo::new();
+    let commit_count = 600usize;
+    let mut stream = String::new();
+    let mut file_body = String::new();
+    for index in 0..commit_count {
+        file_body.push_str(&format!("line {index:04}\n"));
+        let msg = format!("commit {index}");
+        stream.push_str(&format!(
+            "blob\nmark :{mark}\ndata {len}\n{file_body}",
+            mark = index + 1,
+            len = file_body.len()
+        ));
+        stream.push_str("commit refs/heads/main\n");
+        stream.push_str(&format!(
+            "committer Strata Test <strata@example.com> {} +0000\n",
+            1_700_000_000 + index
+        ));
+        stream.push_str(&format!("data {}\n{msg}\n", msg.len()));
+        stream.push_str(&format!(
+            "M 100644 :{mark} history.txt\n\n",
+            mark = index + 1
+        ));
+    }
+    repo.git_with_input(&["fast-import", "--quiet"], &stream);
+    repo.git(&["reset", "--hard", "HEAD"]);
+    let head: strata_core::Oid = repo.git(&["rev-parse", "HEAD"]).trim().parse().unwrap();
+
+    // Also add a tiny shallow file in a second repo? No, let's check shallow file
+    // via a separate small repo too:
+    let shallow_repo = TestRepo::new();
+    shallow_repo.write("small.txt", "one\ntwo\n");
+    shallow_repo.commit_all("small");
+    let shallow_head: strata_core::Oid = shallow_repo
+        .git(&["rev-parse", "HEAD"])
+        .trim()
+        .parse()
+        .unwrap();
+    let shallow_harness = Harness::open(shallow_repo);
+    let shallow_ticket = shallow_harness
+        .session
+        .request_blame(shallow_head, "small.txt");
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let now = Instant::now();
+        assert!(now < deadline, "timed out waiting for shallow BlameReady");
+        match shallow_harness.events.recv_timeout(deadline - now) {
+            Ok(SessionEvent::BlameProgress { ticket: got, .. }) if got == shallow_ticket => {
+                panic!("gix shallow blame path should emit only BlameReady");
+            }
+            Ok(SessionEvent::BlameReady { ticket: got, blame }) if got == shallow_ticket => {
+                assert_eq!(blame.lines, ["one", "two"]);
+                break;
+            }
+            Ok(SessionEvent::QueryFailed { ticket: got, error }) if got == shallow_ticket => {
+                panic!("shallow blame failed: {error}");
+            }
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => panic!("session event channel closed"),
+        }
+    }
+
+    let harness = Harness::open(repo);
+    let ticket = harness.session.request_blame(head, "history.txt");
+
+    let deadline = Instant::now() + TIMEOUT;
+    let mut saw_lines = false;
+    let mut progress_hunk_events = 0usize;
+    let mut progress_hunks = Vec::new();
+    let mut seen_commits = HashSet::new();
+
+    let final_blame = loop {
+        let now = Instant::now();
+        assert!(now < deadline, "timed out waiting for BlameReady");
+        match harness.events.recv_timeout(deadline - now) {
+            Ok(SessionEvent::BlameProgress {
+                ticket: got,
+                lines,
+                hunks,
+                commits,
+            }) if got == ticket => {
+                if let Some(lines) = lines {
+                    assert!(!saw_lines, "lines should be emitted once");
+                    assert_eq!(lines.len(), commit_count);
+                    saw_lines = true;
+                }
+                for oid in commits.keys() {
+                    assert!(
+                        seen_commits.insert(*oid),
+                        "BlameProgress should only emit newly seen commit metadata"
+                    );
+                }
+                if !hunks.is_empty() {
+                    progress_hunk_events += 1;
+                    for hunk in &hunks {
+                        assert!(
+                            seen_commits.contains(&hunk.commit),
+                            "commit metadata for hunk must arrive with or before the hunk"
+                        );
+                    }
+                    progress_hunks.extend(hunks);
+                }
+            }
+            Ok(SessionEvent::BlameReady { ticket: got, blame }) if got == ticket => break blame,
+            Ok(SessionEvent::QueryFailed { ticket: got, error }) if got == ticket => {
+                panic!("blame failed: {error}");
+            }
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => panic!("session event channel closed"),
+        }
+    };
+
+    assert!(saw_lines, "expected early file lines in BlameProgress");
+    assert!(
+        progress_hunk_events >= 1,
+        "expected at least one BlameProgress with hunks before BlameReady"
+    );
+
+    // Every line attributed in progress events must match the final Blame.
+    let mut final_by_line = HashMap::new();
+    for hunk in &final_blame.hunks {
+        for offset in 0..hunk.len {
+            final_by_line.insert(
+                hunk.start + offset,
+                (
+                    hunk.commit,
+                    hunk.orig_path.as_str(),
+                    hunk.orig_start + offset,
+                ),
+            );
+        }
+    }
+    assert_eq!(final_by_line.len(), commit_count);
+    for hunk in &progress_hunks {
+        for offset in 0..hunk.len {
+            let line = hunk.start + offset;
+            let expected = final_by_line
+                .get(&line)
+                .expect("progress hunk line exists in final blame");
+            assert_eq!(
+                (
+                    hunk.commit,
+                    hunk.orig_path.as_str(),
+                    hunk.orig_start + offset
+                ),
+                *expected,
+                "progress hunk line {line} must match final blame"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn cancelling_mid_stream_blame_stops_events() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = TestRepo::new();
+    let mut body = String::new();
+    for i in 0..600 {
+        body.push_str(&format!(
+            "line {i:04}: padding to exceed 64 KiB threshold {:080}\n",
+            i
+        ));
+    }
+    repo.write("big.txt", &body);
+    repo.commit_all("big");
+    let head: strata_core::Oid = repo.git(&["rev-parse", "HEAD"]).trim().parse().unwrap();
+
+    let pid_file = repo.path().join("midstream.pid");
+    let script = repo.path().join("mock-git-stream");
+    // Emit 500 valid incremental hunks (triggering one BlameProgress batch),
+    // write PID, then sleep so cancellation happens mid-stream.
+    let mut script_body = String::from("#!/bin/sh\n");
+    script_body.push_str(&format!("echo $$ > \"{}\"\n", pid_file.display()));
+    script_body.push_str(&format!(
+        "cat <<'EOF'\n{head} 1 1 1\nauthor Strata Test\nauthor-mail <strata@example.com>\nauthor-time 1700000000\nauthor-tz +0000\ncommitter Strata Test\ncommitter-mail <strata@example.com>\ncommitter-time 1700000000\ncommitter-tz +0000\nsummary big\nfilename big.txt\n"
+    ));
+    for line in 2..=500 {
+        script_body.push_str(&format!("{head} {line} {line} 1\nfilename big.txt\n"));
+    }
+    script_body.push_str("EOF\nexec sleep 60\n");
+
+    fs::write(&script, script_body).expect("write mock git");
+    let mut perms = fs::metadata(&script).expect("meta").permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script, perms).expect("chmod");
+
+    let harness = Harness::open_with(
+        repo,
+        SessionOptions {
+            git_executable: Some(script),
+        },
+    );
+    let ticket = harness.session.request_blame(head, "big.txt");
+
+    // Wait for both early lines and the first hunk batch before cancelling.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut saw_lines = false;
+    let mut saw_hunks = false;
+    while !(saw_lines && saw_hunks) {
+        let now = Instant::now();
+        assert!(now < deadline, "timed out waiting for mid-stream progress");
+        match harness.events.recv_timeout(deadline - now) {
+            Ok(SessionEvent::BlameProgress {
+                ticket: got,
+                lines,
+                hunks,
+                ..
+            }) if got == ticket => {
+                if lines.is_some() {
+                    saw_lines = true;
+                }
+                if !hunks.is_empty() {
+                    saw_hunks = true;
+                }
+            }
+            Ok(SessionEvent::BlameReady { ticket: got, .. })
+            | Ok(SessionEvent::QueryFailed { ticket: got, .. })
+                if got == ticket =>
+            {
+                panic!("mock git should still be sleeping mid-stream");
+            }
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => panic!("session event channel closed"),
+        }
+    }
+
+    harness.session.cancel_query(ticket);
+
+    // Wait for the killed git command to be logged, then confirm no further
+    // blame events arrive for this ticket.
+    let stop_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let now = Instant::now();
+        assert!(
+            now < stop_deadline,
+            "timed out waiting for cancelled blame to stop"
+        );
+        match harness.events.recv_timeout(stop_deadline - now) {
+            Ok(SessionEvent::BlameProgress { ticket: got, .. })
+            | Ok(SessionEvent::BlameReady { ticket: got, .. })
+            | Ok(SessionEvent::QueryFailed { ticket: got, .. })
+                if got == ticket =>
+            {
+                panic!("cancelled blame ticket must stop emitting events");
+            }
+            Ok(SessionEvent::CommandLogged(record))
+                if record.args.first().map(String::as_str) == Some("blame") =>
+            {
+                assert_eq!(record.exit_code, None);
+                break;
+            }
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => panic!("session event channel closed"),
+        }
+    }
+
+    let settle = Instant::now() + Duration::from_millis(150);
+    while Instant::now() < settle {
+        match harness
+            .events
+            .recv_timeout(settle.saturating_duration_since(Instant::now()))
+        {
+            Ok(SessionEvent::BlameProgress { ticket: got, .. })
+            | Ok(SessionEvent::BlameReady { ticket: got, .. })
+            | Ok(SessionEvent::QueryFailed { ticket: got, .. })
+                if got == ticket =>
+            {
+                panic!("no blame events should arrive after cancellation");
+            }
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout) => break,
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+    }
+
+    let pid: u32 = fs::read_to_string(&pid_file)
+        .expect("read pid")
+        .trim()
+        .parse()
+        .expect("pid");
+    let alive = Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stderr(Stdio::null())
+        .status()
+        .expect("kill -0")
+        .success();
+    assert!(!alive, "git child {pid} should have been killed");
+}
+
+#[test]
+#[ignore = "benchmarks streaming Session::request_blame on STRATA_BENCH_REPO"]
+fn bench_streaming_blame_on_repo() {
+    let repo_path = std::env::var("STRATA_BENCH_REPO")
+        .expect("set STRATA_BENCH_REPO to a repository path to benchmark");
+    let file_path = std::env::var("STRATA_BENCH_PATH").unwrap_or_else(|_| "MAINTAINERS".into());
+
+    let repo = Repo::open(&repo_path).expect("open benchmark repo");
+    let head = match repo.head().expect("head") {
+        HeadInfo::Branch { target, .. } => target.expect("head target"),
+        HeadInfo::Detached { target } => target,
+    };
+
+    let (tx, rx) = mpsc::channel();
+    let session = Session::open(&repo_path, move |event| {
+        let _ = tx.send(event);
+    })
+    .expect("open session");
+
+    let start = Instant::now();
+    let ticket = session.request_blame(head, file_path.clone());
+    let mut first_lines_at = None;
+    let mut first_hunks_at = None;
+    let mut progress_batches = 0usize;
+    let mut total_lines = 0usize;
+
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let final_blame = loop {
+        let now = Instant::now();
+        assert!(now < deadline, "timed out benchmarking streaming blame");
+        match rx.recv_timeout(deadline - now) {
+            Ok(SessionEvent::BlameProgress {
+                ticket: got,
+                lines,
+                hunks,
+                ..
+            }) if got == ticket => {
+                if let Some(lines) = lines {
+                    first_lines_at.get_or_insert_with(|| start.elapsed());
+                    total_lines = lines.len();
+                }
+                if !hunks.is_empty() {
+                    first_hunks_at.get_or_insert_with(|| start.elapsed());
+                    progress_batches += 1;
+                }
+            }
+            Ok(SessionEvent::BlameReady { ticket: got, blame }) if got == ticket => break blame,
+            Ok(SessionEvent::QueryFailed { ticket: got, error }) if got == ticket => {
+                panic!("benchmark blame failed: {error}");
+            }
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => panic!("session channel closed"),
+        }
+    };
+    let completed_at = start.elapsed();
+
+    eprintln!(
+        "streaming blame({file_path}): lines={} hunks={} commits={} batches={progress_batches} first_lines={first_lines_at:?} first_hunks={first_hunks_at:?} completion={completed_at:?}",
+        total_lines.max(final_blame.lines.len()),
+        final_blame.hunks.len(),
+        final_blame.commits.len(),
+    );
+}

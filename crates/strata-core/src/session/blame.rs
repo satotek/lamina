@@ -32,11 +32,22 @@ pub(crate) fn run(shared: Arc<Shared>, state: Arc<QueryState>, jobs: Receiver<Bl
             continue;
         }
 
-        let result = shared
-            .repo
-            .blame_cancellable(job.commit, &job.path, &shared.git, &|| {
-                state.is_cancelled(job.ticket) || shared.is_shutdown()
-            });
+        let result = shared.repo.blame_cancellable_streaming(
+            job.commit,
+            &job.path,
+            &shared.git,
+            &|| state.is_cancelled(job.ticket) || shared.is_shutdown(),
+            &mut |update| {
+                if !state.is_cancelled(job.ticket) && !shared.is_shutdown() {
+                    shared.emit(SessionEvent::BlameProgress {
+                        ticket: job.ticket,
+                        lines: update.lines,
+                        hunks: update.hunks,
+                        commits: update.commits,
+                    });
+                }
+            },
+        );
         match result {
             Ok(Some(blame)) if !state.is_cancelled(job.ticket) && !shared.is_shutdown() => {
                 shared.emit(SessionEvent::BlameReady {

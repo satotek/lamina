@@ -9,13 +9,24 @@
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::time::{Duration, Instant};
 
 use crate::repo::{BlameCommit, BlameHunk};
 use crate::{Error, Oid, Result};
 
 use super::Git;
 
+/// Flush incremental blame progress after this many parsed hunks or this much
+/// elapsed time, whichever comes first.
+const PROGRESS_BATCH_HUNKS: usize = 500;
+const PROGRESS_BATCH_INTERVAL: Duration = Duration::from_millis(100);
+
 pub(crate) struct GitBlame {
+    pub(crate) hunks: Vec<BlameHunk>,
+    pub(crate) commits: HashMap<Oid, BlameCommit>,
+}
+
+pub(crate) struct BlameProgressBatch {
     pub(crate) hunks: Vec<BlameHunk>,
     pub(crate) commits: HashMap<Oid, BlameCommit>,
 }
@@ -34,17 +45,33 @@ struct PendingHunk {
 impl Git {
     /// Attributes `path` at `commit` using `git blame --incremental`, returning
     /// sorted, coalesced hunks and commit metadata, or `Ok(None)` if cancelled.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn blame_incremental(
         &self,
         commit: Oid,
         path: &str,
         cancelled: &(impl Fn() -> bool + Send + Sync),
     ) -> Result<Option<GitBlame>> {
+        self.blame_incremental_streaming(commit, path, cancelled, |_| {})
+    }
+
+    /// Like [`blame_incremental`](Self::blame_incremental), but delivers parsed
+    /// hunks and newly seen commit metadata in batches while git runs.
+    pub(crate) fn blame_incremental_streaming(
+        &self,
+        commit: Oid,
+        path: &str,
+        cancelled: &(impl Fn() -> bool + Send + Sync),
+        mut on_progress: impl FnMut(BlameProgressBatch),
+    ) -> Result<Option<GitBlame>> {
         let commit_hex = commit.to_string();
         let args = ["blame", "--incremental", &commit_hex, "--", path];
 
         let mut hunks = Vec::new();
         let mut commits = HashMap::new();
+        let mut batch_hunks = Vec::new();
+        let mut batch_commits = HashMap::new();
+        let mut last_emit = Instant::now();
         let mut current: Option<PendingHunk> = None;
 
         let finished = self.run_stdout_cancellable(&args, cancelled, |raw| {
@@ -72,20 +99,34 @@ impl Git {
             if let Some(rest) = line.strip_prefix(b"filename ") {
                 let finished_hunk = current.take().expect("pending hunk present");
                 if let Entry::Vacant(slot) = commits.entry(finished_hunk.commit) {
-                    slot.insert(BlameCommit {
+                    let meta = BlameCommit {
                         author_name: finished_hunk.author_name,
                         author_email: finished_hunk.author_email,
                         author_time: finished_hunk.author_time,
                         summary: finished_hunk.summary,
-                    });
+                    };
+                    slot.insert(meta.clone());
+                    batch_commits.insert(finished_hunk.commit, meta);
                 }
-                hunks.push(BlameHunk {
+                batch_hunks.push(BlameHunk {
                     commit: finished_hunk.commit,
                     orig_path: unquote_git_path(rest),
                     orig_start: finished_hunk.orig_start,
                     start: finished_hunk.start,
                     len: finished_hunk.len,
                 });
+
+                if (batch_hunks.len() >= PROGRESS_BATCH_HUNKS
+                    || last_emit.elapsed() >= PROGRESS_BATCH_INTERVAL)
+                    && !cancelled()
+                {
+                    hunks.extend_from_slice(&batch_hunks);
+                    on_progress(BlameProgressBatch {
+                        hunks: std::mem::take(&mut batch_hunks),
+                        commits: std::mem::take(&mut batch_commits),
+                    });
+                    last_emit = Instant::now();
+                }
             } else if !commits.contains_key(&pending.commit) {
                 if let Some(rest) = line.strip_prefix(b"author ") {
                     pending.author_name = String::from_utf8_lossy(rest).trim().to_owned();
@@ -117,6 +158,7 @@ impl Git {
             return Err(Error::other("truncated `git blame --incremental` output"));
         }
 
+        hunks.extend(batch_hunks);
         hunks.sort_by_key(|hunk| hunk.start);
         coalesce_hunks(&mut hunks);
         Ok(Some(GitBlame { hunks, commits }))

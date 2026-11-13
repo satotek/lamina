@@ -26,7 +26,7 @@ use gpui_component::tooltip::Tooltip;
 use gpui_kit_assets::IconName;
 use strata_core::Oid;
 use strata_core::highlight::{Highlighter, LineHighlights, language_for_path};
-use strata_core::session::{Blame, BlameCommit, QueryTicket};
+use strata_core::session::{Blame, BlameCommit, BlameHunk, QueryTicket};
 
 use super::RepoView;
 use crate::data;
@@ -48,15 +48,18 @@ const BAR_WIDTH: f32 = 3.0;
 const ANNOTATION_WIDTH: f32 = 356.0;
 
 /// What the pane is showing, so a closed pane draws nothing and a request in
-/// flight draws a loading message.
+/// flight draws a loading message or incremental lines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum BlameState {
     /// Not open.
     #[default]
     Closed,
-    /// The request is with the session.
+    /// The request is with the session; no file lines have arrived yet.
     Loading,
-    /// The answer arrived; its rows are being formatted off the UI thread.
+    /// File lines have arrived and hunks are filling in progressively.
+    Streaming,
+    /// The complete answer arrived without streaming; its rows are being
+    /// formatted off the UI thread.
     Formatting,
     Ready,
     Failed,
@@ -97,6 +100,92 @@ struct BlameRow {
     age: f32,
 }
 
+/// Per-line attribution slot while hunks arrive incrementally.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct PartialLine {
+    /// Set on the first line of an attributed hunk.
+    gutter: Option<Oid>,
+    /// Commit owning this line once attributed, for the age bar and count.
+    commit: Option<Oid>,
+    orig_path: String,
+}
+
+/// Incremental blame state while `git blame --incremental` is still running.
+#[derive(Debug, Default)]
+struct PartialBlame {
+    lines: Arc<Vec<String>>,
+    highlights: Arc<Vec<LineHighlights>>,
+    slots: Vec<PartialLine>,
+    commits: HashMap<Oid, CommitMeta>,
+    time_range: Option<(i64, i64)>,
+    attributed_lines: usize,
+}
+
+impl PartialBlame {
+    fn new(lines: Arc<Vec<String>>) -> Self {
+        let len = lines.len();
+        Self {
+            lines,
+            highlights: Arc::new(Vec::new()),
+            slots: vec![PartialLine::default(); len],
+            commits: HashMap::new(),
+            time_range: None,
+            attributed_lines: 0,
+        }
+    }
+
+    fn merge(&mut self, hunks: &[BlameHunk], commits: &HashMap<Oid, BlameCommit>) {
+        for (oid, commit) in commits {
+            self.time_range = Some(match self.time_range {
+                Some((oldest, newest)) => (
+                    oldest.min(commit.author_time),
+                    newest.max(commit.author_time),
+                ),
+                None => (commit.author_time, commit.author_time),
+            });
+            self.commits.insert(*oid, commit_meta(*oid, commit));
+        }
+
+        for hunk in hunks {
+            let Some(first_index) = hunk.start.checked_sub(1).map(|index| index as usize) else {
+                continue;
+            };
+            for offset in 0..hunk.len as usize {
+                let Some(slot) = self.slots.get_mut(first_index + offset) else {
+                    break;
+                };
+                if slot.commit.is_none() {
+                    self.attributed_lines += 1;
+                }
+                slot.commit = Some(hunk.commit);
+                if offset == 0 {
+                    slot.gutter = Some(hunk.commit);
+                    slot.orig_path.clone_from(&hunk.orig_path);
+                } else {
+                    slot.gutter = None;
+                    slot.orig_path.clear();
+                }
+            }
+        }
+    }
+
+    fn percent(&self) -> u8 {
+        attribution_percent(self.attributed_lines, self.lines.len())
+    }
+}
+
+/// Borrowed view of one row for rendering both streaming and completed states.
+struct RowView<'a> {
+    line: u32,
+    text: &'a str,
+    highlights: Option<&'a LineHighlights>,
+    gutter: Option<Oid>,
+    meta: Option<&'a CommitMeta>,
+    orig_path: &'a str,
+    /// `None` when the line has not been attributed yet.
+    age: Option<f32>,
+}
+
 /// The rows and commit details of one blame answer, built as a unit so a late
 /// answer cannot mix its rows with another file's metadata.
 #[derive(Debug, Default)]
@@ -111,6 +200,7 @@ pub(super) struct BlameView {
     target: Option<Target>,
     ticket: Option<QueryTicket>,
     state: BlameState,
+    partial: Option<PartialBlame>,
     rows: Arc<Vec<BlameRow>>,
     commits: Arc<HashMap<Oid, CommitMeta>>,
     error: Option<String>,
@@ -125,6 +215,7 @@ impl Default for BlameView {
             target: None,
             ticket: None,
             state: BlameState::Closed,
+            partial: None,
             rows: Arc::new(Vec::new()),
             commits: Arc::new(HashMap::new()),
             error: None,
@@ -151,6 +242,7 @@ impl BlameView {
     fn begin(&mut self, commit: Oid, path: String, ticket: QueryTicket) -> Option<QueryTicket> {
         self.target = Some(Target { commit, path });
         self.state = BlameState::Loading;
+        self.partial = None;
         self.rows = Arc::new(Vec::new());
         self.commits = Arc::new(HashMap::new());
         self.error = None;
@@ -158,12 +250,58 @@ impl BlameView {
         self.ticket.replace(ticket)
     }
 
-    /// True when `ticket` is the request on screen; starts formatting its rows.
+    /// Applies an incremental update for `ticket`. Returns `false` if `ticket`
+    /// is stale.
+    fn progress(
+        &mut self,
+        ticket: QueryTicket,
+        lines: Option<Arc<Vec<String>>>,
+        hunks: &[BlameHunk],
+        commits: &HashMap<Oid, BlameCommit>,
+    ) -> bool {
+        if self.ticket != Some(ticket) {
+            return false;
+        }
+        if let Some(lines) = lines {
+            self.partial = Some(PartialBlame::new(lines));
+            self.state = BlameState::Streaming;
+        }
+        if let Some(partial) = self.partial.as_mut() {
+            partial.merge(hunks, commits);
+        }
+        true
+    }
+
+    fn set_partial_highlights(
+        &mut self,
+        ticket: QueryTicket,
+        highlights: Vec<LineHighlights>,
+    ) -> bool {
+        if self.ticket != Some(ticket) {
+            return false;
+        }
+        let Some(partial) = self.partial.as_mut() else {
+            return false;
+        };
+        partial.highlights = Arc::new(highlights);
+        true
+    }
+
+    fn cached_highlights(&self) -> Option<Arc<Vec<LineHighlights>>> {
+        let partial = self.partial.as_ref()?;
+        (partial.highlights.len() == partial.lines.len()).then(|| Arc::clone(&partial.highlights))
+    }
+
+    /// True when `ticket` is the request on screen; transitions a non-streaming
+    /// request to formatting, while keeping an already-streaming list mounted so
+    /// scroll stays stable.
     fn accept(&mut self, ticket: QueryTicket) -> bool {
         if self.ticket != Some(ticket) {
             return false;
         }
-        self.state = BlameState::Formatting;
+        if self.state != BlameState::Streaming {
+            self.state = BlameState::Formatting;
+        }
         true
     }
 
@@ -173,6 +311,7 @@ impl BlameView {
         if self.ticket != Some(ticket) {
             return false;
         }
+        self.partial = None;
         self.rows = Arc::new(data.rows);
         self.commits = Arc::new(data.commits);
         self.state = BlameState::Ready;
@@ -186,6 +325,7 @@ impl BlameView {
             return false;
         }
         self.state = BlameState::Failed;
+        self.partial = None;
         self.error = Some(error);
         self.rows = Arc::new(Vec::new());
         self.commits = Arc::new(HashMap::new());
@@ -197,10 +337,67 @@ impl BlameView {
     fn cancel(&mut self) -> Option<QueryTicket> {
         self.target = None;
         self.state = BlameState::Closed;
+        self.partial = None;
         self.rows = Arc::new(Vec::new());
         self.commits = Arc::new(HashMap::new());
         self.error = None;
         self.ticket.take()
+    }
+
+    fn row_count(&self) -> usize {
+        match self.state {
+            BlameState::Streaming => self
+                .partial
+                .as_ref()
+                .map_or(0, |partial| partial.lines.len()),
+            BlameState::Ready => self.rows.len(),
+            _ => 0,
+        }
+    }
+
+    fn progress_percent(&self) -> Option<u8> {
+        (self.state == BlameState::Streaming)
+            .then(|| self.partial.as_ref().map(PartialBlame::percent))
+            .flatten()
+    }
+
+    fn row_view(&self, index: usize) -> Option<RowView<'_>> {
+        match self.state {
+            BlameState::Streaming => {
+                let partial = self.partial.as_ref()?;
+                let text = partial.lines.get(index)?.as_str();
+                let slot = partial.slots.get(index)?;
+                let meta = slot.gutter.and_then(|commit| partial.commits.get(&commit));
+                let age = slot.commit.map(|commit| {
+                    let time = partial.commits.get(&commit).map_or(0, |entry| entry.time);
+                    let (oldest, newest) = partial.time_range.unwrap_or((0, 0));
+                    age_strength(time, oldest, newest)
+                });
+                Some(RowView {
+                    line: index as u32 + 1,
+                    text,
+                    highlights: partial.highlights.get(index),
+                    gutter: slot.gutter,
+                    meta,
+                    orig_path: slot.orig_path.as_str(),
+                    age,
+                })
+            }
+            BlameState::Ready => {
+                let row = self.rows.get(index)?;
+                let meta = row.gutter.and_then(|commit| self.commits.get(&commit));
+                Some(RowView {
+                    line: row.line,
+                    text: row.text.as_str(),
+                    highlights: Some(&row.highlights),
+                    gutter: row.gutter,
+                    meta,
+                    orig_path: row.orig_path.as_str(),
+                    age: Some(row.age),
+                })
+            }
+            _ => None,
+        }
     }
 }
 
@@ -217,6 +414,19 @@ struct RowPlan {
     first: bool,
     orig_path: String,
     age: f32,
+}
+
+/// Percentage of lines attributed so far, floored to `0..=100` so 100% only
+/// shows once every line has a commit.
+fn attribution_percent(attributed_lines: usize, total_lines: usize) -> u8 {
+    if total_lines == 0 {
+        return 0;
+    }
+    ((attributed_lines.min(total_lines) as u64 * 100) / total_lines as u64) as u8
+}
+
+fn progress_label(percent: u8) -> String {
+    format!("attributing… {percent}%")
 }
 
 /// The oldest and newest author times among the commits the hunks reference.
@@ -289,15 +499,36 @@ fn commit_meta(oid: Oid, commit: &BlameCommit) -> CommitMeta {
     }
 }
 
+fn highlight_lines(
+    path: &str,
+    lines: &[String],
+    highlighter: &Mutex<Highlighter>,
+) -> Vec<LineHighlights> {
+    let Some(language) = language_for_path(path) else {
+        return Vec::new();
+    };
+    let source = lines.join("\n");
+    let Ok(mut highlighter) = highlighter.lock() else {
+        return Vec::new();
+    };
+    highlighter.highlight(language, &source)
+}
+
 /// Formats the attribution and highlights the file, off the UI thread.
-fn build_data(path: &str, blame: &Blame, highlighter: &Mutex<Highlighter>) -> BlameData {
-    let source = blame.lines.join("\n");
-    let highlight = language_for_path(path)
-        .and_then(|language| {
-            let mut highlighter = highlighter.lock().ok()?;
-            Some(highlighter.highlight(language, &source))
-        })
-        .unwrap_or_default();
+fn build_data(
+    path: &str,
+    blame: &Blame,
+    highlighter: &Mutex<Highlighter>,
+    cached_highlights: Option<&[LineHighlights]>,
+) -> BlameData {
+    let owned_highlight;
+    let highlight: &[LineHighlights] = match cached_highlights {
+        Some(cached) if cached.len() == blame.lines.len() => cached,
+        _ => {
+            owned_highlight = highlight_lines(path, &blame.lines, highlighter);
+            &owned_highlight
+        }
+    };
 
     let commits = blame
         .hunks
@@ -395,6 +626,46 @@ impl RepoView {
         self.open_blame(commit, path, window, cx);
     }
 
+    /// Early file lines and incremental hunk batches for the target on screen.
+    pub(super) fn blame_progress(
+        &mut self,
+        ticket: QueryTicket,
+        lines: Option<Arc<Vec<String>>>,
+        hunks: Vec<BlameHunk>,
+        commits: HashMap<Oid, BlameCommit>,
+        cx: &mut Context<Self>,
+    ) {
+        let highlight_lines_arg = lines.as_ref().map(Arc::clone);
+        if !self.blame.progress(ticket, lines, &hunks, &commits) {
+            return;
+        }
+        cx.notify();
+
+        let Some(lines) = highlight_lines_arg else {
+            return;
+        };
+        let Some(path) = self.blame.path().map(str::to_owned) else {
+            return;
+        };
+        if language_for_path(&path).is_none() {
+            return;
+        }
+        let highlighter = Arc::clone(&self.blame.highlighter);
+        cx.spawn(async move |this, cx| {
+            let highlights = cx
+                .background_executor()
+                .spawn(async move { highlight_lines(&path, &lines, &highlighter) })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.blame.set_partial_highlights(ticket, highlights) {
+                    cx.notify();
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
     /// The session's attribution for the target on screen.
     pub(super) fn blame_ready(
         &mut self,
@@ -411,10 +682,18 @@ impl RepoView {
         };
         let blame = Arc::clone(blame);
         let highlighter = Arc::clone(&self.blame.highlighter);
+        let cached_highlights = self.blame.cached_highlights();
         cx.spawn(async move |this, cx| {
             let data = cx
                 .background_executor()
-                .spawn(async move { build_data(&path, &blame, &highlighter) })
+                .spawn(async move {
+                    build_data(
+                        &path,
+                        &blame,
+                        &highlighter,
+                        cached_highlights.as_deref().map(Vec::as_slice),
+                    )
+                })
                 .await;
             this.update(cx, |this, cx| {
                 if this.blame.ready(ticket, data) {
@@ -516,7 +795,9 @@ impl RepoView {
 
         let path = self.blame.path().unwrap_or_default().to_owned();
         let commit = self.blame.target().map(|target| target.commit);
+        let progress = self.blame.progress_percent();
         div()
+            .relative()
             .flex()
             .items_center()
             .gap_2()
@@ -544,6 +825,16 @@ impl RepoView {
                     .text_color(design.accent)
                     .child(path),
             )
+            .when_some(progress, |header, pct| {
+                header.child(
+                    div()
+                        .flex_none()
+                        .font_family(design.mono.clone())
+                        .text_size(px(design.tiny()))
+                        .text_color(design.muted)
+                        .child(progress_label(pct)),
+                )
+            })
             .when_some(commit, |header, commit| {
                 header.child(
                     div()
@@ -555,6 +846,17 @@ impl RepoView {
                 )
             })
             .child(crate::ui::kbd("Esc", design))
+            .when_some(progress, |header, pct| {
+                header.child(
+                    div()
+                        .absolute()
+                        .bottom_0()
+                        .left_0()
+                        .h(px(2.0))
+                        .w(gpui::relative(f32::from(pct) / 100.0))
+                        .bg(design.accent),
+                )
+            })
             .into_any_element()
     }
 
@@ -572,34 +874,45 @@ impl RepoView {
             BlameState::Formatting => {
                 crate::ui::message("preparing lines…", design.muted, design).into_any_element()
             }
+            BlameState::Streaming if self.blame.row_count() == 0 => {
+                crate::ui::message("Empty file", design.muted, design).into_any_element()
+            }
             BlameState::Ready if self.blame.rows.is_empty() => {
                 crate::ui::message("Empty file", design.muted, design).into_any_element()
             }
-            BlameState::Ready => self.blame_rows(design, cx),
+            BlameState::Streaming | BlameState::Ready => self.blame_rows(design, cx),
             BlameState::Closed => div().into_any_element(),
         }
     }
 
     fn blame_rows(&self, design: &Design, cx: &mut App) -> AnyElement {
-        let rows = Arc::clone(&self.blame.rows);
-        let commits = Arc::clone(&self.blame.commits);
+        let count = self.blame.row_count();
         let entity = self.entity();
         let colors = DiffColors::from_theme(cx.theme());
         let style = DiffStyle::from_settings(cx, &design.mono);
         let design = design.clone();
         let row_height = style.row_height();
-        uniform_list("blame-lines", rows.len(), move |range, _window, _cx| {
+        uniform_list("blame-lines", count, move |range, _window, cx| {
+            let view = entity.read(cx);
             range
                 .map(|index| {
-                    let row = &rows[index];
-                    let meta = row.gutter.and_then(|commit| commits.get(&commit));
-                    let bar = div()
-                        .flex_none()
-                        .w(px(BAR_WIDTH))
-                        .h(px(row_height))
-                        .bg(design.accent.opacity(bar_opacity(row.age)));
+                    let Some(row) = view.blame.row_view(index) else {
+                        return div().into_any_element();
+                    };
+                    let bar = match row.age {
+                        Some(age) => div()
+                            .flex_none()
+                            .w(px(BAR_WIDTH))
+                            .h(px(row_height))
+                            .bg(design.accent.opacity(bar_opacity(age))),
+                        None => div()
+                            .flex_none()
+                            .w(px(BAR_WIDTH))
+                            .h(px(row_height))
+                            .bg(design.border.opacity(0.25)),
+                    };
 
-                    let annotation: AnyElement = match (row.gutter, meta) {
+                    let annotation: AnyElement = match (row.gutter, row.meta) {
                         (Some(commit), Some(meta)) => {
                             let date = style::relative_time(meta.time, style::now_epoch());
                             let tooltip =
@@ -607,7 +920,7 @@ impl RepoView {
                             let short = meta.short.clone();
                             let author = meta.author.clone();
                             let summary = meta.summary.clone();
-                            let orig_path = row.orig_path.clone();
+                            let orig_path = row.orig_path.to_owned();
                             let click_entity = entity.clone();
                             let menu_entity = entity.clone();
                             let copy_id = commit.to_string();
@@ -728,12 +1041,7 @@ impl RepoView {
                                 .font_family(style.mono().clone())
                                 .text_size(px(style.font_size()))
                                 .text_color(colors.text)
-                                .child(styled_line(
-                                    &row.text,
-                                    &style,
-                                    Some(&row.highlights),
-                                    &colors,
-                                )),
+                                .child(styled_line(row.text, &style, row.highlights, &colors)),
                         )
                         .into_any_element()
                 })
@@ -879,5 +1187,101 @@ mod tests {
         assert!(!view.accept(QueryTicket(7)));
         assert!(!view.ready(QueryTicket(7), BlameData::default()));
         assert_eq!(view.cancel(), None);
+    }
+
+    #[test]
+    fn attribution_percentage_floors_until_all_lines_are_attributed() {
+        assert_eq!(attribution_percent(0, 0), 0);
+        assert_eq!(attribution_percent(0, 100), 0);
+        assert_eq!(attribution_percent(42, 100), 42);
+        assert_eq!(attribution_percent(999, 1000), 99);
+        assert_eq!(attribution_percent(1000, 1000), 100);
+        assert_eq!(attribution_percent(1200, 1000), 100);
+        assert_eq!(progress_label(42), "attributing… 42%");
+    }
+
+    #[test]
+    fn partial_hunks_merge_incrementally_and_ready_replaces_them() {
+        let first = oid(1);
+        let second = oid(2);
+        let mut view = BlameView::default();
+        let ticket = QueryTicket(10);
+        view.begin(oid(9), "src/main.rs".to_owned(), ticket);
+
+        let lines = Arc::new(vec![
+            "one".to_owned(),
+            "two".to_owned(),
+            "three".to_owned(),
+            "four".to_owned(),
+        ]);
+        assert!(view.progress(ticket, Some(lines), &[], &HashMap::new()));
+        assert_eq!(view.state, BlameState::Streaming);
+        assert_eq!(view.row_count(), 4);
+        assert_eq!(view.progress_percent(), Some(0));
+        assert_eq!(view.row_view(0).expect("row 0").age, None);
+        assert_eq!(view.row_view(0).expect("row 0").gutter, None);
+
+        // First hunk batch arrives with metadata for `first`.
+        let mut batch1_commits = HashMap::new();
+        batch1_commits.insert(first, commit(1_000));
+        assert!(view.progress(ticket, None, &[hunk(first, 1, 2)], &batch1_commits,));
+        assert_eq!(view.progress_percent(), Some(50));
+        let row0 = view.row_view(0).expect("row 0");
+        assert_eq!(row0.gutter, Some(first));
+        assert!(row0.meta.is_some());
+        assert_eq!(row0.age, Some(1.0));
+        let row1 = view.row_view(1).expect("row 1");
+        assert_eq!(row1.gutter, None);
+        assert_eq!(row1.age, Some(1.0));
+        assert_eq!(view.row_view(2).expect("row 2").age, None);
+
+        // Second batch adds `second` (newer) and another hunk for `first`
+        // without repeating `first`'s metadata.
+        let mut batch2_commits = HashMap::new();
+        batch2_commits.insert(second, commit(3_000));
+        assert!(view.progress(
+            ticket,
+            None,
+            &[hunk(second, 3, 1), hunk(first, 4, 1)],
+            &batch2_commits,
+        ));
+        assert_eq!(view.progress_percent(), Some(100));
+        assert_eq!(view.row_view(0).expect("row 0").age, Some(0.0));
+        assert_eq!(view.row_view(2).expect("row 2").age, Some(1.0));
+        let row3 = view.row_view(3).expect("row 3");
+        assert_eq!(row3.gutter, Some(first));
+        assert!(row3.meta.is_some());
+
+        // Accepting the final BlameReady keeps Streaming mounted until ready()
+        // swaps in the final formatted rows so scroll does not reset.
+        assert!(view.accept(ticket));
+        assert_eq!(view.state, BlameState::Streaming);
+
+        let final_data = build_data(
+            "src/main.rs",
+            &blame(
+                vec![hunk(first, 1, 2), hunk(second, 3, 1), hunk(first, 4, 1)],
+                &["one", "two", "three", "four"],
+            ),
+            &view.highlighter,
+            None,
+        );
+        assert!(view.ready(ticket, final_data));
+        assert_eq!(view.state, BlameState::Ready);
+        assert!(view.partial.is_none());
+        assert_eq!(view.progress_percent(), None);
+        assert_eq!(view.row_count(), 4);
+    }
+
+    #[test]
+    fn stale_progress_events_for_replaced_ticket_are_ignored() {
+        let mut view = BlameView::default();
+        view.begin(oid(1), "a.rs".to_owned(), QueryTicket(1));
+        view.begin(oid(2), "b.rs".to_owned(), QueryTicket(2));
+
+        let lines = Arc::new(vec!["hello".to_owned()]);
+        assert!(!view.progress(QueryTicket(1), Some(lines), &[], &HashMap::new()));
+        assert_eq!(view.state, BlameState::Loading);
+        assert!(!view.set_partial_highlights(QueryTicket(1), vec![Vec::new()]));
     }
 }

@@ -642,6 +642,12 @@ impl RepoView {
             SessionEvent::PathHistoryDone { ticket, generation } => {
                 self.file_history_done(ticket, generation, cx);
             }
+            SessionEvent::BlameProgress {
+                ticket,
+                lines,
+                hunks,
+                commits,
+            } => self.blame_progress(ticket, lines, hunks, commits, cx),
             SessionEvent::BlameReady { ticket, blame } => self.blame_ready(ticket, &blame, cx),
             SessionEvent::SubmodulesAndWorktreesReady {
                 ticket,

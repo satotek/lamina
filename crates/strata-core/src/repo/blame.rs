@@ -21,6 +21,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use gix::bstr::{BStr, ByteSlice};
 
@@ -74,6 +75,12 @@ pub struct BlameCommit {
     pub summary: String,
 }
 
+pub(crate) struct BlameProgressUpdate {
+    pub(crate) lines: Option<Arc<Vec<String>>>,
+    pub(crate) hunks: Vec<BlameHunk>,
+    pub(crate) commits: HashMap<Oid, BlameCommit>,
+}
+
 impl Repo {
     /// Attribute every line of `path` at `commit` to the commit that last
     /// changed it, following renames of the file itself.
@@ -82,13 +89,14 @@ impl Repo {
     /// file is more likely a stale selection than an empty answer.
     pub fn blame(&self, commit: Oid, path: &str) -> Result<Blame> {
         Ok(self
-            .blame_inner(commit, path, None, &|| false)?
+            .blame_inner(commit, path, None, &|| false, None)?
             .expect("uncancelled blame returns a result"))
     }
 
     /// Like [`blame`](Self::blame), but accepts a session [`Git`] handle (for
     /// configured executable and command logging) and stops early if
     /// `cancelled()` becomes true, returning `Ok(None)`.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn blame_cancellable(
         &self,
         commit: Oid,
@@ -96,7 +104,20 @@ impl Repo {
         git: &Git,
         cancelled: &(impl Fn() -> bool + Send + Sync),
     ) -> Result<Option<Blame>> {
-        self.blame_inner(commit, path, Some(git), cancelled)
+        self.blame_inner(commit, path, Some(git), cancelled, None)
+    }
+
+    /// Like [`blame_cancellable`](Self::blame_cancellable), but emits early file
+    /// lines and batched hunks on the `git blame --incremental` fallback path.
+    pub(crate) fn blame_cancellable_streaming(
+        &self,
+        commit: Oid,
+        path: &str,
+        git: &Git,
+        cancelled: &(impl Fn() -> bool + Send + Sync),
+        on_progress: &mut dyn FnMut(BlameProgressUpdate),
+    ) -> Result<Option<Blame>> {
+        self.blame_inner(commit, path, Some(git), cancelled, Some(on_progress))
     }
 
     fn blame_inner(
@@ -105,6 +126,7 @@ impl Repo {
         path: &str,
         git: Option<&Git>,
         cancelled: &(impl Fn() -> bool + Send + Sync),
+        mut on_progress: Option<&mut dyn FnMut(BlameProgressUpdate)>,
     ) -> Result<Option<Blame>> {
         if cancelled() {
             return Ok(None);
@@ -147,7 +169,27 @@ impl Repo {
                     &owned_git
                 }
             };
-            let Some(git_blame) = git.blame_incremental(commit, path, cancelled)? else {
+            if let Some(emit) = on_progress.as_deref_mut() {
+                if cancelled() {
+                    return Ok(None);
+                }
+                emit(BlameProgressUpdate {
+                    lines: Some(Arc::new(lines.clone())),
+                    hunks: Vec::new(),
+                    commits: HashMap::new(),
+                });
+            }
+            let Some(git_blame) =
+                git.blame_incremental_streaming(commit, path, cancelled, |batch| {
+                    if let Some(emit) = on_progress.as_deref_mut() {
+                        emit(BlameProgressUpdate {
+                            lines: None,
+                            hunks: batch.hunks,
+                            commits: batch.commits,
+                        });
+                    }
+                })?
+            else {
                 return Ok(None);
             };
             return Ok(Some(Blame {

@@ -465,6 +465,16 @@ pub enum SessionEvent {
         ticket: QueryTicket,
         stat: Arc<CommitStat>,
     },
+    /// Partial line attribution from an in-flight `git blame --incremental`
+    /// run for [`Session::request_blame`]. `lines` is populated once when the
+    /// file text is first read via gix; subsequent events carry `lines: None`,
+    /// newly attributed `hunks`, and only newly seen `commits`.
+    BlameProgress {
+        ticket: QueryTicket,
+        lines: Option<Arc<Vec<String>>>,
+        hunks: Vec<BlameHunk>,
+        commits: HashMap<Oid, BlameCommit>,
+    },
     /// Line attribution of a file, for a ticket from
     /// [`Session::request_blame`]. A stale or cancelled ticket emits nothing.
     BlameReady {
