@@ -4,12 +4,14 @@
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, Entity, IntoElement, ParentElement, Styled, div, px, uniform_list};
+use gpui::{
+    AnyElement, Entity, IntoElement, MouseButton, ParentElement, Styled, div, px, uniform_list,
+};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
 use strata_core::session::RepoSnapshot;
 use strata_core::{ChangeKind, FileChange};
 
-use super::{Colors, Selected, Side, WorktreePanel};
+use super::{Colors, Selection, Side, WorktreePanel};
 use crate::repo_view::RepoView;
 use crate::scrollbar::WithScrollbar as _;
 use crate::style;
@@ -19,6 +21,16 @@ const LIST_WIDTH: f32 = 300.0;
 const ROW_HEIGHT: f32 = 28.0;
 /// A list stops growing here and scrolls instead.
 const MAX_LIST_ROWS: usize = 8;
+
+/// What every row of one section needs: the same selection, row order and
+/// colors, cloned once per render instead of once per row.
+struct RowContext {
+    entity: Entity<RepoView>,
+    /// The section's paths in row order, for shift-ranges and arrow moves.
+    rows: Rc<Vec<String>>,
+    selection: Selection,
+    colors: Colors,
+}
 
 impl WorktreePanel {
     pub(super) fn lists(
@@ -136,14 +148,18 @@ impl WorktreePanel {
                 .into_any_element();
         }
 
+        let context = RowContext {
+            entity,
+            rows: Rc::new(files.iter().map(|change| change.path.clone()).collect()),
+            selection: self.selection.clone(),
+            colors: colors.clone(),
+        };
         let entries: Rc<Vec<(String, ChangeKind)>> = Rc::new(
             files
                 .iter()
                 .map(|change| (change.path.clone(), change.kind))
                 .collect(),
         );
-        let selected = self.selected.clone();
-        let list_colors = colors.clone();
         let list_id = match side {
             Side::Unstaged => "unstaged-files",
             Side::Staged => "staged-files",
@@ -163,15 +179,7 @@ impl WorktreePanel {
             range
                 .map(|index| {
                     let (path, kind) = entries[index].clone();
-                    file_row(
-                        &entity,
-                        side,
-                        index,
-                        path,
-                        kind,
-                        selected.as_ref(),
-                        &list_colors,
-                    )
+                    file_row(&context, side, index, path, kind)
                 })
                 .collect::<Vec<_>>()
         })
@@ -186,24 +194,21 @@ impl WorktreePanel {
 }
 
 fn file_row(
-    entity: &Entity<RepoView>,
+    context: &RowContext,
     side: Side,
     index: usize,
     path: String,
     kind: ChangeKind,
-    selected: Option<&Selected>,
-    colors: &Colors,
 ) -> AnyElement {
-    let is_selected =
-        selected.is_some_and(|selected| selected.side == side && selected.path == path);
+    let is_selected = context.selection.contains(side, &path);
     let (name, dir) = style::path_parts(&path);
 
     let row = crate::ui::list_row(
         gpui::ElementId::named_usize(format!("worktree-file-{}", side as u8), index),
         crate::ui::RowState::NORMAL.selected(is_selected),
-        &colors.design,
+        &context.colors.design,
     )
-    .child(crate::ui::change_badge(kind, &colors.design))
+    .child(crate::ui::change_badge(kind, &context.colors.design))
     .child(div().flex_1().min_w_0().truncate().child(name.to_owned()))
     .when_some(dir, |row, dir| {
         row.child(
@@ -212,63 +217,85 @@ fn file_row(
                 .flex_none()
                 .truncate()
                 .text_size(px(11.0))
-                .text_color(colors.muted_foreground)
+                .text_color(context.colors.muted_foreground)
                 .child(dir.to_owned()),
         )
     });
 
-    let click_entity = entity.clone();
+    let click_entity = context.entity.clone();
     let click_path = path.clone();
+    let rows = context.rows.clone();
     let untracked = kind == ChangeKind::Untracked;
-    let menu_entity = entity.clone();
-    let menu_path = path;
+    let menu_entity = context.entity.clone();
+    let right_entity = context.entity.clone();
+    let right_path = click_path.clone();
 
     row.cursor_pointer()
         .on_click(move |event, window, cx| {
+            let modifiers = event.modifiers();
+            let shift = modifiers.shift;
+            let secondary = modifiers.secondary(cx);
             let path = click_path.clone();
+            let rows = rows.clone();
             click_entity.update(cx, |this, cx| {
-                this.select_worktree_file(side, path.clone(), window, cx);
+                this.click_worktree_file(side, path, shift, secondary, rows.as_slice(), window, cx);
                 if event.click_count() >= 2 {
                     this.toggle_worktree_selection(cx);
                 }
             });
         })
-        .context_menu(move |menu, _window, _cx| {
+        // Right-clicking a row outside the selection selects it before the
+        // menu opens, so every menu entry acts on what the user pointed at.
+        .on_mouse_down(MouseButton::Right, move |_, _, cx| {
+            let path = right_path.clone();
+            right_entity.update(cx, |this, cx| {
+                this.ensure_worktree_selection(side, path, cx)
+            });
+        })
+        .context_menu(move |menu, _window, cx| {
+            let count = menu_entity.read(cx).worktree.selection.len();
             let mut menu = menu;
             match side {
                 Side::Unstaged => {
                     let stage_entity = menu_entity.clone();
-                    let stage_path = menu_path.clone();
-                    menu =
-                        menu.item(PopupMenuItem::new("Stage").on_click(move |_, _window, cx| {
-                            let path = stage_path.clone();
-                            stage_entity
-                                .update(cx, |this, cx| this.stage_worktree_path(path.clone(), cx));
-                        }));
+                    let label = if count > 1 {
+                        format!("Stage {count} files")
+                    } else {
+                        "Stage".to_owned()
+                    };
+                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _window, cx| {
+                        stage_entity.update(cx, |this, cx| this.stage_selected(cx));
+                    }));
 
                     let discard_entity = menu_entity.clone();
-                    let discard_path = menu_path.clone();
-                    let label = if untracked {
-                        "Delete file…"
-                    } else {
-                        "Discard changes…"
+                    let label = match count {
+                        1 if untracked => "Delete file…".to_owned(),
+                        1 => "Discard changes…".to_owned(),
+                        _ => format!("Discard {count} files…"),
                     };
                     menu = menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
-                        let path = discard_path.clone();
-                        discard_entity.update(cx, |this, cx| {
-                            this.discard_worktree_path(path.clone(), untracked, window, cx)
-                        });
+                        discard_entity
+                            .update(cx, |this, cx| this.discard_unstaged_selection(window, cx));
                     }));
                 }
                 Side::Staged => {
                     let unstage_entity = menu_entity.clone();
-                    let unstage_path = menu_path.clone();
-                    menu = menu.item(PopupMenuItem::new("Unstage").on_click(
-                        move |_, _window, cx| {
-                            let path = unstage_path.clone();
-                            unstage_entity.update(cx, |this, cx| {
-                                this.unstage_worktree_path(path.clone(), cx)
-                            });
+                    let label = if count > 1 {
+                        format!("Unstage {count} files")
+                    } else {
+                        "Unstage".to_owned()
+                    };
+                    menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _window, cx| {
+                        unstage_entity.update(cx, |this, cx| this.unstage_selected(cx));
+                    }));
+
+                    // Staged discard drops both the index and the worktree at
+                    // these paths, so it is offered separately from unstage.
+                    let discard_entity = menu_entity.clone();
+                    menu = menu.item(PopupMenuItem::new("Discard changes…").on_click(
+                        move |_, window, cx| {
+                            discard_entity
+                                .update(cx, |this, cx| this.discard_staged_selection(window, cx));
                         },
                     ));
                 }

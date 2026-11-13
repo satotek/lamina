@@ -51,7 +51,13 @@ actions!(
     [
         StageSelected,
         UnstageSelected,
+        DiscardSelected,
         ToggleSelected,
+        SelectAllFiles,
+        SelectPreviousFile,
+        SelectNextFile,
+        ExtendPreviousFile,
+        ExtendNextFile,
         CommitMessage,
         ShowHistory,
     ]
@@ -63,13 +69,23 @@ actions!(
 const COMMIT_KEY: &str = "cmd-enter";
 #[cfg(not(target_os = "macos"))]
 const COMMIT_KEY: &str = "ctrl-enter";
+#[cfg(target_os = "macos")]
+const SELECT_ALL_KEY: &str = "cmd-a";
+#[cfg(not(target_os = "macos"))]
+const SELECT_ALL_KEY: &str = "ctrl-a";
 
 pub fn bind(cx: &mut App) {
     let scope = Some(WORKTREE_PANEL);
     cx.bind_keys([
         KeyBinding::new("s", StageSelected, scope),
         KeyBinding::new("u", UnstageSelected, scope),
+        KeyBinding::new("d", DiscardSelected, scope),
         KeyBinding::new("enter", ToggleSelected, scope),
+        KeyBinding::new(SELECT_ALL_KEY, SelectAllFiles, scope),
+        KeyBinding::new("up", SelectPreviousFile, scope),
+        KeyBinding::new("down", SelectNextFile, scope),
+        KeyBinding::new("shift-up", ExtendPreviousFile, scope),
+        KeyBinding::new("shift-down", ExtendNextFile, scope),
         KeyBinding::new(COMMIT_KEY, CommitMessage, scope),
         KeyBinding::new("escape", ShowHistory, scope),
     ]);
@@ -104,12 +120,213 @@ impl Side {
     }
 }
 
-/// The selected row, identified by path so a status refresh that reorders the
+/// The focused row, identified by path so a status refresh that reorders the
 /// list keeps the selection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Selected {
     side: Side,
     path: String,
+}
+
+/// The rows the user selected in one of the file lists.
+///
+/// A selection never spans the unstaged and the staged section: acting on a
+/// row in the other section starts a new selection there. Conflict rows are
+/// single-select and only feed the conflict view, so they never join a set.
+///
+/// The focused row stays [`WorktreePanel::selected`]: the diff pane, the
+/// conflict view and the line-level operations already read it there, and a
+/// selection change only has to keep the two in step. Every method takes the
+/// section's row order as a slice instead of reading the snapshot, which keeps
+/// the model pure and testable.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Selection {
+    side: Option<Side>,
+    /// Sorted, so one operation always receives its paths in the same order.
+    paths: BTreeSet<String>,
+    /// The row a shift-click or shift-arrow extends from.
+    anchor: Option<String>,
+}
+
+impl Selection {
+    fn side(&self) -> Option<Side> {
+        self.side
+    }
+
+    fn len(&self) -> usize {
+        self.paths.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+
+    fn contains(&self, side: Side, path: &str) -> bool {
+        self.side == Some(side) && self.paths.contains(path)
+    }
+
+    /// The selected paths in the order operations should use.
+    fn paths(&self) -> Vec<String> {
+        self.paths.iter().cloned().collect()
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Replaces the selection with one row, which becomes the focused one.
+    fn select_one(&mut self, side: Side, path: String) -> Selected {
+        self.side = Some(side);
+        self.paths = BTreeSet::from([path.clone()]);
+        self.anchor = Some(path.clone());
+        Selected { side, path }
+    }
+
+    /// A click without a modifier collapses the selection onto one row; shift
+    /// and the platform's secondary modifier (Cmd on macOS, Ctrl elsewhere)
+    /// extend and toggle it.
+    fn click(
+        &mut self,
+        focused: Option<Selected>,
+        side: Side,
+        path: String,
+        shift: bool,
+        secondary: bool,
+        rows: &[String],
+    ) -> Option<Selected> {
+        if shift {
+            Some(self.extend_to(side, path, rows))
+        } else if secondary {
+            self.toggle(focused, side, path)
+        } else {
+            Some(self.select_one(side, path))
+        }
+    }
+
+    /// Cmd/Ctrl-click: adds or removes one row without collapsing the rest.
+    /// `focused` is consumed because the row it points at may be the one that
+    /// leaves the selection, in which case another selected row takes over.
+    fn toggle(&mut self, focused: Option<Selected>, side: Side, path: String) -> Option<Selected> {
+        if self.side != Some(side) {
+            return Some(self.select_one(side, path));
+        }
+        if !self.paths.remove(&path) {
+            self.paths.insert(path.clone());
+            self.anchor = Some(path.clone());
+            return Some(Selected { side, path });
+        }
+        if self.paths.is_empty() {
+            self.clear();
+            return None;
+        }
+        if self.anchor.as_deref() == Some(path.as_str()) {
+            self.anchor = focused
+                .as_ref()
+                .map(|focused| focused.path.clone())
+                .filter(|path| self.paths.contains(path));
+        }
+        self.anchor = self
+            .anchor
+            .take()
+            .filter(|anchor| self.paths.contains(anchor));
+        // Keep the diff on a row that is still selected.
+        let next = focused
+            .map(|focused| focused.path)
+            .filter(|path| self.paths.contains(path))
+            .or_else(|| self.anchor.clone())
+            .or_else(|| self.paths.iter().next_back().cloned())?;
+        Some(Selected { side, path: next })
+    }
+
+    /// Shift-click: selects every row between the anchor and `path`.
+    fn extend_to(&mut self, side: Side, path: String, rows: &[String]) -> Selected {
+        if self.side == Some(side)
+            && let Some(anchor) = self.anchor.clone()
+            && let (Some(from), Some(to)) = (
+                rows.iter().position(|row| *row == anchor),
+                rows.iter().position(|row| *row == path),
+            )
+        {
+            let (low, high) = if from <= to { (from, to) } else { (to, from) };
+            self.paths = rows[low..=high].iter().cloned().collect();
+            return Selected { side, path };
+        }
+        self.select_one(side, path)
+    }
+
+    /// Cmd/Ctrl-A: everything the focused section lists. A focused row that is
+    /// still listed stays focused so the diff does not jump.
+    fn select_all(
+        &mut self,
+        side: Side,
+        rows: &[String],
+        focused: Option<&Selected>,
+    ) -> Option<Selected> {
+        self.side = Some(side);
+        self.paths = rows.iter().cloned().collect();
+        let path = focused
+            .filter(|focused| focused.side == side && self.paths.contains(&focused.path))
+            .map(|focused| focused.path.clone())
+            .or_else(|| rows.first().cloned())?;
+        self.anchor = Some(path.clone());
+        Some(Selected { side, path })
+    }
+
+    /// Moves the focused row by `delta` rows, or extends the selection to it
+    /// when `extend` is set.
+    fn move_by(
+        &mut self,
+        rows: &[String],
+        focused: Option<&Selected>,
+        delta: isize,
+        extend: bool,
+    ) -> Option<Selected> {
+        let side = self.side?;
+        if rows.is_empty() {
+            return None;
+        }
+        let current = focused
+            .filter(|focused| focused.side == side)
+            .and_then(|focused| rows.iter().position(|row| *row == focused.path));
+        let index = match current {
+            Some(index) => (index as isize + delta).clamp(0, rows.len() as isize - 1) as usize,
+            None if delta < 0 => rows.len() - 1,
+            None => 0,
+        };
+        let path = rows[index].clone();
+        Some(if extend {
+            self.extend_to(side, path, rows)
+        } else {
+            self.select_one(side, path)
+        })
+    }
+
+    /// The row to focus when the previous focus is gone: the anchor while it
+    /// is still selected, otherwise the last remaining path.
+    fn focus_fallback(&self, side: Side) -> Option<Selected> {
+        if self.side != Some(side) {
+            return None;
+        }
+        let path = self
+            .anchor
+            .clone()
+            .filter(|anchor| self.paths.contains(anchor))
+            .or_else(|| self.paths.iter().next_back().cloned())?;
+        Some(Selected { side, path })
+    }
+
+    /// Drops selected paths a refreshed list no longer shows. The caller keeps
+    /// the focused row when it is still selected.
+    fn retain(&mut self, listed: &[String]) {
+        self.paths.retain(|path| listed.contains(path));
+        self.anchor = self
+            .anchor
+            .take()
+            .filter(|anchor| self.paths.contains(anchor));
+        if self.paths.is_empty() {
+            self.clear();
+        }
+    }
 }
 
 /// What the main area shows below the sidebar.
@@ -214,7 +431,10 @@ impl PendingKind {
 /// from session events and user input.
 #[derive(Default)]
 pub struct WorktreePanel {
+    /// The focused row: the one the diff pane shows.
     selected: Option<Selected>,
+    /// Every selected row on `selected`'s section.
+    selection: Selection,
     /// Conflicts list, per-file conflict view and merge banner state.
     pub(crate) conflicts: Conflicts,
     diff: DiffSlot,
@@ -222,8 +442,8 @@ pub struct WorktreePanel {
     diff_error: Option<String>,
     /// Changed lines picked for a line-level operation.
     picked: BTreeSet<(usize, usize)>,
-    /// Flattened row the last click landed on, for shift-click ranges.
-    anchor: Option<usize>,
+    /// Flattened diff row the last click landed on, for shift-click ranges.
+    line_anchor: Option<usize>,
 
     message_input: Option<Entity<TextareaState>>,
     _message_events: Option<Subscription>,
@@ -243,6 +463,7 @@ pub struct WorktreePanel {
     /// holds exactly the offered message.
     withdraw_merge_message: Option<String>,
 
+    /// The last submitted operation and why, for the notice after it finishes.
     pending: Option<(OperationId, PendingKind)>,
     /// Set while a submitted operation has not refreshed the status yet.
     dirty: bool,
@@ -332,42 +553,108 @@ impl WorktreePanel {
         }
     }
 
+    /// Makes `path` the only selected row and resets the diff, so the next
+    /// frame reads the new file.
     fn select(&mut self, side: Side, path: String) {
-        if self
-            .selected
-            .as_ref()
-            .is_some_and(|selected| selected.side == side && selected.path == path)
-        {
-            return;
+        self.selected = Some(self.selection.select_one(side, path));
+        self.reset_diff();
+    }
+
+    /// Takes the focused row the selection model computed and reports whether
+    /// the diff now shows a different file.
+    fn apply_focus(&mut self, focused: Option<Selected>) -> bool {
+        if self.selected == focused {
+            return false;
         }
-        self.selected = Some(Selected { side, path });
+        self.selected = focused;
+        self.reset_diff();
+        true
+    }
+
+    /// A click on a file row; returns whether the diff's file changed.
+    fn click_file(
+        &mut self,
+        side: Side,
+        path: String,
+        shift: bool,
+        secondary: bool,
+        rows: &[String],
+    ) -> bool {
+        let focused =
+            self.selection
+                .click(self.selected.clone(), side, path, shift, secondary, rows);
+        self.apply_focus(focused)
+    }
+
+    /// Cmd/Ctrl-A; returns whether the diff's file changed.
+    fn select_all(&mut self, side: Side, rows: &[String]) -> bool {
+        let focused = self
+            .selection
+            .select_all(side, rows, self.selected.as_ref());
+        self.apply_focus(focused)
+    }
+
+    /// Up/Down and their shift variants; returns whether the diff's file
+    /// changed.
+    fn move_selection(&mut self, rows: &[String], delta: isize, extend: bool) -> bool {
+        let focused = self
+            .selection
+            .move_by(rows, self.selected.as_ref(), delta, extend);
+        match focused {
+            Some(focused) => self.apply_focus(Some(focused)),
+            None => false,
+        }
+    }
+
+    /// Drops the diff rows and line picks; the next request fills them again.
+    fn reset_diff(&mut self) {
         self.rows = Rc::new(Vec::new());
         self.diff_error = None;
         self.picked.clear();
-        self.anchor = None;
+        self.line_anchor = None;
     }
 
     /// Keeps the selection valid against a new snapshot. Returns true when the
     /// user-visible file changed, which needs a new diff or conflict read.
     ///
-    /// Conflicted paths are listed in `snapshot.conflicts` and not in the
-    /// unstaged list, so they get their own selection side and are preferred
-    /// when the selection has to start somewhere: a stopped merge should open
-    /// on the first conflict instead of an unrelated edited file.
+    /// Selected paths the refreshed lists no longer show are dropped. The
+    /// focused row follows its path to the other section when staging or
+    /// unstaging moved it there. Conflicted paths are listed in
+    /// `snapshot.conflicts` and not in the unstaged list, so they get their own
+    /// section and are preferred when the selection has to start somewhere: a
+    /// stopped merge should open on the first conflict instead of an unrelated
+    /// edited file.
     fn reconcile(&mut self, snapshot: &RepoSnapshot) -> bool {
-        let status = &snapshot.status;
-        if let Some(selected) = self.selected.clone() {
-            if contains(snapshot, selected.side, &selected.path) {
-                return false;
+        let had_selection = self.selection.side().is_some();
+        if let Some(side) = self.selection.side() {
+            let before = self.selected.clone();
+            self.selection.retain(&listed_paths(snapshot, side));
+            if !self.selection.is_empty() {
+                // Stay on the focused row while it is still listed; anything
+                // else is a stale path that moved to another file.
+                let focused = match before.clone() {
+                    Some(focused)
+                        if focused.side == side && self.selection.contains(side, &focused.path) =>
+                    {
+                        focused
+                    }
+                    _ => self
+                        .selection
+                        .focus_fallback(side)
+                        .expect("a non-empty selection has a path"),
+                };
+                return self.apply_focus(Some(focused));
             }
-            if selected.side != Side::Conflict {
-                // A staged file leaves the unstaged list (and vice versa); follow
-                // it to the other side instead of jumping to an unrelated file.
-                let other = selected.side.other();
-                if contains(snapshot, other, &selected.path) {
-                    self.select(other, selected.path);
-                    return true;
-                }
+            // The whole selection is gone. A staged file leaves the unstaged
+            // list (and vice versa), so follow the focused path across instead
+            // of jumping to an unrelated file.
+            self.selected = None;
+            if let Some(previous) = before
+                && previous.side != Side::Conflict
+                && contains(snapshot, previous.side.other(), &previous.path)
+            {
+                self.select(previous.side.other(), previous.path);
+                return true;
             }
         }
 
@@ -376,14 +663,16 @@ impl WorktreePanel {
             .first()
             .map(|entry| (Side::Conflict, entry.path.clone()))
             .or_else(|| {
-                status
+                snapshot
+                    .status
                     .unstaged
                     .iter()
                     .find(|change| change.kind != ChangeKind::Conflicted)
                     .map(|change| (Side::Unstaged, change.path.clone()))
             })
             .or_else(|| {
-                status
+                snapshot
+                    .status
                     .staged
                     .first()
                     .map(|change| (Side::Staged, change.path.clone()))
@@ -394,11 +683,10 @@ impl WorktreePanel {
                 true
             }
             None => {
-                let had_selection = self.selected.take().is_some();
+                self.selection.clear();
+                self.selected = None;
                 if had_selection {
-                    self.rows = Rc::new(Vec::new());
-                    self.picked.clear();
-                    self.anchor = None;
+                    self.reset_diff();
                 }
                 had_selection
             }
@@ -412,7 +700,7 @@ impl WorktreePanel {
         self.rows = Rc::new(panel_rows(&view.diff));
         self.diff_error = None;
         self.picked.clear();
-        self.anchor = None;
+        self.line_anchor = None;
         self.dirty = false;
         true
     }
@@ -587,6 +875,7 @@ impl RepoView {
             // ticket must not land and draw a file the lists no longer have.
             self.worktree.rows = Rc::new(Vec::new());
             self.worktree.picked.clear();
+            self.worktree.line_anchor = None;
             if let (Some(session), Some(ticket)) =
                 (self.session.as_ref(), self.worktree.diff.cancel())
             {
@@ -603,10 +892,7 @@ impl RepoView {
             {
                 session.cancel_diff(ticket);
             }
-            self.worktree.rows = Rc::new(Vec::new());
-            self.worktree.picked.clear();
-            self.worktree.anchor = None;
-            self.worktree.diff_error = None;
+            self.worktree.reset_diff();
             self.worktree.dirty = false;
             if self.worktree.conflicts.needs_load(&selected.path) {
                 self.load_conflict_sides(selected.path, cx);
@@ -631,10 +917,7 @@ impl RepoView {
         if let Some(previous) = self.worktree.diff.begin(ticket) {
             session.cancel_diff(previous);
         }
-        self.worktree.rows = Rc::new(Vec::new());
-        self.worktree.diff_error = None;
-        self.worktree.picked.clear();
-        self.worktree.anchor = None;
+        self.worktree.reset_diff();
         self.worktree.dirty = false;
         cx.notify();
     }
@@ -671,53 +954,40 @@ impl RepoView {
         self.select_worktree_file(Side::Conflict, path, window, cx);
     }
 
+    /// Enter or a double-click: moves the whole selection across the index.
     pub(crate) fn toggle_worktree_selection(&mut self, cx: &mut Context<Self>) {
-        let Some(selected) = self.worktree.selected.clone() else {
-            return;
-        };
-        let Some(session) = self.session.as_ref() else {
-            return;
-        };
-        match selected.side {
-            Side::Unstaged => self.worktree.run(
-                session,
-                PendingKind::Stage,
-                Operation::StagePaths(vec![selected.path]),
-            ),
-            Side::Staged => self.worktree.run(
-                session,
-                PendingKind::Unstage,
-                Operation::UnstagePaths(vec![selected.path]),
-            ),
+        match self.worktree.selection.side() {
+            Some(Side::Unstaged) => self.stage_selected(cx),
+            Some(Side::Staged) => self.unstage_selected(cx),
             // A conflict is resolved from its own view, not by staging it.
-            Side::Conflict => return,
+            Some(Side::Conflict) | None => {}
         }
-        cx.notify();
     }
 
+    /// `s`: stages every selected unstaged path in one operation.
     pub(crate) fn stage_selected(&mut self, cx: &mut Context<Self>) {
-        let Some(selected) = self.worktree.selected.clone() else {
+        if self.worktree.selection.side() != Some(Side::Unstaged) {
             return;
-        };
-        if selected.side != Side::Unstaged {
+        }
+        let paths = self.worktree.selection.paths();
+        if paths.is_empty() {
             return;
         }
         let Some(session) = self.session.as_ref() else {
             return;
         };
-        self.worktree.run(
-            session,
-            PendingKind::Stage,
-            Operation::StagePaths(vec![selected.path]),
-        );
+        self.worktree
+            .run(session, PendingKind::Stage, Operation::StagePaths(paths));
         cx.notify();
     }
 
+    /// `u`: unstages every selected staged path in one operation.
     pub(crate) fn unstage_selected(&mut self, cx: &mut Context<Self>) {
-        let Some(selected) = self.worktree.selected.clone() else {
+        if self.worktree.selection.side() != Some(Side::Staged) {
             return;
-        };
-        if selected.side != Side::Staged {
+        }
+        let paths = self.worktree.selection.paths();
+        if paths.is_empty() {
             return;
         }
         let Some(session) = self.session.as_ref() else {
@@ -726,84 +996,239 @@ impl RepoView {
         self.worktree.run(
             session,
             PendingKind::Unstage,
-            Operation::UnstagePaths(vec![selected.path]),
+            Operation::UnstagePaths(paths),
         );
         cx.notify();
     }
 
-    pub(crate) fn stage_worktree_path(&mut self, path: String, cx: &mut Context<Self>) {
+    /// A click on a file row. Shift extends the range and the platform's
+    /// secondary modifier toggles one row; either way the clicked row becomes
+    /// the focused one, so the diff follows the pointer.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "a click carries the row's section, order and modifiers"
+    )]
+    pub(crate) fn click_worktree_file(
+        &mut self,
+        side: Side,
+        path: String,
+        shift: bool,
+        secondary: bool,
+        rows: &[String],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let focus = self.worktree.ensure_focus(cx);
+        window.focus(&focus, cx);
+        if self.worktree.click_file(side, path, shift, secondary, rows) {
+            self.request_worktree_diff(cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    /// Makes the right-clicked row part of the selection. A menu opened on a
+    /// row outside it acts on that row alone, never on the unrelated
+    /// selection.
+    pub(crate) fn ensure_worktree_selection(
+        &mut self,
+        side: Side,
+        path: String,
+        cx: &mut Context<Self>,
+    ) {
+        if self.worktree.selection.contains(side, &path) {
+            return;
+        }
+        let selected = self.worktree.selection.select_one(side, path);
+        if self.worktree.apply_focus(Some(selected)) {
+            self.request_worktree_diff(cx);
+        } else {
+            cx.notify();
+        }
+    }
+
+    /// Cmd/Ctrl-A: every row of the section the selection is in.
+    pub(crate) fn select_all_files(&mut self, cx: &mut Context<Self>) {
         let Some(session) = self.session.as_ref() else {
             return;
         };
-        self.worktree.run(
-            session,
-            PendingKind::Stage,
-            Operation::StagePaths(vec![path]),
-        );
-        cx.notify();
+        let snapshot = session.snapshot();
+        let side = match self.worktree.selection.side() {
+            // A conflict is a single-file view, so select-all starts in the
+            // first file section that has rows.
+            Some(Side::Conflict) | None => {
+                if !visible_unstaged(&snapshot.status).is_empty() {
+                    Side::Unstaged
+                } else if !snapshot.status.staged.is_empty() {
+                    Side::Staged
+                } else {
+                    return;
+                }
+            }
+            Some(side) => side,
+        };
+        let rows = listed_paths(&snapshot, side);
+        if rows.is_empty() {
+            return;
+        }
+        if self.worktree.select_all(side, &rows) {
+            self.request_worktree_diff(cx);
+        } else {
+            cx.notify();
+        }
     }
 
-    pub(crate) fn unstage_worktree_path(&mut self, path: String, cx: &mut Context<Self>) {
+    /// Up/Down move the focused row; Shift extends the selection to it.
+    pub(crate) fn move_file_selection(
+        &mut self,
+        delta: isize,
+        extend: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(side) = self.worktree.selection.side() else {
+            return;
+        };
+        if side == Side::Conflict {
+            return;
+        }
         let Some(session) = self.session.as_ref() else {
             return;
         };
-        self.worktree.run(
-            session,
-            PendingKind::Unstage,
-            Operation::UnstagePaths(vec![path]),
-        );
-        cx.notify();
+        let rows = listed_paths(&session.snapshot(), side);
+        if self.worktree.move_selection(&rows, delta, extend) {
+            self.request_worktree_diff(cx);
+        } else {
+            cx.notify();
+        }
     }
 
-    /// Asks before throwing away one path's working-tree changes.
+    /// `d` and the context menus: discards the whole selection on whichever
+    /// side it is in.
+    pub(crate) fn discard_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.worktree.selection.side() {
+            Some(Side::Unstaged) => self.discard_unstaged_selection(window, cx),
+            Some(Side::Staged) => self.discard_staged_selection(window, cx),
+            Some(Side::Conflict) | None => {}
+        }
+    }
+
+    /// Asks before throwing away the working-tree changes of the selection.
     ///
     /// The confirmation is a real dialog, not an overlay: it holds focus, so
     /// `Enter` and `Esc` belong to it and nothing behind it can act while it is
     /// open. Nothing is remembered here either, so a cancelled dialog cannot
     /// come back on a later frame.
-    pub(crate) fn discard_worktree_path(
+    pub(crate) fn discard_unstaged_selection(
         &mut self,
-        path: String,
-        untracked: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (title, detail, ok_label, kind, operation) = if untracked {
-            (
-                format!("Delete {path}?"),
-                "The untracked file is removed from disk.".to_owned(),
-                "Delete",
-                PendingKind::Delete,
-                Operation::DeleteUntracked(vec![path]),
-            )
+        if self.worktree.selection.side() != Some(Side::Unstaged) {
+            return;
+        }
+        let paths = self.worktree.selection.paths();
+        if paths.is_empty() {
+            return;
+        }
+
+        // `git restore` cannot drop an untracked path, so those go through
+        // `git clean` instead. Both groups go out as one operation each,
+        // carrying all their paths.
+        let (tracked, untracked) = {
+            let Some(session) = self.session.as_ref() else {
+                return;
+            };
+            let snapshot = session.snapshot();
+            let kind = |path: &str| {
+                snapshot
+                    .status
+                    .unstaged
+                    .iter()
+                    .find(|change| change.path == path)
+                    .map(|change| change.kind)
+            };
+            let mut tracked = Vec::new();
+            let mut untracked = Vec::new();
+            for path in &paths {
+                if kind(path) == Some(ChangeKind::Untracked) {
+                    untracked.push(path.clone());
+                } else {
+                    tracked.push(path.clone());
+                }
+            }
+            (tracked, untracked)
+        };
+
+        let discards = !tracked.is_empty();
+        let deletes = !untracked.is_empty();
+        let title = match paths.as_slice() {
+            [only] if !deletes => format!("Discard changes to {only}?"),
+            [only] => format!("Delete {only}?"),
+            _ if discards => format!("Discard changes to {} files?", paths.len()),
+            _ => format!("Delete {} files?", paths.len()),
+        };
+        let mut operations = Vec::new();
+        if discards {
+            operations.push(Operation::DiscardPaths(tracked));
+        }
+        if deletes {
+            operations.push(Operation::DeleteUntracked(untracked));
+        }
+        let kind = if discards {
+            PendingKind::Discard
         } else {
-            (
-                format!("Discard changes to {path}?"),
-                "The working-tree changes are lost; this cannot be undone.".to_owned(),
-                "Discard",
-                PendingKind::Discard,
-                Operation::DiscardPaths(vec![path]),
-            )
+            PendingKind::Delete
         };
         self.ask_destructive(
             window,
             cx,
-            crate::ui::Confirm::new(title, detail).ok_label(ok_label),
+            crate::ui::Confirm::new(title, discard_detail(&paths, discards, deletes))
+                .ok_label(if discards { "Discard" } else { "Delete" }),
             kind,
-            operation,
+            operations,
         );
     }
 
-    /// Opens the confirmation dialog for `operation`, which runs only when the
+    /// Asks before dropping the staged and the working-tree state of the
+    /// selection. This is always confirmed: it loses edits on both sides and
+    /// deletes files that only exist in the index.
+    pub(crate) fn discard_staged_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.worktree.selection.side() != Some(Side::Staged) {
+            return;
+        }
+        let paths = self.worktree.selection.paths();
+        if paths.is_empty() {
+            return;
+        }
+        let title = match paths.as_slice() {
+            [only] => format!("Discard all changes to {only}?"),
+            _ => format!("Discard staged changes to {} files?", paths.len()),
+        };
+        self.ask_destructive(
+            window,
+            cx,
+            crate::ui::Confirm::new(title, discard_staged_detail(&paths))
+                .ok_label("Discard")
+                .always_ask(),
+            PendingKind::Discard,
+            vec![Operation::DiscardStagedPaths { paths }],
+        );
+    }
+
+    /// Opens the confirmation dialog for `operations`, which run only when the
     /// user accepts it (or immediately, when the settings turn confirmations
     /// off).
+    ///
+    /// A selection that mixes tracked and untracked files needs two queued
+    /// operations because core has a separate command for each; both carry all
+    /// their paths, and core batches long lists itself.
     fn ask_destructive(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
         confirm: crate::ui::Confirm,
         kind: PendingKind,
-        operation: Operation,
+        operations: Vec<Operation>,
     ) {
         // A dialog hands focus back to whatever had it when it opened. The
         // context menu that usually offers these is already closing and its
@@ -814,7 +1239,7 @@ impl RepoView {
         let entity = cx.entity();
         crate::ui::confirm(window, cx, confirm, move |_, cx| {
             entity.update(cx, |view, cx| {
-                view.run_confirmed(kind, operation.clone(), cx);
+                view.run_confirmed(kind, operations.clone(), cx);
             });
         });
     }
@@ -916,7 +1341,7 @@ impl RepoView {
                     )
                     .ok_label("Discard"),
                     PendingKind::Discard,
-                    Operation::DiscardLines { path, selection },
+                    vec![Operation::DiscardLines { path, selection }],
                 );
                 return;
             }
@@ -938,14 +1363,14 @@ impl RepoView {
         let Some(key) = self.worktree.rows.get(row).and_then(PanelRow::pickable) else {
             return;
         };
-        if shift && let Some(anchor) = self.worktree.anchor {
+        if shift && let Some(anchor) = self.worktree.line_anchor {
             let range = picked_in_range(&self.worktree.rows, anchor, row);
             self.worktree.picked.extend(range);
         } else {
             if !self.worktree.picked.insert(key) {
                 self.worktree.picked.remove(&key);
             }
-            self.worktree.anchor = Some(row);
+            self.worktree.line_anchor = Some(row);
         }
         cx.notify();
     }
@@ -982,12 +1407,19 @@ impl RepoView {
         cx.notify();
     }
 
-    /// Runs a destructive operation the user confirmed in [`crate::ui::confirm`].
-    fn run_confirmed(&mut self, kind: PendingKind, operation: Operation, cx: &mut Context<Self>) {
+    /// Runs the operations the user confirmed in [`crate::ui::confirm`].
+    fn run_confirmed(
+        &mut self,
+        kind: PendingKind,
+        operations: Vec<Operation>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(session) = self.session.as_ref() else {
             return;
         };
-        self.worktree.run(session, kind, operation);
+        for operation in operations {
+            self.worktree.run(session, kind, operation);
+        }
         cx.notify();
     }
 }
@@ -1048,6 +1480,82 @@ fn visible_unstaged(status: &WorktreeStatus) -> Vec<&FileChange> {
         .iter()
         .filter(|change| change.kind != ChangeKind::Conflicted)
         .collect()
+}
+
+/// The paths a section lists, in the order its rows appear. Keyboard selection
+/// ranges need the same order the rendered list uses.
+fn listed_paths(snapshot: &RepoSnapshot, side: Side) -> Vec<String> {
+    match side {
+        Side::Unstaged => visible_unstaged(&snapshot.status)
+            .into_iter()
+            .map(|change| change.path.clone())
+            .collect(),
+        Side::Staged => snapshot
+            .status
+            .staged
+            .iter()
+            .map(|change| change.path.clone())
+            .collect(),
+        Side::Conflict => snapshot
+            .conflicts
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect(),
+    }
+}
+
+/// How many paths a discard confirmation names before summarising the rest.
+const DISCARD_NAMES: usize = 5;
+
+/// The names a confirmation lists, at most [`DISCARD_NAMES`] of them.
+fn listed_names(paths: &[String]) -> String {
+    let shown: Vec<&str> = paths
+        .iter()
+        .take(DISCARD_NAMES)
+        .map(String::as_str)
+        .collect();
+    let mut text = shown.join(", ");
+    if let Some(rest) = paths
+        .len()
+        .checked_sub(DISCARD_NAMES)
+        .filter(|rest| *rest > 0)
+    {
+        text.push_str(&format!(" and {rest} more"));
+    }
+    text
+}
+
+/// The body of the unstaged discard confirmation: what is lost, then the
+/// files it happens to.
+fn discard_detail(paths: &[String], discards: bool, deletes: bool) -> String {
+    let mut detail = match (discards, deletes) {
+        (true, true) => {
+            "The working-tree changes are lost and the untracked files are removed from disk; \
+             this cannot be undone."
+        }
+        (false, true) => "The untracked files are removed from disk; this cannot be undone.",
+        _ => "The working-tree changes are lost; this cannot be undone.",
+    }
+    .to_owned();
+    if !paths.is_empty() {
+        detail.push_str(" Files: ");
+        detail.push_str(&listed_names(paths));
+    }
+    detail
+}
+
+/// The body of the staged discard confirmation. Unlike the unstaged one this
+/// drops both sides at once, which needs saying.
+fn discard_staged_detail(paths: &[String]) -> String {
+    let mut detail = String::from(
+        "The staged changes and any further edits in the working tree are lost, \
+         and files that are only in the index are deleted. This cannot be undone.",
+    );
+    if !paths.is_empty() {
+        detail.push_str(" Files: ");
+        detail.push_str(&listed_names(paths));
+    }
+    detail
 }
 
 // ---------------------------------------------------------------------------
@@ -1185,8 +1693,28 @@ impl WorktreePanel {
             .key_context(WORKTREE_PANEL)
             .on_action(cx.listener(|this, _: &StageSelected, _, cx| this.stage_selected(cx)))
             .on_action(cx.listener(|this, _: &UnstageSelected, _, cx| this.unstage_selected(cx)))
+            .on_action(cx.listener(|this, _: &DiscardSelected, window, cx| {
+                this.discard_selected(window, cx)
+            }))
             .on_action(
                 cx.listener(|this, _: &ToggleSelected, _, cx| this.toggle_worktree_selection(cx)),
+            )
+            .on_action(cx.listener(|this, _: &SelectAllFiles, _, cx| this.select_all_files(cx)))
+            .on_action(cx.listener(|this, _: &SelectPreviousFile, _, cx| {
+                this.move_file_selection(-1, false, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &SelectNextFile, _, cx| {
+                    this.move_file_selection(1, false, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &ExtendPreviousFile, _, cx| {
+                this.move_file_selection(-1, true, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &ExtendNextFile, _, cx| {
+                    this.move_file_selection(1, true, cx)
+                }),
             )
             .on_action(cx.listener(|this, _: &CommitMessage, _, cx| this.commit_worktree(cx)))
             .on_action(
@@ -1226,5 +1754,234 @@ impl WorktreePanel {
             .child(self.commit_box(entity.clone(), snapshot, cx, &colors));
 
         root.into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(paths: &[&str]) -> Vec<String> {
+        paths.iter().map(|path| (*path).to_owned()).collect()
+    }
+
+    fn selected(side: Side, path: &str) -> Selected {
+        Selected {
+            side,
+            path: path.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_plain_click_selects_one_row_and_a_secondary_click_toggles() {
+        let rows = names(&["a", "b", "c"]);
+        let mut selection = Selection::default();
+
+        let focused = selection.click(None, Side::Unstaged, "a".to_owned(), false, false, &rows);
+        assert_eq!(focused, Some(selected(Side::Unstaged, "a")));
+        assert_eq!(selection.paths(), names(&["a"]));
+
+        // Cmd-click adds a row and moves the focus to it.
+        let focused = selection.click(focused, Side::Unstaged, "b".to_owned(), false, true, &rows);
+        assert_eq!(focused, Some(selected(Side::Unstaged, "b")));
+        assert_eq!(selection.paths(), names(&["a", "b"]));
+
+        // Removing the focused row hands the focus back to what is left.
+        let focused = selection.click(focused, Side::Unstaged, "b".to_owned(), false, true, &rows);
+        assert_eq!(focused, Some(selected(Side::Unstaged, "a")));
+        assert_eq!(selection.paths(), names(&["a"]));
+
+        // Removing the last row leaves nothing to focus.
+        let focused = selection.click(focused, Side::Unstaged, "a".to_owned(), false, true, &rows);
+        assert_eq!(focused, None);
+        assert!(selection.is_empty());
+        assert_eq!(selection.side(), None);
+    }
+
+    #[test]
+    fn a_secondary_click_on_another_section_replaces_the_selection() {
+        let unstaged = names(&["a", "b"]);
+        let staged = names(&["x", "y"]);
+        let mut selection = Selection::default();
+        let focused = selection.click(
+            None,
+            Side::Unstaged,
+            "a".to_owned(),
+            false,
+            false,
+            &unstaged,
+        );
+        let focused = selection.click(
+            focused,
+            Side::Unstaged,
+            "b".to_owned(),
+            false,
+            true,
+            &unstaged,
+        );
+        assert_eq!(selection.paths(), names(&["a", "b"]));
+
+        let focused = selection.click(focused, Side::Staged, "y".to_owned(), false, true, &staged);
+        assert_eq!(focused, Some(selected(Side::Staged, "y")));
+        assert_eq!(selection.paths(), names(&["y"]));
+        assert!(!selection.contains(Side::Unstaged, "a"));
+        assert_eq!(selection.side(), Some(Side::Staged));
+    }
+
+    #[test]
+    fn shift_click_selects_a_range_from_the_anchor_in_both_directions() {
+        let rows = names(&["a", "b", "c", "d"]);
+        let mut selection = Selection::default();
+        let focused = selection.click(None, Side::Unstaged, "b".to_owned(), false, false, &rows);
+
+        let focused = selection.click(focused, Side::Unstaged, "d".to_owned(), true, false, &rows);
+        assert_eq!(focused, Some(selected(Side::Unstaged, "d")));
+        assert_eq!(selection.paths(), names(&["b", "c", "d"]));
+
+        // The anchor does not move, so extending back up flips the range.
+        let focused = selection.click(focused, Side::Unstaged, "a".to_owned(), true, false, &rows);
+        assert_eq!(focused, Some(selected(Side::Unstaged, "a")));
+        assert_eq!(selection.paths(), names(&["a", "b"]));
+    }
+
+    #[test]
+    fn a_shift_click_in_another_section_starts_a_new_selection_there() {
+        let unstaged = names(&["a", "b"]);
+        let staged = names(&["x", "y"]);
+        let mut selection = Selection::default();
+        let focused = selection.click(
+            None,
+            Side::Unstaged,
+            "a".to_owned(),
+            false,
+            false,
+            &unstaged,
+        );
+        let _ = selection.click(
+            focused,
+            Side::Unstaged,
+            "b".to_owned(),
+            true,
+            false,
+            &unstaged,
+        );
+
+        let focused = selection.click(None, Side::Staged, "y".to_owned(), true, false, &staged);
+        assert_eq!(focused, Some(selected(Side::Staged, "y")));
+        assert_eq!(selection.paths(), names(&["y"]));
+        assert_eq!(selection.side(), Some(Side::Staged));
+    }
+
+    #[test]
+    fn arrow_keys_move_and_shift_arrows_extend() {
+        let rows = names(&["a", "b", "c"]);
+        let mut selection = Selection::default();
+        let focused = selection.click(None, Side::Unstaged, "b".to_owned(), false, false, &rows);
+
+        let focused = selection.move_by(&rows, focused.as_ref(), 1, false);
+        assert_eq!(focused, Some(selected(Side::Unstaged, "c")));
+        assert_eq!(
+            selection.paths(),
+            names(&["c"]),
+            "a plain move selects only the new row"
+        );
+
+        let focused = selection.move_by(&rows, focused.as_ref(), 1, false);
+        assert_eq!(
+            focused,
+            Some(selected(Side::Unstaged, "c")),
+            "the end of the list holds"
+        );
+
+        let mut selection = Selection::default();
+        let focused = selection.click(None, Side::Unstaged, "a".to_owned(), false, false, &rows);
+        let focused = selection.move_by(&rows, focused.as_ref(), 1, true);
+        let focused = selection.move_by(&rows, focused.as_ref(), 1, true);
+        assert_eq!(focused, Some(selected(Side::Unstaged, "c")));
+        assert_eq!(selection.paths(), names(&["a", "b", "c"]));
+    }
+
+    #[test]
+    fn select_all_takes_the_section_and_keeps_a_listed_focus() {
+        let rows = names(&["a", "b"]);
+        let mut selection = Selection::default();
+        let focused = selection.click(None, Side::Unstaged, "b".to_owned(), false, false, &rows);
+
+        let focused = selection.select_all(Side::Unstaged, &rows, focused.as_ref());
+        assert_eq!(focused, Some(selected(Side::Unstaged, "b")));
+        assert_eq!(selection.paths(), names(&["a", "b"]));
+
+        let refreshed = names(&["x", "y", "z"]);
+        let focused = selection.select_all(Side::Unstaged, &refreshed, focused.as_ref());
+        assert_eq!(
+            focused,
+            Some(selected(Side::Unstaged, "x")),
+            "a focus that vanished falls back to the first row"
+        );
+        assert_eq!(selection.paths(), names(&["x", "y", "z"]));
+    }
+
+    #[test]
+    fn a_refresh_keeps_only_the_paths_the_section_still_lists() {
+        let rows = names(&["a", "b", "c"]);
+        let mut selection = Selection::default();
+        let focused = selection.click(None, Side::Unstaged, "a".to_owned(), false, false, &rows);
+        let focused = selection.click(focused, Side::Unstaged, "b".to_owned(), false, true, &rows);
+        let _ = selection.click(focused, Side::Unstaged, "c".to_owned(), false, true, &rows);
+        assert_eq!(selection.paths(), names(&["a", "b", "c"]));
+
+        selection.retain(&names(&["a", "c", "d"]));
+        assert_eq!(
+            selection.paths(),
+            names(&["a", "c"]),
+            "b vanished, the listed paths stay"
+        );
+        assert!(selection.contains(Side::Unstaged, "c"));
+
+        selection.retain(&names(&["x"]));
+        assert!(selection.is_empty());
+        assert_eq!(selection.side(), None);
+    }
+
+    #[test]
+    fn a_refresh_that_drops_the_focused_row_falls_back_to_the_anchor() {
+        let rows = names(&["a", "b", "c"]);
+        let mut selection = Selection::default();
+        let focused = selection.click(None, Side::Unstaged, "a".to_owned(), false, false, &rows);
+        let focused = selection.click(focused, Side::Unstaged, "c".to_owned(), true, false, &rows);
+        assert_eq!(focused, Some(selected(Side::Unstaged, "c")));
+
+        selection.retain(&names(&["a", "b"]));
+        assert_eq!(selection.paths(), names(&["a", "b"]));
+        assert_eq!(
+            selection.focus_fallback(Side::Unstaged),
+            Some(selected(Side::Unstaged, "a")),
+            "the range anchor is a better landing spot than the sort order"
+        );
+        assert_eq!(selection.focus_fallback(Side::Staged), None);
+    }
+
+    #[test]
+    fn discard_confirmations_count_and_name_at_most_five_files() {
+        let many: Vec<String> = (1..=7).map(|n| format!("f{n}.txt")).collect();
+        assert_eq!(
+            listed_names(&many),
+            "f1.txt, f2.txt, f3.txt, f4.txt, f5.txt and 2 more"
+        );
+        assert_eq!(listed_names(&many[..1]), "f1.txt");
+        assert_eq!(listed_names(&[]), "", "no names, no dangling text");
+
+        let one = discard_detail(&many[..1], true, false);
+        assert!(one.contains("working-tree changes are lost"));
+        assert!(one.ends_with("f1.txt"));
+
+        let mixed = discard_detail(&many, true, true);
+        assert!(mixed.contains("untracked files are removed from disk"));
+        assert!(discard_detail(&many, false, true).contains("untracked files are removed"));
+
+        let staged = discard_staged_detail(&many);
+        assert!(staged.contains("staged changes"));
+        assert!(staged.contains("working tree are lost"));
+        assert!(staged.contains("only in the index are deleted"));
     }
 }
