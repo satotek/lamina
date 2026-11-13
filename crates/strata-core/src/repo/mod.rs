@@ -1,11 +1,17 @@
 //! Read-only repository access through gix.
 //!
-//! `log.rs` (commit walk, refs, HEAD) and `status.rs` (status, commit
-//! changes, blob/file content) are owned by separate tasks.
+//! `log.rs` (commit walk, refs, HEAD), `status.rs` (status, commit changes,
+//! blob/file content), `conflicts.rs` (repository state, conflicted paths),
+//! `upstream.rs` (tracking branches) and `history.rs` (path-limited history)
+//! are owned by separate tasks.
 
+mod conflicts;
+mod history;
 mod log;
 mod status;
+mod upstream;
 
+pub use history::PathHistory;
 pub use log::CommitWalk;
 
 use std::path::{Path, PathBuf};

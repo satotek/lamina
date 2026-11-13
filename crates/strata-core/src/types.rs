@@ -84,3 +84,56 @@ pub struct StashInfo {
     pub id: Oid,
     pub message: String,
 }
+
+/// Tracking state of a local branch against its upstream.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpstreamInfo {
+    /// Short name of the upstream, e.g. `origin/main`.
+    pub name: String,
+    /// Commits on the local branch that the upstream lacks.
+    pub ahead: u32,
+    /// Commits on the upstream that the local branch lacks.
+    pub behind: u32,
+    /// The configured upstream ref no longer exists (e.g. deleted on the remote and pruned).
+    pub gone: bool,
+}
+
+/// An operation git left half-done, as recorded in the git dir.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum RepoState {
+    #[default]
+    Normal,
+    Merging,
+    Rebasing,
+    CherryPicking,
+    Reverting,
+    Bisecting,
+    /// `git am` / applying a mailbox.
+    ApplyingPatches,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConflictKind {
+    BothModified,
+    BothAdded,
+    BothDeleted,
+    AddedByUs,
+    AddedByThem,
+    DeletedByUs,
+    DeletedByThem,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConflictEntry {
+    pub path: String,
+    pub kind: ConflictKind,
+}
+
+/// Index stages of a conflicted path: 1 = common ancestor, 2 = ours, 3 = theirs.
+/// A side is `None` when that stage is absent (e.g. deleted on that side).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConflictSides {
+    pub base: Option<Vec<u8>>,
+    pub ours: Option<Vec<u8>>,
+    pub theirs: Option<Vec<u8>>,
+}

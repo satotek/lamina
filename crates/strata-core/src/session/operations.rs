@@ -105,6 +105,9 @@ fn changes_refs(operation: &Operation) -> bool {
             | Operation::StashPop { .. }
             | Operation::StashApply { .. }
             | Operation::StashDrop { .. }
+            | Operation::Merge { .. }
+            | Operation::MergeAbort
+            | Operation::MergeContinue
     )
 }
 
@@ -158,6 +161,14 @@ fn execute(shared: &Shared, operation: &Operation) -> Result<()> {
         Operation::StashPop { index } => git.stash_pop(*index),
         Operation::StashApply { index } => git.stash_apply(*index),
         Operation::StashDrop { index } => git.stash_drop(*index),
+        Operation::Merge { .. }
+        | Operation::MergeAbort
+        | Operation::ResolveConflict { .. }
+        | Operation::MarkResolved(_)
+        | Operation::MergeContinue
+        | Operation::OpenMergetool { .. } => {
+            Err(Error::other("conflict operations are not implemented yet"))
+        }
     }
 }
 

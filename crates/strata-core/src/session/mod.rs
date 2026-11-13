@@ -30,7 +30,10 @@ use crate::highlight::LineHighlights;
 use crate::patch::LineSelection;
 use crate::repo::Repo;
 use crate::watch::RepoWatcher;
-use crate::{CommitInfo, Error, HeadInfo, Oid, RefInfo, Result, StashInfo, WorktreeStatus};
+use crate::{
+    CommitInfo, ConflictEntry, Error, HeadInfo, Oid, RefInfo, RepoState, Result, StashInfo,
+    UpstreamInfo, WorktreeStatus,
+};
 
 use diffs::DiffJob;
 use history::LoadCommand;
@@ -146,6 +149,12 @@ pub struct RepoSnapshot {
     pub status: Arc<WorktreeStatus>,
     /// Newest first, as `stash@{0}`, `stash@{1}`, ...
     pub stashes: Arc<Vec<StashInfo>>,
+    /// Upstream tracking per local branch short name; refreshed with refs.
+    pub upstreams: Arc<HashMap<String, UpstreamInfo>>,
+    /// A merge/rebase/... left in progress; refreshed with status.
+    pub state: RepoState,
+    /// Unmerged paths; refreshed with status. Non-empty only while `state` is not Normal.
+    pub conflicts: Arc<Vec<ConflictEntry>>,
     /// Operation currently running, if any (the UI disables conflicting actions).
     pub busy: Option<OperationId>,
 }
@@ -155,6 +164,25 @@ pub struct OperationId(pub u64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DiffTicket(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct QueryTicket(pub u64);
+
+/// Filter over loaded history. Text matching is case-insensitive substring
+/// unless it looks like a hash prefix (4+ hex chars), which also matches ids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitQuery {
+    pub text: String,
+    pub in_summary: bool,
+    pub in_author: bool,
+    pub in_hash: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConflictSide {
+    Ours,
+    Theirs,
+}
 
 /// Mutations. Each runs through the git CLI, one at a time, in submission order.
 #[derive(Debug, Clone)]
@@ -221,6 +249,26 @@ pub enum Operation {
     StashDrop {
         index: usize,
     },
+    /// `git merge <branch>`; stops with `state == Merging` on conflicts.
+    Merge {
+        branch: String,
+        no_ff: bool,
+    },
+    /// `git merge --abort`.
+    MergeAbort,
+    /// Take one side for a conflicted path and mark it resolved.
+    ResolveConflict {
+        path: String,
+        side: ConflictSide,
+    },
+    /// `git add` for paths the user resolved by editing.
+    MarkResolved(Vec<String>),
+    /// Commit the merge with git's prepared message.
+    MergeContinue,
+    /// Run the user's configured `git mergetool` for one path; blocks until it exits.
+    OpenMergetool {
+        path: String,
+    },
 }
 
 /// Which pair of sides to diff.
@@ -272,6 +320,24 @@ pub enum SessionEvent {
     CommandLogged(CommandRecord),
     /// Background loading failed (e.g. repository deleted).
     LoadFailed {
+        error: String,
+    },
+    /// Progress output of a running fetch/pull/push (git's `--progress` lines).
+    OperationProgress {
+        id: OperationId,
+        text: String,
+        /// Parsed from lines like `Receiving objects:  45% (450/1000)`.
+        percent: Option<u8>,
+    },
+    /// Rows (indices into `snapshot.commits` of `generation`) matching a query,
+    /// in display order. Rows not loaded yet at that generation are not included.
+    QueryReady {
+        ticket: QueryTicket,
+        generation: u64,
+        rows: Arc<Vec<usize>>,
+    },
+    QueryFailed {
+        ticket: QueryTicket,
         error: String,
     },
 }
@@ -406,6 +472,21 @@ impl Session {
         self.shared.cancel_diff(ticket);
     }
 
+    /// Filters loaded history in the background; answers with `QueryReady`.
+    pub fn search_commits(&self, _query: CommitQuery) -> QueryTicket {
+        todo!("history task")
+    }
+
+    /// Commits that changed `path` (file or directory), as rows of the current
+    /// snapshot; answers with `QueryReady`.
+    pub fn path_history(&self, _path: String) -> QueryTicket {
+        todo!("history task")
+    }
+
+    pub fn cancel_query(&self, _ticket: QueryTicket) {
+        todo!("history task")
+    }
+
     /// Forces a full reload (refs, history, status).
     pub fn reload(&self) {
         if let Some(senders) = &self.senders {
@@ -464,6 +545,9 @@ fn empty_snapshot() -> RepoSnapshot {
         commit_index: Arc::new(HashMap::new()),
         status: Arc::new(WorktreeStatus::default()),
         stashes: Arc::new(Vec::new()),
+        upstreams: Arc::new(HashMap::new()),
+        state: RepoState::Normal,
+        conflicts: Arc::new(Vec::new()),
         busy: None,
     }
 }
