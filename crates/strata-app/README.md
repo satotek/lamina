@@ -73,9 +73,9 @@ commit ids, hunk headers and the commit box. `cx.observe_global::<Settings>` in
 
 Icons come from `gpui_component`'s default `IconName` bundle. The branch, cloud,
 tag, archive and commit glyphs are not in that bundle, so they are embedded from
-`assets/icons/` and drawn with `style::glyph_icon`. `assets/icon.svg` and
-`assets/icon-small.svg` are the app mark; the title bar paints `style::app_mark`
-with quads instead, because GPUI renders an SVG as a single-colour alpha mask
+`assets/icons/` and drawn with `style::glyph_icon`. The app mark's sources
+are in `resources/icon/`; the title bar paints `style::app_mark` with quads
+instead, because GPUI renders an SVG as a single-colour alpha mask
 and the three bands would collapse into one silhouette.
 
 ## Dependencies: why `gpui-pre`
