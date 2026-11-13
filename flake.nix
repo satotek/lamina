@@ -67,7 +67,14 @@
               rustfmt
             ];
             RUST_BACKTRACE = "1";
-            shellHook = sharedTarget;
+            # Since Xcode 26 the Metal compiler is a separate download, and
+            # without it the GPUI build fails minutes in. Warn up front instead.
+            shellHook = sharedTarget + ''
+              if ! /usr/bin/xcrun metal --version >/dev/null 2>&1; then
+                echo "strata: the Metal Toolchain is missing; GPUI cannot compile its shaders." >&2
+                echo "strata: install it once with: xcodebuild -downloadComponent MetalToolchain" >&2
+              fi
+            '';
           };
 
           linuxShell = pkgs.mkShell {
