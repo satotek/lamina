@@ -15,7 +15,10 @@ strata-core.workspace = true
 # maintainers; the library is still named `gpui`, so the package rename keeps
 # `use gpui::…` working. `=0.3.12` matches what gpui-component pins.
 gpui = { package = "gpui-pre", version = "=0.3.12" }
+# `font-kit` is macOS-only in effect: without it gpui_macos has no text system
+# and every glyph and icon silently fails to draw.
 gpui-platform = { package = "gpui-pre-platform", version = "=0.3.12", features = [
+    "font-kit",
     "wayland",
     "x11",
 ] }
