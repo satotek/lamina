@@ -8,16 +8,20 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, Context, Div, FontWeight, Hsla, InteractiveElement, KeyDownEvent, ParentElement,
-    Render, SharedString, Styled, Window, div, px, uniform_list,
+    AnyElement, Context, Div, FontWeight, Hsla, InteractiveElement, ParentElement, Render,
+    SharedString, Styled, Window, div, px, uniform_list,
 };
-use gpui_component::{ActiveTheme, Theme};
+use gpui_component::{ActiveTheme, Theme, TitleBar, window_border};
 use strata_core::diff::LineKind;
 use strata_core::highlight::LineHighlights;
 use strata_core::session::DiffView;
 use strata_core::{ChangeKind, HeadInfo, RefKind};
 
-use super::{DIFF_HEIGHT, RepoView};
+use super::{DIFF_HEIGHT, PAGE, RepoView};
+use crate::actions::{
+    self, SelectFirst, SelectLast, SelectNext, SelectPageDown, SelectPageUp, SelectPrevious,
+    ToggleFrameStats,
+};
 use crate::data::{self, Badge, RowData, Source};
 use crate::diff_view::{self, DiffColors, Row as DiffRow};
 use crate::graph_canvas;
@@ -53,12 +57,6 @@ impl Render for RepoView {
 
         let entity = cx.entity();
         let palette = Palette::from_theme(cx.theme());
-        let key_listener = cx.listener(
-            |this: &mut Self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>| {
-                this.on_key(event, window, cx);
-            },
-        );
-
         let mut root = div()
             .relative()
             .flex()
@@ -67,13 +65,22 @@ impl Render for RepoView {
             .bg(palette.background)
             .text_color(palette.foreground)
             .track_focus(&self.focus)
-            .on_key_down(key_listener);
+            .key_context(actions::REPO_VIEW)
+            .on_action(cx.listener(|this, _: &SelectPrevious, _, cx| this.move_selection(-1, cx)))
+            .on_action(cx.listener(|this, _: &SelectNext, _, cx| this.move_selection(1, cx)))
+            .on_action(cx.listener(|this, _: &SelectPageUp, _, cx| this.move_selection(-PAGE, cx)))
+            .on_action(cx.listener(|this, _: &SelectPageDown, _, cx| this.move_selection(PAGE, cx)))
+            .on_action(cx.listener(|this, _: &SelectFirst, _, cx| this.jump(0, cx)))
+            .on_action(cx.listener(|this, _: &SelectLast, _, cx| this.select_last(cx)))
+            .on_action(
+                cx.listener(|this, _: &ToggleFrameStats, _, cx| this.toggle_frame_stats(cx)),
+            );
 
+        root = root.child(self.header(&palette));
         if let Some((path, error)) = &self.error {
             root = root.child(self.error_screen(path, error, &palette));
         } else {
             root = root
-                .child(self.header(&palette))
                 .child(
                     div()
                         .flex()
@@ -105,7 +112,9 @@ impl Render for RepoView {
             window.request_animation_frame();
         }
 
-        root
+        // Client-side decorations need a drawn border, shadow and resize
+        // edges on Linux; elsewhere this is a plain full-size wrapper.
+        window_border().child(root)
     }
 }
 
@@ -126,16 +135,10 @@ impl RepoView {
             "no repository".to_owned()
         };
 
-        div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .h(px(40.0))
-            .flex_none()
-            .px_3()
-            .bg(palette.title_bar)
-            .border_b_1()
-            .border_color(palette.border)
+        // `TitleBar` owns dragging, double-click and (on Windows and Linux)
+        // the window controls; the app only supplies its content. On macOS
+        // it leaves room for the traffic lights itself.
+        TitleBar::new()
             .child(
                 div()
                     .flex()
@@ -144,7 +147,7 @@ impl RepoView {
                     .min_w_0()
                     .child(
                         div()
-                            .text_size(px(15.0))
+                            .text_size(px(13.0))
                             .font_weight(FontWeight::SEMIBOLD)
                             .child("Strata"),
                     )
@@ -159,6 +162,7 @@ impl RepoView {
             .child(
                 div()
                     .flex_none()
+                    .pr_3()
                     .text_size(px(11.0))
                     .text_color(palette.muted_foreground)
                     .child("↑/↓ select · F12 frame stats"),

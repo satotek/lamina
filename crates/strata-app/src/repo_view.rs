@@ -15,8 +15,7 @@ use std::sync::Arc;
 use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedReceiver};
 use gpui::{
-    App, Context, FocusHandle, KeyDownEvent, ScrollStrategy, Subscription, Task,
-    UniformListScrollHandle, Window,
+    App, Context, FocusHandle, ScrollStrategy, Subscription, Task, UniformListScrollHandle, Window,
 };
 use gpui_component::Theme;
 use strata_core::git_cli::CommandRecord;
@@ -106,6 +105,8 @@ fn repo_name(session: &Session) -> String {
         .workdir()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| repo.git_dir().to_path_buf());
+    // Opening `.` yields a relative workdir with no file name of its own.
+    let path = std::fs::canonicalize(&path).unwrap_or(path);
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| display_path(&path))
@@ -485,23 +486,14 @@ impl RepoView {
         }
     }
 
-    fn on_key(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        match event.keystroke.key.as_str() {
-            "up" | "k" => self.move_selection(-1, cx),
-            "down" | "j" => self.move_selection(1, cx),
-            "pageup" => self.move_selection(-PAGE, cx),
-            "pagedown" => self.move_selection(PAGE, cx),
-            "home" => self.jump(0, cx),
-            "end" => {
-                let last = self.commit_count().saturating_sub(1);
-                self.jump(last, cx);
-            }
-            "f12" => {
-                self.overlay = !self.overlay;
-                cx.notify();
-            }
-            _ => {}
-        }
+    fn toggle_frame_stats(&mut self, cx: &mut Context<Self>) {
+        self.overlay = !self.overlay;
+        cx.notify();
+    }
+
+    fn select_last(&mut self, cx: &mut Context<Self>) {
+        let last = self.commit_count().saturating_sub(1);
+        self.jump(last, cx);
     }
 
     fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {

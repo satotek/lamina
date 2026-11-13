@@ -5,6 +5,7 @@
 //! instead, which is the phase-0 render benchmark; both modes share the same
 //! commit-list and diff renderers.
 
+mod actions;
 mod data;
 mod diff_view;
 mod fake;
@@ -14,7 +15,11 @@ mod repo_view;
 
 use std::path::Path;
 
-use gpui::{App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
+use gpui::{
+    App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions,
+    px, size,
+};
+use gpui_component::TitleBar;
 use gpui_platform::application;
 
 use repo_view::{Launch, RepoView};
@@ -26,17 +31,24 @@ fn main() {
 
     application().run(move |cx: &mut App| {
         gpui_component::init(cx);
+        actions::bind(cx);
 
         let bounds = Bounds::centered(None, size(px(1360.0), px(860.0)), cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
+                // The app draws its own title bar (with the repository and
+                // branch in it) so the window reads as one surface on every
+                // platform. The title is still set for the taskbar and window
+                // switcher.
                 titlebar: Some(TitlebarOptions {
                     title: Some(title.into()),
-                    ..Default::default()
+                    ..TitleBar::title_bar_options()
                 }),
+                window_decorations: Some(WindowDecorations::Client),
+                window_min_size: Some(size(px(720.0), px(480.0))),
                 focus: true,
-                ..Default::default()
+                ..TitleBar::window_options()
             },
             move |window, cx| {
                 gpui_component::Theme::sync_system_appearance(Some(window), cx);

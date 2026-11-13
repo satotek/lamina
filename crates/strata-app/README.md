@@ -43,7 +43,14 @@ UI only ever reads `Session::snapshot()`, and file lists and diffs are computed
 off the UI thread (see `src/repo_view.rs`).
 
 Keys: `↑`/`↓` or `j`/`k` select, `PageUp`/`PageDown` jump, `Home`/`End` jump to
-the ends, `F12` toggles the overlay.
+the ends, `F12` toggles the overlay, `Ctrl+Q` (`Cmd+Q` on macOS) quits. Every
+command is a GPUI action bound in `src/actions.rs` under the `RepoView` key
+context, so new commands add an action and a binding there rather than
+matching raw keys in a view.
+
+The window draws its own title bar (`gpui_component::TitleBar`) with the
+repository and branch in it, so the title bar and the app read as one surface
+on every platform.
 
 ## Dependencies: why `gpui-pre`
 
@@ -100,16 +107,17 @@ needs (`libxkbcommon`, wayland, the X11 libraries, `vulkan-loader`,
 
 ```sh
 direnv allow
-direnv exec . cargo build -p strata-app --release
-direnv exec . ./target/release/strata
+direnv exec . cargo run -p strata-app --release -- [PATH]
 ```
 
 or without direnv:
 
 ```sh
-nix develop -c cargo build -p strata-app --release
-nix develop -c ./target/release/strata
+nix develop -c cargo run -p strata-app --release -- [PATH]
 ```
+
+The dev shell sets `CARGO_TARGET_DIR` to a directory shared by every worktree,
+so the binary is not under `./target`; `cargo run` finds it either way.
 
 macOS and Windows need no Nix; `cargo build -p strata-app` from a normal Rust
 toolchain is enough.
@@ -123,7 +131,7 @@ found in the first place:
 
 ```sh
 Xvfb :99 -screen 0 1600x1000x24 &
-DISPLAY=:99 RUST_LOG=info STRATA_SMOKE=1 ./target/release/strata
+DISPLAY=:99 RUST_LOG=info STRATA_SMOKE=1 direnv exec . cargo run -p strata-app --release
 ```
 
 This is how the phase-0 numbers on a headless Linux box were produced. On X11,
