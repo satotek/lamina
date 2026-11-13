@@ -391,61 +391,18 @@ impl Branches {
                                 .into_any_element()
                         }
                     }
-                    // Stash rows are listed in stash@{N} order. A click shows the
-                    // stash commit in the history; the menu applies, pops or
-                    // drops the entry.
-                    Section::Stashes => {
-                        let menu_source = entity.clone();
-                        let click_entity = entity.clone();
-                        let row_element = row(
-                            ("stash", index),
-                            name,
-                            crate::ui::RowState::NORMAL.revealed(self.reveal.is_stash(index)),
-                            colors,
-                        )
-                        .cursor_pointer()
-                        .on_click(move |_, window, cx| {
-                            click_entity
-                                .update(cx, |view, cx| view.reveal_stash(index, window, cx));
-                        });
-                        if !enabled {
-                            row_element.into_any_element()
-                        } else {
-                            row_element
-                                .context_menu(move |menu, _window, _cx| {
-                                    let menu_entity = menu_source.clone();
-                                    let apply = {
-                                        let entity = menu_entity.clone();
-                                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                                            entity.update(cx, |view, cx| {
-                                                view.stash_apply(index, window, cx)
-                                            });
-                                        }
-                                    };
-                                    let pop = {
-                                        let entity = menu_entity.clone();
-                                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                                            entity.update(cx, |view, cx| {
-                                                view.stash_pop(index, window, cx)
-                                            });
-                                        }
-                                    };
-                                    let drop =
-                                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                                            menu_entity.update(cx, |view, cx| {
-                                                view.confirm_stash_drop(index, window, cx)
-                                            });
-                                        };
-                                    menu.item(
-                                        PopupMenuItem::new("Apply").disabled(busy).on_click(apply),
-                                    )
-                                    .item(PopupMenuItem::new("Pop").disabled(busy).on_click(pop))
-                                    .separator()
-                                    .item(PopupMenuItem::new("Drop…").disabled(busy).on_click(drop))
-                                })
-                                .into_any_element()
-                        }
-                    }
+                    // Stash rows are listed in stash@{N} order. The row and its
+                    // menu live in `stash`, which can read the entry's age and
+                    // source branch from the snapshot.
+                    Section::Stashes => crate::stash::sidebar_row(
+                        name,
+                        index,
+                        self.reveal.is_stash(index),
+                        enabled,
+                        busy,
+                        colors,
+                        entity.clone(),
+                    ),
                 });
             }
         }

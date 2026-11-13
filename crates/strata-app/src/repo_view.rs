@@ -516,14 +516,21 @@ impl RepoView {
                     self.file_history_failed(ticket, &error, cx);
                 }
             }
-            // The details pane requests the commit stat; the streaming file
-            // history is wired up in a later change.
             SessionEvent::CommitStatReady { ticket, stat } => {
                 if self.stat.accept(ticket, stat) {
                     cx.notify();
                 }
             }
-            SessionEvent::PathHistoryBatch { .. } | SessionEvent::PathHistoryDone { .. } => {}
+            SessionEvent::PathHistoryBatch {
+                ticket,
+                generation,
+                entries,
+            } => {
+                self.file_history_batch(ticket, generation, &entries, cx);
+            }
+            SessionEvent::PathHistoryDone { ticket, generation } => {
+                self.file_history_done(ticket, generation, cx);
+            }
             SessionEvent::CommandLogged(record) => {
                 self.last_command = Some(command_line(&record));
                 cx.notify();
