@@ -30,6 +30,9 @@ actions!(
         /// Stashes the working tree's changes. Handled on `RepoView` by
         /// `stash.rs`.
         StashChanges,
+        /// Opens the command palette over the active window. Handled globally
+        /// by the palette module.
+        TogglePalette,
     ]
 );
 
@@ -51,6 +54,10 @@ const PLATFORM_OPEN: &str = "ctrl-o";
 const PLATFORM_STASH: &str = "cmd-shift-s";
 #[cfg(not(target_os = "macos"))]
 const PLATFORM_STASH: &str = "ctrl-shift-s";
+#[cfg(target_os = "macos")]
+const PLATFORM_PALETTE: &str = "cmd-shift-p";
+#[cfg(not(target_os = "macos"))]
+const PLATFORM_PALETTE: &str = "ctrl-shift-p";
 
 pub fn bind(cx: &mut App) {
     let scope = Some(REPO_VIEW);
@@ -68,6 +75,10 @@ pub fn bind(cx: &mut App) {
         // Global: these work whichever window or panel has focus.
         KeyBinding::new(PLATFORM_SETTINGS, OpenSettings, None),
         KeyBinding::new(PLATFORM_OPEN, OpenRepository, None),
+        KeyBinding::new(PLATFORM_PALETTE, TogglePalette, None),
+        // `F1` is the command palette on platforms that do not spell shortcuts
+        // with the primary modifier, and a second way in everywhere else.
+        KeyBinding::new("f1", TogglePalette, None),
         // Global: quitting must work whichever panel has focus.
         KeyBinding::new(PLATFORM_QUIT, Quit, None),
     ]);

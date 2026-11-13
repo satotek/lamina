@@ -19,6 +19,7 @@ mod fake;
 mod file_history;
 mod graph_canvas;
 mod metrics;
+mod palette;
 mod picker;
 mod recent;
 mod remote;
@@ -74,6 +75,7 @@ fn main() {
         remote::bind(cx);
         search::bind(cx);
         picker::bind(cx);
+        palette::bind(cx);
 
         open_window(start, cx);
 
