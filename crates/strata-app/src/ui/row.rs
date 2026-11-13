@@ -153,13 +153,21 @@ pub fn list_row(id: impl Into<ElementId>, state: RowState, design: &Design) -> S
 /// overflow the window is no longer moved to the other side of the pointer.
 /// The sidebar's tips are one to three short lines and stay inside the window,
 /// which is why the trade is worth it here.
+///
+/// GPUI's hover timer also outlives the press: a tip whose delay expires after
+/// a right press opened the row's menu would be built and painted over it,
+/// because tooltips are drawn above every deferred layer. The tip therefore
+/// skips its content while [`menu_open`](super::menu::menu_open) reports a
+/// menu, leaving a tip GPUI keeps up but paints nothing of. The empty tip
+/// stays until the pointer leaves the row, so the real tip does not reappear
+/// until the pointer re-enters.
 pub trait RowTipExt: StatefulInteractiveElement + Sized {
     fn row_tooltip(
         self,
         build_tooltip: impl Fn(&mut Window, &mut App) -> AnyView + 'static,
     ) -> Self {
         self.tooltip(move |window, cx| {
-            let content = build_tooltip(window, cx);
+            let content = (!super::menu::menu_open()).then(|| build_tooltip(window, cx));
             cx.new(|_| RowTip { content }).into()
         })
     }
@@ -168,20 +176,19 @@ pub trait RowTipExt: StatefulInteractiveElement + Sized {
 impl<E: StatefulInteractiveElement> RowTipExt for E {}
 
 /// The view behind [`RowTipExt::row_tooltip`]: a one-pixel box at the pointer
-/// with the tip's content drawn from its corner.
+/// with the tip's content drawn from its corner, or nothing at all while a
+/// context menu is open.
 struct RowTip {
-    content: AnyView,
+    content: Option<AnyView>,
 }
 
 impl Render for RowTip {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div().w(px(1.0)).h(px(1.0)).child(
-            div()
-                .absolute()
-                .top_0()
-                .left_0()
-                .child(self.content.clone()),
-        )
+        div().when_some(self.content.clone(), |tip, content| {
+            tip.w(px(1.0))
+                .h(px(1.0))
+                .child(div().absolute().top_0().left_0().child(content))
+        })
     }
 }
 
@@ -370,6 +377,123 @@ mod tests {
         assert!(
             !showing(&mut cx),
             "the tip must be dismissed or it paints over the menu"
+        );
+    }
+
+    /// A tip whose hover delay expires after a right press opened the row's
+    /// menu must not paint over the menu either.
+    ///
+    /// Pressing without moving leaves GPUI's hover timer armed on the row, so
+    /// the tip is built while the menu is up; dismissing the active tip on the
+    /// press is not enough on its own.
+    #[gpui::test]
+    fn a_tip_that_fires_after_the_menu_opens_stays_hidden(cx: &mut gpui::TestAppContext) {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        use std::time::Duration;
+
+        use gpui::{
+            AppContext as _, Background, Context, IntoElement, MouseButton, ParentElement as _,
+            Render, Styled as _, VisualTestContext, Window, div, point, px, rgb,
+        };
+        use gpui_component::Root;
+        use gpui_component::menu::PopupMenuItem;
+
+        const TIP: u32 = 0x7a135e;
+
+        struct Tip;
+        impl Render for Tip {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().w(px(120.0)).h(px(24.0)).bg(rgb(TIP))
+            }
+        }
+
+        struct Probe {
+            opened: Rc<Cell<usize>>,
+        }
+        impl Render for Probe {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let opened = self.opened.clone();
+                div().size_full().child(crate::ui::context_menu(
+                    "delayed-tip-row-menu",
+                    &Design::default(),
+                    list_row("delayed-tip-row", RowState::NORMAL, &Design::default())
+                        .w(px(220.0))
+                        .row_tooltip(|_, cx| cx.new(|_| Tip).into()),
+                    move |menu, _, _| {
+                        opened.set(opened.get() + 1);
+                        menu.item(PopupMenuItem::new("Item"))
+                    },
+                ))
+            }
+        }
+
+        let paint = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        };
+        let showing = |cx: &mut VisualTestContext| {
+            let marker: Background = rgb(TIP).into();
+            cx.update(|window, _| {
+                window
+                    .painted_quads()
+                    .iter()
+                    .any(|quad| quad.background == marker)
+            })
+        };
+
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let opened = Rc::new(Cell::new(0));
+        let probe_opened = opened.clone();
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), |window, cx| {
+                    let probe = cx.new(|_| Probe {
+                        opened: probe_opened,
+                    });
+                    cx.new(|cx| Root::new(probe, window, cx))
+                })
+            })
+            .expect("a window");
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        paint(&mut cx);
+
+        // Hover the row, stopping short of the tip's show delay.
+        let hovered = point(px(10.0), px(2.0));
+        cx.simulate_mouse_move(hovered, None, Default::default());
+        cx.run_until_parked();
+        paint(&mut cx);
+        assert!(!showing(&mut cx), "the tip is still waiting for its delay");
+
+        // Right-press without moving: the menu opens, the hover timer stays
+        // armed on the row.
+        cx.simulate_mouse_down(hovered, MouseButton::Right, Default::default());
+        cx.simulate_mouse_up(hovered, MouseButton::Right, Default::default());
+        cx.run_until_parked();
+        paint(&mut cx);
+        assert_eq!(opened.get(), 1, "the right press must open the menu");
+
+        // The armed timer now fires with the pointer still over the row.
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        paint(&mut cx);
+        assert!(
+            !showing(&mut cx),
+            "a tip built while the menu is open must paint nothing"
+        );
+
+        // A small move that stays on the row must not bring one back either.
+        cx.simulate_mouse_move(point(px(200.0), px(15.0)), None, Default::default());
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        paint(&mut cx);
+        assert!(
+            !showing(&mut cx),
+            "no row tip may show while a menu is open"
         );
     }
 }
