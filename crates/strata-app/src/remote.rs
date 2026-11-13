@@ -17,13 +17,14 @@ use std::collections::BTreeSet;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, Hsla, IntoElement, KeyBinding, Window, actions, div, px,
-    relative,
+    AnyElement, App, Context, Entity, FontWeight, Hsla, IntoElement, KeyBinding, Window, actions,
+    div, px, relative,
 };
 use gpui_component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_component::dialog::DialogFooter;
 use gpui_component::notification::Notification;
-use gpui_component::{Disableable as _, IconName, Sizable as _, WindowExt as _};
+use gpui_component::{Disableable as _, Icon, Sizable as _, WindowExt as _};
+use gpui_kit_assets::IconName;
 use strata_core::session::{Operation, OperationId, RepoSnapshot};
 use strata_core::{HeadInfo, RefInfo, RefKind, UpstreamInfo};
 
@@ -338,6 +339,7 @@ pub(crate) struct Remote {
 /// Palette subset the remote controls paint with, taken from the window
 /// chrome's palette so the title bar and status bar read as one surface.
 pub(crate) struct Colors {
+    pub(crate) foreground: Hsla,
     pub(crate) muted_foreground: Hsla,
     pub(crate) border: Hsla,
     pub(crate) accent: Hsla,
@@ -518,24 +520,74 @@ impl RepoView {
         let blocked = self.remote_blocked();
 
         let entity = self.entity.clone();
+        // The design stacks a 16 px icon over a 10 px label; the badge sits in
+        // the button's top-right corner so it cannot shift the label.
         let button = |id: &'static str,
-                      icon: IconName,
+                      icon_name: IconName,
                       label: &'static str,
                       tooltip: String,
                       enabled: bool,
+                      badge: Option<u32>,
                       command: Command| {
             let entity = entity.clone();
+            let mut content = div()
+                .relative()
+                .size_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(2.0))
+                .text_size(px(10.0))
+                .child(Icon::new(icon_name).with_size(px(16.0)))
+                .child(label);
+            if let Some(count) = badge {
+                content = content.child(
+                    div()
+                        .absolute()
+                        .top(px(2.0))
+                        .right(px(8.0))
+                        .min_w(px(14.0))
+                        .h(px(14.0))
+                        .px(px(3.0))
+                        .rounded_full()
+                        .bg(colors.accent)
+                        .text_color(colors.accent_foreground)
+                        .text_size(px(9.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(count.to_string()),
+                );
+            }
             Button::new(id)
-                .icon(icon)
-                .xsmall()
                 .ghost()
-                .label(label)
+                .w(px(52.0))
+                .h(px(40.0))
+                .p_0()
+                .text_color(if enabled {
+                    colors.foreground
+                } else {
+                    colors.muted_foreground
+                })
                 .disabled(!enabled)
                 .tooltip(tooltip)
                 .on_click(move |_, window, cx| {
                     entity.update(cx, |view, cx| view.remote_command(command, window, cx));
                 })
+                .child(content)
         };
+
+        let behind = targets
+            .upstream
+            .as_ref()
+            .filter(|upstream| !upstream.gone)
+            .map(|upstream| upstream.behind)
+            .filter(|behind| *behind > 0);
+        let ahead = targets
+            .upstream
+            .as_ref()
+            .filter(|upstream| !upstream.gone)
+            .map(|upstream| upstream.ahead)
+            .filter(|ahead| *ahead > 0);
 
         let fetch = button(
             "remote-fetch",
@@ -543,6 +595,7 @@ impl RepoView {
             "Fetch",
             fetch_tooltip(blocked),
             blocked.is_none(),
+            None,
             Command::Fetch,
         );
 
@@ -552,39 +605,24 @@ impl RepoView {
             "Pull",
             pull_tooltip(&targets, blocked),
             blocked.is_none() && targets.branch().is_ok(),
+            behind,
             Command::Pull,
         );
 
-        let mut push = button(
+        let push = button(
             "remote-push",
             IconName::ArrowUp,
             "Push",
             push_tooltip(&targets, blocked),
             blocked.is_none() && push_plan(&targets).is_ok(),
+            ahead,
             Command::Push,
         );
-        // The badge is the one number that changes what the click does: the
-        // commits the upstream does not have yet.
-        if let Some(upstream) = &targets.upstream
-            && !upstream.gone
-            && upstream.ahead > 0
-        {
-            push = push.child(
-                div()
-                    .flex_none()
-                    .px(px(4.0))
-                    .rounded_sm()
-                    .bg(colors.accent)
-                    .text_color(colors.accent_foreground)
-                    .text_size(px(9.0))
-                    .child(format!("↑{}", upstream.ahead)),
-            );
-        }
 
         div()
             .flex()
             .items_center()
-            .gap_1()
+            .gap(px(2.0))
             .flex_none()
             .child(fetch)
             .child(pull)

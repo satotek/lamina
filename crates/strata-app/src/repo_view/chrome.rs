@@ -3,21 +3,27 @@
 //! Everything here renders from [`RepoView`]'s state; nothing in this module
 //! calls git or the session. The commit list is built from [`Source`], so the
 //! synthetic benchmark and a real repository share the same row renderer.
+//!
+//! Colours and sizes come from [`Design`], one palette resolved per frame from
+//! the theme and the user's settings; the layout follows the design mockups.
 
 use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Div, FontWeight, Hsla, InteractiveElement, ParentElement,
-    Render, SharedString, Styled, Window, div, px, uniform_list,
+    AnyElement, App, ClickEvent, ClipboardItem, Context, Div, FontWeight, Hsla, InteractiveElement,
+    IntoElement, ParentElement, Render, Styled, Window, div, px, uniform_list,
 };
+use gpui_component::Disableable as _;
+use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Input;
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
-use gpui_component::{ActiveTheme, Sizable as _, Theme, TitleBar};
+use gpui_component::{ActiveTheme, Icon, Sizable as _, Theme, TitleBar};
+use gpui_kit_assets::IconName;
 use strata_core::diff::LineKind;
 use strata_core::highlight::LineHighlights;
 use strata_core::session::DiffView;
-use strata_core::{ChangeKind, HeadInfo, RefKind};
+use strata_core::{ChangeKind, FileChange, HeadInfo, RefKind};
 
 use super::{DIFF_HEIGHT, PAGE, RepoView, one_line};
 use crate::actions::{
@@ -34,10 +40,16 @@ use crate::scrollbar::WithScrollbar as _;
 use crate::search::{
     Field, FocusSearch, SEARCH_BAR, SearchDismiss, SearchNext, SearchPrevious, SearchSubmit,
 };
+use crate::settings::Settings;
+use crate::style::{self, Design};
 use crate::worktree_panel::MainMode;
 
-const SIDEBAR_WIDTH: f32 = 240.0;
-const FILE_LIST_WIDTH: f32 = 260.0;
+const SIDEBAR_WIDTH: f32 = 248.0;
+/// Width of the commit metadata column, matching the design's details pane.
+const DETAILS_WIDTH: f32 = 320.0;
+const AUTHOR_WIDTH: f32 = 150.0;
+const DATE_WIDTH: f32 = 96.0;
+const COMMIT_WIDTH: f32 = 64.0;
 
 impl Render for RepoView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -65,14 +77,15 @@ impl Render for RepoView {
         }
 
         let entity = cx.entity();
-        let palette = Palette::from_theme(cx.theme());
+        let design = Design::new(cx.theme(), Settings::get(cx));
         let mut root = div()
             .relative()
             .flex()
             .flex_col()
             .size_full()
-            .bg(palette.background)
-            .text_color(palette.foreground)
+            .bg(design.background)
+            .text_color(design.text)
+            .text_size(px(design.ui))
             .track_focus(&self.focus)
             .key_context(actions::REPO_VIEW)
             .on_action(cx.listener(|this, _: &SelectPrevious, _, cx| this.move_selection(-1, cx)))
@@ -104,12 +117,15 @@ impl Render for RepoView {
             .on_action(cx.listener(|this, _: &PushBranch, window, cx| {
                 this.remote_command(Command::Push, window, cx)
             }));
+        if let Some(font) = &design.ui_font {
+            root = root.font_family(font.clone());
+        }
 
-        root = root.child(self.header(&palette));
+        root = root.child(self.header(&design));
         if let Some((path, error)) = &self.error {
-            root = root.child(self.error_screen(path, error, &palette));
+            root = root.child(self.error_screen(path, error, &design));
         } else {
-            let sidebar = self.sidebar(cx, &palette);
+            let sidebar = self.sidebar(cx, &design);
             // The worktree view owns the main area while it is open; a file
             // history belongs to the history view, so it is dropped instead of
             // coming back stale.
@@ -126,8 +142,8 @@ impl Render for RepoView {
                         .flex_1()
                         .min_w_0()
                         .min_h_0()
-                        .child(self.commit_pane(entity.clone(), &palette))
-                        .child(self.diff_pane(entity.clone(), cx.theme(), &palette))
+                        .child(self.commit_pane(entity.clone(), &design))
+                        .child(self.diff_pane(cx.theme(), &design))
                         .into_any_element(),
                     MainMode::Worktree => self.worktree_view(entity.clone(), window, cx),
                 }
@@ -142,11 +158,11 @@ impl Render for RepoView {
                         .child(sidebar)
                         .child(main),
                 )
-                .child(self.status_bar(&palette));
+                .child(self.status_bar(&design));
         }
 
         if self.overlay {
-            root = root.child(self.overlay_panel(&palette));
+            root = root.child(self.overlay_panel(&design));
         }
 
         self.metrics.end_frame(started);
@@ -160,151 +176,295 @@ impl Render for RepoView {
 }
 
 impl RepoView {
-    fn header(&self, palette: &Palette) -> AnyElement {
+    /// The title bar: the app mark, the repository and branch, the commit
+    /// search, and the remote and window actions on the right.
+    fn header(&self, design: &Design) -> AnyElement {
         let source = self.source();
-        let count = source.as_ref().map_or(0, Source::len);
-        let subtitle = if self.fake.is_some() {
-            format!("synthetic — {count} commits")
-        } else if let Some(name) = &self.name {
-            let branch = match source.as_ref().and_then(Source::head) {
-                Some(HeadInfo::Branch { short_name, .. }) => format!("on {short_name}"),
-                Some(HeadInfo::Detached { .. }) => "detached".to_owned(),
-                None => "loading".to_owned(),
-            };
-            format!("{name} — {branch} — {count} commits")
-        } else {
-            "no repository".to_owned()
+        let head = source.as_ref().and_then(Source::head);
+        let repo = match &self.fake {
+            Some(_) => "synthetic".to_owned(),
+            None => self.name.clone().unwrap_or_else(|| "strata".to_owned()),
         };
+        let branch = match head {
+            Some(HeadInfo::Branch { short_name, .. }) => short_name.clone(),
+            Some(HeadInfo::Detached { .. }) => "detached".to_owned(),
+            // Synthetic history has no `HeadInfo`, but its sidebar names the
+            // branch it pretends to be on.
+            None => source
+                .as_ref()
+                .and_then(|source| source.sidebar().head_branch)
+                .unwrap_or_else(|| "loading".to_owned()),
+        };
+        let upstream = match &source {
+            Some(Source::Repo(snapshot)) => head
+                .and_then(|head| match head {
+                    HeadInfo::Branch { short_name, .. } => snapshot.upstreams.get(short_name),
+                    HeadInfo::Detached { .. } => None,
+                })
+                .cloned(),
+            _ => None,
+        };
+        let track = upstream
+            .as_ref()
+            .and_then(crate::branches::upstream_label)
+            .unwrap_or_default();
 
-        // `TitleBar` owns dragging, double-click and (on Windows and Linux)
-        // the window controls; the app only supplies its content. On macOS
-        // it leaves room for the traffic lights itself.
+        let repository = div()
+            .id("repository-button")
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .h(px(30.0))
+            .px_2p5()
+            .rounded(px(7.0))
+            .cursor_pointer()
+            .hover(|style| style.bg(design.field))
+            .on_click(|_, window, cx| {
+                window.dispatch_action(Box::new(actions::OpenRepository), cx);
+            })
+            .child(icon(IconName::Folder, 15.0, design.text))
+            .child(
+                div()
+                    .max_w(px(220.0))
+                    .truncate()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(repo),
+            )
+            .child(icon(IconName::ChevronDown, 12.0, design.muted));
+
+        let branch_chip = div()
+            .flex()
+            .items_center()
+            .gap(px(6.0))
+            .h(px(28.0))
+            .px_2p5()
+            .rounded(px(7.0))
+            .border_1()
+            .border_color(design.border)
+            .bg(design.background)
+            .child(glyph(style::glyph::BRANCH, 14.0, design.text))
+            .child(div().max_w(px(240.0)).truncate().child(branch))
+            .when(!track.is_empty(), |chip| {
+                chip.child(
+                    div()
+                        .flex_none()
+                        .text_size(px(11.0))
+                        .text_color(design.muted)
+                        .child(track),
+                )
+            })
+            .child(icon(IconName::ChevronDown, 12.0, design.muted));
+
+        // The real field lives in the title bar when a repository can search;
+        // `--fake` gets the same look without an editable field.
+        let search_field: AnyElement = match self.search.input() {
+            Some(input) => div()
+                .flex_1()
+                .min_w_0()
+                .child(Input::new(input).appearance(false).bordered(false).small())
+                .into_any_element(),
+            None => div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .child("Search commits, authors, hashes")
+                .into_any_element(),
+        };
+        let search = div()
+            .id("commit-search-field")
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .w(px(420.0))
+            .max_w_full()
+            .h(px(28.0))
+            .px_2p5()
+            .rounded(px(7.0))
+            .bg(design.field)
+            .text_color(design.muted)
+            .cursor_text()
+            .child(icon(IconName::Search, 14.0, design.muted))
+            .child(search_field)
+            .child(kbd(search_key_label(), design));
+
+        let separator = div()
+            .flex_none()
+            .w(px(1.0))
+            .h(px(22.0))
+            .mx_1p5()
+            .bg(design.border);
+
+        let nav = div()
+            .flex()
+            .items_center()
+            .gap(px(2.0))
+            .flex_none()
+            .child(self.remote_buttons(
+                source.as_ref(),
+                &remote::Colors {
+                    foreground: design.text,
+                    muted_foreground: design.muted,
+                    border: design.border,
+                    accent: design.accent,
+                    accent_foreground: design.on_accent,
+                },
+            ))
+            .child(stash_button(design))
+            .child(separator)
+            .child(
+                Button::new("terminal-placeholder")
+                    .ghost()
+                    .icon(IconName::SquareTerminal)
+                    .w(px(32.0))
+                    .h(px(32.0))
+                    .text_color(design.muted)
+                    .tooltip("Terminal — coming soon")
+                    .disabled(true),
+            )
+            .child(
+                Button::new("open-settings")
+                    .ghost()
+                    .icon(IconName::Settings)
+                    .w(px(32.0))
+                    .h(px(32.0))
+                    .text_color(design.muted)
+                    .tooltip("Settings")
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(Box::new(actions::OpenSettings), cx);
+                    }),
+            );
+
         TitleBar::new()
+            .h(px(44.0))
+            .bg(design.chrome)
+            .border_color(design.border)
             .child(
                 div()
                     .flex()
                     .items_center()
-                    .gap_3()
-                    .min_w_0()
-                    .child(
-                        div()
-                            .text_size(px(13.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("Strata"),
-                    )
-                    .child(
-                        div()
-                            .truncate()
-                            .text_size(px(11.0))
-                            .text_color(palette.muted_foreground)
-                            .child(subtitle),
-                    ),
-            )
-            // The remote controls sit on the right, where a git client's
-            // network actions usually are; the key hints stay on their left so
-            // the bar keeps the hints it had before.
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_3()
+                    .gap_2()
                     .flex_none()
-                    .pr_3()
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(px(11.0))
-                            .text_color(palette.muted_foreground)
-                            .child("↑/↓ select · F12 frame stats"),
-                    )
-                    .child(self.remote_buttons(
-                        source.as_ref(),
-                        &remote::Colors {
-                            muted_foreground: palette.muted_foreground,
-                            border: palette.border,
-                            accent: palette.accent,
-                            accent_foreground: palette.accent_foreground,
-                        },
-                    )),
+                    .child(style::app_mark(20.0))
+                    .child(repository)
+                    .child(branch_chip),
             )
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .justify_center()
+                    .px_4()
+                    .child(search),
+            )
+            .child(nav)
             .into_any_element()
     }
 
-    fn sidebar(&self, cx: &mut Context<Self>, palette: &Palette) -> AnyElement {
+    fn sidebar(&self, cx: &mut Context<Self>, design: &Design) -> AnyElement {
         div()
             .flex()
             .flex_col()
             .w(px(SIDEBAR_WIDTH))
             .h_full()
             .flex_none()
-            .py_2()
+            .gap(px(14.0))
+            .py_3()
+            .px_2()
             .overflow_hidden()
-            .bg(palette.sidebar)
+            .bg(design.sidebar)
             .border_r_1()
-            .border_color(palette.border)
-            .child(self.working_tree_section(cx, palette))
-            .child(self.ref_sections(palette))
+            .border_color(design.border)
+            .child(self.nav_section(cx, design))
+            .child(self.ref_sections(design))
             .into_any_element()
     }
 
-    /// The working-tree entry at the top of the sidebar; clicking it switches
-    /// the main area to the staging view.
-    fn working_tree_section(&self, cx: &mut Context<Self>, palette: &Palette) -> AnyElement {
+    /// The two view entries at the top of the sidebar.
+    fn nav_section(&self, cx: &mut Context<Self>, design: &Design) -> AnyElement {
         let (staged, unstaged) = self
             .source()
             .map_or((0, 0), |source| source.sidebar().working_tree);
-        let active = self.mode == MainMode::Worktree;
+        let changes = staged + unstaged;
+        let worktree = self.mode == MainMode::Worktree;
 
-        let mut entry =
-            div()
-                .id("working-tree-entry")
-                .flex()
-                .flex_col()
-                .cursor_pointer()
-                .on_click(cx.listener(|this, _: &gpui::ClickEvent, window, cx| {
-                    this.open_worktree(window, cx)
-                }))
-                .child(section_title("WORKING TREE", None, palette))
-                .child(
+        let working_tree = div()
+            .id("working-tree-entry")
+            .flex()
+            .items_center()
+            .gap_2()
+            .h(px(30.0))
+            .px_2()
+            .rounded(px(7.0))
+            .text_size(px(design.ui))
+            .cursor_pointer()
+            .when(worktree, |row| row.bg(design.selected))
+            .hover(|style| style.bg(design.selected))
+            .on_click(
+                cx.listener(|this, _: &ClickEvent, window, cx| this.open_worktree(window, cx)),
+            )
+            .child(icon(IconName::FileText, 15.0, design.text))
+            .child(div().flex_1().min_w_0().truncate().child("Working tree"))
+            .when(changes > 0, |row| {
+                row.child(
                     div()
-                        .px_3()
-                        .pb_2()
+                        .flex_none()
+                        .px(px(7.0))
+                        .rounded_full()
+                        .bg(design.accent_soft)
                         .text_size(px(11.0))
-                        .text_color(if staged + unstaged == 0 {
-                            palette.muted_foreground
-                        } else {
-                            palette.foreground
-                        })
-                        .child(format!(
-                            "Working tree: {staged} staged, {unstaged} unstaged"
-                        )),
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(design.accent_text)
+                        .child(changes.to_string()),
                 )
-                .child(
-                    div()
-                        .px_3()
-                        .pb_2()
-                        .text_size(px(10.0))
-                        .text_color(if active {
-                            palette.accent
-                        } else {
-                            palette.muted_foreground
-                        })
-                        .child(if active {
-                            "staging view open"
-                        } else {
-                            "click to stage and commit"
-                        }),
-                );
-        if active {
-            entry = entry.bg(palette.selection);
-        }
-        entry.into_any_element()
+            });
+
+        let history = div()
+            .id("history-entry")
+            .flex()
+            .items_center()
+            .gap_2()
+            .h(px(30.0))
+            .px_2()
+            .rounded(px(7.0))
+            .text_size(px(design.ui))
+            .cursor_pointer()
+            .when(!worktree, |row| row.bg(design.selected))
+            .hover(|style| style.bg(design.selected))
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                if this.mode != MainMode::History {
+                    this.close_worktree(window, cx);
+                }
+            }))
+            .child(glyph(
+                style::glyph::COMMIT,
+                15.0,
+                if worktree {
+                    design.text
+                } else {
+                    design.accent_text
+                },
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .when(!worktree, |row| row.font_weight(FontWeight::MEDIUM))
+                    .child("History"),
+            );
+
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .child(working_tree)
+            .child(history)
+            .into_any_element()
     }
 
-    /// Branches, remotes, tags and stashes below the working-tree entry. Every
-    /// section scrolls, so long ref lists stay reachable, and collapses when
-    /// its title is clicked.
-    fn ref_sections(&self, palette: &Palette) -> AnyElement {
+    /// Branches, remotes, tags and stashes below the view entries.
+    fn ref_sections(&self, design: &Design) -> AnyElement {
         let Some(source) = self.source() else {
             return div().into_any_element();
         };
@@ -314,15 +474,13 @@ impl RepoView {
             Source::Fake(_) => Default::default(),
         };
         let colors = crate::branches::Colors {
-            sidebar_foreground: palette.sidebar_foreground,
-            sidebar_accent: palette.sidebar_accent,
-            sidebar_accent_foreground: palette.sidebar_accent_foreground,
-            muted_foreground: palette.muted_foreground,
-            border: palette.border,
-            foreground: palette.foreground,
-            danger: palette.danger,
-            overlay: palette.overlay,
-            mono: palette.mono.clone(),
+            design: design.clone(),
+            sidebar_foreground: design.text,
+            muted_foreground: design.muted,
+            border: design.border,
+            foreground: design.text,
+            danger: design.remove_text,
+            overlay: design.panel,
         };
         self.branches.render(
             &data,
@@ -334,25 +492,31 @@ impl RepoView {
         )
     }
 
-    fn commit_pane(&self, entity: gpui::Entity<Self>, palette: &Palette) -> AnyElement {
+    fn commit_pane(&self, entity: gpui::Entity<Self>, design: &Design) -> AnyElement {
         let Some(source) = self.source() else {
-            return empty_pane("No repository", palette);
+            return empty_pane("No repository", design);
         };
         let len = source.len();
         if len == 0 {
-            return empty_pane("No commits yet", palette);
+            return empty_pane("No commits yet", design);
         }
 
+        let now = style::now_epoch();
         let selected = self.selected;
         let lanes = self.lanes.max();
-        let row_palette = palette.clone();
+        let graph_width = graph_canvas::column_width(lanes);
+        let row_design = design.clone();
         let focus = self.focus.clone();
         // Branch creation from a commit row is only meaningful for a real
         // repository, and only when no operation is in flight.
         let branch_menu = self.session.is_some() && !self.is_busy();
         let filter = self.search.filter().cloned();
         let count = filter.as_ref().map_or(len, |rows| rows.len());
+        let date_format = design.date_format;
+        let show_remote = design.show_remote_branches;
+        let show_tags = design.show_tags;
         let list_entity = entity.clone();
+        let source_for_list = source.clone();
         let list = uniform_list("commits", count, move |range, _window, _cx| {
             range
                 .map(|position| {
@@ -364,17 +528,31 @@ impl RepoView {
                         .as_ref()
                         .and_then(|rows| rows.get(position).copied())
                         .unwrap_or(position);
-                    let Some(row) = source.row(index) else {
+                    let Some(mut row) = source_for_list.row(index) else {
                         return div().into_any_element();
                     };
+                    if !show_remote {
+                        row.badges
+                            .retain(|badge| badge.kind != RefKind::RemoteBranch);
+                    }
+                    if !show_tags {
+                        row.badges.retain(|badge| badge.kind != RefKind::Tag);
+                    }
+                    let date = style::date_label(row.time, now, date_format);
                     let filtered = filter.is_some();
                     let click_entity = entity.clone();
                     let element = if filtered {
                         // The graph is hidden while filtered: spaced-out rows
                         // would draw lanes that never existed between them.
-                        filtered_commit_row(&row, selected == Some(index), &row_palette)
+                        filtered_commit_row(
+                            &row,
+                            selected == Some(index),
+                            graph_width,
+                            &date,
+                            &row_design,
+                        )
                     } else {
-                        commit_row(&row, selected == Some(index), lanes, &row_palette)
+                        commit_row(&row, selected == Some(index), lanes, &date, &row_design)
                     }
                     .id(("commit-row", index))
                     .cursor_pointer()
@@ -388,7 +566,8 @@ impl RepoView {
                             window.focus(&focus, cx);
                         });
                     });
-                    let Some(commit) = source.commit_id(index).filter(|_| branch_menu) else {
+                    let Some(commit) = source_for_list.commit_id(index).filter(|_| branch_menu)
+                    else {
                         return element.into_any_element();
                     };
                     let entity = entity.clone();
@@ -417,13 +596,17 @@ impl RepoView {
         .flex_1();
 
         let body: AnyElement = if count == 0 {
-            empty_pane("No commits match the search", palette)
+            empty_pane("No commits match the search", design)
         } else {
             list.into_any_element()
         };
 
         let mut column = div().flex().flex_col().flex_1().min_h_0().min_w_0();
-        column = column.child(self.search_bar(entity, palette)).child(body);
+        column = column.child(commit_header(design, graph_width));
+        if self.search.is_active() {
+            column = column.child(self.search_bar(entity, design));
+        }
+        column = column.child(body);
         if !self.source().is_some_and(|source| source.complete()) {
             column = column.child(
                 div()
@@ -433,60 +616,56 @@ impl RepoView {
                     .flex_none()
                     .px_3()
                     .text_size(px(10.0))
-                    .text_color(palette.muted_foreground)
+                    .text_color(design.muted)
                     .child(format!("loading {len} commits")),
             );
         }
         column.into_any_element()
     }
 
-    /// Search field, match toggles and the match count, above the commit list.
-    fn search_bar(&self, entity: gpui::Entity<Self>, palette: &Palette) -> AnyElement {
-        let mut bar = div()
+    /// Match toggles and the match count, shown only while a search filters
+    /// the list. The text field itself is in the title bar.
+    fn search_bar(&self, entity: gpui::Entity<Self>, design: &Design) -> AnyElement {
+        let bar = div()
             .flex()
             .items_center()
             .gap_2()
-            .h(px(34.0))
+            .h(px(30.0))
             .flex_none()
-            .px_2()
+            .px_3()
+            .bg(design.background)
             .border_b_1()
-            .border_color(palette.border)
-            .key_context(SEARCH_BAR);
-
-        let Some(input) = self.search.input() else {
-            return bar
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(palette.muted_foreground)
-                        .child("Search needs a real repository"),
-                )
-                .into_any_element();
-        };
-
-        bar = bar
-            .child(div().flex_1().min_w_0().child(Input::new(input).small()))
+            .border_color(design.border)
+            .key_context(SEARCH_BAR)
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(10.5))
+                    .text_color(design.muted)
+                    .child("Filters"),
+            )
             .child(search_chip(
                 "summary",
                 Field::Summary,
                 self.search.fields(),
                 entity.clone(),
-                palette,
+                design,
             ))
             .child(search_chip(
                 "author",
                 Field::Author,
                 self.search.fields(),
                 entity.clone(),
-                palette,
+                design,
             ))
             .child(search_chip(
                 "hash",
                 Field::Hash,
                 self.search.fields(),
                 entity,
-                palette,
-            ));
+                design,
+            ))
+            .child(div().flex_1());
 
         let label = match self.search.error() {
             Some(error) => one_line(error),
@@ -499,21 +678,16 @@ impl RepoView {
                 .truncate()
                 .text_size(px(10.5))
                 .text_color(if self.search.error().is_some() {
-                    palette.danger
+                    design.remove_text
                 } else {
-                    palette.muted_foreground
+                    design.muted
                 })
                 .child(label),
         )
         .into_any_element()
     }
 
-    fn diff_pane(
-        &self,
-        entity: gpui::Entity<Self>,
-        theme: &Theme,
-        palette: &Palette,
-    ) -> AnyElement {
+    fn diff_pane(&self, theme: &Theme, design: &Design) -> AnyElement {
         let rows = if self.fake.is_some() {
             self.selected
                 .and_then(|index| self.fake_diffs.get(index % self.fake_diffs.len().max(1)))
@@ -522,12 +696,36 @@ impl RepoView {
             Rc::clone(&self.diff_rows)
         };
 
-        let header = self.diff_header(palette, rows.len());
-        let body = if self.fake.is_some() {
-            self.diff_rows_list(rows, None, theme, palette)
-        } else {
-            self.real_diff_body(entity, theme, palette)
-        };
+        let source = self.source();
+        let commit = self
+            .selected
+            .and_then(|index| source.as_ref().and_then(|source| source.commit(index)));
+
+        let left = div()
+            .flex()
+            .flex_col()
+            .w(px(DETAILS_WIDTH))
+            .flex_none()
+            .min_h_0()
+            .border_r_1()
+            .border_color(design.border)
+            .bg(design.panel)
+            .child(self.commit_details(commit, design))
+            .child(self.files_summary(design))
+            .child(self.file_list(design));
+
+        let right = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .child(self.diff_header(design, rows.len()))
+            .child(if self.fake.is_some() {
+                self.diff_rows_list(rows, None, theme, design)
+            } else {
+                self.real_diff_body(theme, design)
+            });
 
         div()
             .flex()
@@ -536,21 +734,183 @@ impl RepoView {
             .h(px(DIFF_HEIGHT))
             .flex_none()
             .min_h_0()
-            .bg(palette.background)
+            .bg(design.background)
             .border_t_1()
-            .border_color(palette.border)
-            .child(header)
-            .child(body)
+            .border_color(design.border)
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .child(left)
+                    .child(right),
+            )
             .into_any_element()
     }
 
-    fn diff_header(&self, palette: &Palette, row_count: usize) -> AnyElement {
-        let source = self.source();
-        let commit = self
-            .selected
-            .and_then(|index| source.as_ref().and_then(|source| source.row(index)))
-            .map(|row| row.id.to_string());
+    /// The commit's summary, author, id and parents at the top of the details
+    /// column. Empty while nothing is selected.
+    fn commit_details(
+        &self,
+        commit: Option<&strata_core::CommitInfo>,
+        design: &Design,
+    ) -> AnyElement {
+        let Some(source) = self.source() else {
+            return div().into_any_element();
+        };
+        let Some(row) = self.selected.and_then(|index| source.row(index)) else {
+            return div().into_any_element();
+        };
+        let now = style::now_epoch();
+        let date = style::date_label(row.time, now, design.date_format);
+        let initials = style::initials(&row.author);
+        let avatar_color = design.avatar_color(&row.email);
+        let id = row.id.to_string();
+        let copy_id = id.clone();
+        let parents = commit
+            .map(|commit| {
+                commit
+                    .parents
+                    .iter()
+                    .map(|parent| data::short_oid(*parent))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
 
+        let mut block = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .p_3()
+            .border_b_1()
+            .border_color(design.border)
+            .child(
+                div()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .line_height(gpui::relative(1.35))
+                    .child(row.summary.to_string()),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(12.0))
+                    .text_color(design.muted)
+                    .child(style::avatar(&initials, avatar_color, 18.0))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .child(format!("{} · {date}", row.author)),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .font_family(design.mono.clone())
+                    .text_size(px(design.code))
+                    .text_color(design.muted)
+                    .child(id)
+                    .child(
+                        div()
+                            .id("copy-commit-id")
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .w(px(22.0))
+                            .h(px(22.0))
+                            .rounded(px(5.0))
+                            .cursor_pointer()
+                            .hover(|style| style.bg(design.field))
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(copy_id.clone()));
+                            })
+                            .child(icon(IconName::Copy, 13.0, design.muted)),
+                    )
+                    .when(!parents.is_empty(), |row| {
+                        row.child(div().child(format!("parent {}", parents.join(" · "))))
+                    }),
+            );
+
+        if self.fake.is_some() {
+            block = block.child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(design.muted)
+                    .child("synthetic diff"),
+            );
+        }
+        block.into_any_element()
+    }
+
+    /// "N files" and the selected diff's line counts.
+    fn files_summary(&self, design: &Design) -> AnyElement {
+        let files = self.files.as_ref().map_or(0, Vec::len);
+        let mut row = div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap_2()
+            .px_3p5()
+            .pt_2()
+            .pb_1()
+            .text_size(px(11.0));
+        if files == 0 {
+            return row
+                .child(
+                    div()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(design.muted)
+                        .child("0 files"),
+                )
+                .into_any_element();
+        }
+        row = row.child(
+            div()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(design.muted)
+                .child(format!("{files} file{}", if files == 1 { "" } else { "s" })),
+        );
+        if let Some((added, removed)) = self.diff_stats() {
+            row = row.child(
+                div()
+                    .flex()
+                    .gap_1()
+                    .child(div().text_color(design.add_text).child(format!("+{added}")))
+                    .child(
+                        div()
+                            .text_color(design.remove_text)
+                            .child(format!("−{removed}")),
+                    ),
+            );
+        }
+        row.into_any_element()
+    }
+
+    /// Added and removed lines in the diff on screen. The session loads one
+    /// file at a time, so this is the selected file's contribution.
+    fn diff_stats(&self) -> Option<(u32, u32)> {
+        let view = self.diff.view()?;
+        let mut added = 0;
+        let mut removed = 0;
+        for hunk in &view.diff.hunks {
+            for line in &hunk.lines {
+                match line.kind {
+                    LineKind::Added => added += 1,
+                    LineKind::Removed => removed += 1,
+                    LineKind::Context => {}
+                }
+            }
+        }
+        Some((added, removed))
+    }
+
+    fn diff_header(&self, design: &Design, row_count: usize) -> AnyElement {
         let (path, kind) = match (&self.fake, &self.files, self.selected_file) {
             _ if self.fake.is_some() => ("synthetic diff".to_owned(), None),
             (_, Some(files), Some(index)) => match files.get(index) {
@@ -559,131 +919,127 @@ impl RepoView {
             },
             _ => ("no file selected".to_owned(), None),
         };
-
-        let right = if self.fake.is_some() {
-            format!("synthetic — {row_count} rows")
-        } else {
-            let files = self.files.as_ref().map_or(0, Vec::len);
-            match commit {
-                Some(commit) => format!("commit {commit} · {files} changed files"),
-                None => format!("{files} changed files"),
-            }
+        let (name, dir) = style::path_parts(&path);
+        let right = match self.fake {
+            Some(_) => format!("{row_count} rows"),
+            None => match self.files.as_ref().map_or(0, Vec::len) {
+                0 => String::new(),
+                files => format!("{files} changed"),
+            },
         };
 
         div()
             .flex()
             .items_center()
-            .justify_between()
-            .h(px(30.0))
+            .gap(px(10.0))
+            .h(px(40.0))
             .flex_none()
-            .px_3()
-            .gap_3()
-            .bg(palette.title_bar)
+            .px_3p5()
+            .bg(design.background)
             .border_b_1()
-            .border_color(palette.border)
+            .border_color(design.border)
             .text_size(px(12.0))
+            .child(match kind {
+                Some(kind) => style::file_badge(kind, design),
+                None => div().into_any_element(),
+            })
             .child(
                 div()
+                    .flex_1()
+                    .min_w_0()
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .min_w_0()
-                    .child(match kind {
-                        Some(kind) => change_badge(kind, palette),
-                        None => div().into_any_element(),
-                    })
-                    .child(div().truncate().child(path)),
+                    .child(div().font_weight(FontWeight::MEDIUM).child(name.to_owned()))
+                    .when_some(dir, |row, dir| {
+                        row.child(
+                            div()
+                                .ml_2()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(11.5))
+                                .text_color(design.muted)
+                                .child(dir.to_owned()),
+                        )
+                    }),
             )
             .child(
                 div()
                     .flex_none()
                     .text_size(px(11.0))
-                    .text_color(palette.muted_foreground)
+                    .text_color(design.muted)
                     .child(right),
             )
             .into_any_element()
     }
 
-    fn real_diff_body(
-        &self,
-        entity: gpui::Entity<Self>,
-        theme: &Theme,
-        palette: &Palette,
-    ) -> AnyElement {
+    fn real_diff_body(&self, theme: &Theme, design: &Design) -> AnyElement {
         if let Some(error) = &self.files_error {
-            return message(error, palette.danger, palette);
+            return message(error, design.remove_text, design);
         }
         let Some(files) = &self.files else {
-            return message("reading changed files…", palette.muted_foreground, palette);
+            return message("reading changed files…", design.muted, design);
         };
         if files.is_empty() {
-            return message(
-                "No changes in this commit",
-                palette.muted_foreground,
-                palette,
-            );
+            return message("No changes in this commit", design.muted, design);
         }
-
-        div()
-            .flex()
-            .flex_1()
-            .min_h_0()
-            .min_w_0()
-            .child(self.file_list(entity, files, palette))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .child(self.diff_content(theme, palette)),
-            )
-            .into_any_element()
+        self.diff_content(theme, design)
     }
 
-    fn file_list(
-        &self,
-        entity: gpui::Entity<Self>,
-        files: &[strata_core::FileChange],
-        palette: &Palette,
-    ) -> AnyElement {
+    fn file_list(&self, design: &Design) -> AnyElement {
+        let Some(files) = &self.files else {
+            return div().into_any_element();
+        };
+        let entity = self.entity.clone();
         let selected = self.selected_file;
-        let list_palette = palette.clone();
+        let list_design = design.clone();
         let count = files.len();
-        let paths: Vec<(String, ChangeKind)> = files
+        let entries: Vec<(String, ChangeKind)> = files
             .iter()
-            .map(|change| (change.path.clone(), change.kind))
+            .map(|change: &FileChange| (change.path.clone(), change.kind))
             .collect();
 
         uniform_list("changed-files", count, move |range, _window, _cx| {
             range
                 .map(|index| {
                     let entity = entity.clone();
-                    let (path, kind) = &paths[index];
+                    let (path, kind) = &entries[index];
+                    let (name, dir) = style::path_parts(path);
+                    let is_selected = selected == Some(index);
                     let mut row = div()
                         .flex()
                         .items_center()
                         .gap_2()
-                        .h(px(20.0))
-                        .w_full()
+                        .h(px(28.0))
+                        .mx(px(6.0))
                         .px_2()
-                        .text_size(px(11.0))
-                        .child(change_badge(*kind, &list_palette))
+                        .rounded(px(6.0))
+                        .text_size(px(12.5))
+                        .child(style::file_badge(*kind, &list_design))
                         .child(
                             div()
                                 .flex_1()
                                 .min_w_0()
                                 .truncate()
-                                .text_color(if selected == Some(index) {
-                                    list_palette.accent
+                                .text_color(if is_selected {
+                                    list_design.accent_text
                                 } else {
-                                    list_palette.foreground
+                                    list_design.text
                                 })
-                                .child(path.clone()),
-                        );
-                    if selected == Some(index) {
-                        row = row.bg(list_palette.selection);
+                                .child(name.to_owned()),
+                        )
+                        .when_some(dir, |row, dir| {
+                            row.child(
+                                div()
+                                    .max_w(px(110.0))
+                                    .flex_none()
+                                    .truncate()
+                                    .text_size(px(11.0))
+                                    .text_color(list_design.muted)
+                                    .child(dir.to_owned()),
+                            )
+                        });
+                    if is_selected {
+                        row = row.bg(list_design.row_selected);
                     }
                     let click_entity = entity.clone();
                     let menu_entity = entity;
@@ -711,27 +1067,25 @@ impl RepoView {
         })
         .track_scroll(&self.file_scroll)
         .with_scrollbar(&self.file_scroll)
-        .w(px(FILE_LIST_WIDTH))
-        .flex_none()
-        .border_r_1()
-        .border_color(palette.border)
+        .flex_1()
+        .min_h_0()
         .into_any_element()
     }
 
-    fn diff_content(&self, theme: &Theme, palette: &Palette) -> AnyElement {
+    fn diff_content(&self, theme: &Theme, design: &Design) -> AnyElement {
         if let Some(error) = &self.diff_error {
-            return message(error, palette.danger, palette);
+            return message(error, design.remove_text, design);
         }
         let Some(view) = self.diff.view().cloned() else {
-            return message("computing diff…", palette.muted_foreground, palette);
+            return message("computing diff…", design.muted, design);
         };
         if view.diff.binary {
-            return message("Binary file", palette.muted_foreground, palette);
+            return message("Binary file", design.muted, design);
         }
         if self.diff_rows.is_empty() {
-            return message("No textual changes", palette.muted_foreground, palette);
+            return message("No textual changes", design.muted, design);
         }
-        self.diff_rows_list(Rc::clone(&self.diff_rows), Some(view), theme, palette)
+        self.diff_rows_list(Rc::clone(&self.diff_rows), Some(view), theme, design)
     }
 
     fn diff_rows_list(
@@ -739,10 +1093,10 @@ impl RepoView {
         rows: Rc<Vec<DiffRow>>,
         view: Option<std::sync::Arc<DiffView>>,
         theme: &Theme,
-        palette: &Palette,
+        design: &Design,
     ) -> AnyElement {
         let colors = DiffColors::from_theme(theme);
-        let mono = palette.mono.clone();
+        let mono = design.mono.clone();
         uniform_list("diff", rows.len(), move |range, _window, _cx| {
             range
                 .map(|index| {
@@ -759,39 +1113,55 @@ impl RepoView {
         .into_any_element()
     }
 
-    fn status_bar(&self, palette: &Palette) -> AnyElement {
+    fn status_bar(&self, design: &Design) -> AnyElement {
         let command = self
             .last_command
             .clone()
             .unwrap_or_else(|| "no git commands yet".to_owned());
         let error = self.status_error.clone();
         let operation = self.remote_status(&remote::Colors {
-            muted_foreground: palette.muted_foreground,
-            border: palette.border,
-            accent: palette.accent,
-            accent_foreground: palette.accent_foreground,
+            foreground: design.text,
+            muted_foreground: design.muted,
+            border: design.border,
+            accent: design.accent,
+            accent_foreground: design.on_accent,
         });
 
         let mut bar = div()
             .flex()
             .items_center()
             .justify_between()
-            .h(px(24.0))
+            .h(px(26.0))
             .flex_none()
             .px_3()
-            .gap_4()
-            .bg(palette.title_bar)
+            .gap(px(10.0))
+            .bg(design.chrome)
             .border_t_1()
-            .border_color(palette.border)
-            .font_family(palette.mono.clone())
-            .text_size(px(11.0))
+            .border_color(design.border)
+            .text_size(px(design.small()))
             .child(
                 div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.0))
                     .flex_1()
                     .min_w_0()
-                    .truncate()
-                    .text_color(palette.muted_foreground)
-                    .child(command),
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(7.0))
+                            .h(px(7.0))
+                            .rounded_full()
+                            .bg(design.add_text),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .font_family(design.mono.clone())
+                            .text_color(design.muted)
+                            .child(command),
+                    ),
             );
         // Only while a fetch, pull or push runs: the bar otherwise keeps its
         // command log and last-error slots.
@@ -803,16 +1173,16 @@ impl RepoView {
                 .max_w(px(720.0))
                 .truncate()
                 .text_color(if error.is_some() {
-                    palette.danger
+                    design.remove_text
                 } else {
-                    palette.muted_foreground
+                    design.muted
                 })
-                .child(error.unwrap_or_else(|| "ready".to_owned())),
+                .child(error.unwrap_or_else(|| "Watching for changes".to_owned())),
         )
         .into_any_element()
     }
 
-    fn overlay_panel(&self, palette: &Palette) -> AnyElement {
+    fn overlay_panel(&self, design: &Design) -> AnyElement {
         let stats = self.metrics.stats();
         let target = self.target_frame_ms;
         let target_hz = if target > 0.0 { 1000.0 / target } else { 60.0 };
@@ -827,11 +1197,11 @@ impl RepoView {
             .gap_1()
             .p_2()
             .rounded_md()
-            .bg(palette.overlay)
+            .bg(design.panel)
             .border_1()
-            .border_color(palette.border)
+            .border_color(design.border)
             .text_size(px(11.0))
-            .text_color(palette.foreground)
+            .text_color(design.text)
             .child(div().font_weight(FontWeight::SEMIBOLD).child(format!(
                 "{:.2} ms/frame mean · p95 {:.2} ms · {:.1} fps",
                 stats.frame_ms, stats.p95_ms, stats.fps
@@ -853,7 +1223,7 @@ impl RepoView {
             ));
 
         if stats.samples > 0 {
-            panel = panel.child(div().text_color(palette.muted_foreground).child(
+            panel = panel.child(div().text_color(design.muted).child(
                 if stats.frame_ms <= target * 1.05 {
                     format!("smooth ({target_hz:.0} fps target)")
                 } else {
@@ -865,7 +1235,7 @@ impl RepoView {
         panel.into_any_element()
     }
 
-    fn error_screen(&self, path: &str, error: &str, palette: &Palette) -> AnyElement {
+    fn error_screen(&self, path: &str, error: &str, design: &Design) -> AnyElement {
         div()
             .flex()
             .flex_col()
@@ -878,13 +1248,13 @@ impl RepoView {
                 div()
                     .text_size(px(18.0))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(palette.danger)
+                    .text_color(design.remove_text)
                     .child("Could not open repository"),
             )
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(palette.muted_foreground)
+                    .text_color(design.muted)
                     .child(path.to_owned()),
             )
             .child(
@@ -896,124 +1266,214 @@ impl RepoView {
             .child(
                 div()
                     .text_size(px(11.0))
-                    .text_color(palette.muted_foreground)
+                    .text_color(design.muted)
                     .child("usage: strata [PATH] · strata --fake [N]"),
             )
             .into_any_element()
     }
 }
 
-fn commit_row(data: &RowData<'_>, selected: bool, lanes: u16, palette: &Palette) -> Div {
-    let mut row = div()
+/// The column headings above the commit list.
+fn commit_header(design: &Design, graph_width: f32) -> AnyElement {
+    div()
         .flex()
         .items_center()
-        .h(px(graph_canvas::ROW_HEIGHT))
-        .w_full()
-        .text_size(px(12.0))
-        .child(graph_canvas::graph_column(data.graph, palette.lane, lanes));
-
-    if !data.badges.is_empty() {
-        let mut badges = div().flex().items_center().gap_1().flex_none().pl_1();
-        for badge in &data.badges {
-            badges = badges.child(badge_chip(badge, palette));
-        }
-        row = row.child(badges);
-    }
-
-    row = row
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .truncate()
-                .pl_2()
-                .text_color(palette.foreground)
-                .child(data.summary.to_string()),
-        )
-        .child(
-            div()
-                .w(px(150.0))
-                .flex_none()
-                .truncate()
-                .text_size(px(11.0))
-                .text_color(palette.muted_foreground)
-                .child(data.author.to_string()),
-        )
-        .child(
-            div()
-                .w(px(120.0))
-                .flex_none()
-                .text_size(px(11.0))
-                .text_color(palette.muted_foreground)
-                .child(data::format_time(data.time)),
-        )
-        .child(
-            div()
-                .w(px(70.0))
-                .flex_none()
-                .font_family(palette.mono.clone())
-                .text_size(px(11.0))
-                .text_color(palette.muted_foreground)
-                .child(data.id.to_string()),
-        );
-
-    if selected {
-        row = row.bg(palette.selection);
-    }
-    row
+        .gap_3()
+        .h(px(28.0))
+        .flex_none()
+        .pl(px(17.0))
+        .pr(px(13.0))
+        .border_b_1()
+        .border_color(design.border)
+        .text_size(px(design.tiny()))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(design.muted)
+        .child(div().w(px(graph_width)).flex_none().child("Graph"))
+        .child(div().flex_1().min_w_0().child("Description"))
+        .child(div().w(px(AUTHOR_WIDTH)).flex_none().child("Author"))
+        .child(div().w(px(DATE_WIDTH)).flex_none().child("Date"))
+        .child(div().w(px(COMMIT_WIDTH)).flex_none().child("Commit"))
+        .into_any_element()
 }
 
-/// A commit row in the filtered result set. The graph column is left out: the
-/// matching commits are not adjacent in history, so lanes between them would
-/// draw connections that never existed.
-fn filtered_commit_row(data: &RowData<'_>, selected: bool, palette: &Palette) -> Div {
-    let mut row = div()
+fn commit_row(data: &RowData<'_>, selected: bool, lanes: u16, date: &str, design: &Design) -> Div {
+    let avatar_color = design.avatar_color(&data.email);
+    let initials = style::initials(&data.author);
+    div()
         .flex()
         .items_center()
+        .gap_3()
         .h(px(graph_canvas::ROW_HEIGHT))
         .w_full()
-        .text_size(px(12.0))
+        .px_3()
+        .border_l_2()
+        .border_color(if selected {
+            design.accent
+        } else {
+            Hsla::transparent_black()
+        })
+        .when(selected, |row| row.bg(design.row_selected))
+        .child(graph_canvas::graph_column(data.graph, design.lane, lanes))
         .child(
             div()
                 .flex_1()
                 .min_w_0()
-                .truncate()
-                .pl_3()
-                .text_color(palette.foreground)
-                .child(data.summary.to_string()),
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .overflow_hidden()
+                .when(!data.badges.is_empty(), |cell| {
+                    let mut badges = div()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.0))
+                        .flex_none()
+                        .overflow_hidden();
+                    for badge in &data.badges {
+                        badges = badges.child(badge_chip(badge, design));
+                    }
+                    cell.child(badges)
+                })
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(design.text)
+                        .when(data.badges.iter().any(|badge| badge.head), |text| {
+                            text.font_weight(FontWeight::SEMIBOLD)
+                        })
+                        .child(data.summary.to_string()),
+                ),
         )
         .child(
             div()
-                .w(px(150.0))
+                .w(px(AUTHOR_WIDTH))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(7.0))
+                .overflow_hidden()
+                .child(style::avatar(&initials, avatar_color, 18.0))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(design.small()))
+                        .text_color(design.muted)
+                        .child(data.author.to_string()),
+                ),
+        )
+        .child(
+            div()
+                .w(px(DATE_WIDTH))
                 .flex_none()
                 .truncate()
-                .pl_2()
-                .text_size(px(11.0))
-                .text_color(palette.muted_foreground)
-                .child(data.author.to_string()),
+                .text_size(px(design.tiny()))
+                .text_color(design.muted)
+                .child(date.to_owned()),
         )
         .child(
             div()
-                .w(px(120.0))
+                .w(px(COMMIT_WIDTH))
                 .flex_none()
-                .text_size(px(11.0))
-                .text_color(palette.muted_foreground)
-                .child(data::format_time(data.time)),
-        )
-        .child(
-            div()
-                .w(px(70.0))
-                .flex_none()
-                .font_family(palette.mono.clone())
-                .text_size(px(11.0))
-                .text_color(palette.muted_foreground)
+                .font_family(design.mono.clone())
+                .text_size(px(design.code))
+                .text_color(design.muted)
                 .child(data.id.to_string()),
-        );
+        )
+}
 
-    if selected {
-        row = row.bg(palette.selection);
-    }
-    row
+/// A commit row in the filtered result set. The graph column keeps its width so
+/// the columns stay aligned, but nothing is painted in it: the matching commits
+/// are not adjacent in history, so lanes between them would be fiction.
+fn filtered_commit_row(
+    data: &RowData<'_>,
+    selected: bool,
+    graph_width: f32,
+    date: &str,
+    design: &Design,
+) -> Div {
+    let avatar_color = design.avatar_color(&data.email);
+    let initials = style::initials(&data.author);
+    div()
+        .flex()
+        .items_center()
+        .gap_3()
+        .h(px(graph_canvas::ROW_HEIGHT))
+        .w_full()
+        .px_3()
+        .border_l_2()
+        .border_color(if selected {
+            design.accent
+        } else {
+            Hsla::transparent_black()
+        })
+        .when(selected, |row| row.bg(design.row_selected))
+        .child(div().w(px(graph_width)).flex_none())
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .overflow_hidden()
+                .when(!data.badges.is_empty(), |cell| {
+                    let mut badges = div()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.0))
+                        .flex_none()
+                        .overflow_hidden();
+                    for badge in &data.badges {
+                        badges = badges.child(badge_chip(badge, design));
+                    }
+                    cell.child(badges)
+                })
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(design.text)
+                        .child(data.summary.to_string()),
+                ),
+        )
+        .child(
+            div()
+                .w(px(AUTHOR_WIDTH))
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap(px(7.0))
+                .overflow_hidden()
+                .child(style::avatar(&initials, avatar_color, 18.0))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(design.small()))
+                        .text_color(design.muted)
+                        .child(data.author.to_string()),
+                ),
+        )
+        .child(
+            div()
+                .w(px(DATE_WIDTH))
+                .flex_none()
+                .truncate()
+                .text_size(px(design.tiny()))
+                .text_color(design.muted)
+                .child(date.to_owned()),
+        )
+        .child(
+            div()
+                .w(px(COMMIT_WIDTH))
+                .flex_none()
+                .font_family(design.mono.clone())
+                .text_size(px(design.code))
+                .text_color(design.muted)
+                .child(data.id.to_string()),
+        )
 }
 
 /// One of the three match toggles above the commit list.
@@ -1022,7 +1482,7 @@ fn search_chip(
     field: Field,
     fields: crate::search::Fields,
     entity: gpui::Entity<RepoView>,
-    palette: &Palette,
+    design: &Design,
 ) -> AnyElement {
     let on = fields.enabled(field);
     div()
@@ -1030,15 +1490,11 @@ fn search_chip(
         .flex_none()
         .px_1p5()
         .py_0p5()
-        .rounded_sm()
+        .rounded(px(5.0))
         .cursor_pointer()
-        .bg(if on { palette.accent } else { palette.muted })
+        .bg(if on { design.accent } else { design.field })
         .text_size(px(10.0))
-        .text_color(if on {
-            palette.accent_foreground
-        } else {
-            palette.muted_foreground
-        })
+        .text_color(if on { design.on_accent } else { design.muted })
         .child(label)
         .on_click(move |_event, _window, cx| {
             entity.update(cx, |this, cx| this.toggle_search_field(field, cx));
@@ -1046,69 +1502,46 @@ fn search_chip(
         .into_any_element()
 }
 
-fn badge_chip(badge: &Badge<'_>, palette: &Palette) -> Div {
-    let (background, foreground) = match badge.kind {
-        RefKind::LocalBranch if badge.head => (palette.accent, palette.accent_foreground),
-        RefKind::LocalBranch => (palette.muted, palette.foreground),
-        RefKind::RemoteBranch => (palette.muted, palette.muted_foreground),
-        RefKind::Tag => (palette.warning.opacity(0.24), palette.warning),
+fn badge_chip(badge: &Badge<'_>, design: &Design) -> Div {
+    let (background, foreground, glyph_data) = match badge.kind {
+        RefKind::LocalBranch if badge.head => {
+            (design.accent, design.on_accent, style::glyph::BRANCH)
+        }
+        RefKind::LocalBranch => (design.accent_soft, design.accent_text, style::glyph::BRANCH),
+        RefKind::RemoteBranch => (
+            design.remote_background,
+            design.remote_text,
+            style::glyph::CLOUD,
+        ),
+        RefKind::Tag => (design.tag_background, design.tag_text, style::glyph::TAG),
     };
 
     div()
         .flex()
         .items_center()
+        .gap(px(4.0))
         .flex_none()
-        .max_w(px(150.0))
-        .truncate()
-        .px_1()
-        .rounded_sm()
+        .h(px(18.0))
+        .px(px(7.0))
+        .rounded_full()
         .bg(background)
-        .text_size(px(9.5))
-        .font_weight(if badge.head {
+        .text_size(px(11.0))
+        .font_weight(if badge.head || badge.kind == RefKind::Tag {
             FontWeight::SEMIBOLD
         } else {
-            FontWeight::NORMAL
+            FontWeight::MEDIUM
         })
         .text_color(foreground)
-        .child(badge.label.to_string())
+        .child(glyph(glyph_data, 11.0, foreground))
+        .child(
+            div()
+                .max_w(px(130.0))
+                .truncate()
+                .child(badge.label.to_string()),
+        )
 }
 
-fn change_badge(kind: ChangeKind, palette: &Palette) -> AnyElement {
-    let (marker, color) = match kind {
-        ChangeKind::Added | ChangeKind::Untracked => ("A", palette.success),
-        ChangeKind::Modified => ("M", palette.warning),
-        ChangeKind::Deleted => ("D", palette.danger),
-        ChangeKind::Renamed => ("R", palette.accent),
-        ChangeKind::Copied => ("C", palette.info),
-        ChangeKind::TypeChanged => ("T", palette.warning),
-        ChangeKind::Conflicted => ("!", palette.danger),
-    };
-    div()
-        .w(px(14.0))
-        .flex_none()
-        .text_size(px(10.0))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(color)
-        .child(marker)
-        .into_any_element()
-}
-
-fn section_title(title: &str, count: Option<usize>, palette: &Palette) -> Div {
-    let label = match count {
-        Some(count) => format!("{title} ({count})"),
-        None => title.to_owned(),
-    };
-    div()
-        .px_3()
-        .pt_2()
-        .pb_1()
-        .text_size(px(10.0))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(palette.muted_foreground)
-        .child(label)
-}
-
-fn empty_pane(message: &str, palette: &Palette) -> AnyElement {
+fn empty_pane(text: &str, design: &Design) -> AnyElement {
     div()
         .flex()
         .flex_1()
@@ -1116,12 +1549,12 @@ fn empty_pane(message: &str, palette: &Palette) -> AnyElement {
         .items_center()
         .justify_center()
         .text_size(px(12.0))
-        .text_color(palette.muted_foreground)
-        .child(message.to_owned())
+        .text_color(design.muted)
+        .child(text.to_owned())
         .into_any_element()
 }
 
-fn message(text: &str, color: Hsla, palette: &Palette) -> AnyElement {
+fn message(text: &str, color: Hsla, design: &Design) -> AnyElement {
     div()
         .flex()
         .flex_1()
@@ -1131,9 +1564,66 @@ fn message(text: &str, color: Hsla, palette: &Palette) -> AnyElement {
         .p_4()
         .text_size(px(12.0))
         .text_color(color)
-        .bg(palette.background)
+        .bg(design.background)
         .child(text.to_owned())
         .into_any_element()
+}
+
+fn icon(name: IconName, size: f32, color: Hsla) -> Icon {
+    Icon::new(name).with_size(px(size)).text_color(color)
+}
+
+fn glyph(data: &'static [u8], size: f32, color: Hsla) -> Icon {
+    style::glyph_icon(data, size, color)
+}
+
+/// The title bar's Stash action: the same icon-over-label shape as the remote
+/// buttons, but it dispatches an action instead of running a git command here.
+fn stash_button(design: &Design) -> AnyElement {
+    div()
+        .id("stash-button")
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(2.0))
+        .w(px(52.0))
+        .h(px(40.0))
+        .rounded(px(7.0))
+        .text_size(px(10.0))
+        .text_color(design.text)
+        .cursor_pointer()
+        .hover(|style| style.bg(design.field))
+        .on_click(|_, window, cx| {
+            window.dispatch_action(Box::new(actions::StashChanges), cx);
+        })
+        .child(glyph(style::glyph::ARCHIVE, 16.0, design.text))
+        .child("Stash")
+        .into_any_element()
+}
+
+/// A keyboard hint chip, matching the design's `Ctrl F`.
+fn kbd(label: &'static str, design: &Design) -> AnyElement {
+    div()
+        .flex_none()
+        .px(px(6.0))
+        .py(px(1.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(design.border)
+        .text_size(px(11.0))
+        .child(label)
+        .into_any_element()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn search_key_label() -> &'static str {
+    "Ctrl F"
+}
+
+#[cfg(target_os = "macos")]
+fn search_key_label() -> &'static str {
+    "⌘F"
 }
 
 /// The highlights for the side of the line that is drawn. Context lines exist
@@ -1148,80 +1638,4 @@ fn line_highlights<'a>(row: &DiffRow, view: &'a DiffView) -> Option<&'a LineHigh
         LineKind::Context => (&view.new_highlights, line.new_lineno.or(line.old_lineno)),
     };
     highlights.get(number?.checked_sub(1)? as usize)
-}
-
-#[derive(Clone)]
-struct Palette {
-    background: Hsla,
-    foreground: Hsla,
-    muted: Hsla,
-    muted_foreground: Hsla,
-    border: Hsla,
-    sidebar: Hsla,
-    sidebar_foreground: Hsla,
-    sidebar_accent: Hsla,
-    sidebar_accent_foreground: Hsla,
-    selection: Hsla,
-    title_bar: Hsla,
-    overlay: Hsla,
-    accent: Hsla,
-    accent_foreground: Hsla,
-    danger: Hsla,
-    warning: Hsla,
-    success: Hsla,
-    info: Hsla,
-    mono: SharedString,
-    lane: [Hsla; 8],
-}
-
-impl Palette {
-    fn from_theme(theme: &Theme) -> Self {
-        let dark = theme.is_dark();
-        let lane = if dark {
-            [
-                theme.red,
-                theme.green,
-                theme.blue,
-                theme.yellow,
-                theme.magenta,
-                theme.cyan,
-                theme.primary,
-                theme.warning,
-            ]
-        } else {
-            [
-                theme.red_light,
-                theme.green_light,
-                theme.blue_light,
-                theme.yellow_light,
-                theme.magenta_light,
-                theme.cyan_light,
-                theme.primary,
-                theme.warning,
-            ]
-        };
-
-        Self {
-            background: theme.background,
-            foreground: theme.foreground,
-            muted: theme.muted,
-            muted_foreground: theme.muted_foreground,
-            border: theme.border,
-            sidebar: theme.sidebar,
-            sidebar_foreground: theme.sidebar_foreground,
-            sidebar_accent: theme.sidebar_accent,
-            sidebar_accent_foreground: theme.sidebar_accent_foreground,
-            selection: theme.list_active,
-            title_bar: theme.title_bar,
-            overlay: theme.popover,
-            accent: theme.primary,
-            accent_foreground: theme.primary_foreground,
-            danger: theme.danger,
-            warning: theme.warning,
-            success: theme.success,
-            info: theme.info,
-            mono: theme.mono_font_family.clone(),
-            lane,
-        }
-    }
 }

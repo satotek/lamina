@@ -243,9 +243,8 @@ impl SearchState {
         if self.input.is_some() {
             return;
         }
-        let input = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Search summary, author or object id")
-        });
+        let input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search commits, authors, hashes"));
         self._events = Some(
             cx.subscribe(&input, |view, _input, event: &InputEvent, cx| {
                 if let InputEvent::Change = event {

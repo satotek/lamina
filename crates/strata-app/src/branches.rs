@@ -12,22 +12,25 @@ use std::collections::HashMap;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, ClickEvent, Context, Div, Entity, FocusHandle, FontWeight, Hsla,
-    InteractiveElement, IntoElement, KeyBinding, ParentElement, Pixels, SharedString, Size,
+    InteractiveElement, IntoElement, KeyBinding, ParentElement, Pixels, Size,
     StatefulInteractiveElement as _, Styled, Window, actions, anchored, deferred, div, hsla, point,
     px,
 };
 use gpui_component::{
+    Icon, Sizable as _,
     button::{Button, ButtonVariants as _},
     checkbox::Checkbox,
     input::{Input, InputState},
     menu::{ContextMenuExt as _, PopupMenuItem},
 };
+use gpui_kit_assets::IconName;
 use strata_core::session::{Operation, OperationId};
 use strata_core::{RefKind, UpstreamInfo};
 
 use crate::actions::REPO_VIEW;
 use crate::data::SidebarData;
 use crate::repo_view::RepoView;
+use crate::style::{self, Design};
 
 /// Key context the dialog sets while it is open, so `Enter` and `Escape` mean
 /// confirm and cancel only there.
@@ -61,15 +64,13 @@ pub fn bind(cx: &mut App) {
 /// The colours the sections and dialogs paint with, taken from the window
 /// chrome's palette so the sidebar reads as one surface.
 pub(crate) struct Colors {
+    pub(crate) design: Design,
     pub(crate) sidebar_foreground: Hsla,
-    pub(crate) sidebar_accent: Hsla,
-    pub(crate) sidebar_accent_foreground: Hsla,
     pub(crate) muted_foreground: Hsla,
     pub(crate) border: Hsla,
     pub(crate) foreground: Hsla,
     pub(crate) danger: Hsla,
     pub(crate) overlay: Hsla,
-    pub(crate) mono: SharedString,
 }
 
 /// One collapsible section of the sidebar.
@@ -100,10 +101,19 @@ impl Section {
 
     fn title(self) -> &'static str {
         match self {
-            Section::Local => "LOCAL BRANCHES",
-            Section::Remote => "REMOTE BRANCHES",
+            Section::Local => "BRANCHES",
+            Section::Remote => "REMOTES",
             Section::Tags => "TAGS",
             Section::Stashes => "STASHES",
+        }
+    }
+
+    fn icon(self) -> &'static [u8] {
+        match self {
+            Section::Local => style::glyph::BRANCH,
+            Section::Remote => style::glyph::CLOUD,
+            Section::Tags => style::glyph::TAG,
+            Section::Stashes => style::glyph::ARCHIVE,
         }
     }
 
@@ -113,6 +123,16 @@ impl Section {
             Section::Remote => "no remote branches",
             Section::Tags => "no tags",
             Section::Stashes => "no stashes",
+        }
+    }
+
+    /// Whether `history` settings hide this section.
+    fn hidden(self, design: &Design) -> bool {
+        match self {
+            Section::Local => false,
+            Section::Remote => !design.show_remote_branches,
+            Section::Tags => !design.show_tags,
+            Section::Stashes => !design.show_stashes,
         }
     }
 }
@@ -128,6 +148,8 @@ pub(crate) struct BranchStart {
 #[derive(Default)]
 pub(crate) struct Branches {
     collapsed: [bool; 4],
+    /// Remote name -> collapsed, so each remote's branch list folds on its own.
+    remote_groups: HashMap<String, bool>,
     dialog: Option<Dialog>,
     /// Operations this module started, keyed by the id the session returned.
     /// The label is what the status bar prefixes a failure with.
@@ -209,7 +231,11 @@ impl Branches {
             .min_h_0()
             .overflow_y_scroll();
 
+        let mut remote_row_index = 0;
         for section in Section::ALL {
+            if section.hidden(&colors.design) {
+                continue;
+            }
             let entries = match section {
                 Section::Local => &data.local,
                 Section::Remote => &data.remote,
@@ -226,6 +252,36 @@ impl Branches {
                 column = column.child(empty_row(section.empty_label(), colors));
                 continue;
             }
+
+            // Remote branches are grouped under their remote, which is the
+            // first path component of `origin/main`.
+            if section == Section::Remote {
+                for (group, branches) in remote_groups(entries) {
+                    column = column.child(self.remote_group_header(
+                        &group,
+                        branches.len(),
+                        colors,
+                        entity,
+                    ));
+                    if self.remote_groups.get(&group).copied().unwrap_or(false) {
+                        continue;
+                    }
+                    for name in &branches {
+                        column = column.child(self.remote_row(
+                            name,
+                            remote_row_index,
+                            &data.local,
+                            enabled,
+                            busy,
+                            colors,
+                            entity,
+                        ));
+                        remote_row_index += 1;
+                    }
+                }
+                continue;
+            }
+
             for (index, name) in entries.iter().enumerate() {
                 column = column.child(match section {
                     Section::Local => self.local_row(
@@ -238,13 +294,11 @@ impl Branches {
                         colors,
                         entity,
                     ),
-                    Section::Remote => {
-                        self.remote_row(name, index, &data.local, enabled, busy, colors, entity)
-                    }
+                    Section::Remote => unreachable!("remote rows are grouped above"),
                     Section::Tags => {
                         let tag = name.clone();
                         let entity = entity.clone();
-                        row(name, colors)
+                        row_with_icon(Some(style::glyph::TAG), name, colors)
                             .id(("tag", index))
                             .cursor_pointer()
                             .on_click(move |_, window, cx| {
@@ -329,18 +383,35 @@ impl Branches {
             .id(("branch-section", index))
             .flex()
             .items_center()
-            .gap_1()
-            .px_3()
-            .pt_2()
-            .pb_1()
+            .gap(px(6.0))
+            .h(px(26.0))
+            .px_2()
+            .rounded(px(7.0))
             .cursor_pointer()
-            .text_size(px(10.0))
+            .text_size(px(colors.design.tiny()))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(colors.muted_foreground)
-            .child(div().w(px(10.0)).child(if open { "▾" } else { "▸" }))
-            .child(format!("{} ({count})", section.title()));
+            .hover(|style| style.bg(colors.design.selected))
+            .child(icon(
+                if open {
+                    IconName::ChevronDown
+                } else {
+                    IconName::ChevronRight
+                },
+                12.0,
+                colors.muted_foreground,
+            ))
+            .child(glyph(section.icon(), 14.0, colors.muted_foreground))
+            .child(div().flex_1().min_w_0().truncate().child(section.title()))
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(10.0))
+                    .font_weight(FontWeight::NORMAL)
+                    .child(count.to_string()),
+            );
         if busy && section == Section::Local {
-            header = header.child(div().flex_1()).child(
+            header = header.child(
                 div()
                     .flex_none()
                     .text_size(px(9.0))
@@ -360,6 +431,58 @@ impl Branches {
             .into_any_element()
     }
 
+    /// A remote's own collapsing header, above its branch list.
+    fn remote_group_header(
+        &self,
+        group: &str,
+        count: usize,
+        colors: &Colors,
+        entity: &Entity<RepoView>,
+    ) -> AnyElement {
+        let collapsed = self.remote_groups.get(group).copied().unwrap_or(false);
+        let group = group.to_owned();
+        let click_group = group.clone();
+        let entity = entity.clone();
+        div()
+            .id(format!("remote-group-{group}"))
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .h(px(28.0))
+            .px_2()
+            .rounded(px(7.0))
+            .cursor_pointer()
+            .text_size(px(colors.design.small()))
+            .text_color(colors.sidebar_foreground)
+            .hover(|style| style.bg(colors.design.selected))
+            .on_click(move |_, _, cx| {
+                let group = click_group.clone();
+                entity.update(cx, |view, cx| {
+                    view.branches.toggle_remote_group(group);
+                    cx.notify();
+                });
+            })
+            .child(icon(
+                if collapsed {
+                    IconName::ChevronRight
+                } else {
+                    IconName::ChevronDown
+                },
+                12.0,
+                colors.muted_foreground,
+            ))
+            .child(glyph(style::glyph::CLOUD, 14.0, colors.sidebar_foreground))
+            .child(div().flex_1().min_w_0().truncate().child(group))
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(10.0))
+                    .text_color(colors.muted_foreground)
+                    .child(count.to_string()),
+            )
+            .into_any_element()
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn local_row(
         &self,
@@ -372,26 +495,18 @@ impl Branches {
         colors: &Colors,
         entity: &Entity<RepoView>,
     ) -> AnyElement {
-        let mut row = row(name, colors)
+        let mut row = row_with_icon(Some(style::glyph::BRANCH), name, colors)
             .id(("local-branch", index))
             .cursor_pointer()
             .when(active, |row| {
-                row.bg(colors.sidebar_accent)
-                    .text_color(colors.sidebar_accent_foreground)
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(px(9.0))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child("HEAD"),
-                    )
+                row.bg(colors.design.selected)
+                    .font_weight(FontWeight::SEMIBOLD)
             });
         if let Some(label) = upstream.and_then(upstream_label) {
             row = row.child(
                 div()
                     .flex_none()
-                    .font_family(colors.mono.clone())
-                    .text_size(px(9.5))
+                    .text_size(px(colors.design.tiny()))
                     .text_color(colors.muted_foreground)
                     .child(label),
             );
@@ -508,7 +623,8 @@ impl Branches {
         colors: &Colors,
         entity: &Entity<RepoView>,
     ) -> AnyElement {
-        let row_element = row(name, colors).id(("remote-branch", index));
+        let label = local_name_for_remote(name).unwrap_or(name);
+        let row_element = row(label, colors).id(("remote-branch", index)).pl(px(42.0));
         let Some(local_name) = local_name_for_remote(name).map(str::to_owned) else {
             return row_element.into_any_element();
         };
@@ -678,6 +794,11 @@ impl Branches {
         }
     }
 
+    pub(crate) fn toggle_remote_group(&mut self, group: String) {
+        let collapsed = self.remote_groups.entry(group).or_insert(false);
+        *collapsed = !*collapsed;
+    }
+
     pub(crate) fn set_viewport(&mut self, viewport: Size<Pixels>) {
         self.viewport = viewport;
     }
@@ -801,22 +922,68 @@ fn checkout_remote(
 }
 
 fn row(name: &str, colors: &Colors) -> Div {
+    row_with_icon(None, name, colors)
+}
+
+fn row_with_icon(item_icon: Option<&'static [u8]>, name: &str, colors: &Colors) -> Div {
+    let name = strip_stash_prefix(name);
     div()
         .flex()
         .items_center()
         .justify_between()
         .gap_2()
-        .h(px(22.0))
-        .px_3()
-        .text_size(px(11.0))
+        .h(px(28.0))
+        .px_2()
+        .rounded(px(7.0))
+        .text_size(px(colors.design.small()))
         .text_color(colors.sidebar_foreground)
+        .when_some(item_icon, |row, item_icon| {
+            row.child(glyph(item_icon, 14.0, colors.muted_foreground))
+        })
         .child(div().flex_1().min_w_0().truncate().child(name.to_owned()))
+}
+
+fn icon(name: IconName, size: f32, color: Hsla) -> Icon {
+    Icon::new(name).with_size(px(size)).text_color(color)
+}
+
+fn glyph(data: &'static [u8], size: f32, color: Hsla) -> Icon {
+    style::glyph_icon(data, size, color)
+}
+
+/// The sidebar lists `stash@{0}: message`; the row shows the message alone, as
+/// the design does, while the click handler keeps using the stash's index.
+fn strip_stash_prefix(name: &str) -> &str {
+    match name
+        .strip_prefix("stash@{")
+        .and_then(|rest| rest.split_once("}: "))
+    {
+        Some((_, message)) => message,
+        None => name,
+    }
+}
+
+/// `origin/main`, `origin/feat/x`, `upstream/main` grouped by their first path
+/// component, preserving the order the refs arrived in.
+fn remote_groups(entries: &[String]) -> Vec<(String, Vec<String>)> {
+    let mut groups: Vec<(String, Vec<String>)> = Vec::new();
+    for name in entries {
+        let group = name.split('/').next().unwrap_or(name).to_owned();
+        match groups.iter_mut().find(|(existing, _)| *existing == group) {
+            Some((_, branches)) => branches.push(name.clone()),
+            None => groups.push((group, vec![name.clone()])),
+        }
+    }
+    groups
 }
 
 fn empty_row(text: &str, colors: &Colors) -> Div {
     div()
-        .px_3()
-        .h(px(20.0))
+        .pl(px(38.0))
+        .pr_2()
+        .h(px(24.0))
+        .flex()
+        .items_center()
         .text_size(px(11.0))
         .text_color(colors.muted_foreground)
         .child(text.to_owned())
@@ -1174,6 +1341,16 @@ mod tests {
                 "{name} should be rejected"
             );
         }
+    }
+
+    #[test]
+    fn stash_rows_show_the_message_without_the_index() {
+        assert_eq!(
+            strip_stash_prefix("stash@{0}: WIP on diff options"),
+            "WIP on diff options"
+        );
+        assert_eq!(strip_stash_prefix("main"), "main");
+        assert_eq!(strip_stash_prefix("stash@{0}"), "stash@{0}");
     }
 
     #[test]

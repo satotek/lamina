@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use strata_core::graph::GraphRow;
 use strata_core::session::{CommitList, RepoSnapshot};
-use strata_core::{HeadInfo, Oid, RefInfo, RefKind, StashInfo};
+use strata_core::{CommitInfo, HeadInfo, Oid, RefInfo, RefKind, StashInfo};
 
 use crate::fake::{self, FakeRepo};
 
@@ -36,6 +36,8 @@ pub struct RowData<'a> {
     pub id: Cow<'a, str>,
     pub summary: Cow<'a, str>,
     pub author: Cow<'a, str>,
+    /// Author address; only the avatar colour uses it.
+    pub email: Cow<'a, str>,
     /// Seconds since the Unix epoch.
     pub time: i64,
     pub badges: Vec<Badge<'a>>,
@@ -82,11 +84,13 @@ impl Source {
         match self {
             Source::Fake(repo) => {
                 let commit = repo.commits.get(index)?;
+                let author = fake::author(commit.author);
                 Some(RowData {
                     graph: repo.graph.get(index)?,
                     id: Cow::Owned(fake::short_id(commit.id)),
                     summary: Cow::Owned(fake::summary(commit.summary_seed)),
-                    author: Cow::Borrowed(fake::author(commit.author)),
+                    author: Cow::Borrowed(author),
+                    email: Cow::Owned(fake_email(author)),
                     time: commit.time,
                     badges: fake_badges(index),
                 })
@@ -103,6 +107,7 @@ impl Source {
                     id: Cow::Owned(short_oid(commit.id)),
                     summary: Cow::Borrowed(commit.summary.as_str()),
                     author: Cow::Borrowed(commit.author_name.as_str()),
+                    email: Cow::Borrowed(commit.author_email.as_str()),
                     time: commit.author_time,
                     badges: badges_for_commit(
                         &snapshot.refs,
@@ -112,6 +117,14 @@ impl Source {
                     ),
                 })
             }
+        }
+    }
+
+    /// The commit at `index` in a real repository; `None` for synthetic rows.
+    pub fn commit(&self, index: usize) -> Option<&CommitInfo> {
+        match self {
+            Source::Fake(_) => None,
+            Source::Repo(snapshot) => snapshot.commits.get(index).map(|(commit, _)| commit),
         }
     }
 
@@ -259,6 +272,21 @@ fn fake_badges(index: usize) -> Vec<Badge<'static>> {
             head: *head,
         })
         .collect()
+}
+
+/// A stable synthetic address so `--fake` avatars get a colour of their own.
+fn fake_email(author: &str) -> String {
+    let local: String = author
+        .chars()
+        .map(|character| {
+            if character == ' ' {
+                '.'
+            } else {
+                character.to_ascii_lowercase()
+            }
+        })
+        .collect();
+    format!("{local}@strata.invalid")
 }
 
 /// Seven hex digits is what the status columns need; full ids make the list

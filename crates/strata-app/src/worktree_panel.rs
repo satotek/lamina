@@ -10,9 +10,10 @@ use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Entity, FocusHandle, Hsla, InteractiveElement,
-    IntoElement, KeyBinding, ParentElement, SharedString, StatefulInteractiveElement, Styled,
-    Subscription, UniformListScrollHandle, Window, actions, div, px, uniform_list,
+    AnyElement, App, ClickEvent, Context, Entity, FocusHandle, FontWeight, Hsla,
+    InteractiveElement, IntoElement, KeyBinding, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, UniformListScrollHandle, Window, actions,
+    div, px, uniform_list,
 };
 use gpui_component::input::{InputEvent, Textarea, TextareaState};
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
@@ -29,6 +30,8 @@ use crate::conflicts::{Conflicts, MarkFileResolved, UseOurs, UseTheirs};
 use crate::diff_view::{self, DiffColors, Row as DiffRow, RowOptions};
 use crate::repo_view::RepoView;
 use crate::scrollbar::WithScrollbar as _;
+use crate::settings::Settings;
+use crate::style::{self, Design};
 
 /// Key context of the file lists and the diff picker.
 ///
@@ -1046,14 +1049,14 @@ fn trim_message(message: &str) -> String {
     message.trim().to_owned()
 }
 
-/// First line length in characters, for the 72-column hint.
+/// First line length in characters, for the summary-length hint.
 fn summary_len(message: &str) -> usize {
     message.lines().next().unwrap_or_default().chars().count()
 }
 
-fn summary_hint(message: &str) -> Option<String> {
+fn summary_hint(message: &str, limit: u32) -> Option<String> {
     let len = summary_len(message);
-    (len > 72).then(|| format!("summary is {len} characters (guideline: 72)"))
+    (len > limit as usize).then(|| format!("summary is {len} characters (guideline: {limit})"))
 }
 
 /// HEAD's full message, used to prefill the amend box.
@@ -1078,6 +1081,8 @@ fn previous_message(session: &Session) -> Option<String> {
 
 #[derive(Clone)]
 struct Colors {
+    /// The shared design palette, sizes and history settings.
+    design: Design,
     background: Hsla,
     foreground: Hsla,
     muted: Hsla,
@@ -1090,34 +1095,34 @@ struct Colors {
     danger: Hsla,
     warning: Hsla,
     success: Hsla,
-    info: Hsla,
     mono: SharedString,
 }
 
 impl Colors {
-    fn from_theme(theme: &Theme) -> Self {
+    fn from_theme(theme: &Theme, settings: &Settings) -> Self {
+        let design = Design::new(theme, settings);
         Self {
-            background: theme.background,
-            foreground: theme.foreground,
-            muted: theme.muted,
-            muted_foreground: theme.muted_foreground,
-            border: theme.border,
-            selection: theme.list_active,
-            title_bar: theme.title_bar,
-            accent: theme.primary,
-            accent_foreground: theme.primary_foreground,
-            danger: theme.danger,
-            warning: theme.warning,
-            success: theme.success,
-            info: theme.info,
-            mono: theme.mono_font_family.clone(),
+            background: design.background,
+            foreground: design.text,
+            muted: design.field,
+            muted_foreground: design.muted,
+            border: design.border,
+            selection: design.row_selected,
+            title_bar: design.chrome,
+            accent: design.accent,
+            accent_foreground: design.on_accent,
+            danger: design.remove_text,
+            warning: design.tag_text,
+            success: design.add_text,
+            mono: design.mono.clone(),
+            design,
         }
     }
 }
 
 const LIST_WIDTH: f32 = 300.0;
-/// Height of one file row, matching the badge/list padding.
-const ROW_HEIGHT: f32 = 20.0;
+/// Height of one file row, matching the commit list and the design.
+const ROW_HEIGHT: f32 = 28.0;
 /// A list stops growing here and scrolls instead.
 const MAX_LIST_ROWS: usize = 8;
 
@@ -1132,28 +1137,41 @@ fn file_row(
 ) -> AnyElement {
     let is_selected =
         selected.is_some_and(|selected| selected.side == side && selected.path == path);
+    let (name, dir) = style::path_parts(&path);
 
     let mut row = div()
         .flex()
         .items_center()
         .gap_2()
-        .h(px(20.0))
-        .w_full()
+        .h(px(ROW_HEIGHT))
+        .mx(px(6.0))
         .px_2()
-        .text_size(px(11.0))
-        .child(change_badge(kind, colors))
+        .rounded(px(6.0))
+        .text_size(px(colors.design.small() + 0.5))
+        .child(style::file_badge(kind, &colors.design))
         .child(
             div()
                 .flex_1()
                 .min_w_0()
                 .truncate()
                 .text_color(if is_selected {
-                    colors.accent
+                    colors.design.accent_text
                 } else {
                     colors.foreground
                 })
-                .child(path.clone()),
-        );
+                .child(name.to_owned()),
+        )
+        .when_some(dir, |row, dir| {
+            row.child(
+                div()
+                    .max_w(px(120.0))
+                    .flex_none()
+                    .truncate()
+                    .text_size(px(11.0))
+                    .text_color(colors.muted_foreground)
+                    .child(dir.to_owned()),
+            )
+        });
     if is_selected {
         row = row.bg(colors.selection);
     }
@@ -1248,10 +1266,10 @@ fn hunk_header_row(
                 .items_center()
                 .gap_1()
                 .pr_1()
-                .child(chip_button(
+                .child(chip_button_compact(
                     ("hunk-stage", row),
                     "Stage hunk",
-                    true,
+                    false,
                     &stage_colors,
                     move |_, _, cx| {
                         stage_entity.update(cx, |this, cx| {
@@ -1259,9 +1277,9 @@ fn hunk_header_row(
                         });
                     },
                 ))
-                .child(chip_button(
+                .child(chip_button_compact(
                     ("hunk-discard", row),
-                    "Discard hunk",
+                    "Discard",
                     true,
                     &discard_colors,
                     move |_, _, cx| {
@@ -1279,10 +1297,10 @@ fn hunk_header_row(
                 .items_center()
                 .gap_1()
                 .pr_1()
-                .child(chip_button(
+                .child(chip_button_compact(
                     ("hunk-unstage", row),
                     "Unstage hunk",
-                    true,
+                    false,
                     &unstage_colors,
                     move |_, _, cx| {
                         unstage_entity.update(cx, |this, cx| {
@@ -1300,14 +1318,22 @@ fn hunk_header_row(
         .items_center()
         .h(px(diff_view::ROW_HEIGHT))
         .w_full()
-        .bg(diff_colors.header)
+        .bg(colors.design.panel)
         .border_t_1()
-        .border_color(diff_colors.border)
+        .border_color(colors.border)
         .text_size(px(11.0))
         .text_color(diff_colors.muted)
-        .child(div().flex_1().min_w_0().pl_2().truncate().child(format!(
-            "@@ -{old_start},{old_len} +{new_start},{new_len} @@"
-        )))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .pl_2()
+                .truncate()
+                .font_family(colors.mono.clone())
+                .child(format!(
+                    "@@ -{old_start},{old_len} +{new_start},{new_len} @@"
+                )),
+        )
         .child(buttons)
         .into_any_element()
 }
@@ -1322,22 +1348,57 @@ fn chip_button(
     let mut button = div()
         .id(id)
         .flex_none()
-        .px_1()
-        .py_0()
-        .rounded_sm()
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(24.0))
+        .px(px(9.0))
+        .rounded(px(6.0))
         .border_1()
         .border_color(colors.border)
-        .text_size(px(9.5))
+        .text_size(px(colors.design.small()))
         .text_color(if enabled {
             colors.foreground
         } else {
             colors.muted_foreground
         })
-        .bg(colors.muted.opacity(0.5));
+        .bg(colors.muted);
     if enabled {
         button = button.cursor_pointer().on_click(handler);
     }
     button.child(label.into()).into_any_element()
+}
+
+/// The hunk header's buttons: same look, sized for a 20 px diff row.
+fn chip_button_compact(
+    id: impl Into<gpui::ElementId>,
+    label: impl Into<SharedString>,
+    danger: bool,
+    colors: &Colors,
+    handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    div()
+        .id(id)
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(16.0))
+        .px(px(6.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(colors.border)
+        .text_size(px(10.0))
+        .text_color(if danger {
+            colors.danger
+        } else {
+            colors.foreground
+        })
+        .bg(colors.muted)
+        .cursor_pointer()
+        .on_click(handler)
+        .child(label.into())
+        .into_any_element()
 }
 
 fn primary_button(
@@ -1350,10 +1411,14 @@ fn primary_button(
     let mut button = div()
         .id(id)
         .flex_none()
-        .px_3()
-        .py_1()
-        .rounded_sm()
-        .text_size(px(11.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(28.0))
+        .px(px(14.0))
+        .rounded(px(7.0))
+        .text_size(px(colors.design.small()))
+        .font_weight(FontWeight::SEMIBOLD)
         .text_color(if enabled {
             colors.accent_foreground
         } else {
@@ -1437,26 +1502,6 @@ fn confirm_overlay(entity: Entity<RepoView>, confirm: &Confirm, colors: &Colors)
                         )),
                 ),
         )
-        .into_any_element()
-}
-
-fn change_badge(kind: ChangeKind, colors: &Colors) -> AnyElement {
-    let (marker, color) = match kind {
-        ChangeKind::Added | ChangeKind::Untracked => ("A", colors.success),
-        ChangeKind::Modified => ("M", colors.warning),
-        ChangeKind::Deleted => ("D", colors.danger),
-        ChangeKind::Renamed => ("R", colors.accent),
-        ChangeKind::Copied => ("C", colors.info),
-        ChangeKind::TypeChanged => ("T", colors.warning),
-        ChangeKind::Conflicted => ("!", colors.danger),
-    };
-    div()
-        .w(px(14.0))
-        .flex_none()
-        .text_size(px(10.0))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .text_color(color)
-        .child(marker)
         .into_any_element()
 }
 
@@ -1562,7 +1607,7 @@ impl RepoView {
         self.worktree.flush_input(window, cx);
         self.worktree.ensure_focus(cx);
 
-        let colors = Colors::from_theme(cx.theme());
+        let colors = Colors::from_theme(cx.theme(), Settings::get(cx));
         let Some(session) = self.session.as_ref() else {
             return synthetic_state(entity, &self.worktree, cx, &colors);
         };
@@ -1588,7 +1633,7 @@ impl WorktreePanel {
         snapshot: &RepoSnapshot,
         cx: &mut Context<RepoView>,
     ) -> AnyElement {
-        let colors = Colors::from_theme(cx.theme());
+        let colors = Colors::from_theme(cx.theme(), Settings::get(cx));
         let selected_conflict = self.selected_conflict().map(str::to_owned);
         let mut body = div()
             .flex()
@@ -1620,7 +1665,7 @@ impl WorktreePanel {
             .child(self.lists(entity.clone(), snapshot, &colors, cx))
             .child(match selected_conflict {
                 Some(path) => self.conflicts.pane(&path, entity.clone(), snapshot, cx),
-                None => self.diff_pane(entity.clone(), cx.theme(), &colors),
+                None => self.diff_pane(entity.clone(), snapshot, cx.theme(), &colors),
             });
         if let Some(focus) = &self.focus {
             body = body.track_focus(focus);
@@ -1809,14 +1854,14 @@ impl WorktreePanel {
                 .justify_between()
                 .gap_2()
                 .px_3()
-                .pt_2()
-                .pb_1()
+                .pt_3()
+                .pb_1p5()
                 .child(
                     div()
-                        .text_size(px(10.0))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_size(px(colors.design.tiny()))
+                        .font_weight(FontWeight::SEMIBOLD)
                         .text_color(colors.muted_foreground)
-                        .child(format!("{title} ({})", files.len())),
+                        .child(format!("{title} · {}", files.len())),
                 )
                 .child(button),
         );
@@ -1826,7 +1871,7 @@ impl WorktreePanel {
                 .child(
                     div()
                         .px_3()
-                        .h(px(22.0))
+                        .h(px(24.0))
                         .text_size(px(11.0))
                         .text_color(colors.muted_foreground)
                         .child("none"),
@@ -1882,39 +1927,75 @@ impl WorktreePanel {
         section.into_any_element()
     }
 
-    fn diff_pane(&self, entity: Entity<RepoView>, theme: &Theme, colors: &Colors) -> AnyElement {
+    fn diff_pane(
+        &self,
+        entity: Entity<RepoView>,
+        snapshot: &RepoSnapshot,
+        theme: &Theme,
+        colors: &Colors,
+    ) -> AnyElement {
         let selected = self.selected.clone();
         let (path, side) = selected
             .as_ref()
             .map(|selected| (selected.path.clone(), Some(selected.side)))
             .unwrap_or_else(|| ("no file selected".to_owned(), None));
+        let kind = selected.as_ref().and_then(|selected| match selected.side {
+            Side::Unstaged => snapshot
+                .status
+                .unstaged
+                .iter()
+                .find(|change| change.path == selected.path)
+                .map(|change| change.kind),
+            Side::Staged => snapshot
+                .status
+                .staged
+                .iter()
+                .find(|change| change.path == selected.path)
+                .map(|change| change.kind),
+            Side::Conflict => Some(ChangeKind::Conflicted),
+        });
+        let (name, dir) = style::path_parts(&path);
 
         let mut header = div()
             .flex()
             .items_center()
-            .justify_between()
-            .gap_2()
-            .h(px(30.0))
+            .gap(px(10.0))
+            .h(px(40.0))
             .flex_none()
-            .px_3()
-            .bg(colors.title_bar)
+            .px_3p5()
+            .bg(colors.background)
             .border_b_1()
             .border_color(colors.border)
-            .text_size(px(12.0))
+            .text_size(px(12.0));
+        if let Some(kind) = kind {
+            header = header.child(style::file_badge(kind, &colors.design));
+        }
+        header = header
             .child(
                 div()
+                    .flex_1()
+                    .min_w_0()
                     .flex()
                     .items_center()
-                    .gap_2()
-                    .min_w_0()
-                    .child(div().truncate().child(path))
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(px(10.0))
-                            .text_color(colors.muted_foreground)
-                            .child(side.map(Side::label).unwrap_or("")),
-                    ),
+                    .child(div().font_weight(FontWeight::MEDIUM).child(name.to_owned()))
+                    .when_some(dir, |row, dir| {
+                        row.child(
+                            div()
+                                .ml_2()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(11.5))
+                                .text_color(colors.muted_foreground)
+                                .child(dir.to_owned()),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(11.0))
+                    .text_color(colors.muted_foreground)
+                    .child(side.map(Side::label).unwrap_or("")),
             );
 
         if let (Some(selected), Some(_)) = (&selected, self.diff.view()) {
@@ -1954,9 +2035,9 @@ impl WorktreePanel {
         if count == 0 {
             return div()
                 .flex_none()
-                .text_size(px(10.0))
+                .text_size(px(11.0))
                 .text_color(colors.muted_foreground)
-                .child("click lines to pick")
+                .child("Click lines to pick · Shift-click for a range")
                 .into_any_element();
         }
 
@@ -2078,7 +2159,10 @@ impl WorktreePanel {
             &message,
             snapshot.busy.is_some() || self.pending.is_some(),
         );
-        let hint = summary_hint(&message);
+        let limit = colors.design.summary_hint;
+        let length = summary_len(&message);
+        let over = length > limit as usize;
+        let hint = summary_hint(&message, limit);
 
         let amend_box = {
             let entity = entity.clone();
@@ -2103,7 +2187,7 @@ impl WorktreePanel {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .rounded_sm()
+                        .rounded(px(3.0))
                         .border_1()
                         .border_color(colors.border)
                         .text_size(px(9.0))
@@ -2115,16 +2199,42 @@ impl WorktreePanel {
 
         let commit_button = {
             let entity = entity.clone();
-            let colors = colors.clone();
-            primary_button(
-                "commit-button",
-                "Commit",
-                enabled,
-                &colors,
-                move |_, _, cx| {
+            let mut button = div()
+                .id("commit-button")
+                .flex_none()
+                .flex()
+                .items_center()
+                .gap_2()
+                .h(px(32.0))
+                .px(px(14.0))
+                .rounded(px(7.0))
+                .text_size(px(12.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(if enabled {
+                    colors.accent_foreground
+                } else {
+                    colors.muted_foreground
+                })
+                .bg(if enabled { colors.accent } else { colors.muted })
+                .child(format!(
+                    "Commit {staged} file{}",
+                    if staged == 1 { "" } else { "s" }
+                ))
+                .child(
+                    div()
+                        .px(px(5.0))
+                        .py(px(1.0))
+                        .rounded(px(4.0))
+                        .bg(colors.accent_foreground.opacity(0.18))
+                        .text_size(px(10.5))
+                        .child(commit_key_label()),
+                );
+            if enabled {
+                button = button.cursor_pointer().on_click(move |_, _, cx| {
                     entity.update(cx, |this, cx| this.commit_worktree(cx));
-                },
-            )
+                });
+            }
+            button
         };
         let history_button = {
             let entity = entity.clone();
@@ -2167,45 +2277,67 @@ impl WorktreePanel {
             .flex_col()
             .flex_none()
             .w_full()
-            .gap_1()
-            .p_2()
+            .gap_2()
+            .p_3()
             .bg(colors.title_bar)
             .border_t_1()
             .border_color(colors.border)
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(colors.muted_foreground)
+                    .child("COMMIT MESSAGE"),
+            )
+            .child(
+                Textarea::new(&input)
+                    .h(px(84.0))
+                    .w_full()
+                    .text_size(px(colors.design.code)),
+            )
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap_3()
                     .child(history_button)
-                    .child(
-                        div()
-                            .text_size(px(10.0))
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(colors.muted_foreground)
-                            .child("COMMIT MESSAGE"),
-                    )
                     .child(amend_box)
+                    .when_some(hint, |row, hint| {
+                        row.child(
+                            div()
+                                .flex_none()
+                                .text_size(px(10.0))
+                                .text_color(colors.warning)
+                                .child(hint),
+                        )
+                    })
                     .child(
                         div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(10.0))
-                            .text_color(colors.warning)
-                            .child(hint.unwrap_or_default()),
+                            .flex_none()
+                            .text_size(px(11.0))
+                            .text_color(if over {
+                                colors.warning
+                            } else {
+                                colors.muted_foreground
+                            })
+                            .child(format!("{length} / {limit}")),
                     )
+                    .child(div().flex_1())
                     .child(commit_button),
-            )
-            .child(
-                Textarea::new(&input)
-                    .h(px(78.0))
-                    .w_full()
-                    .text_size(px(12.0)),
             )
             .child(status)
             .into_any_element()
     }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn commit_key_label() -> &'static str {
+    "Ctrl ↵"
+}
+
+#[cfg(target_os = "macos")]
+fn commit_key_label() -> &'static str {
+    "⌘↵"
 }
 
 #[cfg(test)]
@@ -2316,16 +2448,21 @@ mod tests {
 
     #[test]
     fn long_summaries_get_a_hint() {
-        assert_eq!(summary_hint("short summary"), None);
+        assert_eq!(summary_hint("short summary", 72), None);
         let summary = "s".repeat(73);
         assert_eq!(
-            summary_hint(&summary).as_deref(),
+            summary_hint(&summary, 72).as_deref(),
             Some("summary is 73 characters (guideline: 72)")
         );
         let message = format!("{summary}\n\nbody that is long but irrelevant");
         assert!(
-            summary_hint(&message).is_some(),
+            summary_hint(&message, 72).is_some(),
             "only the first line counts"
+        );
+        assert_eq!(
+            summary_hint(&summary, 120),
+            None,
+            "the limit comes from the settings"
         );
         assert_eq!(
             summary_len(&format!("{}\nbody", "é".repeat(72))),

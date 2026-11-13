@@ -26,6 +26,7 @@ mod scrollbar;
 mod search;
 mod settings;
 mod stash;
+mod style;
 mod workspace;
 mod worktree_panel;
 

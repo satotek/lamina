@@ -9,15 +9,26 @@ use gpui::prelude::*;
 use gpui::{Bounds, Hsla, PathBuilder, Pixels, Window, canvas, div, fill, point, px, size};
 use strata_core::graph::{GraphRow, Half, PassThrough, Segment};
 
-pub const ROW_HEIGHT: f32 = 22.0;
-pub const LANE_WIDTH: f32 = 12.0;
-const STROKE_WIDTH: f32 = 1.5;
-const NODE_RADIUS: f32 = 3.5;
+pub const ROW_HEIGHT: f32 = 28.0;
+pub const LANE_WIDTH: f32 = 14.0;
+/// Distance from the column's left edge to the first lane's centre.
+const LANE_PADDING: f32 = 14.0;
+/// The graph column never gets narrower than this, so the "Graph" heading and
+/// the first lane keep their places even for a linear history.
+pub const MIN_WIDTH: f32 = 72.0;
+const STROKE_WIDTH: f32 = 2.0;
+const NODE_RADIUS: f32 = 5.0;
+
+/// Width of the graph column for a list whose widest row has `lanes` lanes.
+pub fn column_width(lanes: u16) -> f32 {
+    let lanes = f32::from(lanes.max(1));
+    (LANE_PADDING * 2.0 + (lanes - 1.0) * LANE_WIDTH).max(MIN_WIDTH)
+}
 
 /// `lanes` is the width of the widest row in the list, not of this row: the
 /// column must not resize per row or lanes would drift horizontally.
 pub fn graph_column(row: GraphRow<'_>, colors: [Hsla; 8], lanes: u16) -> impl IntoElement {
-    let width = px(LANE_WIDTH * f32::from(lanes.max(1)));
+    let width = px(column_width(lanes));
     // The paint closure must own its data; only visible rows are copied.
     let row = OwnedRow {
         node_lane: row.node_lane,
@@ -113,5 +124,5 @@ fn paint_row(row: &OwnedRow, colors: &[Hsla; 8], bounds: Bounds<Pixels>, window:
 }
 
 fn lane_x(bounds: Bounds<Pixels>, lane: u16) -> Pixels {
-    bounds.origin.x + px((f32::from(lane) + 0.5) * LANE_WIDTH)
+    bounds.origin.x + px(LANE_PADDING + f32::from(lane) * LANE_WIDTH)
 }

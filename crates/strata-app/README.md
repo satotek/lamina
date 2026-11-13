@@ -53,6 +53,31 @@ The window draws its own title bar (`gpui_component::TitleBar`) with the
 repository and branch in it, so the title bar and the app read as one surface
 on every platform.
 
+## Visual system
+
+The window follows the design mockups in `.docs/design`: a 44 px title bar with
+the app mark, repository and branch chips, the commit search and the remote
+actions; a 248 px sidebar; a 28 px commit list with graph, description, author,
+date and commit columns; a 320 px details column next to the diff; and a 26 px
+status bar.
+
+`src/style.rs` holds the one palette both appearances use. It exposes the
+design's light and dark tables as `Design`, which every pane copies and reads for
+its colours, lane and avatar palette, UI and code sizes, and the settings that
+change what is drawn (`history.date_format`, `history.show_remote_branches`,
+`history.show_tags`, `history.show_stashes`, `behaviour.summary_length_hint`).
+`appearance.ui_font`/`ui_font_size` set the UI font and the text scale;
+`appearance.code_font`/`code_font_size` set the monospace family and the size of
+commit ids, hunk headers and the commit box. `cx.observe_global::<Settings>` in
+`RepoView::new` repaints the window when a setting changes.
+
+Icons come from `gpui_component`'s default `IconName` bundle. The branch, cloud,
+tag, archive and commit glyphs are not in that bundle, so they are embedded from
+`assets/icons/` and drawn with `style::glyph_icon`. `assets/icon.svg` and
+`assets/icon-small.svg` are the app mark; the title bar paints `style::app_mark`
+with quads instead, because GPUI renders an SVG as a single-colour alpha mask
+and the three bands would collapse into one silhouette.
+
 ## Dependencies: why `gpui-pre`
 
 `gpui` is not published on crates.io under its own name. The current GPUI is

@@ -26,6 +26,8 @@ use crate::diff_view::{self, DiffColors, Row as DiffRow};
 use crate::repo_view::RepoView;
 use crate::scrollbar::WithScrollbar as _;
 use crate::search::{QuerySlot, Ready};
+use crate::settings::Settings;
+use crate::style::{self, Design};
 
 const LIST_WIDTH: f32 = 520.0;
 
@@ -355,7 +357,7 @@ impl RepoView {
         let Some(history) = self.file_history.as_ref() else {
             return div().into_any_element();
         };
-        let colors = Colors::from_theme(cx.theme());
+        let colors = Colors::from_theme(cx.theme(), Settings::get(cx));
 
         let back = {
             let entity = entity.clone();
@@ -384,10 +386,10 @@ impl RepoView {
             .flex()
             .items_center()
             .gap_3()
-            .h(px(34.0))
+            .h(px(40.0))
             .flex_none()
-            .px_2()
-            .bg(colors.title_bar)
+            .px_3p5()
+            .bg(colors.background)
             .border_b_1()
             .border_color(colors.border)
             .child(back)
@@ -493,14 +495,19 @@ impl RepoView {
                         let Some(row) = source.row(index) else {
                             return div().into_any_element();
                         };
+                        let date = style::date_label(
+                            row.time,
+                            style::now_epoch(),
+                            list_colors.design.date_format,
+                        );
                         let mut element = div()
                             .flex()
                             .items_center()
-                            .gap_2()
-                            .h(px(20.0))
+                            .gap_3()
+                            .h(px(28.0))
                             .w_full()
-                            .px_2()
-                            .text_size(px(11.0))
+                            .px_3()
+                            .text_size(px(list_colors.design.small()))
                             .text_color(list_colors.foreground)
                             .child(
                                 div()
@@ -522,7 +529,7 @@ impl RepoView {
                                     .w(px(104.0))
                                     .flex_none()
                                     .text_color(list_colors.muted_foreground)
-                                    .child(data::format_time(row.time)),
+                                    .child(date),
                             )
                             .child(
                                 div()
@@ -533,7 +540,10 @@ impl RepoView {
                                     .child(row.id.to_string()),
                             );
                         if selected == Some(index) {
-                            element = element.bg(list_colors.selection);
+                            element = element
+                                .bg(list_colors.selection)
+                                .border_l_2()
+                                .border_color(list_colors.accent);
                         }
                         let entity = entity.clone();
                         element
@@ -571,9 +581,9 @@ impl RepoView {
             .items_center()
             .justify_between()
             .gap_3()
-            .h(px(28.0))
+            .h(px(36.0))
             .flex_none()
-            .px_3()
+            .px_3p5()
             .bg(colors.title_bar)
             .border_b_1()
             .border_color(colors.border)
@@ -701,6 +711,7 @@ fn line_highlights<'a>(row: &DiffRow, view: &'a DiffView) -> Option<&'a LineHigh
 
 #[derive(Clone)]
 struct Colors {
+    design: Design,
     background: Hsla,
     foreground: Hsla,
     muted_foreground: Hsla,
@@ -713,17 +724,19 @@ struct Colors {
 }
 
 impl Colors {
-    fn from_theme(theme: &Theme) -> Self {
+    fn from_theme(theme: &Theme, settings: &Settings) -> Self {
+        let design = Design::new(theme, settings);
         Self {
-            background: theme.background,
-            foreground: theme.foreground,
-            muted_foreground: theme.muted_foreground,
-            border: theme.border,
-            selection: theme.list_active,
-            title_bar: theme.title_bar,
-            accent: theme.primary,
-            danger: theme.danger,
-            mono: theme.mono_font_family.clone(),
+            background: design.background,
+            foreground: design.text,
+            muted_foreground: design.muted,
+            border: design.border,
+            selection: design.row_selected,
+            title_bar: design.chrome,
+            accent: design.accent,
+            danger: design.remove_text,
+            mono: design.mono.clone(),
+            design,
         }
     }
 }

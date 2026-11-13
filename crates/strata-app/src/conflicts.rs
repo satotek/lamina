@@ -11,6 +11,7 @@
 
 use std::rc::Rc;
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, ClickEvent, Context, ElementId, Entity, Hsla, InteractiveElement, IntoElement,
     KeyBinding, ParentElement, SharedString, StatefulInteractiveElement, Styled,
@@ -22,10 +23,12 @@ use gpui_component::WindowExt as _;
 use gpui_component::button::ButtonVariant;
 use strata_core::diff::{DiffOptions, LineKind, diff_text};
 use strata_core::session::{ConflictSide, Operation, OperationId, RepoSnapshot};
-use strata_core::{ConflictEntry, ConflictKind, ConflictSides, RepoState};
+use strata_core::{ChangeKind, ConflictEntry, ConflictKind, ConflictSides, RepoState};
 
 use crate::repo_view::RepoView;
 use crate::scrollbar::WithScrollbar as _;
+use crate::settings::Settings;
+use crate::style::{self, Design};
 use crate::worktree_panel::WORKTREE_PANEL;
 
 actions!(strata_conflicts, [UseOurs, UseTheirs, MarkFileResolved]);
@@ -818,13 +821,13 @@ pub(crate) fn confirm_abort_merge(entity: Entity<RepoView>, window: &mut Window,
 
 #[derive(Clone)]
 struct Colors {
+    design: Design,
     background: Hsla,
     foreground: Hsla,
     muted: Hsla,
     muted_foreground: Hsla,
     border: Hsla,
     selection: Hsla,
-    title_bar: Hsla,
     accent: Hsla,
     accent_foreground: Hsla,
     danger: Hsla,
@@ -835,22 +838,23 @@ struct Colors {
 }
 
 impl Colors {
-    fn from_theme(theme: &Theme) -> Self {
+    fn from_theme(theme: &Theme, settings: &Settings) -> Self {
+        let design = Design::new(theme, settings);
         Self {
-            background: theme.background,
-            foreground: theme.foreground,
-            muted: theme.muted,
-            muted_foreground: theme.muted_foreground,
-            border: theme.border,
-            selection: theme.list_active,
-            title_bar: theme.title_bar,
-            accent: theme.primary,
-            accent_foreground: theme.primary_foreground,
-            danger: theme.danger,
-            warning: theme.warning,
-            success: theme.success,
-            info: theme.info,
-            mono: theme.mono_font_family.clone(),
+            background: design.background,
+            foreground: design.text,
+            muted: design.field,
+            muted_foreground: design.muted,
+            border: design.border,
+            selection: design.row_selected,
+            accent: design.accent,
+            accent_foreground: design.on_accent,
+            danger: design.remove_text,
+            warning: design.tag_text,
+            success: design.add_text,
+            info: design.accent_text,
+            mono: design.mono.clone(),
+            design,
         }
     }
 }
@@ -874,17 +878,20 @@ fn button(
         (false, _) => (colors.muted, colors.muted_foreground),
         (true, Tone::Primary) => (colors.accent, colors.accent_foreground),
         (true, Tone::Danger) => (colors.danger, colors.accent_foreground),
-        (true, Tone::Normal) => (colors.muted.opacity(0.5), colors.foreground),
+        (true, Tone::Normal) => (colors.muted, colors.foreground),
     };
     let mut element = div()
         .id(id)
         .flex_none()
-        .px_2()
-        .py_1()
-        .rounded_sm()
+        .flex()
+        .items_center()
+        .justify_center()
+        .h(px(24.0))
+        .px(px(9.0))
+        .rounded(px(6.0))
         .border_1()
         .border_color(colors.border)
-        .text_size(px(10.5))
+        .text_size(px(12.0))
         .text_color(foreground)
         .bg(background);
     if enabled {
@@ -920,15 +927,17 @@ fn conflict_row(
     let entity = entity.clone();
     let click_path = path.clone();
 
+    let (name, dir) = style::path_parts(&path);
     let mut row = div()
         .id(("conflict-file", index))
         .flex()
         .items_center()
         .gap_2()
         .h(px(ROW_HEIGHT))
-        .w_full()
+        .mx(px(6.0))
         .px_2()
-        .text_size(px(11.0))
+        .rounded(px(6.0))
+        .text_size(px(colors.design.small() + 0.5))
         .cursor_pointer()
         .on_click(move |_, window, cx| {
             let path = click_path.clone();
@@ -936,27 +945,30 @@ fn conflict_row(
                 this.select_conflict_file(path.clone(), window, cx)
             });
         })
-        .child(
-            div()
-                .w(px(14.0))
-                .flex_none()
-                .text_size(px(10.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .text_color(colors.danger)
-                .child("!"),
-        )
+        .child(style::file_badge(ChangeKind::Conflicted, &colors.design))
         .child(
             div()
                 .flex_1()
                 .min_w_0()
                 .truncate()
                 .text_color(if is_selected {
-                    colors.accent
+                    colors.design.accent_text
                 } else {
                     colors.foreground
                 })
-                .child(path),
+                .child(name.to_owned()),
         )
+        .when_some(dir, |row, dir| {
+            row.child(
+                div()
+                    .max_w(px(120.0))
+                    .flex_none()
+                    .truncate()
+                    .text_size(px(11.0))
+                    .text_color(colors.muted_foreground)
+                    .child(dir.to_owned()),
+            )
+        })
         .child(
             div()
                 .flex_none()
@@ -982,7 +994,7 @@ impl Conflicts {
         if conflicts.is_empty() {
             return div().into_any_element();
         }
-        let colors = Colors::from_theme(cx.theme());
+        let colors = Colors::from_theme(cx.theme(), Settings::get(cx));
         let entries: Rc<Vec<(String, ConflictKind)>> = Rc::new(
             conflicts
                 .iter()
@@ -1028,14 +1040,14 @@ impl Conflicts {
                     .justify_between()
                     .gap_2()
                     .px_3()
-                    .pt_2()
-                    .pb_1()
+                    .pt_3()
+                    .pb_1p5()
                     .child(
                         div()
-                            .text_size(px(10.0))
+                            .text_size(px(11.0))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(colors.danger)
-                            .child(format!("CONFLICTS ({})", conflicts.len())),
+                            .child(format!("CONFLICTS · {}", conflicts.len())),
                     ),
             )
             .child(list)
@@ -1050,20 +1062,21 @@ impl Conflicts {
         snapshot: &RepoSnapshot,
         cx: &Context<RepoView>,
     ) -> AnyElement {
-        let colors = Colors::from_theme(cx.theme());
+        let colors = Colors::from_theme(cx.theme(), Settings::get(cx));
         let busy = snapshot.busy.is_some() || self.pending.is_some();
         let loaded = self.data_for(path);
         let kind = loaded.map(|loaded| loaded.kind);
 
+        let (name, dir) = style::path_parts(path);
         let mut header = div()
             .flex()
             .items_center()
             .justify_between()
             .gap_2()
-            .h(px(30.0))
+            .h(px(40.0))
             .flex_none()
-            .px_3()
-            .bg(colors.title_bar)
+            .px_3p5()
+            .bg(colors.background)
             .border_b_1()
             .border_color(colors.border)
             .text_size(px(12.0))
@@ -1073,7 +1086,18 @@ impl Conflicts {
                     .items_center()
                     .gap_2()
                     .min_w_0()
-                    .child(div().truncate().child(path.to_owned()))
+                    .child(style::file_badge(ChangeKind::Conflicted, &colors.design))
+                    .child(div().truncate().child(name.to_owned()))
+                    .when_some(dir, |row, dir| {
+                        row.child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(11.5))
+                                .text_color(colors.muted_foreground)
+                                .child(dir.to_owned()),
+                        )
+                    })
                     .child(
                         div()
                             .flex_none()
@@ -1098,8 +1122,8 @@ impl Conflicts {
             .items_center()
             .gap_2()
             .flex_none()
-            .px_3()
-            .h(px(30.0))
+            .px_3p5()
+            .h(px(40.0))
             .border_b_1()
             .border_color(colors.border);
 

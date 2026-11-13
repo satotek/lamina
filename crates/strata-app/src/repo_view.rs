@@ -229,6 +229,9 @@ pub struct RepoView {
     metrics: FrameMetrics,
 
     _appearance: Subscription,
+    /// Notifies the view when the settings change, so sizes and colours that
+    /// come from them take effect without a restart.
+    _settings: Subscription,
     /// Held so the event loop is cancelled with the view.
     _bridge: Option<Task<()>>,
 }
@@ -239,6 +242,7 @@ impl RepoView {
         window.focus(&focus, cx);
         let appearance = window
             .observe_window_appearance(|window, cx| crate::settings::apply_theme(Some(window), cx));
+        let settings = cx.observe_global::<crate::settings::Settings>(|_, cx| cx.notify());
         let smoke = std::env::var_os("STRATA_SMOKE").is_some();
         let title = launch.title();
         let entity = cx.entity();
@@ -279,6 +283,7 @@ impl RepoView {
             finished: false,
             metrics: FrameMetrics::default(),
             _appearance: appearance,
+            _settings: settings,
             _bridge: None,
         };
         view.branches.set_dialog_focus(cx.focus_handle());
