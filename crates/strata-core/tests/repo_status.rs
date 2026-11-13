@@ -207,6 +207,59 @@ fn untracked(path: &str) -> FileChange {
     }
 }
 
+fn type_changed(path: &str) -> FileChange {
+    FileChange {
+        path: path.to_owned(),
+        old_path: None,
+        kind: ChangeKind::TypeChanged,
+    }
+}
+
+/// The reference for `commit_changes`: `git diff-tree -r --no-renames
+/// --name-status` against the first parent, or the empty tree for a root commit.
+fn git_commit_changes(repo: &TestRepo, commit: &str) -> Vec<FileChange> {
+    let parent = format!("{commit}^1");
+    let has_parent = repo
+        .command(&["rev-parse", "--verify", "--quiet", &parent])
+        .status()
+        .expect("run git")
+        .success();
+    let mut args = vec![
+        "diff-tree",
+        "-r",
+        "--no-renames",
+        "--no-commit-id",
+        "--name-status",
+    ];
+    if has_parent {
+        args.push(&parent);
+    } else {
+        args.push("--root");
+    }
+    args.push(commit);
+
+    repo.git(&args)
+        .lines()
+        .map(|line| {
+            let (code, path) = line
+                .split_once('\t')
+                .unwrap_or_else(|| panic!("name-status line without a tab: {line:?}"));
+            FileChange {
+                path: path.to_owned(),
+                old_path: None,
+                kind: kind_for(code.chars().next().expect("status code"))
+                    .unwrap_or_else(|| panic!("unexpected status code {code:?}")),
+            }
+        })
+        .collect()
+}
+
+fn commit_changes(repo: &TestRepo, commit: &str) -> Vec<FileChange> {
+    repo.open()
+        .commit_changes(commit.parse().expect("commit oid"))
+        .expect("commit changes")
+}
+
 /// Replace the worktree copy of `path` with what `git checkout` writes, then
 /// backdate it so a content comparison is required. This is the state a Windows
 /// checkout with CRLF conversion leaves behind.
@@ -393,11 +446,240 @@ fn root_commit_changes_are_additions() {
     repo.git(&["add", "--", "root.txt", "nested/child.txt"]);
     repo.git(&["commit", "-q", "-m", "root"]);
 
-    let changes = repo
-        .open()
-        .commit_changes(repo.head())
-        .expect("commit changes");
+    let head = repo.head().to_string();
+    let changes = commit_changes(&repo, &head);
     assert_eq!(changes, vec![added("nested/child.txt"), added("root.txt")]);
+    assert_eq!(changes, git_commit_changes(&repo, &head));
+}
+
+#[test]
+fn commit_changes_in_a_subdirectory_lists_only_the_file() {
+    let repo = TestRepo::new();
+    repo.write("src/lib.rs", "one\n");
+    repo.write("src/main.rs", "main\n");
+    repo.git(&["add", "--", "src/lib.rs", "src/main.rs"]);
+    repo.git(&["commit", "-q", "-m", "init"]);
+
+    repo.write("src/lib.rs", "two\n");
+    repo.git(&["add", "--", "src/lib.rs"]);
+    repo.git(&["commit", "-q", "-m", "modify"]);
+
+    let head = repo.head().to_string();
+    let changes = commit_changes(&repo, &head);
+    assert_eq!(
+        changes,
+        vec![modified("src/lib.rs")],
+        "the changed `src` tree is not a file and must not be reported"
+    );
+    assert_eq!(changes, git_commit_changes(&repo, &head));
+}
+
+#[test]
+fn commit_changes_for_added_and_removed_directories_lists_files() {
+    let repo = TestRepo::new();
+    repo.write("keep.txt", "keep\n");
+    repo.git(&["add", "--", "keep.txt"]);
+    repo.git(&["commit", "-q", "-m", "init"]);
+
+    repo.write("dir/one.txt", "one\n");
+    repo.write("dir/sub/two.txt", "two\n");
+    repo.git(&["add", "--", "dir"]);
+    repo.git(&["commit", "-q", "-m", "add a directory"]);
+    let added_dir = repo.head().to_string();
+    let changes = commit_changes(&repo, &added_dir);
+    assert_eq!(
+        changes,
+        vec![added("dir/one.txt"), added("dir/sub/two.txt")]
+    );
+    assert_eq!(changes, git_commit_changes(&repo, &added_dir));
+
+    repo.git(&["rm", "-r", "-q", "dir"]);
+    repo.git(&["commit", "-q", "-m", "remove a directory"]);
+    let removed_dir = repo.head().to_string();
+    let changes = commit_changes(&repo, &removed_dir);
+    assert_eq!(
+        changes,
+        vec![deleted("dir/one.txt"), deleted("dir/sub/two.txt")]
+    );
+    assert_eq!(changes, git_commit_changes(&repo, &removed_dir));
+}
+
+#[test]
+fn commit_changes_for_file_directory_replacements() {
+    let repo = TestRepo::new();
+    repo.write("thing", "a file, before the change\n");
+    repo.git(&["add", "--", "thing"]);
+    repo.git(&["commit", "-q", "-m", "file"]);
+
+    // The content is unrelated, so rename detection cannot pair the two sides.
+    fs::remove_file(repo.path().join("thing")).expect("remove the file");
+    repo.write("thing/inside.txt", "unrelated contents entirely\n");
+    repo.git(&["add", "-A", "--", "thing"]);
+    repo.git(&["commit", "-q", "-m", "file becomes directory"]);
+    let to_directory = repo.head().to_string();
+    let changes = commit_changes(&repo, &to_directory);
+    assert_eq!(
+        changes,
+        vec![deleted("thing"), added("thing/inside.txt")],
+        "git reports the file as deleted and the new file as added"
+    );
+    assert_eq!(changes, git_commit_changes(&repo, &to_directory));
+
+    repo.git(&["rm", "-r", "-q", "thing"]);
+    repo.write("thing", "now a plain file again\n");
+    repo.git(&["add", "--", "thing"]);
+    repo.git(&["commit", "-q", "-m", "directory becomes file"]);
+    let to_file = repo.head().to_string();
+    let changes = commit_changes(&repo, &to_file);
+    assert_eq!(changes, vec![added("thing"), deleted("thing/inside.txt")]);
+    assert_eq!(changes, git_commit_changes(&repo, &to_file));
+}
+
+#[test]
+fn commit_changes_for_gitlink_changes() {
+    let repo = TestRepo::new();
+    repo.write("file.txt", "file\n");
+    repo.git(&["add", "--", "file.txt"]);
+    repo.git(&["commit", "-q", "-m", "init"]);
+
+    // A gitlink is a tree entry of its own; it is not a directory to recurse
+    // into, and the object it names does not have to exist here.
+    let first = "1111111111111111111111111111111111111111";
+    let second = "2222222222222222222222222222222222222222";
+    repo.git(&[
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        &format!("160000,{first},sub"),
+    ]);
+    repo.git(&["commit", "-q", "-m", "add a gitlink"]);
+    let added_link = repo.head().to_string();
+    assert_eq!(commit_changes(&repo, &added_link), vec![added("sub")]);
+    assert_eq!(
+        commit_changes(&repo, &added_link),
+        git_commit_changes(&repo, &added_link)
+    );
+
+    repo.git(&[
+        "update-index",
+        "--cacheinfo",
+        &format!("160000,{second},sub"),
+    ]);
+    repo.git(&["commit", "-q", "-m", "move the gitlink"]);
+    let moved_link = repo.head().to_string();
+    assert_eq!(commit_changes(&repo, &moved_link), vec![modified("sub")]);
+    assert_eq!(
+        commit_changes(&repo, &moved_link),
+        git_commit_changes(&repo, &moved_link)
+    );
+
+    repo.git(&["update-index", "--force-remove", "sub"]);
+    repo.write("sub", "a regular file where the gitlink was\n");
+    repo.git(&["add", "--", "sub"]);
+    repo.git(&["commit", "-q", "-m", "gitlink becomes a file"]);
+    let replaced = repo.head().to_string();
+    assert_eq!(commit_changes(&repo, &replaced), vec![type_changed("sub")]);
+    assert_eq!(
+        commit_changes(&repo, &replaced),
+        git_commit_changes(&repo, &replaced)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn commit_changes_for_a_mode_change_is_a_modification() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = TestRepo::new();
+    repo.write("run.sh", "#!/bin/sh\necho hi\n");
+    repo.git(&["add", "--", "run.sh"]);
+    repo.git(&["commit", "-q", "-m", "init"]);
+
+    let file = repo.path().join("run.sh");
+    let mut permissions = fs::metadata(&file).expect("metadata").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&file, permissions).expect("chmod");
+    repo.git(&["add", "--", "run.sh"]);
+    repo.git(&["commit", "-q", "-m", "make executable"]);
+
+    let head = repo.head().to_string();
+    let changes = commit_changes(&repo, &head);
+    assert_eq!(changes, vec![modified("run.sh")]);
+    assert_eq!(changes, git_commit_changes(&repo, &head));
+}
+
+#[cfg(unix)]
+#[test]
+fn commit_changes_for_symlinks() {
+    let repo = TestRepo::new();
+    repo.write("target.txt", "content\n");
+    repo.write("other.txt", "other\n");
+    repo.write("link", "a plain file\n");
+    repo.git(&["add", "--", "target.txt", "other.txt", "link"]);
+    repo.git(&["commit", "-q", "-m", "init"]);
+
+    // A regular file replaced by a symlink is a type change, as is the reverse.
+    fs::remove_file(repo.path().join("link")).expect("remove the file");
+    std::os::unix::fs::symlink("target.txt", repo.path().join("link")).expect("symlink");
+    repo.git(&["add", "--", "link"]);
+    repo.git(&["commit", "-q", "-m", "link becomes a symlink"]);
+    let to_link = repo.head().to_string();
+    assert_eq!(commit_changes(&repo, &to_link), vec![type_changed("link")]);
+    assert_eq!(
+        commit_changes(&repo, &to_link),
+        git_commit_changes(&repo, &to_link)
+    );
+
+    // Retargeting a symlink keeps its type, so it is a content modification.
+    fs::remove_file(repo.path().join("link")).expect("remove the symlink");
+    std::os::unix::fs::symlink("other.txt", repo.path().join("link")).expect("symlink");
+    repo.git(&["add", "--", "link"]);
+    repo.git(&["commit", "-q", "-m", "retarget the symlink"]);
+    let retargeted = repo.head().to_string();
+    assert_eq!(commit_changes(&repo, &retargeted), vec![modified("link")]);
+    assert_eq!(
+        commit_changes(&repo, &retargeted),
+        git_commit_changes(&repo, &retargeted)
+    );
+
+    fs::remove_file(repo.path().join("link")).expect("remove the symlink");
+    repo.write("link", "back to a plain file\n");
+    repo.git(&["add", "--", "link"]);
+    repo.git(&["commit", "-q", "-m", "link is a file again"]);
+    let to_file = repo.head().to_string();
+    assert_eq!(commit_changes(&repo, &to_file), vec![type_changed("link")]);
+    assert_eq!(
+        commit_changes(&repo, &to_file),
+        git_commit_changes(&repo, &to_file)
+    );
+}
+
+#[test]
+fn commit_changes_for_a_merge_is_the_first_parent_diff() {
+    let repo = TestRepo::new();
+    repo.write("base.txt", "base\n");
+    repo.git(&["add", "--", "base.txt"]);
+    repo.git(&["commit", "-q", "-m", "base"]);
+
+    repo.git(&["checkout", "-q", "-b", "side"]);
+    repo.write("side.txt", "side\n");
+    repo.git(&["add", "--", "side.txt"]);
+    repo.git(&["commit", "-q", "-m", "side"]);
+
+    repo.git(&["checkout", "-q", "main"]);
+    repo.write("main.txt", "main\n");
+    repo.git(&["add", "--", "main.txt"]);
+    repo.git(&["commit", "-q", "-m", "main"]);
+    repo.git(&["merge", "-q", "--no-ff", "-m", "merge side", "side"]);
+
+    let merge = repo.head().to_string();
+    let changes = commit_changes(&repo, &merge);
+    assert_eq!(
+        changes,
+        vec![added("side.txt")],
+        "a merge is diffed against its first parent only"
+    );
+    assert_eq!(changes, git_commit_changes(&repo, &merge));
 }
 
 #[test]

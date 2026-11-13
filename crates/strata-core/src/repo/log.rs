@@ -3,19 +3,32 @@
 mod walk;
 
 use std::collections::HashSet;
+use std::sync::Arc;
 
 use gix::objs::commit::ref_iter::Token as CommitToken;
 
 use super::Repo;
 use crate::{CommitInfo, Error, HeadInfo, Oid, RefInfo, RefKind, Result, StashInfo};
 
-/// Streams commits reachable from HEAD and all refs, in topological order
-/// (children before parents), newest first among independent commits.
+/// Cooperative cancellation for a walk: returns `true` to stop it.
 ///
-/// This is `git log --all --date-order`. `gix`'s topological walk builds the
-/// whole reachability graph before yielding anything, so it is replaced by the
-/// incremental walk in `walk.rs`, which uses commit-graph generation numbers to
-/// emit the newest commits while older history is still being counted.
+/// Shared between the commit walk and the path-history filter, which has to keep
+/// checking between commits that do not match the path.
+pub(crate) type CancelCheck = Arc<dyn Fn() -> bool + Send + Sync>;
+
+/// Streams commits reachable from HEAD and the user-facing refs, in topological
+/// order (children before parents), newest first among independent commits.
+///
+/// This is `git log --date-order HEAD --branches --remotes --tags refs/stash`
+/// (`refs/stash` only when a stash exists). Private namespaces that tools create
+/// (`refs/notes/`, `refs/original/`, `refs/prefetch/`, `refs/bisect/`, ...) are
+/// deliberately left out: their commits would add lanes that no user asked to
+/// see.
+///
+/// `gix`'s topological walk builds the whole reachability graph before yielding
+/// anything, so it is replaced by the incremental walk in `walk.rs`, which uses
+/// commit-graph generation numbers to emit the newest commits while older
+/// history is still being counted.
 pub struct CommitWalk {
     repo: gix::Repository,
     walk: walk::Walk,
@@ -88,6 +101,10 @@ impl Repo {
         })
     }
 
+    /// The user-facing refs: local branches, remote-tracking branches and tags.
+    ///
+    /// Tool-owned namespaces such as `refs/notes/` are not listed; the commit
+    /// walk skips them as well, so a ref badge always has a row to sit on.
     pub fn refs(&self) -> Result<Vec<RefInfo>> {
         let repo = self.local();
         let graph = repo.commit_graph_if_enabled().ok().flatten();
@@ -130,11 +147,17 @@ impl Repo {
     }
 
     pub fn walk_commits(&self) -> Result<CommitWalk> {
+        self.walk_commits_with(None)
+    }
+
+    /// [`walk_commits`](Self::walk_commits) that stops once `cancelled` returns
+    /// `true`, for a caller that must be able to give up on a long walk.
+    pub(crate) fn walk_commits_with(&self, cancelled: Option<CancelCheck>) -> Result<CommitWalk> {
         let repo = self.local();
         // A missing or corrupt commit-graph is not fatal: object reads still work.
         let graph = repo.commit_graph_if_enabled().ok().flatten();
         let tips = walk_tips(&repo, graph.as_ref())?;
-        let walk = walk::Walk::new(repo.objects.clone(), graph, &tips)?;
+        let walk = walk::Walk::new(repo.objects.clone(), graph, &tips, cancelled)?;
         Ok(CommitWalk { repo, walk })
     }
 }
@@ -149,6 +172,15 @@ fn ref_kind(full_name: &gix::bstr::BStr) -> Option<RefKind> {
     } else {
         None
     }
+}
+
+/// Whether a ref belongs to the history the user sees: local branches,
+/// remote-tracking branches, tags and the stash.
+///
+/// Tool-owned namespaces (`refs/notes/`, `refs/original/`, `refs/prefetch/`,
+/// `refs/bisect/`, ...) are excluded, as they are in `Repo::refs`.
+fn is_user_ref(full_name: &gix::bstr::BStr) -> bool {
+    ref_kind(full_name).is_some() || full_name == b"refs/stash"
 }
 
 fn ref_kind_rank(kind: RefKind) -> u8 {
@@ -229,7 +261,8 @@ fn is_commit(
     }
 }
 
-/// HEAD plus every ref target, deduplicated, matching the `--all` revision set.
+/// HEAD plus every user-facing ref target, deduplicated, matching the
+/// `HEAD --branches --remotes --tags refs/stash` revision set.
 fn walk_tips(
     repo: &gix::Repository,
     graph: Option<&gix::commitgraph::Graph>,
@@ -253,6 +286,9 @@ fn walk_tips(
             continue;
         };
         let inner = reference.detach();
+        if !is_user_ref(inner.name.as_bstr()) {
+            continue;
+        }
         let gix::refs::Target::Object(target) = inner.target else {
             // A symbolic ref only aliases a ref that is visited on its own.
             continue;

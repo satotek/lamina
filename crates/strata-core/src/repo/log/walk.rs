@@ -1,4 +1,4 @@
-//! Incremental `git log --all --date-order` walk.
+//! Incremental date-ordered topological commit walk.
 //!
 //! This mirrors git's topo walk (`init_topo_walk` / `expand_topo_walk` in
 //! `revision.c`): in-degree counting records how many children of a commit
@@ -13,6 +13,7 @@ use std::collections::{BinaryHeap, HashMap};
 
 use gix::objs::FindExt;
 
+use super::CancelCheck;
 use crate::{Error, Result};
 
 /// Commits outside the commit-graph have no generation number, so they can
@@ -81,6 +82,8 @@ pub(super) struct Walk {
     min_generation: u32,
     parents_buf: Vec<gix::ObjectId>,
     object_buf: Vec<u8>,
+    /// `None` for an uncancellable walk, which is every walk the UI starts.
+    cancelled: Option<CancelCheck>,
 }
 
 impl Walk {
@@ -90,6 +93,7 @@ impl Walk {
         objects: gix::OdbHandle,
         graph: Option<gix::commitgraph::Graph>,
         tips: &[gix::ObjectId],
+        cancelled: Option<CancelCheck>,
     ) -> Result<Self> {
         let mut walk = Walk {
             objects,
@@ -104,6 +108,7 @@ impl Walk {
             min_generation: INFINITE_GENERATION,
             parents_buf: Vec::new(),
             object_buf: Vec::new(),
+            cancelled,
         };
 
         let mut seeds = Vec::new();
@@ -125,6 +130,9 @@ impl Walk {
         }
 
         walk.compute_in_degrees_to_depth(walk.min_generation)?;
+        if walk.is_cancelled() {
+            return Ok(walk);
+        }
 
         for index in seeds {
             if walk.nodes[index as usize].in_degree == 1 {
@@ -136,14 +144,24 @@ impl Walk {
     }
 
     /// The next commit in `--date-order`, or `None` once every reachable
-    /// commit was emitted.
+    /// commit was emitted or the walk was cancelled.
     pub(super) fn next_id(&mut self) -> Result<Option<gix::ObjectId>> {
+        if self.is_cancelled() {
+            return Ok(None);
+        }
         let Some((_, _, index)) = self.ready.pop() else {
             return Ok(None);
         };
         self.nodes[index as usize].in_degree = 0;
         self.expand(index as usize)?;
         Ok(Some(self.nodes[index as usize].id))
+    }
+
+    fn is_cancelled(&self) -> bool {
+        match &self.cancelled {
+            Some(cancelled) => cancelled(),
+            None => false,
+        }
     }
 
     fn push_ready(&mut self, index: u32) {
@@ -276,7 +294,7 @@ impl Walk {
 
     fn compute_in_degrees_to_depth(&mut self, cutoff: u32) -> Result<()> {
         while let Some(&(generation, _, _)) = self.in_degree_queue.peek() {
-            if generation < cutoff {
+            if generation < cutoff || self.is_cancelled() {
                 break;
             }
             self.in_degree_step()?;
@@ -310,7 +328,7 @@ impl Walk {
 
     fn explore_to_depth(&mut self, cutoff: u32) -> Result<()> {
         while let Some(&(generation, _, _)) = self.explore.peek() {
-            if generation < cutoff {
+            if generation < cutoff || self.is_cancelled() {
                 break;
             }
             self.explore_step()?;

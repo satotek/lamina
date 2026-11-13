@@ -59,19 +59,8 @@ impl Fixture {
         use std::io::Write;
         use std::process::Stdio;
 
-        let mut child = Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .env("GIT_CONFIG_GLOBAL", &self.empty_config)
-            .env("GIT_CONFIG_SYSTEM", &self.empty_config)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_AUTHOR_NAME", "Strata Author")
-            .env("GIT_AUTHOR_EMAIL", "author@example.com")
-            .env("GIT_COMMITTER_NAME", "Strata Committer")
-            .env("GIT_COMMITTER_EMAIL", "committer@example.com")
-            .env("GIT_AUTHOR_DATE", format!("@{date} +0000"))
-            .env("GIT_COMMITTER_DATE", format!("@{date} +0000"))
-            .env("GIT_TERMINAL_PROMPT", "0")
+        let mut command = self.command(dir, args, date);
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -93,6 +82,37 @@ impl Fixture {
         String::from_utf8_lossy(&output.stdout)
             .trim_end()
             .to_string()
+    }
+
+    /// `git` with the fixture's isolated environment, for a command whose
+    /// failure is part of the check.
+    fn command(&self, dir: &Path, args: &[&str], date: i64) -> Command {
+        let mut command = Command::new("git");
+        command
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", &self.empty_config)
+            .env("GIT_CONFIG_SYSTEM", &self.empty_config)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "Strata Author")
+            .env("GIT_AUTHOR_EMAIL", "author@example.com")
+            .env("GIT_COMMITTER_NAME", "Strata Committer")
+            .env("GIT_COMMITTER_EMAIL", "committer@example.com")
+            .env("GIT_AUTHOR_DATE", format!("@{date} +0000"))
+            .env("GIT_COMMITTER_DATE", format!("@{date} +0000"))
+            .env("GIT_TERMINAL_PROMPT", "0");
+        command
+    }
+
+    fn ref_exists(&self, name: &str) -> bool {
+        self.command(
+            &self.repo,
+            &["show-ref", "--verify", "--quiet", name],
+            BASE_TIME,
+        )
+        .status()
+        .expect("git is runnable")
+        .success()
     }
 
     fn git_input(&self, args: &[&str], input: &str) -> String {
@@ -126,11 +146,23 @@ impl Fixture {
             .collect()
     }
 
-    fn git_log_all_date_order(&self) -> Vec<String> {
-        self.git(&["log", "--all", "--date-order", "--format=%H"])
-            .lines()
-            .map(str::to_string)
-            .collect()
+    /// The reference this module documents: HEAD, branches, remote-tracking
+    /// branches, tags and the stash, in the `--date-order` the walk produces.
+    /// Private namespaces such as `refs/notes/` are deliberately absent.
+    fn git_log_date_order(&self) -> Vec<String> {
+        let mut args = vec![
+            "log",
+            "--date-order",
+            "--format=%H",
+            "HEAD",
+            "--branches",
+            "--remotes",
+            "--tags",
+        ];
+        if self.ref_exists("refs/stash") {
+            args.push("refs/stash");
+        }
+        self.git(&args).lines().map(str::to_string).collect()
     }
 }
 
@@ -235,7 +267,7 @@ fn refs_cover_branches_and_peeled_tags() {
         walked.contains(&side),
         "tag-only commit is part of the walk"
     );
-    assert_eq!(walked, fixture.git_log_all_date_order());
+    assert_eq!(walked, fixture.git_log_date_order());
 }
 
 #[test]
@@ -262,7 +294,7 @@ fn merge_is_walked_children_first() {
     let merge = fixture.head();
 
     let ids = fixture.walk_ids();
-    assert_eq!(ids, fixture.git_log_all_date_order());
+    assert_eq!(ids, fixture.git_log_date_order());
     assert_eq!(ids, vec![merge.clone(), main, feature, base]);
 
     let merge_commit = fixture
@@ -301,7 +333,7 @@ fn date_order_keeps_children_before_newer_parents() {
         ],
     );
 
-    let expected = fixture.git_log_all_date_order();
+    let expected = fixture.git_log_date_order();
     assert!(expected.len() >= 6);
     assert_eq!(fixture.walk_ids(), expected);
 
@@ -331,7 +363,7 @@ fn detached_head_reports_its_commit() {
             target: second.parse().expect("oid"),
         }
     );
-    assert_eq!(fixture.walk_ids(), fixture.git_log_all_date_order());
+    assert_eq!(fixture.walk_ids(), fixture.git_log_date_order());
 }
 
 #[test]
@@ -426,7 +458,7 @@ fn many_refs_walk_matches_git_log() {
     }
     fixture.git_input(&["update-ref", "--stdin"], &refs);
 
-    let expected = fixture.git_log_all_date_order();
+    let expected = fixture.git_log_date_order();
     assert_eq!(fixture.walk_ids(), expected, "loose refs");
 
     // packed-refs records the peeled target of every annotated tag, and a ref
@@ -440,6 +472,76 @@ fn many_refs_walk_matches_git_log() {
         2001,
         "the annotated tag and every lightweight tag are listed"
     );
+}
+
+#[test]
+fn private_namespace_refs_are_not_walked() {
+    let fixture = Fixture::new();
+    let first = fixture.commit("file.txt", "one\n", BASE_TIME + 100, "first");
+    let second = fixture.commit("file.txt", "two\n", BASE_TIME + 200, "second");
+
+    // A commit reachable only from a private ref: a walk that includes private
+    // namespaces would list it, and its lane would have no ref badge.
+    fixture.git(&["checkout", "--quiet", "--detach", &first]);
+    let hidden = fixture.commit(
+        "hidden/only.txt",
+        "hidden\n",
+        BASE_TIME + 150,
+        "hidden only",
+    );
+    fixture.git(&["checkout", "--quiet", "main"]);
+    fixture.git(&["update-ref", "refs/custom/x", &hidden]);
+    for name in ["refs/prefetch/main", "refs/bisect/bad"] {
+        fixture.git(&["update-ref", name, &hidden]);
+    }
+    fixture.git(&["update-ref", "refs/original/heads/main", &first]);
+    fixture.git(&["notes", "add", "-m", "a note", &second]);
+
+    let walked = fixture.walk_ids();
+    assert!(
+        !walked.contains(&hidden),
+        "a commit only reachable from refs/custom is not history"
+    );
+    assert_eq!(walked, vec![second.clone(), first.clone()]);
+    assert_eq!(walked, fixture.git_log_date_order());
+
+    // Path history reuses the walk, so the private commit's path is not there.
+    let repo = fixture.open();
+    let history: Vec<String> = repo
+        .path_history("hidden/only.txt")
+        .expect("path history")
+        .map(|id| id.expect("commit id").to_string())
+        .collect();
+    assert!(
+        history.is_empty(),
+        "a path only touched by a private-ref commit has no history"
+    );
+
+    let listed = fixture.open().refs().expect("refs");
+    assert_eq!(
+        kinds_and_names(&listed),
+        vec![(RefKind::LocalBranch, "refs/heads/main".to_string())],
+        "private namespaces are not listed as refs either"
+    );
+}
+
+#[test]
+fn stash_is_walked() {
+    let fixture = Fixture::new();
+    fixture.commit("file.txt", "base\n", BASE_TIME + 100, "base");
+    std::fs::write(fixture.path().join("file.txt"), "stashed\n").expect("write");
+    fixture.git_dated(
+        BASE_TIME + 200,
+        &["stash", "push", "--quiet", "-m", "work in progress"],
+    );
+    let stash = fixture.git(&["rev-parse", "refs/stash"]);
+
+    let walked = fixture.walk_ids();
+    assert!(
+        walked.contains(&stash),
+        "the stash tip must be part of the history"
+    );
+    assert_eq!(walked, fixture.git_log_date_order());
 }
 
 #[test]
@@ -470,7 +572,7 @@ fn commit_graph_walk_matches_git_log() {
     fixture.git(&["commit-graph", "write", "--reachable", "--split"]);
     assert_eq!(
         fixture.walk_ids(),
-        fixture.git_log_all_date_order(),
+        fixture.git_log_date_order(),
         "split commit-graph"
     );
 
@@ -482,7 +584,7 @@ fn commit_graph_walk_matches_git_log() {
     fixture.git(&["checkout", "--quiet", "main"]);
     assert_eq!(
         fixture.walk_ids(),
-        fixture.git_log_all_date_order(),
+        fixture.git_log_date_order(),
         "history newer than the commit-graph"
     );
 }
@@ -506,7 +608,7 @@ fn non_commit_refs_are_ignored() {
         vec![(RefKind::LocalBranch, "refs/heads/main".to_string())],
         "refs that do not resolve to a commit are not listed"
     );
-    assert_eq!(fixture.walk_ids(), fixture.git_log_all_date_order());
+    assert_eq!(fixture.walk_ids(), fixture.git_log_date_order());
 }
 
 #[test]

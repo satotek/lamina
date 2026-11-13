@@ -75,7 +75,7 @@ pub(crate) fn run(shared: Arc<Shared>, state: Arc<QueryState>, jobs: Receiver<Qu
             continue;
         }
 
-        let failure = answer(&shared, &state, &job)
+        let failure = answer(Arc::clone(&shared), Arc::clone(&state), &job)
             .err()
             .map(|error| error.to_string());
         if let Some(error) = failure
@@ -90,7 +90,7 @@ pub(crate) fn run(shared: Arc<Shared>, state: Arc<QueryState>, jobs: Receiver<Qu
     }
 }
 
-fn answer(shared: &Shared, state: &QueryState, job: &QueryJob) -> Result<()> {
+fn answer(shared: Arc<Shared>, state: Arc<QueryState>, job: &QueryJob) -> Result<()> {
     let snapshot = shared.snapshot();
     let generation = snapshot.generation;
     let rows = match &job.kind {
@@ -102,10 +102,18 @@ fn answer(shared: &Shared, state: &QueryState, job: &QueryJob) -> Result<()> {
             rows
         }
         QueryKind::Path(path) => {
+            let ticket = job.ticket;
+            // A path that never matches keeps the walk busy for the whole
+            // history, so cancellation has to reach the walk itself.
+            let cancelled = {
+                let shared = Arc::clone(&shared);
+                let state = Arc::clone(&state);
+                Arc::new(move || state.is_cancelled(ticket) || shared.is_shutdown())
+            };
+            let mut history = shared.repo.path_history_cancellable(path, cancelled)?;
             let mut rows = Vec::new();
             // Drive the walk by hand so cancellation and shutdown are noticed
             // between commits instead of only when a matching row arrives.
-            let mut history = shared.repo.path_history(path)?;
             loop {
                 if state.is_cancelled(job.ticket) || shared.is_shutdown() {
                     return Ok(());
@@ -126,7 +134,7 @@ fn answer(shared: &Shared, state: &QueryState, job: &QueryJob) -> Result<()> {
 
     // The snapshot may have been replaced while the query ran; the rows still
     // belong to `generation`, which the UI uses to decide whether to apply them.
-    if state.is_cancelled(job.ticket) {
+    if state.is_cancelled(job.ticket) || shared.is_shutdown() {
         return Ok(());
     }
     shared.emit(SessionEvent::QueryReady {

@@ -10,6 +10,7 @@ use std::collections::HashMap;
 
 use gix::objs::{FindExt, TreeRefIter};
 
+use super::log::CancelCheck;
 use super::{CommitWalk, Repo};
 use crate::{Error, Oid, Result};
 
@@ -30,10 +31,12 @@ type Entry = (Oid, u16);
 /// in the same order as [`Repo::walk_commits`].
 ///
 /// A commit is reported when its tree entry for `path` differs from its first
-/// parent's. That matches `git log --full-history --all --date-order -- <path>`
-/// except for merge commits that are TREESAME to their first parent but differ
-/// from another parent: git's full history lists those, this walk does not,
-/// because it never traverses the other parents. No rename following either.
+/// parent's. That matches `git log --full-history --date-order HEAD --branches
+/// --remotes --tags refs/stash -- <path>` (with `refs/stash` only when a stash
+/// exists) except for merge commits that are TREESAME to their first parent but
+/// differ from another parent: git's full history lists those, this walk does
+/// not, because it never traverses the other parents. No rename following
+/// either.
 pub struct PathHistory {
     repo: gix::Repository,
     walk: CommitWalk,
@@ -43,6 +46,8 @@ pub struct PathHistory {
     entries: HashMap<Oid, Option<Entry>>,
     odb_buf: Vec<u8>,
     failed: bool,
+    /// `None` for the public, uncancellable walk.
+    cancelled: Option<CancelCheck>,
 }
 
 impl Iterator for PathHistory {
@@ -53,6 +58,13 @@ impl Iterator for PathHistory {
             return None;
         }
         loop {
+            // The commit walk checks too, but this is the loop that can keep
+            // running without ever yielding a row: a path that never matches
+            // would otherwise walk the whole history before the caller gets
+            // control back.
+            if self.is_cancelled() {
+                return None;
+            }
             let commit = match self.walk.next()? {
                 Ok(commit) => commit,
                 Err(error) => {
@@ -70,6 +82,15 @@ impl Iterator for PathHistory {
                     return Some(Err(error));
                 }
             }
+        }
+    }
+}
+
+impl PathHistory {
+    fn is_cancelled(&self) -> bool {
+        match &self.cancelled {
+            Some(cancelled) => cancelled(),
+            None => false,
         }
     }
 }
@@ -154,14 +175,33 @@ impl PathHistory {
 }
 
 impl Repo {
-    /// Like `git log --all --date-order -- <path>`, without rename following.
+    /// Like `git log --full-history --date-order HEAD --branches --remotes
+    /// --tags refs/stash -- <path>`, without rename following.
     ///
     /// `path` may name a file or a directory; a directory matches changes to any
     /// entry below it because its tree id covers the whole subtree. An empty
     /// path names the repository root and reports every commit.
     pub fn path_history(&self, path: &str) -> Result<PathHistory> {
+        self.path_history_with_cancel(path, None)
+    }
+
+    /// [`path_history`](Self::path_history) that stops once `cancelled` returns
+    /// `true`, even between commits that do not match the path.
+    pub(crate) fn path_history_cancellable(
+        &self,
+        path: &str,
+        cancelled: CancelCheck,
+    ) -> Result<PathHistory> {
+        self.path_history_with_cancel(path, Some(cancelled))
+    }
+
+    fn path_history_with_cancel(
+        &self,
+        path: &str,
+        cancelled: Option<CancelCheck>,
+    ) -> Result<PathHistory> {
         let mut repo = self.local();
-        let walk = self.walk_commits()?;
+        let walk = self.walk_commits_with(cancelled.clone())?;
         // A missing or corrupt graph only costs speed here.
         let graph = repo.commit_graph_if_enabled().ok().flatten();
         repo.object_cache_size_if_unset(OBJECT_CACHE_BYTES);
@@ -173,6 +213,7 @@ impl Repo {
             entries: HashMap::new(),
             odb_buf: Vec::new(),
             failed: false,
+            cancelled,
         })
     }
 }

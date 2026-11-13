@@ -60,19 +60,8 @@ impl Fixture {
     }
 
     fn run(&self, dir: &Path, args: &[&str], date: i64, input: &str) -> String {
-        let mut child = Command::new("git")
-            .args(args)
-            .current_dir(dir)
-            .env("GIT_CONFIG_GLOBAL", &self.empty_config)
-            .env("GIT_CONFIG_SYSTEM", &self.empty_config)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_AUTHOR_NAME", "Strata Author")
-            .env("GIT_AUTHOR_EMAIL", "author@example.com")
-            .env("GIT_COMMITTER_NAME", "Strata Committer")
-            .env("GIT_COMMITTER_EMAIL", "committer@example.com")
-            .env("GIT_AUTHOR_DATE", format!("@{date} +0000"))
-            .env("GIT_COMMITTER_DATE", format!("@{date} +0000"))
-            .env("GIT_TERMINAL_PROMPT", "0")
+        let mut command = self.command(dir, args, date);
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -94,6 +83,37 @@ impl Fixture {
         String::from_utf8_lossy(&output.stdout)
             .trim_end()
             .to_string()
+    }
+
+    /// `git` with the fixture's isolated environment, for a command whose
+    /// failure is part of the check.
+    fn command(&self, dir: &Path, args: &[&str], date: i64) -> Command {
+        let mut command = Command::new("git");
+        command
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", &self.empty_config)
+            .env("GIT_CONFIG_SYSTEM", &self.empty_config)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "Strata Author")
+            .env("GIT_AUTHOR_EMAIL", "author@example.com")
+            .env("GIT_COMMITTER_NAME", "Strata Committer")
+            .env("GIT_COMMITTER_EMAIL", "committer@example.com")
+            .env("GIT_AUTHOR_DATE", format!("@{date} +0000"))
+            .env("GIT_COMMITTER_DATE", format!("@{date} +0000"))
+            .env("GIT_TERMINAL_PROMPT", "0");
+        command
+    }
+
+    fn ref_exists(&self, name: &str) -> bool {
+        self.command(
+            &self.repo,
+            &["show-ref", "--verify", "--quiet", name],
+            BASE_TIME,
+        )
+        .status()
+        .expect("git is runnable")
+        .success()
     }
 
     fn write(&self, file: &str, content: &str) {
@@ -140,20 +160,25 @@ impl Fixture {
     }
 
     /// The reference this module documents: full history without rename
-    /// following, in the same `--date-order` the commit walk produces.
+    /// following, over the same refs the walk uses, in the same `--date-order`
+    /// the commit walk produces.
     fn git_history(&self, path: &str) -> Vec<String> {
-        self.git(&[
+        let mut args = vec![
             "log",
-            "--all",
             "--full-history",
             "--date-order",
             "--format=%H",
-            "--",
-            path,
-        ])
-        .lines()
-        .map(str::to_string)
-        .collect()
+            "HEAD",
+            "--branches",
+            "--remotes",
+            "--tags",
+        ];
+        if self.ref_exists("refs/stash") {
+            args.push("refs/stash");
+        }
+        args.push("--");
+        args.push(path);
+        self.git(&args).lines().map(str::to_string).collect()
     }
 
     fn write_commit_graph(&self) {
@@ -671,6 +696,60 @@ fn session_cancelled_query_emits_nothing() {
     let after = harness.session.search_commits(search("commit 4999"));
     let (_, rows) = harness.wait_for_query(after);
     assert_eq!(harness.summaries(&rows), vec!["commit 4999"]);
+}
+
+/// A path that never matches keeps the walk busy for the whole history, so the
+/// abandon signal has to reach the walk itself, not just the row loop.
+#[test]
+fn cancelled_path_query_frees_the_worker_and_drop_does_not_wait() {
+    let fixture = Fixture::new();
+    // fast-import leaves history without a commit-graph, so the walk really has
+    // to visit every commit before it can answer an empty path.
+    fixture.fast_import(20_000);
+    let harness = Harness::open(fixture, 20_000);
+
+    // How long the walk that has to be abandoned takes.
+    let start = Instant::now();
+    let baseline = harness.session.path_history("no/such/path".to_string());
+    harness.wait_for_query(baseline);
+    let full_walk = start.elapsed();
+    assert!(
+        full_walk > Duration::from_millis(50),
+        "the fixture must make a full walk observable, took {full_walk:?}"
+    );
+
+    // Let the worker pick up a second walk of the same shape, then cancel it.
+    let cancelled = harness.session.path_history("other/such/path".to_string());
+    std::thread::sleep(full_walk / 4);
+    harness.session.cancel_query(cancelled);
+
+    // A search only reads the published snapshot, so it can only be slow if
+    // the worker is still walking the cancelled path.
+    let start = Instant::now();
+    let after = harness.session.search_commits(search("commit 19999"));
+    harness.wait_for_query(after);
+    let waited = start.elapsed();
+    assert!(
+        waited < full_walk / 2,
+        "the worker took {waited:?} to answer after a cancel; a full walk is {full_walk:?}"
+    );
+    assert!(
+        harness
+            .query_events(cancelled, Duration::from_millis(200))
+            .is_empty(),
+        "a cancelled path query must not answer"
+    );
+
+    // Dropping the session must not wait for the walk either.
+    harness.session.path_history("third/such/path".to_string());
+    std::thread::sleep(full_walk / 4);
+    let start = Instant::now();
+    drop(harness);
+    let dropped = start.elapsed();
+    assert!(
+        dropped < full_walk / 2,
+        "session drop waited {dropped:?} for a walk; a full walk is {full_walk:?}"
+    );
 }
 
 /// 100k commits, each changing the file: the slowest shape for a single path.

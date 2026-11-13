@@ -364,6 +364,9 @@ fn unstaged_change(item: gix::status::index_worktree::Item) -> Option<FileChange
     })
 }
 
+/// One entry of `git diff-tree -r --name-status`: trees are not listed, their
+/// entries are, and a file/directory replacement shows up as the deletion and
+/// addition git reports.
 fn tree_change(change: gix::object::tree::diff::ChangeDetached) -> Option<FileChange> {
     use gix::object::tree::diff::ChangeDetached;
 
@@ -395,7 +398,11 @@ fn tree_change(change: gix::object::tree::diff::ChangeDetached) -> Option<FileCh
             entry_mode,
             ..
         } => {
-            if entry_mode.is_tree() {
+            if entry_mode.is_tree() && previous_entry_mode.is_tree() {
+                // A changed directory is reported through its children; the
+                // directory itself is not a file `git diff-tree -r` lists.
+                return None;
+            } else if entry_mode.is_tree() {
                 (location, None, ChangeKind::Deleted)
             } else if previous_entry_mode.is_tree() {
                 (location, None, ChangeKind::Added)
