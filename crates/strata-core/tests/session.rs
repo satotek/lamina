@@ -790,6 +790,19 @@ fn dropping_a_session_during_the_initial_walk_is_prompt() {
     // Let the loader thread reach the walk, past the cheap reads before it.
     std::thread::sleep(walk_setup / 4);
 
+    // A walk that already reached the end would make the measurement below
+    // vacuous, so check the drop really interrupts one in progress.
+    let in_flight = session.snapshot();
+    assert!(
+        !in_flight.commits.complete && in_flight.commits.len() < 20_000,
+        "the initial walk already finished ({} commits); nothing left to interrupt",
+        in_flight.commits.len()
+    );
+
+    // The whole drop is measured, not just the walk: it also tears down the
+    // watcher, the channels and every worker, and that is acceptable only
+    // because a drop no longer waits for the filesystem backend's teardown
+    // (`RepoWatcher`), which alone took seconds under load.
     let started = Instant::now();
     drop(session);
     let dropped = started.elapsed();

@@ -20,9 +20,7 @@
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -64,11 +62,25 @@ impl Changes {
 /// Watches a worktree and its git dir, reporting coalesced [`Changes`].
 ///
 /// Dropping it stops watching and waits for the worker thread, unless the drop
-/// happens from inside the callback itself.
+/// happens from inside the callback itself. The platform backend is stopped
+/// afterwards on its own thread, so a drop never waits for it: `notify`'s
+/// FSEvents backend busy-waits for its run loop and purges queued device
+/// events, which can take seconds on a loaded machine, and no change can reach
+/// the caller once the worker is gone.
 pub struct RepoWatcher {
     watcher: Option<RecommendedWatcher>,
-    stop: Arc<AtomicBool>,
+    /// Cloned into the backend's callback; kept here so a drop can wake the
+    /// worker without waiting for the backend to shut down.
+    wake: Option<Sender<Wake>>,
     worker: Option<JoinHandle<()>>,
+}
+
+/// One message for the watcher worker.
+enum Wake {
+    /// A raw event from the platform backend.
+    Event(notify::Result<Event>),
+    /// The owner is dropping the watcher.
+    Stop,
 }
 
 impl RepoWatcher {
@@ -94,10 +106,11 @@ impl RepoWatcher {
             .is_some_and(|workdir| workdir.contains(&git_dir));
 
         let (tx, rx) = mpsc::channel();
+        let wake = tx.clone();
         let mut watcher = notify::recommended_watcher(move |event| {
             // Unbounded and non-blocking from notify's point of view; the worker
             // is the only place that may take its time.
-            let _ = tx.send(event);
+            let _ = tx.send(Wake::Event(event));
         })
         .map_err(|err| Error::other(format!("failed to create filesystem watcher: {err}")))?;
 
@@ -119,13 +132,11 @@ impl RepoWatcher {
         }
 
         let filter = workdir.as_ref().and_then(WorktreeFilter::open);
-        let stop = Arc::new(AtomicBool::new(false));
         let watch = Watch {
             workdir,
             git_dir,
             debounce,
             filter,
-            stop: Arc::clone(&stop),
         };
 
         let worker = thread::Builder::new()
@@ -135,7 +146,7 @@ impl RepoWatcher {
 
         Ok(Self {
             watcher: Some(watcher),
-            stop,
+            wake: Some(wake),
             worker: Some(worker),
         })
     }
@@ -143,14 +154,25 @@ impl RepoWatcher {
 
 impl Drop for RepoWatcher {
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
-        // Dropping the watcher drops the event sender, which wakes the worker.
-        drop(self.watcher.take());
+        // Wake and join the worker first: the callback and the senders it holds
+        // live on that thread, so joining it is what guarantees no change after
+        // the drop returns.
+        if let Some(wake) = self.wake.take() {
+            let _ = wake.send(Wake::Stop);
+        }
         if let Some(worker) = self.worker.take() {
             // A callback that drops its own watcher must not join itself.
             if worker.thread().id() != thread::current().id() {
                 let _ = worker.join();
             }
+        }
+        // Stop the backend last, on its own thread: its teardown blocks for as
+        // long as its run loop takes to park, and nothing waits on it anymore.
+        // A failed spawn drops it here instead, which is only slower.
+        if let Some(watcher) = self.watcher.take() {
+            let _ = thread::Builder::new()
+                .name("strata-repo-watcher-stop".into())
+                .spawn(move || drop(watcher));
         }
     }
 }
@@ -162,7 +184,6 @@ struct Watch {
     git_dir: Root,
     debounce: Duration,
     filter: Option<WorktreeFilter>,
-    stop: Arc<AtomicBool>,
 }
 
 impl Watch {
@@ -303,11 +324,12 @@ fn push_path(changes: &mut Changes, path: PathBuf) {
 }
 
 /// The debounce loop.
-fn run(rx: Receiver<notify::Result<Event>>, watch: Watch, on_change: impl Fn(Changes)) {
-    while let Ok(first) = rx.recv() {
-        if watch.stop.load(Ordering::SeqCst) {
-            return;
-        }
+fn run(rx: Receiver<Wake>, watch: Watch, on_change: impl Fn(Changes)) {
+    loop {
+        let first = match rx.recv() {
+            Ok(Wake::Event(event)) => event,
+            Ok(Wake::Stop) | Err(_) => return,
+        };
 
         let started = Instant::now();
         let mut last = started;
@@ -323,10 +345,12 @@ fn run(rx: Receiver<notify::Result<Event>>, watch: Watch, on_change: impl Fn(Cha
                 break;
             }
             match rx.recv_timeout(deadline - now) {
-                Ok(event) => {
+                Ok(Wake::Event(event)) => {
                     batch.push(event);
                     last = Instant::now();
                 }
+                // The owner is going away; its remaining events are noise.
+                Ok(Wake::Stop) => return,
                 Err(RecvTimeoutError::Timeout) => break,
                 Err(RecvTimeoutError::Disconnected) => {
                     disconnected = true;
@@ -335,9 +359,6 @@ fn run(rx: Receiver<notify::Result<Event>>, watch: Watch, on_change: impl Fn(Cha
             }
         }
 
-        if watch.stop.load(Ordering::SeqCst) {
-            return;
-        }
         let changes = watch.changes(&batch);
         if !changes.is_idle() {
             on_change(changes);
