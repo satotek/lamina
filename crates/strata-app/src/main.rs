@@ -7,6 +7,7 @@
 
 mod actions;
 mod branches;
+mod conflicts;
 mod data;
 mod diff_view;
 mod fake;
@@ -38,6 +39,7 @@ fn main() {
             actions::bind(cx);
             worktree_panel::bind(cx);
             branches::bind(cx);
+            conflicts::bind(cx);
 
             let bounds = Bounds::centered(None, size(px(1360.0), px(860.0)), cx);
             cx.open_window(
