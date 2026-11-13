@@ -48,35 +48,36 @@ fn main() {
     env_logger::init();
     let start = parse_args();
 
-    application()
-        .with_assets(gpui_kit_assets::Assets)
-        .run(move |cx: &mut App| {
-            gpui_component::init(cx);
-            settings::init(cx);
-            actions::bind(cx);
-            settings_view::bind(cx);
-            worktree_panel::bind(cx);
-            branches::bind(cx);
-            conflicts::bind(cx);
-            remote::bind(cx);
-            search::bind(cx);
-            picker::bind(cx);
+    let app = application().with_assets(gpui_kit_assets::Assets);
 
-            open_window(start, cx);
-
-            // macOS keeps the app alive after the last window closes; the dock
-            // icon is how the user asks for a window again.
-            #[cfg(target_os = "macos")]
-            cx.on_reopen(|cx| {
-                if cx.windows().is_empty() {
-                    open_window(Start::Welcome, cx);
-                } else {
-                    cx.activate(true);
-                }
-            });
-
+    // macOS keeps the app alive after the last window closes; the dock icon is
+    // how the user asks for a window again. The handler belongs to the
+    // `Application`, so it is registered before `run`.
+    #[cfg(target_os = "macos")]
+    app.on_reopen(|cx| {
+        if cx.windows().is_empty() {
+            open_window(Start::Welcome, cx);
+        } else {
             cx.activate(true);
-        });
+        }
+    });
+
+    app.run(move |cx: &mut App| {
+        gpui_component::init(cx);
+        settings::init(cx);
+        actions::bind(cx);
+        settings_view::bind(cx);
+        worktree_panel::bind(cx);
+        branches::bind(cx);
+        conflicts::bind(cx);
+        remote::bind(cx);
+        search::bind(cx);
+        picker::bind(cx);
+
+        open_window(start, cx);
+
+        cx.activate(true);
+    });
 }
 
 /// What the command line asked the first window to show.
