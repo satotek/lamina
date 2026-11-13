@@ -29,36 +29,38 @@ fn main() {
     let launch = parse_args();
     let title = launch.title();
 
-    application().run(move |cx: &mut App| {
-        gpui_component::init(cx);
-        actions::bind(cx);
+    application()
+        .with_assets(gpui_kit_assets::Assets)
+        .run(move |cx: &mut App| {
+            gpui_component::init(cx);
+            actions::bind(cx);
 
-        let bounds = Bounds::centered(None, size(px(1360.0), px(860.0)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                // The app draws its own title bar (with the repository and
-                // branch in it) so the window reads as one surface on every
-                // platform. The title is still set for the taskbar and window
-                // switcher.
-                titlebar: Some(TitlebarOptions {
-                    title: Some(title.into()),
-                    ..TitleBar::title_bar_options()
-                }),
-                window_decorations: Some(WindowDecorations::Client),
-                window_min_size: Some(size(px(720.0), px(480.0))),
-                focus: true,
-                ..TitleBar::window_options()
-            },
-            move |window, cx| {
-                gpui_component::Theme::sync_system_appearance(Some(window), cx);
-                cx.new(|cx| RepoView::new(launch, window, cx))
-            },
-        )
-        .expect("failed to open the Strata window");
+            let bounds = Bounds::centered(None, size(px(1360.0), px(860.0)), cx);
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    // The app draws its own title bar (with the repository and
+                    // branch in it) so the window reads as one surface on every
+                    // platform. The title is still set for the taskbar and window
+                    // switcher.
+                    titlebar: Some(TitlebarOptions {
+                        title: Some(title.into()),
+                        ..TitleBar::title_bar_options()
+                    }),
+                    window_decorations: Some(WindowDecorations::Client),
+                    window_min_size: Some(size(px(720.0), px(480.0))),
+                    focus: true,
+                    ..TitleBar::window_options()
+                },
+                move |window, cx| {
+                    gpui_component::Theme::sync_system_appearance(Some(window), cx);
+                    cx.new(|cx| RepoView::new(launch, window, cx))
+                },
+            )
+            .expect("failed to open the Strata window");
 
-        cx.activate(true);
-    });
+            cx.activate(true);
+        });
 }
 
 fn parse_args() -> Launch {

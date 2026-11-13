@@ -7317,6 +7317,7 @@ dependencies = [
  "env_logger",
  "futures",
  "gpui-component",
+ "gpui-kit-assets",
  "gpui-pre",
  "gpui-pre-platform",
  "strata-core",
