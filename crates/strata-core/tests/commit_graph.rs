@@ -178,14 +178,16 @@ fn the_write_operation_creates_the_commit_graph() {
 }
 
 #[test]
-fn the_session_suggests_a_write_for_a_stale_graph() {
+fn the_session_does_not_nag_about_a_slightly_stale_graph() {
+    // `git gc` leaves a graph behind that every later commit outgrows; a small
+    // repository a few commits past it loads instantly and needs no offer.
     let fixture = Fixture::new();
     fixture.commit("a.txt", "one\n", "first");
     fixture.write_graph();
     fixture.commit("b.txt", "late\n", "late");
 
     let (tx, rx): (_, Receiver<SessionEvent>) = mpsc::channel();
-    let _session = Session::open_with(fixture.path(), SessionOptions::default(), move |event| {
+    let session = Session::open_with(fixture.path(), SessionOptions::default(), move |event| {
         let _ = tx.send(event);
     })
     .expect("open session");
@@ -193,14 +195,17 @@ fn the_session_suggests_a_write_for_a_stale_graph() {
     let deadline = Instant::now() + TIMEOUT;
     loop {
         let now = Instant::now();
-        assert!(now < deadline, "timed out waiting for the offer");
+        assert!(now < deadline, "timed out waiting for the history");
         match rx.recv_timeout(deadline - now) {
             Ok(SessionEvent::CommitGraphSuggested { advice }) => {
-                assert_eq!(advice, CommitGraphAdvice::Stale);
+                panic!("unexpected commit-graph offer: {advice:?}")
+            }
+            // The offer is decided before the first snapshot, so a complete
+            // history without one means none is coming.
+            Ok(SessionEvent::SnapshotUpdated { .. }) if session.snapshot().commits.complete => {
                 return;
             }
-            Ok(_) => {}
-            Err(RecvTimeoutError::Timeout) => {}
+            Ok(_) | Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => panic!("session event channel closed"),
         }
     }

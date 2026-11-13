@@ -12,6 +12,9 @@ use super::Repo;
 
 /// A repository with fewer commits than this is fast enough without a graph.
 pub const DEFAULT_MIN_COMMITS: usize = 50_000;
+/// A graph counts as stale once this fraction of `min_commits` lies outside it.
+const STALE_FRACTION: usize = 5;
+
 /// A walk that took at least this long is worth offering a graph for.
 pub const DEFAULT_MIN_WALK: Duration = Duration::from_millis(500);
 
@@ -56,7 +59,12 @@ pub struct CommitGraphFacts {
 impl CommitGraphFacts {
     pub fn advise(self, thresholds: CommitGraphThresholds) -> Option<CommitGraphAdvice> {
         if self.has_graph {
-            (self.commits_outside_graph > 0).then_some(CommitGraphAdvice::Stale)
+            // `git gc` writes a graph that every later commit leaves behind, so
+            // a few uncovered commits are normal and cost nothing; only offer a
+            // rewrite once the uncovered part is itself expensive to walk.
+            let costly = self.commits_outside_graph >= thresholds.min_commits / STALE_FRACTION
+                || self.walk_time >= thresholds.min_walk;
+            (self.commits_outside_graph > 0 && costly).then_some(CommitGraphAdvice::Stale)
         } else if self
             .commit_count
             .is_some_and(|count| count >= thresholds.min_commits)
@@ -138,6 +146,15 @@ mod tests {
         let thresholds = CommitGraphThresholds::default();
         assert_eq!(
             facts(true, Some(10), 2, Duration::ZERO).advise(thresholds),
+            None,
+            "a handful of commits past the graph is normal after any commit"
+        );
+        assert_eq!(
+            facts(true, Some(100_000), 20_000, Duration::ZERO).advise(thresholds),
+            Some(CommitGraphAdvice::Stale)
+        );
+        assert_eq!(
+            facts(true, Some(10), 2, Duration::from_secs(1)).advise(thresholds),
             Some(CommitGraphAdvice::Stale)
         );
         assert_eq!(
