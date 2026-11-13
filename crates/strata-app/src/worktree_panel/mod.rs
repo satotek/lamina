@@ -45,6 +45,9 @@ use crate::style::Design;
 /// context, and a panel-wide `s`/`u` binding must not fire while the user writes
 /// a message.
 pub const WORKTREE_PANEL: &str = "WorktreePanel";
+/// [`WORKTREE_PANEL`] minus text fields, for bindings on unmodified letters:
+/// typing one there must reach the field, not the file list.
+pub const WORKTREE_PANEL_LIST: &str = "WorktreePanel && !Input";
 
 actions!(
     strata_worktree,
@@ -76,10 +79,13 @@ const SELECT_ALL_KEY: &str = "ctrl-a";
 
 pub fn bind(cx: &mut App) {
     let scope = Some(WORKTREE_PANEL);
+    // Single letters select or act on the focused file; a text field must be
+    // able to take them as text instead.
+    let letters = Some(WORKTREE_PANEL_LIST);
     cx.bind_keys([
-        KeyBinding::new("s", StageSelected, scope),
-        KeyBinding::new("u", UnstageSelected, scope),
-        KeyBinding::new("d", DiscardSelected, scope),
+        KeyBinding::new("s", StageSelected, letters),
+        KeyBinding::new("u", UnstageSelected, letters),
+        KeyBinding::new("d", DiscardSelected, letters),
         KeyBinding::new("enter", ToggleSelected, scope),
         KeyBinding::new(SELECT_ALL_KEY, SelectAllFiles, scope),
         KeyBinding::new("up", SelectPreviousFile, scope),

@@ -28,16 +28,17 @@ use crate::repo_view::RepoView;
 use crate::scrollbar::WithScrollbar as _;
 use crate::settings::Settings;
 use crate::style::{self, Design};
-use crate::worktree_panel::WORKTREE_PANEL;
+use crate::worktree_panel::WORKTREE_PANEL_LIST;
 
 actions!(strata_conflicts, [UseOurs, UseTheirs, MarkFileResolved]);
 
 // `KeyBinding::new` parses without an OS, so a platform modifier is chosen at
 // compile time instead of using `secondary-`. The keys only do something while
-// a conflicted file is selected, so single letters are safe here; the commit
-// box is outside the panel's key context and never sees them.
+// a conflicted file is selected, so single letters are safe here; a focused
+// text field still takes the letter, which is why the panel's list context
+// excludes `Input`.
 pub fn bind(cx: &mut App) {
-    let scope = Some(WORKTREE_PANEL);
+    let scope = Some(WORKTREE_PANEL_LIST);
     cx.bind_keys([
         KeyBinding::new("o", UseOurs, scope),
         KeyBinding::new("t", UseTheirs, scope),

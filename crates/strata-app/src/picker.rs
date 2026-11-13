@@ -81,17 +81,17 @@ actions!(
 pub fn bind(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("up", PickerPrevious, Some(PICKER_PAGE)),
-        KeyBinding::new("k", PickerPrevious, Some(PICKER_PAGE)),
+        KeyBinding::new("k", PickerPrevious, Some("PickerPage && !Input")),
         KeyBinding::new("down", PickerNext, Some(PICKER_PAGE)),
-        KeyBinding::new("j", PickerNext, Some(PICKER_PAGE)),
+        KeyBinding::new("j", PickerNext, Some("PickerPage && !Input")),
         KeyBinding::new("enter", OpenSelectedRepository, Some(PICKER_PAGE)),
         KeyBinding::new(NEW_TAB_ENTER_KEY, OpenSelectedInNewTab, Some(PICKER_PAGE)),
         KeyBinding::new("escape", PickerEscape, Some(PICKER_PAGE)),
         KeyBinding::new(PATH_KEY, TogglePathEntry, Some(PICKER_PAGE)),
         KeyBinding::new("up", PickerPrevious, Some(PICKER_DIALOG)),
-        KeyBinding::new("k", PickerPrevious, Some(PICKER_DIALOG)),
+        KeyBinding::new("k", PickerPrevious, Some("PickerDialog && !Input")),
         KeyBinding::new("down", PickerNext, Some(PICKER_DIALOG)),
-        KeyBinding::new("j", PickerNext, Some(PICKER_DIALOG)),
+        KeyBinding::new("j", PickerNext, Some("PickerDialog && !Input")),
         KeyBinding::new(PATH_KEY, TogglePathEntry, Some(PICKER_DIALOG)),
     ]);
 }
