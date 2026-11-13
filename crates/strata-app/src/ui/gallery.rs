@@ -14,7 +14,7 @@ use strata_core::{ChangeKind, RefKind};
 use super::{
     BadgeTone, BannerKind, ButtonKind, ButtonSize, Confirm, RowState, banner, button, change_badge,
     content_button, count_pill, empty_state, icon_button, kbd, list_row, message, ref_badge,
-    section_header, status_badge,
+    section_header, status_badge, tab, tab_strip,
 };
 use crate::settings::Settings;
 use crate::style::{self, Design};
@@ -324,6 +324,33 @@ impl Render for Gallery {
                     design.remove_text,
                     &design,
                 ))),
+        ));
+
+        column = column.child(section(
+            "Tabs",
+            &design,
+            tab_strip("gallery-tab-strip", &design)
+                .border_1()
+                .rounded(px(6.0))
+                .child(
+                    tab("gallery-tab-0", 0, "strata", true, &design)
+                        .tooltip("/work/strata")
+                        .on_select(|_, _, _| {})
+                        .on_close(|_, _| {}),
+                )
+                .child(
+                    tab("gallery-tab-1", 1, "gpui-component", false, &design)
+                        .busy(true)
+                        .tooltip("/work/gpui-component")
+                        .on_select(|_, _, _| {})
+                        .on_close(|_, _| {}),
+                )
+                .child(
+                    tab("gallery-tab-2", 2, "docs-site", false, &design)
+                        .tooltip("/work/docs-site")
+                        .on_select(|_, _, _| {})
+                        .on_close(|_, _| {}),
+                ),
         ));
 
         column = column.child(section(

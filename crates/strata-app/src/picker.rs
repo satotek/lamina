@@ -14,12 +14,14 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable as _, FontWeight,
-    InteractiveElement, IntoElement, KeyBinding, ParentElement, PathPromptOptions, Render,
-    ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled, Subscription,
+    AnyElement, App, AppContext as _, ClickEvent, Context, Entity, FocusHandle, Focusable as _,
+    FontWeight, InteractiveElement, IntoElement, KeyBinding, ParentElement, PathPromptOptions,
+    Render, ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled, Subscription,
     UniformListScrollHandle, Window, actions, div, px, uniform_list,
 };
+use gpui_component::WindowExt as _;
 use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::menu::PopupMenuItem;
 use gpui_component::{ActiveTheme as _, TitleBar};
 use strata_core::repo::Repo;
 
@@ -51,6 +53,10 @@ const MODIFIER: &str = "Ctrl";
 const PATH_KEY: &str = "cmd-l";
 #[cfg(not(target_os = "macos"))]
 const PATH_KEY: &str = "ctrl-l";
+#[cfg(target_os = "macos")]
+const NEW_TAB_ENTER_KEY: &str = "cmd-enter";
+#[cfg(not(target_os = "macos"))]
+const NEW_TAB_ENTER_KEY: &str = "ctrl-enter";
 
 actions!(
     strata,
@@ -61,6 +67,8 @@ actions!(
         PickerNext,
         /// Opens the selected repository, or the typed path.
         OpenSelectedRepository,
+        /// Opens the selected repository, or the typed path, in a new tab.
+        OpenSelectedInNewTab,
         /// Switches the text field between filtering and entering a path.
         TogglePathEntry,
         /// Leaves the typed-path field.
@@ -77,6 +85,7 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("down", PickerNext, Some(PICKER_PAGE)),
         KeyBinding::new("j", PickerNext, Some(PICKER_PAGE)),
         KeyBinding::new("enter", OpenSelectedRepository, Some(PICKER_PAGE)),
+        KeyBinding::new(NEW_TAB_ENTER_KEY, OpenSelectedInNewTab, Some(PICKER_PAGE)),
         KeyBinding::new("escape", PickerEscape, Some(PICKER_PAGE)),
         KeyBinding::new(PATH_KEY, TogglePathEntry, Some(PICKER_PAGE)),
         KeyBinding::new("up", PickerPrevious, Some(PICKER_DIALOG)),
@@ -96,9 +105,20 @@ pub(crate) enum Mode {
     Dialog,
 }
 
+/// Where the chosen repository should open by default when submitting the picker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum OpenTarget {
+    /// Replace the active repository view in this window (or open the first tab).
+    #[default]
+    Current,
+    /// Add a new tab in this window (or switch to it if already open).
+    NewTab,
+}
+
 /// A directory chooser for one repository.
 pub struct Picker {
     mode: Mode,
+    target: OpenTarget,
     workspace: Entity<Workspace>,
     entity: Entity<Picker>,
     recents: RecentRepositories,
@@ -116,6 +136,7 @@ pub struct Picker {
 impl Picker {
     pub(crate) fn new(
         mode: Mode,
+        target: OpenTarget,
         workspace: Entity<Workspace>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -136,19 +157,23 @@ impl Picker {
                     this.error = None;
                     cx.notify();
                 }
-                InputEvent::PressEnter {
-                    secondary: false, ..
-                } => {
+                InputEvent::PressEnter { secondary, .. } => {
                     // The input owns `Enter` while it has focus, so the picker
                     // submits from here instead of from its own binding.
+                    let target = if *secondary {
+                        OpenTarget::NewTab
+                    } else {
+                        this.target
+                    };
                     let Some(handle) = cx.active_window() else {
                         return;
                     };
                     let mut failure = None;
-                    let _ = handle.update(cx, |_, window, cx| match this.open(window, cx) {
-                        Ok(()) => {}
-                        Err(message) => failure = Some(message),
-                    });
+                    let _ =
+                        handle.update(cx, |_, window, cx| match this.open_in(target, window, cx) {
+                            Ok(()) => {}
+                            Err(message) => failure = Some(message),
+                        });
                     if let Some(message) = failure {
                         this.error = Some(message);
                     }
@@ -158,6 +183,7 @@ impl Picker {
             });
         Self {
             mode,
+            target,
             workspace,
             entity: cx.entity(),
             recents,
@@ -211,7 +237,12 @@ impl Picker {
 
     /// Resolves what the picker should open and hands it to the workspace.
     /// `Err` is a message for the user, and the dialog stays open to show it.
-    fn open(&mut self, window: &mut Window, cx: &mut App) -> Result<(), String> {
+    fn open_in(
+        &mut self,
+        target: OpenTarget,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<(), String> {
         let path = if self.path_mode {
             let text = self.input.read(cx).value().trim().to_owned();
             if text.is_empty() {
@@ -222,23 +253,35 @@ impl Picker {
             self.selected_path(cx)
                 .ok_or_else(|| "Choose a repository first.".to_owned())?
         };
-        self.open_path(path, window, cx)
+        self.open_path_in(path, target, window, cx)
     }
 
-    fn open_path(
+    fn open_path_in(
         &mut self,
         path: PathBuf,
+        target: OpenTarget,
         window: &mut Window,
         cx: &mut App,
     ) -> Result<(), String> {
-        self.workspace
-            .update(cx, |workspace, cx| workspace.open_path(&path, window, cx))
+        self.workspace.update(cx, |workspace, cx| match target {
+            OpenTarget::Current => workspace.open_path(&path, window, cx),
+            OpenTarget::NewTab => workspace.open_path_in_new_tab(&path, window, cx),
+        })
     }
 
     /// `Enter` from the welcome screen or the dialog's confirm button. Returns
     /// whether a repository was opened; the dialog closes only when one was.
     pub(crate) fn open_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        match self.open(window, cx) {
+        self.open_selected_in(self.target, window, cx)
+    }
+
+    fn open_selected_in(
+        &mut self,
+        target: OpenTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match self.open_in(target, window, cx) {
             // The workspace closes the dialog and focuses the new view once the
             // swap is done, so this entity may be dropped right after.
             Ok(()) => true,
@@ -250,14 +293,79 @@ impl Picker {
         }
     }
 
-    /// Opens the platform's directory chooser. Its answer arrives on a later
-    /// frame, so the picker stays exactly as it is until then.
+    fn open_row_in(
+        &mut self,
+        position: usize,
+        target: OpenTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.selected = position;
+        let Some(path) = self
+            .filtered(cx)
+            .get(position)
+            .copied()
+            .and_then(|index| self.recents.get(index))
+            .map(|entry| entry.path.clone())
+        else {
+            return;
+        };
+        match self.open_path_in(path, target, window, cx) {
+            Ok(()) => {}
+            Err(message) => {
+                self.error = Some(message);
+                cx.notify();
+            }
+        }
+    }
+
+    fn open_row_in_new_window(
+        &mut self,
+        position: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.selected = position;
+        let Some(path) = self
+            .filtered(cx)
+            .get(position)
+            .copied()
+            .and_then(|index| self.recents.get(index))
+            .map(|entry| entry.path.clone())
+        else {
+            return;
+        };
+        match resolve_repository(&path) {
+            Ok(root) => {
+                crate::workspace::open_new_window(root, cx);
+                if self.mode == Mode::Dialog && window.has_active_dialog(cx) {
+                    window.defer(cx, |window, cx| window.close_dialog(cx));
+                }
+            }
+            Err(message) => {
+                self.error = Some(message);
+                cx.notify();
+            }
+        }
+    }
+
+    /// Opens the platform's directory chooser using the picker's default target.
     pub(crate) fn open_native(&mut self, window: &mut Window, cx: &mut App) {
+        self.open_native_in(self.target, window, cx);
+    }
+
+    /// Opens the platform's directory chooser and opens the result in `target`.
+    /// Its answer arrives on a later frame, so the picker stays as it is until then.
+    pub(crate) fn open_native_in(&mut self, target: OpenTarget, window: &mut Window, cx: &mut App) {
+        let prompt = match target {
+            OpenTarget::Current => "Open repository",
+            OpenTarget::NewTab => "Open in new tab",
+        };
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("Open repository".into()),
+            prompt: Some(prompt.into()),
         });
         let handle = window.window_handle();
         let weak = self.entity.downgrade();
@@ -269,7 +377,7 @@ impl Picker {
                 let _ = handle.update(cx, |_, window, cx| {
                     let _ = weak.update(cx, |picker, cx| {
                         picker.path_mode = false;
-                        match picker.open_path(path, window, cx) {
+                        match picker.open_path_in(path, target, window, cx) {
                             Ok(()) => {}
                             Err(message) => {
                                 picker.error = Some(message);
@@ -343,6 +451,8 @@ impl Picker {
         let entries = self.recents.clone();
         let list_entity = self.entity.clone();
         let list_design = design.clone();
+        let target = self.target;
+        let mode = self.mode;
         let now = crate::recent::now_seconds();
         let count = filtered.len();
         let filtered = Rc::new(filtered);
@@ -434,6 +544,8 @@ impl Picker {
                             return div().into_any_element();
                         };
                         recent_row(
+                            mode,
+                            target,
                             position,
                             entry,
                             position == selected,
@@ -458,7 +570,7 @@ impl Picker {
                     .text_size(px(10.5))
                     .text_color(design.muted)
                     .child(format!(
-                        "↑/↓ choose · Enter open · {MODIFIER}+O open… · {MODIFIER}+L type a path"
+                        "↑/↓ choose · Enter open · {MODIFIER}+Enter new tab · {MODIFIER}+O open… · {MODIFIER}+L type a path"
                     )),
             );
         }
@@ -499,7 +611,10 @@ fn path_toggle_button(entity: &Entity<Picker>, mode: Mode, path_mode: bool) -> u
 }
 
 /// Row rendering shared by the page and the dialog.
+#[allow(clippy::too_many_arguments)]
 fn recent_row(
+    mode: Mode,
+    default_target: OpenTarget,
     position: usize,
     entry: &RecentRepository,
     selected: bool,
@@ -507,7 +622,7 @@ fn recent_row(
     entity: Entity<Picker>,
     design: &Design,
 ) -> AnyElement {
-    let group = format!("recent-{position}");
+    let group = format!("recent-{mode:?}-{position}");
     let name = entry.name();
     let path = entry.path.display().to_string();
     let opened = opened_label(entry.opened_at, now);
@@ -522,10 +637,14 @@ fn recent_row(
         .items_center()
         .gap_2()
         .cursor_pointer()
-        .on_click(move |_, window, cx| {
+        .on_click(move |event, window, cx| {
+            let target = if event.modifiers().secondary(cx) {
+                OpenTarget::NewTab
+            } else {
+                default_target
+            };
             open_entity.update(cx, |picker, cx| {
-                picker.selected = position;
-                picker.open_selected(window, cx);
+                picker.open_row_in(position, target, window, cx);
             });
         })
         .child(
@@ -557,7 +676,7 @@ fn recent_row(
                 .child(opened),
         );
 
-    let remove_entity = entity;
+    let remove_entity = entity.clone();
     let remove = div()
         .id(("recent-remove", position))
         .flex_none()
@@ -590,7 +709,47 @@ fn recent_row(
     if selected {
         row = row.bg(design.row_selected);
     }
-    row.into_any_element()
+
+    let menu_id: SharedString = format!("recent-menu-{mode:?}-{position}").into();
+    let menu_entity = entity;
+    ui::context_menu(menu_id, design, row, move |menu, _window, _cx| {
+        let open_current = {
+            let entity = menu_entity.clone();
+            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                entity.update(cx, |picker, cx| {
+                    picker.open_row_in(position, OpenTarget::Current, window, cx);
+                });
+            }
+        };
+        let open_new_tab = {
+            let entity = menu_entity.clone();
+            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                entity.update(cx, |picker, cx| {
+                    picker.open_row_in(position, OpenTarget::NewTab, window, cx);
+                });
+            }
+        };
+        let open_new_window = {
+            let entity = menu_entity.clone();
+            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                entity.update(cx, |picker, cx| {
+                    picker.open_row_in_new_window(position, window, cx);
+                });
+            }
+        };
+        let remove = {
+            let entity = menu_entity.clone();
+            move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                entity.update(cx, |picker, cx| picker.remove(position, cx));
+            }
+        };
+        menu.item(PopupMenuItem::new("Open").on_click(open_current))
+            .item(PopupMenuItem::new("Open in New Tab").on_click(open_new_tab))
+            .item(PopupMenuItem::new("Open in New Window").on_click(open_new_window))
+            .separator()
+            .item(PopupMenuItem::new("Remove from Recent").on_click(remove))
+    })
+    .into_any_element()
 }
 
 impl Render for Picker {
@@ -611,6 +770,9 @@ impl Render for Picker {
                 .on_action(cx.listener(|this, _: &PickerNext, _, cx| this.step(1, cx)))
                 .on_action(cx.listener(|this, _: &OpenSelectedRepository, window, cx| {
                     this.open_selected(window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &OpenSelectedInNewTab, window, cx| {
+                    this.open_selected_in(OpenTarget::NewTab, window, cx);
                 }))
                 .on_action(cx.listener(|this, _: &TogglePathEntry, window, cx| {
                     this.toggle_path_entry(window, cx);
@@ -659,26 +821,32 @@ impl Render for Picker {
                         .child(body),
                 )
                 .into_any_element(),
-            Mode::Dialog => div()
-                .flex()
-                .flex_col()
-                .w_full()
-                .track_focus(&self.focus)
-                .key_context(PICKER_DIALOG)
-                .on_action(cx.listener(|this, _: &PickerPrevious, _, cx| this.step(-1, cx)))
-                .on_action(cx.listener(|this, _: &PickerNext, _, cx| this.step(1, cx)))
-                .on_action(cx.listener(|this, _: &TogglePathEntry, window, cx| {
-                    this.toggle_path_entry(window, cx);
-                }))
-                .child(
-                    div()
-                        .pb_1()
-                        .text_size(px(11.0))
-                        .text_color(design.muted)
-                        .child("Choose a repository to open in this window."),
-                )
-                .child(body)
-                .into_any_element(),
+            Mode::Dialog => {
+                let subtitle = match self.target {
+                    OpenTarget::Current => "Choose a repository to open in this window.",
+                    OpenTarget::NewTab => "Choose a repository to open in a new tab.",
+                };
+                div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .track_focus(&self.focus)
+                    .key_context(PICKER_DIALOG)
+                    .on_action(cx.listener(|this, _: &PickerPrevious, _, cx| this.step(-1, cx)))
+                    .on_action(cx.listener(|this, _: &PickerNext, _, cx| this.step(1, cx)))
+                    .on_action(cx.listener(|this, _: &TogglePathEntry, window, cx| {
+                        this.toggle_path_entry(window, cx);
+                    }))
+                    .child(
+                        div()
+                            .pb_1()
+                            .text_size(px(11.0))
+                            .text_color(design.muted)
+                            .child(subtitle),
+                    )
+                    .child(body)
+                    .into_any_element()
+            }
         }
     }
 }

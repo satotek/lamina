@@ -11,7 +11,7 @@
 
 use std::time::{Duration, Instant};
 
-use gpui::{AnyWindowHandle, Context};
+use gpui::{AnyWindowHandle, Context, Task};
 
 use crate::remote::Command;
 use crate::repo_view::RepoView;
@@ -21,33 +21,32 @@ use crate::settings::Settings;
 /// auto-fetch on or off feels immediate, coarse enough to cost nothing.
 const TICK: Duration = Duration::from_secs(5);
 
-/// Starts the timer for a repository view. `window` is the window that owns it;
-/// a fetch runs through the view's title-bar command, which needs one.
-pub(crate) fn start(window: AnyWindowHandle, cx: &mut Context<RepoView>) {
+/// Starts the timer for an active repository view. Dropping the returned
+/// [`Task`] cancels polling immediately when the tab becomes inactive or closes.
+pub(crate) fn start(
+    window: AnyWindowHandle,
+    mut last: Instant,
+    cx: &mut Context<RepoView>,
+) -> Task<()> {
     cx.spawn(async move |this, cx| {
-        let mut last = Instant::now();
         loop {
             cx.background_executor().timer(TICK).await;
 
-            let Ok((has_session, minutes)) = this.read_with(cx, |view, cx| {
+            let Ok((active, has_session, minutes)) = this.read_with(cx, |view, cx| {
                 (
+                    view.is_active(),
                     view.session.is_some(),
                     Settings::get(cx).behaviour.auto_fetch_minutes,
                 )
             }) else {
-                // The window is gone, and with it the repository.
+                // The window or view is gone, and with it the repository.
                 return;
             };
-            // `--fake` has no session to fetch into.
-            if !has_session {
+            // Stop polling when inactive, `--fake`, or disabled.
+            if !active || !has_session || minutes == 0 {
                 return;
             }
             if !due(minutes, last.elapsed()) {
-                if minutes == 0 {
-                    // Do not credit time spent with auto-fetch off to the next
-                    // interval the user picks.
-                    last = Instant::now();
-                }
                 continue;
             }
 
@@ -55,6 +54,9 @@ pub(crate) fn start(window: AnyWindowHandle, cx: &mut Context<RepoView>) {
             // then makes the next tick try again.
             let started = window.update(cx, |_, window, cx| {
                 this.update(cx, |view, cx| {
+                    if !view.is_active() {
+                        return false;
+                    }
                     let busy = view
                         .session
                         .as_ref()
@@ -71,9 +73,9 @@ pub(crate) fn start(window: AnyWindowHandle, cx: &mut Context<RepoView>) {
                 continue;
             }
             last = Instant::now();
+            let _ = this.update(cx, |view, _| view.record_autofetch(last));
         }
     })
-    .detach();
 }
 
 /// Whether `elapsed` covers the configured interval. Zero disables auto-fetch.

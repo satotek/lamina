@@ -1,36 +1,77 @@
-//! What fills the window: the welcome screen or a repository view.
+//! What fills the window: the welcome screen or one or more repository tabs.
 //!
 //! `Root` is created with a fixed child, so the window's content is swapped one
-//! level down: this view owns whichever child is current and replaces it when
-//! the user opens another repository. Releasing the old [`RepoView`] frees it
-//! (it keeps no handle to itself); the swap takes its [`Session`] out and hands
-//! it to a background thread, because `Session::drop` joins its worker threads
-//! and that must not happen on the UI thread.
+//! level down: this view owns whichever tab is active and only renders the
+//! active [`RepoView`]. Inactive tabs keep their [`Session`] (so their
+//! filesystem watcher stays current and switching back is instant), while
+//! pausing repaints and timers until re-activated. Releasing or closing a tab
+//! takes its [`Session`] out and drops it on a background thread, because
+//! `Session::drop` joins worker threads and must not block the UI thread.
 //!
-//! Swapping also gives every repository one place to record "opened": the recent
-//! list is written here, never by a view. Each active repository lives in a
-//! [`RepoSlot`] alongside its [`NavigationStack`], so future tabs can hold one
-//! slot per tab without changing [`RepoView`].
+//! Swapping and opening tabs also gives every repository one place to record
+//! "opened": the recent list and per-window session file are written here,
+//! never by a view.
 
 use std::path::{Path, PathBuf};
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement,
-    ParentElement, Render, Styled, Subscription, Window, div, px,
+    AnyElement, App, AppContext as _, BorrowAppContext as _, Bounds, Context, Entity, Global,
+    InteractiveElement as _, IntoElement, ParentElement, Render, Styled, Subscription,
+    TitlebarOptions, Window, WindowBounds, WindowDecorations, WindowId, WindowOptions, div, px,
+    size,
 };
-use gpui_component::WindowExt as _;
 use gpui_component::dialog::DialogFooter;
+use gpui_component::{Root, TitleBar, WindowExt as _};
 use strata_core::session::Session;
 
-use crate::actions::OpenRepository;
+use crate::actions::{
+    CloseTab, NewTab, NextTab, OpenRepository, PreviousTab, SelectTab1, SelectTab2, SelectTab3,
+    SelectTab4, SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9, WORKSPACE,
+};
 use crate::debug_launch::{self, DebugDialog, DebugLaunch};
-use crate::picker::{Mode, Picker};
+use crate::picker::{Mode, OpenTarget, Picker};
 use crate::recent::{self, RecentRepositories};
 use crate::repo_view::{Launch, RepoView};
 use crate::settings::Settings;
+use crate::style::Design;
+use crate::tabs::{CloseOutcome, SavedSession, SavedWindow, TabDeck};
+
+const DEFAULT_WINDOW_SIZE: (f32, f32) = (1360.0, 860.0);
+const DEFAULT_MIN_WINDOW_SIZE: (f32, f32) = (720.0, 480.0);
+
+/// Tracks open workspace windows so multi-window sessions survive quitting and
+/// closing one secondary window updates `session.json` cleanly.
+#[derive(Default)]
+struct SessionRegistry {
+    windows: Vec<(WindowId, SavedWindow)>,
+    quitting: bool,
+}
+
+impl Global for SessionRegistry {}
+
+/// Initializes workspace session tracking and quit protection.
+pub(crate) fn init(cx: &mut App) {
+    cx.set_global(SessionRegistry::default());
+    cx.on_app_quit(|cx| {
+        if cx.has_global::<SessionRegistry>() {
+            cx.update_global::<SessionRegistry, _>(|reg, _| {
+                reg.quitting = true;
+            });
+        }
+        async {}
+    })
+    .detach();
+}
+
+/// Restored launches and active tab index for one window at startup.
+pub(crate) struct RestoredWindow {
+    pub(crate) tabs: Vec<Launch>,
+    pub(crate) active: usize,
+}
 
 /// A parent repository the user navigated away from when opening a submodule
-/// or linked worktree in the current window.
+/// or linked worktree in the current tab.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ParentRepo {
     pub(crate) path: PathBuf,
@@ -74,12 +115,11 @@ impl NavigationStack {
     }
 }
 
-/// One open repository view together with its canonical root and parent
-/// history, self-contained so tabs can reuse it directly later.
+/// One open repository tab together with its canonical root and parent history.
 struct RepoSlot {
     view: Entity<RepoView>,
-    /// The working-tree root (or git dir for bare repos) on screen. Canonical,
-    /// so the picker and child-opening can recognise the current repository.
+    /// The working-tree root (or git dir for bare repos). Canonical, so the
+    /// picker, tab deduplication, and child-opening recognise the repository.
     path: Option<PathBuf>,
     parents: NavigationStack,
 }
@@ -88,8 +128,8 @@ struct RepoSlot {
 enum Content {
     /// The welcome screen, shown when no repository was opened at startup.
     Welcome(Entity<Picker>),
-    /// A repository, synthetic (`--fake`) or real.
-    Repo(RepoSlot),
+    /// One or more open repository tabs (always non-empty while active).
+    Tabs(TabDeck<RepoSlot>),
 }
 
 enum OpenDisposition {
@@ -102,12 +142,13 @@ enum OpenDisposition {
 
 pub struct Workspace {
     content: Content,
-    /// `System` follows the OS. A repository view subscribes for itself; the
+    window_id: WindowId,
+    /// `System` follows the OS. Repository views subscribe for themselves; the
     /// welcome screen has no view of its own to do that, so the workspace
     /// keeps the subscription while it is showing one.
     _appearance: Option<Subscription>,
-    /// Overrides the recent-list directory in tests so test runs never mutate
-    /// the user's real `recent.json` or depend on global env vars.
+    /// Overrides the recent-list and session directory in tests so test runs
+    /// never mutate the user's real config files or depend on global env vars.
     #[cfg(test)]
     recent_dir: Option<PathBuf>,
     #[cfg(test)]
@@ -129,36 +170,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Self {
         match launch {
-            Some(launch) => {
-                let path = repo_path(&launch);
-                let workspace = cx.weak_entity();
-                let view = cx.new(|cx| {
-                    RepoView::new_in_workspace(launch, Some(workspace), None, window, cx)
-                });
-                if debug.is_active() {
-                    view.update(cx, |view, cx| view.set_debug_launch(debug, window, cx));
-                }
-                let slot = RepoSlot {
-                    view,
-                    path,
-                    parents: NavigationStack::default(),
-                };
-                let workspace = Self {
-                    content: Content::Repo(slot),
-                    // The repository view subscribes on its own.
-                    _appearance: None,
-                    #[cfg(test)]
-                    recent_dir: None,
-                    #[cfg(test)]
-                    launch_repo: Launch::open_with,
-                };
-                // The session already opened successfully, so this is the point
-                // where the repository counts as "opened".
-                if let Some(path) = workspace.current_path() {
-                    workspace.record_recent(path);
-                }
-                workspace
-            }
+            Some(launch) => Self::new_with_tabs(vec![launch], 0, debug, window, cx),
             None => {
                 if debug.is_active() {
                     if debug.has_repo_actions() {
@@ -195,14 +207,91 @@ impl Workspace {
         }
     }
 
+    /// Creates a workspace pre-populated with one or more repository tabs,
+    /// keeping inactive tabs quiet (`active = false`) while leaving their
+    /// background sessions and watchers running.
+    pub(crate) fn new_with_tabs(
+        launches: Vec<Launch>,
+        active: usize,
+        debug: DebugLaunch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        if launches.is_empty() {
+            return Self::new_with_debug(None, debug, window, cx);
+        }
+        let clamped_active = active.min(launches.len() - 1);
+        let workspace_weak = cx.weak_entity();
+        let mut slots = Vec::with_capacity(launches.len());
+
+        for (index, launch) in launches.into_iter().enumerate() {
+            let is_active = index == clamped_active;
+            let path = repo_path(&launch);
+            let ws = workspace_weak.clone();
+            let view = cx.new(|cx| {
+                RepoView::new_in_workspace_active(launch, Some(ws), None, is_active, window, cx)
+            });
+            if is_active && debug.is_active() {
+                view.update(cx, |view, cx| {
+                    view.set_debug_launch(debug.clone(), window, cx)
+                });
+            }
+            slots.push(RepoSlot {
+                view,
+                path,
+                parents: NavigationStack::default(),
+            });
+        }
+
+        let deck = TabDeck::from_items(slots, clamped_active);
+        if let Some(active_slot) = deck.active() {
+            let title = active_slot.view.read(cx).window_title().to_owned();
+            window.set_window_title(&title);
+        }
+
+        let window_id = window.window_handle().window_id();
+        track_window_release(&cx.entity(), cx);
+
+        let workspace = Self {
+            content: Content::Tabs(deck),
+            // Repository views manage window appearance subscriptions on their own.
+            _appearance: None,
+            window_id,
+            #[cfg(test)]
+            recent_dir: None,
+            #[cfg(test)]
+            launch_repo: Launch::open_with,
+        };
+
+        // Record recents after all slots are constructed so the active tab ends
+        // up newest in `recent.json`.
+        if let Content::Tabs(deck) = &workspace.content {
+            for (index, slot) in deck.items().iter().enumerate() {
+                if index != clamped_active
+                    && let Some(path) = slot.path.as_deref()
+                {
+                    workspace.record_recent(path);
+                }
+            }
+            if let Some(active_path) = deck.active().and_then(|slot| slot.path.as_deref()) {
+                workspace.record_recent(active_path);
+            }
+        }
+        workspace.persist_session(cx);
+        workspace
+    }
+
     fn welcome(appearance: Subscription, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let workspace = cx.entity();
-        let view = cx.new(|cx| Picker::new(Mode::Page, workspace, window, cx));
+        let view = cx.new(|cx| Picker::new(Mode::Page, OpenTarget::Current, workspace, window, cx));
         let input = view.read(cx).input().clone();
         crate::ui::focus_input(&input, window, cx);
         window.set_window_title("Strata");
+        let window_id = window.window_handle().window_id();
+        track_window_release(&cx.entity(), cx);
         Self {
             content: Content::Welcome(view),
+            window_id,
             _appearance: Some(appearance),
             #[cfg(test)]
             recent_dir: None,
@@ -211,23 +300,26 @@ impl Workspace {
         }
     }
 
-    fn current_path(&self) -> Option<&Path> {
+    pub(crate) fn current_path(&self) -> Option<&Path> {
         match &self.content {
             Content::Welcome(_) => None,
-            Content::Repo(slot) => slot.path.as_deref(),
+            Content::Tabs(deck) => deck.active().and_then(|slot| slot.path.as_deref()),
+        }
+    }
+
+    pub(crate) fn tab_count(&self) -> usize {
+        match &self.content {
+            Content::Welcome(_) => 0,
+            Content::Tabs(deck) => deck.len(),
         }
     }
 
     fn current_repo_name(&self, cx: &App) -> Option<String> {
-        match &self.content {
-            Content::Welcome(_) => None,
-            Content::Repo(slot) => slot
-                .view
-                .read(cx)
-                .repo_display_name()
-                .map(str::to_owned)
-                .or_else(|| slot.path.as_deref().map(recent::repository_name)),
-        }
+        let Content::Tabs(deck) = &self.content else {
+            return None;
+        };
+        let slot = deck.active()?;
+        Some(slot_display_name(slot, cx))
     }
 
     fn record_recent(&self, path: &Path) {
@@ -241,11 +333,92 @@ impl Workspace {
             }
             return;
         }
+        #[cfg(not(test))]
         recent::record(path);
+        #[cfg(test)]
+        if std::env::var_os("STRATA_CONFIG_DIR").is_some() {
+            recent::record(path);
+        } else {
+            let _ = path;
+        }
     }
 
-    /// Opens `path` in this window, replacing whatever it shows and resetting
-    /// the back-navigation stack.
+    fn saved_window(&self) -> Option<SavedWindow> {
+        let Content::Tabs(deck) = &self.content else {
+            return None;
+        };
+        let mut tabs = Vec::with_capacity(deck.len());
+        let mut active = None;
+        let raw_active = deck.active_index();
+        for (index, slot) in deck.items().iter().enumerate() {
+            let Some(path) = &slot.path else {
+                continue;
+            };
+            if index == raw_active {
+                active = Some(tabs.len());
+            }
+            tabs.push(path.clone());
+        }
+        if tabs.is_empty() {
+            return None;
+        }
+        Some(SavedWindow {
+            tabs,
+            active: active.unwrap_or(0),
+        })
+    }
+
+    fn persist_session(&self, cx: &mut App) {
+        let saved = self.saved_window();
+
+        #[cfg(test)]
+        if let Some(dir) = &self.recent_dir {
+            let file = dir.join("session.json");
+            let session = SavedSession {
+                windows: saved.into_iter().collect(),
+            };
+            if let Err(error) = session.save(&file) {
+                log::warn!("cannot save test window session: {error}");
+            }
+            return;
+        }
+
+        #[cfg(test)]
+        if std::env::var_os("STRATA_CONFIG_DIR").is_none() {
+            return;
+        }
+
+        if !cx.has_global::<SessionRegistry>() {
+            return;
+        }
+        let window_id = self.window_id;
+        let snapshot = cx.update_global::<SessionRegistry, _>(|reg, _| {
+            if let Some(entry) = reg.windows.iter_mut().find(|(id, _)| *id == window_id) {
+                if let Some(saved) = saved {
+                    entry.1 = saved;
+                } else {
+                    reg.windows.retain(|(id, _)| *id != window_id);
+                }
+            } else if let Some(saved) = saved {
+                reg.windows.push((window_id, saved));
+            }
+            SavedSession {
+                windows: reg
+                    .windows
+                    .iter()
+                    .map(|(_, window)| window.clone())
+                    .collect(),
+            }
+        });
+        if !snapshot.windows.is_empty()
+            && let Err(error) = snapshot.save_default()
+        {
+            log::warn!("cannot save window session: {error}");
+        }
+    }
+
+    /// Opens `path` in the active tab of this window, resetting its
+    /// back-navigation stack (or opens the first tab from the welcome screen).
     ///
     /// The path may be any directory inside a repository; the repository's own
     /// root is what gets opened and remembered. `Err` is a message for the
@@ -264,9 +437,73 @@ impl Workspace {
         Ok(())
     }
 
-    /// Opens a submodule or linked worktree in the current window, pushing the
-    /// current repository onto the navigation stack so the user can return to
-    /// it.
+    /// Opens `path` in a new tab of this window, or switches to its existing tab
+    /// if the same repository is already open here.
+    pub(crate) fn open_path_in_new_tab(
+        &mut self,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        let root = crate::picker::resolve_repository(path)?;
+        let canon = canonical(root.clone());
+
+        if let Content::Tabs(deck) = &self.content {
+            if let Some(existing) = deck
+                .items()
+                .iter()
+                .position(|slot| slot.path.as_deref() == Some(canon.as_path()))
+            {
+                let switched = self.activate_index(existing, window, cx);
+                self.record_recent(&canon);
+                if switched {
+                    self.persist_session(cx);
+                }
+                self.finish_navigation(window, cx);
+                return Ok(());
+            }
+
+            let launch = self.open_launch(&root, cx);
+            if let Launch::Error { error, .. } = &launch {
+                return Err(format!("Cannot open {}: {error}", root.display()));
+            }
+            let slot_path = repo_path(&launch);
+            let title = launch.title();
+            let workspace = cx.weak_entity();
+            let view = cx.new(|cx| {
+                RepoView::new_in_workspace_active(launch, Some(workspace), None, true, window, cx)
+            });
+
+            if let Content::Tabs(deck) = &mut self.content {
+                if let Some(active) = deck.active() {
+                    active
+                        .view
+                        .update(cx, |view, cx| view.set_active(false, cx));
+                }
+                deck.open(RepoSlot {
+                    view,
+                    path: slot_path.clone(),
+                    parents: NavigationStack::default(),
+                });
+            }
+            window.set_window_title(&title);
+            if let Some(path) = &slot_path {
+                self.record_recent(path);
+            }
+            self.persist_session(cx);
+            self.refresh_tab_strip(cx);
+            self.finish_navigation(window, cx);
+            return Ok(());
+        }
+
+        // Welcome screen has no open tabs yet, so opening in a new tab creates
+        // the first tab.
+        self.open_path(&root, window, cx)
+    }
+
+    /// Opens a submodule or linked worktree in the current tab, pushing the
+    /// current repository onto that tab's navigation stack so the user can return
+    /// to it.
     pub(crate) fn open_child(
         &mut self,
         path: &Path,
@@ -288,7 +525,9 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
         let target = match &self.content {
-            Content::Repo(slot) => slot.parents.current().cloned(),
+            Content::Tabs(deck) => deck
+                .active()
+                .and_then(|slot| slot.parents.current().cloned()),
             Content::Welcome(_) => None,
         };
         let Some(target) = target else {
@@ -301,7 +540,10 @@ impl Workspace {
         }
 
         let mut parents = match &self.content {
-            Content::Repo(slot) => slot.parents.clone(),
+            Content::Tabs(deck) => deck
+                .active()
+                .map(|slot| slot.parents.clone())
+                .unwrap_or_default(),
             Content::Welcome(_) => NavigationStack::default(),
         };
         parents.pop();
@@ -337,7 +579,10 @@ impl Workspace {
             OpenDisposition::Replace => NavigationStack::default(),
             OpenDisposition::PushParent => {
                 let mut parents = match &self.content {
-                    Content::Repo(slot) => slot.parents.clone(),
+                    Content::Tabs(deck) => deck
+                        .active()
+                        .map(|slot| slot.parents.clone())
+                        .unwrap_or_default(),
                     Content::Welcome(_) => NavigationStack::default(),
                 };
                 if let Some(current_path) = self.current_path() {
@@ -374,23 +619,256 @@ impl Workspace {
             path: path.clone(),
             parents,
         };
-        // Taking the old session out explicitly keeps the hand-off obvious
-        // at the swap site. The drop runs on another thread so the swap does
-        // not wait for a running history walk to notice the shutdown; the
-        // view's own memory is released when `previous` goes out of scope.
-        let previous = std::mem::replace(&mut self.content, Content::Repo(slot));
+
         self._appearance = None;
-        if let Content::Repo(previous) = previous
-            && let Some(session) = previous.view.update(cx, |view, _| view.detach_session())
-        {
-            crate::repo_view::drop_session_in_background(session);
+        match &mut self.content {
+            Content::Welcome(_) => {
+                self.content = Content::Tabs(TabDeck::from_items(vec![slot], 0));
+            }
+            Content::Tabs(deck) => {
+                if let Some(active_slot) = deck.active_mut() {
+                    let previous = std::mem::replace(active_slot, slot);
+                    detach_and_drop_slot(previous, cx);
+                } else {
+                    deck.open(slot);
+                }
+            }
         }
+
         // A new view syncs the title only when it differs from the one it
         // was built with, so the swap has to set the window title itself.
         window.set_window_title(&title);
         if let Some(path) = &path {
             self.record_recent(path);
         }
+        self.persist_session(cx);
+    }
+
+    pub(crate) fn select_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if self.activate_index(index, window, cx) {
+            self.persist_session(cx);
+            self.finish_navigation(window, cx);
+        }
+    }
+
+    pub(crate) fn cycle_tab(&mut self, delta: isize, window: &mut Window, cx: &mut Context<Self>) {
+        let Content::Tabs(deck) = &mut self.content else {
+            return;
+        };
+        let old_active = deck.active_index();
+        let Some(new_active) = deck.cycle(delta) else {
+            return;
+        };
+        self.transition_active_tab(old_active, new_active, window, cx);
+    }
+
+    pub(crate) fn jump_to_tab(
+        &mut self,
+        one_based: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Content::Tabs(deck) = &mut self.content else {
+            return;
+        };
+        let old_active = deck.active_index();
+        let Some(new_active) = deck.jump(one_based) else {
+            return;
+        };
+        self.transition_active_tab(old_active, new_active, window, cx);
+    }
+
+    fn activate_index(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Content::Tabs(deck) = &mut self.content else {
+            return false;
+        };
+        let old_active = deck.active_index();
+        if !deck.select(index) {
+            return false;
+        }
+        self.transition_active_after_deck_change(old_active, index, window, cx);
+        true
+    }
+
+    fn transition_active_tab(
+        &mut self,
+        old_active: usize,
+        new_active: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.transition_active_after_deck_change(old_active, new_active, window, cx);
+        self.persist_session(cx);
+        self.finish_navigation(window, cx);
+    }
+
+    fn transition_active_after_deck_change(
+        &mut self,
+        old_active: usize,
+        new_active: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Content::Tabs(deck) = &self.content else {
+            return;
+        };
+        if let Some(old_slot) = deck.get(old_active) {
+            old_slot
+                .view
+                .update(cx, |view, cx| view.set_active(false, cx));
+        }
+        if let Some(new_slot) = deck.get(new_active) {
+            let title = new_slot.view.update(cx, |view, cx| {
+                view.set_active(true, cx);
+                view.window_title().to_owned()
+            });
+            window.set_window_title(&title);
+        }
+    }
+
+    pub(crate) fn reorder_tab(
+        &mut self,
+        from: usize,
+        to: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Content::Tabs(deck) = &mut self.content else {
+            return;
+        };
+        if deck.reorder(from, to) {
+            self.persist_session(cx);
+            self.refresh_tab_strip(cx);
+        }
+    }
+
+    pub(crate) fn close_tab(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Content::Tabs(deck) = &mut self.content else {
+            window.remove_window();
+            return;
+        };
+        let old_active = deck.active_index();
+        match deck.close(index) {
+            CloseOutcome::OutOfBounds => {}
+            CloseOutcome::ClosedLast(removed) => {
+                detach_and_drop_slot(removed, cx);
+                window.remove_window();
+            }
+            CloseOutcome::Closed {
+                removed,
+                new_active,
+            } => {
+                detach_and_drop_slot(removed, cx);
+                if index == old_active
+                    && let Some(new_slot) = deck.get(new_active)
+                {
+                    let title = new_slot.view.update(cx, |view, cx| {
+                        view.set_active(true, cx);
+                        view.window_title().to_owned()
+                    });
+                    window.set_window_title(&title);
+                    let focus = new_slot.view.read(cx).view_focus();
+                    window.defer(cx, move |window, cx| focus.focus(window, cx));
+                }
+                self.persist_session(cx);
+                self.refresh_tab_strip(cx);
+            }
+        }
+    }
+
+    pub(crate) fn close_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match &self.content {
+            Content::Welcome(_) => window.remove_window(),
+            Content::Tabs(deck) => {
+                let active = deck.active_index();
+                self.close_tab(active, window, cx);
+            }
+        }
+    }
+
+    /// Repaints the active repository view so the tab strip reflects changes
+    /// from background tabs (e.g. an operation starting or finishing) or tab
+    /// list updates without waking inactive tabs.
+    pub(crate) fn refresh_tab_strip(&self, cx: &mut Context<Self>) {
+        if let Content::Tabs(deck) = &self.content
+            && let Some(active) = deck.active()
+        {
+            active.view.update(cx, |_, cx| cx.notify());
+        }
+        cx.notify();
+    }
+
+    /// Renders the tab strip when 2 or more repository tabs are open in this
+    /// window; returns `None` for 0 or 1 tabs so single-repo windows look identical.
+    pub(crate) fn render_tab_strip(
+        workspace: &Entity<Self>,
+        active_name: Option<&str>,
+        active_busy: bool,
+        design: &Design,
+        cx: &App,
+    ) -> Option<AnyElement> {
+        let ws = workspace.read(cx);
+        let Content::Tabs(deck) = &ws.content else {
+            return None;
+        };
+        if deck.len() < 2 {
+            return None;
+        }
+        let active_index = deck.active_index();
+        let workspace_weak = workspace.downgrade();
+
+        let tabs = deck
+            .items()
+            .iter()
+            .enumerate()
+            .map(|(index, slot)| {
+                let is_active = index == active_index;
+                let (label, busy) = if is_active {
+                    let label = active_name
+                        .map(str::to_owned)
+                        .or_else(|| slot.path.as_deref().map(recent::repository_name))
+                        .unwrap_or_else(|| "Repository".to_owned());
+                    (label, active_busy)
+                } else {
+                    (
+                        slot_display_name(slot, cx),
+                        slot.view.read(cx).has_operation_in_progress(),
+                    )
+                };
+                let select_ws = workspace_weak.clone();
+                let close_ws = workspace_weak.clone();
+                let reorder_ws = workspace_weak.clone();
+
+                let mut item = crate::ui::tab(("repo-tab", index), index, label, is_active, design)
+                    .busy(busy)
+                    .on_select(move |_, window, cx| {
+                        let _ = select_ws.update(cx, |this, cx| this.select_tab(index, window, cx));
+                    })
+                    .on_close(move |window, cx| {
+                        let _ = close_ws.update(cx, |this, cx| this.close_tab(index, window, cx));
+                    })
+                    .on_reorder(move |from, to, window, cx| {
+                        let _ = reorder_ws
+                            .update(cx, |this, cx| this.reorder_tab(from, to, window, cx));
+                    });
+
+                if let Some(path) = &slot.path {
+                    item = item.tooltip(path.display().to_string());
+                }
+                item
+            })
+            .collect::<Vec<_>>();
+
+        Some(
+            crate::ui::tab_strip("repo-tab-strip", design)
+                .children(tabs)
+                .into_any_element(),
+        )
     }
 
     fn finish_navigation(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -410,43 +888,67 @@ impl Workspace {
     /// The focus handle of whichever view fills the window.
     fn content_focus(&self, cx: &App) -> Option<gpui::FocusHandle> {
         match &self.content {
-            Content::Repo(slot) => Some(slot.view.read(cx).view_focus()),
+            Content::Tabs(deck) => deck.active().map(|slot| slot.view.read(cx).view_focus()),
             Content::Welcome(view) => Some(view.read(cx).input_focus(cx)),
         }
     }
 
     /// `OpenRepository`: the same picker as a dialog over the current view.
     pub(crate) fn open_picker(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_picker_for(OpenTarget::Current, window, cx);
+    }
+
+    pub(crate) fn open_picker_for(
+        &mut self,
+        target: OpenTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if window.has_active_dialog(cx) {
             return;
         }
+        let has_open_repo = matches!(&self.content, Content::Tabs(_));
         let workspace = cx.entity();
-        let picker = cx.new(|cx| Picker::new(Mode::Dialog, workspace, window, cx));
+        let picker = cx.new(|cx| Picker::new(Mode::Dialog, target, workspace, window, cx));
         let input = picker.read(cx).input().clone();
+        let title = match target {
+            OpenTarget::Current => "Open repository",
+            OpenTarget::NewTab => "Open in new tab",
+        };
         window.open_dialog(cx, move |dialog, _, _| {
             let content_picker = picker.clone();
             let footer_picker = picker.clone();
+            let new_tab_footer_picker = picker.clone();
             let confirm_picker = picker.clone();
+            let footer = DialogFooter::new()
+                .child(
+                    crate::ui::button("picker-dialog-open", "Open repository…")
+                        .size(crate::ui::ButtonSize::Medium)
+                        .on_click(move |_, window, cx| {
+                            footer_picker.update(cx, |picker, cx| picker.open_native(window, cx));
+                        }),
+                )
+                .when(target == OpenTarget::Current && has_open_repo, |footer| {
+                    footer.child(
+                        crate::ui::button("picker-dialog-open-new-tab", "Open in New Tab…")
+                            .size(crate::ui::ButtonSize::Medium)
+                            .on_click(move |_, window, cx| {
+                                new_tab_footer_picker.update(cx, |picker, cx| {
+                                    picker.open_native_in(OpenTarget::NewTab, window, cx)
+                                });
+                            }),
+                    )
+                })
+                .child(
+                    crate::ui::button("picker-dialog-cancel", "Cancel")
+                        .size(crate::ui::ButtonSize::Medium)
+                        .on_click(|_, window, cx| window.close_dialog(cx)),
+                );
             dialog
-                .title("Open repository")
+                .title(title)
                 .w(px(600.0))
                 .content(move |content, _, _| content.child(content_picker.clone()))
-                .footer(
-                    DialogFooter::new()
-                        .child(
-                            crate::ui::button("picker-dialog-open", "Open repository…")
-                                .size(crate::ui::ButtonSize::Medium)
-                                .on_click(move |_, window, cx| {
-                                    footer_picker
-                                        .update(cx, |picker, cx| picker.open_native(window, cx));
-                                }),
-                        )
-                        .child(
-                            crate::ui::button("picker-dialog-cancel", "Cancel")
-                                .size(crate::ui::ButtonSize::Medium)
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
-                        ),
-                )
+                .footer(footer)
                 .on_ok(move |_, window, cx| {
                     // A successful open closes the dialog itself, one frame
                     // later, so the confirm must not close it a second time.
@@ -462,33 +964,258 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let tab_count = self.tab_count();
         let content: AnyElement = match &self.content {
             Content::Welcome(view) => view.clone().into_any_element(),
-            Content::Repo(slot) => slot.view.clone().into_any_element(),
+            Content::Tabs(deck) => match deck.active() {
+                Some(slot) => slot.view.clone().into_any_element(),
+                None => div().into_any_element(),
+            },
         };
-        div()
+        let mut root = div()
             .size_full()
+            .key_context(WORKSPACE)
+            .on_action(cx.listener(|this, _: &OpenRepository, window, cx| {
+                this.open_picker_for(OpenTarget::Current, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NewTab, window, cx| {
+                this.open_picker_for(OpenTarget::NewTab, window, cx);
+            }))
             .on_action(
-                cx.listener(|this, _: &OpenRepository, window, cx| this.open_picker(window, cx)),
-            )
-            .child(content)
+                cx.listener(|this, _: &CloseTab, window, cx| this.close_active_tab(window, cx)),
+            );
+        if tab_count >= 2 {
+            root = root
+                .on_action(
+                    cx.listener(|this, _: &NextTab, window, cx| this.cycle_tab(1, window, cx)),
+                )
+                .on_action(
+                    cx.listener(|this, _: &PreviousTab, window, cx| this.cycle_tab(-1, window, cx)),
+                )
+                .on_action(
+                    cx.listener(|this, _: &SelectTab1, window, cx| this.jump_to_tab(1, window, cx)),
+                )
+                .on_action(
+                    cx.listener(|this, _: &SelectTab2, window, cx| this.jump_to_tab(2, window, cx)),
+                );
+            if tab_count >= 3 {
+                root =
+                    root.on_action(cx.listener(|this, _: &SelectTab3, window, cx| {
+                        this.jump_to_tab(3, window, cx)
+                    }));
+            }
+            if tab_count >= 4 {
+                root =
+                    root.on_action(cx.listener(|this, _: &SelectTab4, window, cx| {
+                        this.jump_to_tab(4, window, cx)
+                    }));
+            }
+            if tab_count >= 5 {
+                root =
+                    root.on_action(cx.listener(|this, _: &SelectTab5, window, cx| {
+                        this.jump_to_tab(5, window, cx)
+                    }));
+            }
+            if tab_count >= 6 {
+                root =
+                    root.on_action(cx.listener(|this, _: &SelectTab6, window, cx| {
+                        this.jump_to_tab(6, window, cx)
+                    }));
+            }
+            if tab_count >= 7 {
+                root =
+                    root.on_action(cx.listener(|this, _: &SelectTab7, window, cx| {
+                        this.jump_to_tab(7, window, cx)
+                    }));
+            }
+            if tab_count >= 8 {
+                root =
+                    root.on_action(cx.listener(|this, _: &SelectTab8, window, cx| {
+                        this.jump_to_tab(8, window, cx)
+                    }));
+            }
+            if tab_count >= 9 {
+                root =
+                    root.on_action(cx.listener(|this, _: &SelectTab9, window, cx| {
+                        this.jump_to_tab(9, window, cx)
+                    }));
+            }
+        }
+        root.child(content)
     }
 }
 
-/// The repository that should reopen at startup: the newest recent entry, but
-/// only while it still opens and only when the setting allows restoring.
-pub(crate) fn restored_launch(cx: &App) -> Option<Launch> {
+fn track_window_release(entity: &Entity<Workspace>, cx: &mut App) {
+    cx.observe_release(entity, |this, cx| {
+        on_workspace_released(this.window_id, cx);
+    })
+    .detach();
+}
+
+/// Drops one closed window from `SessionRegistry` while leaving the last
+/// saved session intact when the final window closes or the app is quitting.
+fn on_workspace_released(window_id: WindowId, cx: &mut App) {
+    if !cx.has_global::<SessionRegistry>() {
+        return;
+    }
+    let snapshot = cx.update_global::<SessionRegistry, _>(|reg, _| {
+        if reg.quitting {
+            return None;
+        }
+        let had = reg.windows.iter().any(|(id, _)| *id == window_id);
+        if !had {
+            return None;
+        }
+        reg.windows.retain(|(id, _)| *id != window_id);
+        if reg.windows.is_empty() {
+            return None;
+        }
+        Some(SavedSession {
+            windows: reg
+                .windows
+                .iter()
+                .map(|(_, window)| window.clone())
+                .collect(),
+        })
+    });
+    if let Some(snapshot) = snapshot
+        && let Err(error) = snapshot.save_default()
+    {
+        log::warn!("cannot update window session after close: {error}");
+    }
+}
+
+/// Takes the slot's [`Session`] out and drops it on a background thread so
+/// closing or replacing a tab never blocks the UI thread on worker shutdown.
+fn detach_and_drop_slot(slot: RepoSlot, cx: &mut App) {
+    if let Some(session) = slot.view.update(cx, |view, _| view.detach_session()) {
+        crate::repo_view::drop_session_in_background(session);
+    }
+}
+
+fn slot_display_name(slot: &RepoSlot, cx: &App) -> String {
+    slot.view
+        .read(cx)
+        .repo_display_name()
+        .map(str::to_owned)
+        .or_else(|| slot.path.as_deref().map(recent::repository_name))
+        .unwrap_or_else(|| "Repository".to_owned())
+}
+
+/// Opens `root` in a new Strata window.
+pub(crate) fn open_new_window(root: PathBuf, cx: &mut App) {
+    let launch = Launch::open_with(&root, Settings::get(cx).behaviour.git_executable.clone());
+    if let Launch::Error { error, .. } = &launch {
+        log::warn!("cannot open {}: {error}", root.display());
+        return;
+    }
+    open_tabs_window(
+        vec![launch],
+        0,
+        DebugLaunch::default(),
+        DEFAULT_WINDOW_SIZE,
+        cx,
+    );
+}
+
+/// Opens a repository window hosting `launches` with `active` selected.
+pub(crate) fn open_tabs_window(
+    launches: Vec<Launch>,
+    active: usize,
+    debug: DebugLaunch,
+    window_size: (f32, f32),
+    cx: &mut App,
+) {
+    let clamped = if launches.is_empty() {
+        0
+    } else {
+        active.min(launches.len() - 1)
+    };
+    let title = launches
+        .get(clamped)
+        .map_or_else(|| "Strata".to_owned(), Launch::title);
+    let bounds = Bounds::centered(None, size(px(window_size.0), px(window_size.1)), cx);
+    let min_size = size(
+        px(window_size.0.min(DEFAULT_MIN_WINDOW_SIZE.0)),
+        px(window_size.1.min(DEFAULT_MIN_WINDOW_SIZE.1)),
+    );
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        titlebar: Some(TitlebarOptions {
+            title: Some(title.into()),
+            ..TitleBar::title_bar_options()
+        }),
+        window_decorations: Some(WindowDecorations::Client),
+        window_min_size: Some(min_size),
+        focus: true,
+        app_id: Some("strata".to_owned()),
+        ..TitleBar::window_options()
+    };
+    #[cfg(target_os = "linux")]
+    let options = {
+        let mut options = options;
+        options.icon = crate::linux_window_icon();
+        options
+    };
+    let opened = cx.open_window(options, move |window, cx| {
+        crate::settings::apply_theme(Some(window), cx);
+        let content = cx.new(|cx| Workspace::new_with_tabs(launches, clamped, debug, window, cx));
+        cx.new(|cx| Root::new(content, window, cx))
+    });
+    match opened {
+        Ok(handle) => {
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
+        }
+        Err(error) => log::warn!("cannot open a repository window: {error}"),
+    }
+}
+
+/// Restores open windows and their tabs at startup when `restore_last_repository`
+/// allows it, skipping repositories that no longer exist.
+///
+/// Falls back to the single most recent repository when no `session.json`
+/// survives yet so upgrades from single-repository versions stay seamless.
+pub(crate) fn restored_windows(cx: &App) -> Vec<RestoredWindow> {
     if !Settings::get(cx).behaviour.restore_last_repository {
-        return None;
+        return Vec::new();
     }
+    let git_executable = Settings::get(cx).behaviour.git_executable.clone();
+    let session = SavedSession::load_default();
+    let resolved = session.resolve_windows(|path| path.is_dir());
+
+    let mut windows = Vec::new();
+    for saved in resolved {
+        let mut launches = Vec::with_capacity(saved.tabs.len());
+        let mut active = None;
+        for (index, path) in saved.tabs.iter().enumerate() {
+            if let launch @ Launch::Repo { .. } = Launch::open_with(path, git_executable.clone()) {
+                if index == saved.active {
+                    active = Some(launches.len());
+                }
+                launches.push(launch);
+            }
+        }
+        if !launches.is_empty() {
+            windows.push(RestoredWindow {
+                tabs: launches,
+                active: active.unwrap_or(0),
+            });
+        }
+    }
+    if !windows.is_empty() {
+        return windows;
+    }
+
     let recents = RecentRepositories::load_default();
-    let path = recents.most_recent()?;
-    match Launch::open_with(path, Settings::get(cx).behaviour.git_executable.clone()) {
-        launch @ Launch::Repo { .. } => Some(launch),
-        // A repository that moved or was deleted is not an error at startup;
-        // the welcome screen lists it so the user can retry or forget it.
-        _ => None,
+    if let Some(path) = recents.most_recent()
+        && let launch @ Launch::Repo { .. } = Launch::open_with(path, git_executable)
+    {
+        windows.push(RestoredWindow {
+            tabs: vec![launch],
+            active: 0,
+        });
     }
+    windows
 }
 
 /// The repository a launch ended up showing, as the working-tree root.
@@ -655,11 +1382,12 @@ mod tests {
 
         let workspace = workspace_cell.borrow().clone().expect("workspace created");
         let first_view_weak = visual_cx.update(|_, cx| match &workspace.read(cx).content {
-            Content::Repo(slot) => {
+            Content::Tabs(deck) => {
+                let slot = deck.active().expect("active slot");
                 assert_eq!(slot.view.read(cx).parent_name(), None);
                 slot.view.downgrade()
             }
-            Content::Welcome(_) => panic!("expected repo content"),
+            Content::Welcome(_) => panic!("expected repo tabs"),
         });
 
         // Open child worktree through RepoView -> Workspace plumbing.
@@ -681,12 +1409,13 @@ mod tests {
             let ws = workspace.read(cx);
             assert_eq!(ws.current_path(), Some(worktree_canon.as_path()));
             match &ws.content {
-                Content::Repo(slot) => {
+                Content::Tabs(deck) => {
+                    let slot = deck.active().expect("active slot");
                     assert_eq!(slot.view.read(cx).parent_name(), Some("alpha-repo"));
                     assert_eq!(slot.parents.len(), 1);
                     slot.view.downgrade()
                 }
-                Content::Welcome(_) => panic!("expected repo content"),
+                Content::Welcome(_) => panic!("expected repo tabs"),
             }
         });
 
@@ -703,7 +1432,7 @@ mod tests {
 
         // Navigate back via RepoView's NavigateBack action handler.
         visual_cx.update(|window, cx| {
-            let _ = window.draw(cx);
+            window.draw(cx).clear(cx);
             window.dispatch_action(Box::new(crate::actions::NavigateBack), cx);
         });
         visual_cx.run_until_parked();
@@ -716,11 +1445,12 @@ mod tests {
             let ws = workspace.read(cx);
             assert_eq!(ws.current_path(), Some(main_canon.as_path()));
             match &ws.content {
-                Content::Repo(slot) => {
+                Content::Tabs(deck) => {
+                    let slot = deck.active().expect("active slot");
                     assert_eq!(slot.view.read(cx).parent_name(), None);
                     assert!(slot.parents.is_empty());
                 }
-                Content::Welcome(_) => panic!("expected repo content"),
+                Content::Welcome(_) => panic!("expected repo tabs"),
             }
         });
 
@@ -742,11 +1472,12 @@ mod tests {
             let ws = workspace.read(cx);
             assert_eq!(ws.current_path(), Some(unrelated_canon.as_path()));
             match &ws.content {
-                Content::Repo(slot) => {
+                Content::Tabs(deck) => {
+                    let slot = deck.active().expect("active slot");
                     assert_eq!(slot.view.read(cx).parent_name(), None);
                     assert!(slot.parents.is_empty());
                 }
-                Content::Welcome(_) => panic!("expected repo content"),
+                Content::Welcome(_) => panic!("expected repo tabs"),
             }
         });
 
@@ -754,5 +1485,287 @@ mod tests {
             .update(&mut visual_cx, |_, window, _| window.remove_window())
             .expect("close test window");
         visual_cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn tabs_keep_inactive_sessions_quiet_reorder_cycle_jump_persist_and_close_last_window(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let alpha_dir = temp.path().join("alpha");
+        let beta_dir = temp.path().join("beta");
+        let gamma_dir = temp.path().join("gamma");
+        let config_dir = temp.path().join("config");
+
+        init_repo_with_commit(&alpha_dir);
+        init_repo_with_commit(&beta_dir);
+        init_repo_with_commit(&gamma_dir);
+
+        let alpha_canon = canonical(alpha_dir.clone());
+        let beta_canon = canonical(beta_dir.clone());
+        let gamma_canon = canonical(gamma_dir.clone());
+
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            gpui_component::init(cx);
+            cx.set_global(Settings::default());
+            crate::actions::bind(cx);
+        });
+
+        let workspace_cell: std::rc::Rc<std::cell::RefCell<Option<Entity<Workspace>>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
+        let workspace_cell_init = workspace_cell.clone();
+        let initial_launch = Launch::open_quiet(&alpha_dir, None);
+        let config_dir_for_ws = config_dir.clone();
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), move |window, cx| {
+                    let workspace = cx.new(|cx| {
+                        let mut ws = Workspace::new(Some(initial_launch), window, cx);
+                        ws.recent_dir = Some(config_dir_for_ws.clone());
+                        ws.launch_repo = Launch::open_quiet;
+                        ws.persist_session(cx);
+                        ws
+                    });
+                    *workspace_cell_init.borrow_mut() = Some(workspace.clone());
+                    cx.new(|cx| Root::new(workspace, window, cx))
+                })
+            })
+            .expect("open window");
+        let mut visual_cx = VisualTestContext::from_window(window.into(), cx);
+        visual_cx.run_until_parked();
+
+        let workspace = workspace_cell.borrow().clone().expect("workspace created");
+        let alpha_weak = visual_cx.update(|_, cx| match &workspace.read(cx).content {
+            Content::Tabs(deck) => {
+                assert_eq!(deck.len(), 1);
+                let slot = deck.active().expect("active slot");
+                assert!(slot.view.read(cx).is_active());
+                assert!(slot.view.read(cx).has_session());
+                slot.view.downgrade()
+            }
+            Content::Welcome(_) => panic!("expected repo tabs"),
+        });
+
+        // Opening a second repository in a new tab keeps the first RepoView + Session
+        // alive in the background while deactivating it so it stops repainting/polling.
+        visual_cx.update(|window, cx| {
+            workspace
+                .update(cx, |ws, cx| ws.open_path_in_new_tab(&beta_dir, window, cx))
+                .expect("open beta tab");
+        });
+        visual_cx.run_until_parked();
+
+        let beta_weak = visual_cx.update(|_, cx| {
+            let ws = workspace.read(cx);
+            assert_eq!(ws.tab_count(), 2);
+            assert_eq!(ws.current_path(), Some(beta_canon.as_path()));
+            let Content::Tabs(deck) = &ws.content else {
+                panic!("expected repo tabs");
+            };
+            let alpha_view = alpha_weak.upgrade().expect("alpha tab must remain alive");
+            assert!(!alpha_view.read(cx).is_active());
+            assert!(alpha_view.read(cx).has_session());
+
+            let beta_slot = deck.active().expect("active slot");
+            assert!(beta_slot.view.read(cx).is_active());
+            assert!(beta_slot.view.read(cx).has_session());
+            beta_slot.view.downgrade()
+        });
+
+        // Re-opening an already open repository in a new tab switches to the existing tab
+        // rather than duplicating it.
+        visual_cx.update(|window, cx| {
+            workspace
+                .update(cx, |ws, cx| ws.open_path_in_new_tab(&alpha_dir, window, cx))
+                .expect("focus existing alpha tab");
+        });
+        visual_cx.run_until_parked();
+
+        visual_cx.update(|_, cx| {
+            let ws = workspace.read(cx);
+            assert_eq!(ws.tab_count(), 2);
+            assert_eq!(ws.current_path(), Some(alpha_canon.as_path()));
+            assert!(
+                alpha_weak
+                    .upgrade()
+                    .expect("alpha alive")
+                    .read(cx)
+                    .is_active()
+            );
+            assert!(
+                !beta_weak
+                    .upgrade()
+                    .expect("beta alive")
+                    .read(cx)
+                    .is_active()
+            );
+        });
+
+        // Open a third repository tab (`gamma`).
+        visual_cx.update(|window, cx| {
+            workspace
+                .update(cx, |ws, cx| ws.open_path_in_new_tab(&gamma_dir, window, cx))
+                .expect("open gamma tab");
+        });
+        visual_cx.run_until_parked();
+
+        let gamma_weak = visual_cx.update(|_, cx| {
+            let ws = workspace.read(cx);
+            assert_eq!(ws.tab_count(), 3);
+            assert_eq!(ws.current_path(), Some(gamma_canon.as_path()));
+            let Content::Tabs(deck) = &ws.content else {
+                panic!("expected repo tabs");
+            };
+            deck.active().expect("active gamma slot").view.downgrade()
+        });
+
+        // Cycle forward (wraps 2 -> 0) and backward (wraps 0 -> 2) via actions, then jump.
+        visual_cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            window.dispatch_action(Box::new(NextTab), cx);
+        });
+        visual_cx.run_until_parked();
+        visual_cx.update(|_, cx| {
+            assert_eq!(
+                workspace.read(cx).current_path(),
+                Some(alpha_canon.as_path())
+            );
+        });
+
+        visual_cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            window.dispatch_action(Box::new(PreviousTab), cx);
+        });
+        visual_cx.run_until_parked();
+        visual_cx.update(|_, cx| {
+            assert_eq!(
+                workspace.read(cx).current_path(),
+                Some(gamma_canon.as_path())
+            );
+        });
+
+        visual_cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            window.dispatch_action(Box::new(SelectTab2), cx);
+        });
+        visual_cx.run_until_parked();
+        visual_cx.update(|_, cx| {
+            assert_eq!(
+                workspace.read(cx).current_path(),
+                Some(beta_canon.as_path())
+            );
+        });
+
+        // Reorder active tab `beta` (index 1) to the front (index 0).
+        visual_cx.update(|window, cx| {
+            workspace.update(cx, |ws, cx| ws.reorder_tab(1, 0, window, cx));
+        });
+        visual_cx.run_until_parked();
+        visual_cx.update(|_, cx| {
+            let Content::Tabs(deck) = &workspace.read(cx).content else {
+                panic!("expected repo tabs");
+            };
+            assert_eq!(deck.active_index(), 0);
+            let paths = deck
+                .items()
+                .iter()
+                .filter_map(|slot| slot.path.clone())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                paths,
+                vec![beta_canon.clone(), alpha_canon.clone(), gamma_canon.clone()]
+            );
+        });
+
+        // Session persistence wrote the reordered tabs and active index.
+        let saved = SavedSession::load(&config_dir.join("session.json"));
+        assert_eq!(
+            saved,
+            SavedSession {
+                windows: vec![SavedWindow {
+                    tabs: vec![beta_canon.clone(), alpha_canon.clone(), gamma_canon.clone()],
+                    active: 0,
+                }],
+            }
+        );
+
+        // Removing a missing directory during restore skips it while preserving the rest.
+        std::fs::remove_dir_all(&alpha_dir).expect("remove alpha dir");
+        let resolved = saved.resolve_windows(|path| path.is_dir());
+        assert_eq!(
+            resolved,
+            vec![SavedWindow {
+                tabs: vec![beta_canon.clone(), gamma_canon.clone()],
+                active: 0,
+            }]
+        );
+
+        // Close an inactive tab (`alpha` at index 1): its view and session drop cleanly.
+        visual_cx.update(|window, cx| {
+            workspace.update(cx, |ws, cx| ws.close_tab(1, window, cx));
+        });
+        visual_cx.run_until_parked();
+        assert!(
+            alpha_weak.upgrade().is_none(),
+            "closing an inactive tab must drop its RepoView and Session"
+        );
+        visual_cx.update(|_, cx| {
+            assert_eq!(workspace.read(cx).tab_count(), 2);
+            assert_eq!(
+                workspace.read(cx).current_path(),
+                Some(beta_canon.as_path())
+            );
+        });
+
+        // Close active tab (`beta`) via CloseTab action: view drops and `gamma` activates.
+        visual_cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            window.dispatch_action(Box::new(CloseTab), cx);
+        });
+        visual_cx.run_until_parked();
+        assert!(
+            beta_weak.upgrade().is_none(),
+            "closing active tab must drop its RepoView and Session"
+        );
+        visual_cx.update(|_, cx| {
+            assert_eq!(workspace.read(cx).tab_count(), 1);
+            assert_eq!(
+                workspace.read(cx).current_path(),
+                Some(gamma_canon.as_path())
+            );
+            assert!(
+                gamma_weak
+                    .upgrade()
+                    .expect("gamma alive")
+                    .read(cx)
+                    .is_active(),
+                "remaining tab must become active"
+            );
+        });
+
+        // Closing the last remaining tab closes the window.
+        visual_cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            window.dispatch_action(Box::new(CloseTab), cx);
+        });
+        visual_cx.run_until_parked();
+        drop(visual_cx);
+        drop(workspace);
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                cx.windows().is_empty(),
+                "closing the last tab should close the window (windows left: {})",
+                cx.windows().len()
+            );
+        });
+        cx.run_until_parked();
+        if let Some(view) = gamma_weak.upgrade() {
+            let has_session = cx.read(|cx| view.read(cx).has_session());
+            drop(view);
+            panic!("closing last tab kept RepoView alive (has_session={has_session})");
+        }
     }
 }

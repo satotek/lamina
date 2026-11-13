@@ -106,6 +106,17 @@ impl Render for RepoView {
         }
 
         root = root.child(self.header(&design, window));
+        if let Some(workspace) = self.workspace.as_ref().and_then(|ws| ws.upgrade())
+            && let Some(strip) = crate::workspace::Workspace::render_tab_strip(
+                &workspace,
+                self.repo_display_name(),
+                self.has_operation_in_progress(),
+                &design,
+                cx,
+            )
+        {
+            root = root.child(strip);
+        }
         if let Some((path, error)) = &self.error {
             root = root.child(self.error_screen(path, error, &design));
         } else {

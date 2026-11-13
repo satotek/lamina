@@ -709,7 +709,7 @@ impl RepoView {
                 .await;
             this.update(cx, |this, cx| {
                 this.worktree.conflicts.finish_load(epoch, path, kind, data);
-                cx.notify();
+                this.notify_if_active(cx);
             })
             .ok();
         })
@@ -767,7 +767,7 @@ impl RepoView {
                 } else {
                     this.stage_resolved_conflict(cx);
                 }
-                cx.notify();
+                this.notify_if_active(cx);
             })
             .ok();
         })

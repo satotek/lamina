@@ -19,6 +19,7 @@ mod focus;
 pub(crate) mod gallery;
 mod menu;
 mod row;
+mod tab;
 mod text;
 
 pub use badge::{BadgeTone, avatar, change_badge, count_pill, kbd, ref_badge, status_badge};
@@ -28,4 +29,5 @@ pub use confirm::{Confirm, confirm};
 pub(crate) use focus::focus_input;
 pub use menu::{context_menu, menu_label};
 pub use row::{RowState, RowTipExt, list_row, row_surface};
+pub use tab::{tab, tab_strip};
 pub use text::{empty_state, message, section_header};

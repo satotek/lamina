@@ -12,26 +12,20 @@ use std::path::{Path, PathBuf};
 
 use gpui::prelude::*;
 use gpui::{
-    App, Bounds, Context, Entity, Focusable as _, FontWeight, IntoElement, Render, Subscription,
-    TitlebarOptions, WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions, div, px,
-    size,
+    App, Context, Entity, Focusable as _, FontWeight, IntoElement, Render, Subscription,
+    WeakEntity, Window, div, px,
 };
 use gpui_component::checkbox::Checkbox;
 use gpui_component::dialog::DialogFooter;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::notification::Notification;
-use gpui_component::{ActiveTheme as _, Disableable as _, Root, TitleBar, WindowExt as _};
+use gpui_component::{ActiveTheme as _, Disableable as _, WindowExt as _};
 use strata_core::session::Operation;
 use strata_core::{HeadInfo, Oid, RefKind};
 
-use crate::repo_view::{Launch, RepoView};
+use crate::repo_view::RepoView;
 use crate::settings::Settings;
 use crate::style::Design;
-use crate::workspace::Workspace;
-
-/// Size and minimum size of a repository window the sidebar opens.
-const WINDOW_SIZE: (f32, f32) = (1360.0, 860.0);
-const MIN_WINDOW_SIZE: (f32, f32) = (720.0, 480.0);
 
 impl RepoView {
     /// Whether any submodule is listed, so "Update all" has something to do.
@@ -171,6 +165,32 @@ impl RepoView {
         window.defer(cx, move |window, cx| {
             let result = workspace.update(cx, |workspace, cx| {
                 workspace.open_child(&resolved, window, cx)
+            });
+            if let Ok(Err(message)) = result {
+                window.push_notification(
+                    Notification::error(message).title("Cannot open repository"),
+                    cx,
+                );
+            }
+        });
+    }
+
+    /// Opens `path` in a new tab of the current window (or switches to it if
+    /// already open here). Falls back to a new window when standalone.
+    pub(crate) fn open_repository_in_new_tab(
+        &mut self,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let resolved = self.resolve_child_path(path);
+        let Some(workspace) = self.workspace.clone() else {
+            self.open_repository_in_new_window(&resolved, window, cx);
+            return;
+        };
+        window.defer(cx, move |window, cx| {
+            let result = workspace.update(cx, |workspace, cx| {
+                workspace.open_path_in_new_tab(&resolved, window, cx)
             });
             if let Ok(Err(message)) = result {
                 window.push_notification(
@@ -672,39 +692,8 @@ impl Render for AddWorktreeDialog {
 
 /// Opens `root` as a repository in a new window, the way the settings window
 /// opens beside the one it was invoked from.
-fn open_repository_window(root: PathBuf, cx: &mut App) {
-    let launch = Launch::open_with(&root, Settings::get(cx).behaviour.git_executable.clone());
-    if let Launch::Error { error, .. } = &launch {
-        log::warn!("cannot open {}: {error}", root.display());
-        return;
-    }
-    let title = launch.title();
-    let bounds = Bounds::centered(None, size(px(WINDOW_SIZE.0), px(WINDOW_SIZE.1)), cx);
-    let options = WindowOptions {
-        window_bounds: Some(WindowBounds::Windowed(bounds)),
-        titlebar: Some(TitlebarOptions {
-            title: Some(title.into()),
-            ..TitleBar::title_bar_options()
-        }),
-        window_decorations: Some(WindowDecorations::Client),
-        window_min_size: Some(size(px(MIN_WINDOW_SIZE.0), px(MIN_WINDOW_SIZE.1))),
-        focus: true,
-        app_id: Some("strata".to_owned()),
-        ..TitleBar::window_options()
-    };
-    let opened = cx.open_window(options, move |window, cx| {
-        crate::settings::apply_theme(Some(window), cx);
-        // The workspace records the repository as opened and owns the window's
-        // content, exactly like the first window does.
-        let content = cx.new(|cx| Workspace::new(Some(launch), window, cx));
-        cx.new(|cx| Root::new(content, window, cx))
-    });
-    match opened {
-        Ok(handle) => {
-            let _ = handle.update(cx, |_, window, _| window.activate_window());
-        }
-        Err(error) => log::warn!("cannot open a repository window: {error}"),
-    }
+pub(crate) fn open_repository_window(root: PathBuf, cx: &mut App) {
+    crate::workspace::open_new_window(root, cx);
 }
 
 /// Resolves a path reported by git (`submodule.path` is relative to the

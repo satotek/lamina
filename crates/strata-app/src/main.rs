@@ -33,6 +33,7 @@ mod settings;
 mod settings_view;
 mod stash;
 mod style;
+mod tabs;
 mod ui;
 mod workspace;
 mod worktree_panel;
@@ -70,7 +71,7 @@ fn main() {
     #[cfg(target_os = "macos")]
     app.on_reopen(|cx| {
         if cx.windows().is_empty() {
-            open_window(StartMode::Welcome, DebugLaunch::default(), cx);
+            open_start(StartMode::Welcome, DebugLaunch::default(), cx);
         } else {
             cx.activate(true);
         }
@@ -79,6 +80,7 @@ fn main() {
     app.run(move |cx: &mut App| {
         gpui_component::init(cx);
         settings::init(cx);
+        workspace::init(cx);
         actions::bind(cx);
         settings_view::bind(cx);
         worktree_panel::bind(cx);
@@ -89,14 +91,42 @@ fn main() {
         picker::bind(cx);
         palette::bind(cx);
 
-        open_window(start, debug, cx);
+        open_start(start, debug, cx);
 
         cx.activate(true);
     });
 }
 
-fn open_window(start: StartMode, mut debug: DebugLaunch, cx: &mut App) {
-    let gallery = matches!(start, StartMode::Gallery);
+fn open_start(start: StartMode, debug: DebugLaunch, cx: &mut App) {
+    match start {
+        StartMode::Gallery => open_window(None, true, debug, cx),
+        StartMode::Path(path) => open_window(Some(Launch::open(&path)), false, debug, cx),
+        StartMode::Fake(count) => open_window(Some(Launch::fake(count)), false, debug, cx),
+        StartMode::Welcome => {
+            let restored = workspace::restored_windows(cx);
+            if restored.is_empty() {
+                open_window(None, false, debug, cx);
+                return;
+            }
+            let window_size = if let Some(requested) = debug.window_size {
+                eprintln!(
+                    "debug-launch: applied --window-size {}x{}",
+                    requested.width, requested.height
+                );
+                (requested.width as f32, requested.height as f32)
+            } else {
+                (1360.0, 860.0)
+            };
+            let mut first_debug = Some(debug);
+            for window in restored {
+                let win_debug = first_debug.take().unwrap_or_default();
+                workspace::open_tabs_window(window.tabs, window.active, win_debug, window_size, cx);
+            }
+        }
+    }
+}
+
+fn open_window(launch: Option<Launch>, gallery: bool, mut debug: DebugLaunch, cx: &mut App) {
     // The gallery has no view to own a dialog, so the app opens the dialogs it
     // hosts itself once the window exists. A `window.defer` cannot do it: its
     // callback runs before GPUI records the window handle, so the `update` that
@@ -118,12 +148,6 @@ fn open_window(start: StartMode, mut debug: DebugLaunch, cx: &mut App) {
         None
     };
 
-    let launch = match start {
-        StartMode::Path(path) => Some(Launch::open(&path)),
-        StartMode::Fake(count) => Some(Launch::fake(count)),
-        StartMode::Gallery => None,
-        StartMode::Welcome => workspace::restored_launch(cx),
-    };
     let title = if gallery {
         "Strata UI gallery".to_owned()
     } else {
@@ -204,7 +228,7 @@ fn open_window(start: StartMode, mut debug: DebugLaunch, cx: &mut App) {
 /// macOS and Windows take theirs from the bundle or the embedded resource, so
 /// this is the one platform where the app has to hand the pixels over.
 #[cfg(target_os = "linux")]
-fn linux_window_icon() -> Option<std::sync::Arc<image::RgbaImage>> {
+pub(crate) fn linux_window_icon() -> Option<std::sync::Arc<image::RgbaImage>> {
     const PNG: &[u8] = include_bytes!("../resources/icon/hicolor/128.png");
 
     // A broken icon must not keep the window from opening.

@@ -240,7 +240,7 @@ impl RepoView {
             .is_some()
             .then(|| SnapshotHeads::from_snapshot(&snapshot));
         history.error = None;
-        cx.notify();
+        self.notify_if_active(cx);
     }
 
     /// Returns to the commit list. True when a file history was open.
@@ -255,7 +255,7 @@ impl RepoView {
         self.cancel_file_history();
         self.file_history = None;
         self.focus_root(window, cx);
-        cx.notify();
+        self.notify_if_active(cx);
         true
     }
 
@@ -307,7 +307,7 @@ impl RepoView {
                 false
             }
         };
-        cx.notify();
+        self.notify_if_active(cx);
         if request_diff {
             self.request_history_diff(cx);
         }
@@ -337,7 +337,7 @@ impl RepoView {
             }
             moved
         };
-        cx.notify();
+        self.notify_if_active(cx);
         if moved {
             self.request_history_diff(cx);
         }
@@ -357,7 +357,7 @@ impl RepoView {
             return false;
         }
         history.error = Some(error.to_owned());
-        cx.notify();
+        self.notify_if_active(cx);
         true
     }
 
@@ -376,7 +376,7 @@ impl RepoView {
         history.diff_rows = Rc::new(diff_view::flatten(&view.diff));
         history.view = Some(Arc::clone(view));
         history.diff_error = None;
-        cx.notify();
+        self.notify_if_active(cx);
         true
     }
 
@@ -396,7 +396,7 @@ impl RepoView {
         history.view = None;
         history.diff_rows = Rc::new(Vec::new());
         history.diff_error = Some(error.to_owned());
-        cx.notify();
+        self.notify_if_active(cx);
         true
     }
 
@@ -489,7 +489,7 @@ impl RepoView {
         history.view = None;
         history.diff_rows = Rc::new(Vec::new());
         history.diff_error = None;
-        cx.notify();
+        self.notify_if_active(cx);
     }
 
     /// The whole main area while a file history is open.

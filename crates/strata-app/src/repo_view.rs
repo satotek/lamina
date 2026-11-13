@@ -27,12 +27,13 @@ mod worktrees;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Instant;
 
 use futures::StreamExt;
 use futures::channel::mpsc::{self, UnboundedReceiver};
 use gpui::{
-    App, AppContext as _, Context, Entity, FocusHandle, Focusable as _, ScrollStrategy,
-    Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
+    AnyWindowHandle, App, AppContext as _, Context, Entity, FocusHandle, Focusable as _,
+    ScrollStrategy, Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
 };
 use gpui_component::input::InputState;
 use strata_core::git_cli::CommandRecord;
@@ -404,6 +405,16 @@ pub struct RepoView {
     _settings: Subscription,
     /// Held so the event loop is cancelled with the view.
     _bridge: Option<Task<()>>,
+    /// False while this repository sits in an inactive tab: session watcher
+    /// keeps running in the background, but the view neither repaints nor polls.
+    active: bool,
+    /// Snapshot arrived while inactive; re-sync diffs/lists on re-activation.
+    pending_sync: bool,
+    /// Conflicts appeared when an operation finished while inactive.
+    pending_reveal_conflicts: bool,
+    window_handle: Option<AnyWindowHandle>,
+    autofetch: Option<Task<()>>,
+    last_autofetch: Instant,
 }
 
 /// Hands a session to a background thread that drops it.
@@ -451,13 +462,26 @@ impl RepoView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        Self::new_in_workspace_active(launch, workspace, parent_name, true, window, cx)
+    }
+
+    pub(crate) fn new_in_workspace_active(
+        launch: Launch,
+        workspace: Option<WeakEntity<crate::workspace::Workspace>>,
+        parent_name: Option<String>,
+        active: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus = cx.focus_handle();
-        window.focus(&focus, cx);
+        if active {
+            window.focus(&focus, cx);
+        }
         let appearance = window
             .observe_window_appearance(|window, cx| crate::settings::apply_theme(Some(window), cx));
         let settings = cx.observe_global::<crate::settings::Settings>(|this, cx| {
             this.settings_changed(cx);
-            cx.notify();
+            this.notify_if_active(cx);
         });
         let smoke = std::env::var_os("STRATA_SMOKE").is_some();
         let title = launch.title();
@@ -514,6 +538,12 @@ impl RepoView {
             _appearance: appearance,
             _settings: settings,
             _bridge: None,
+            active,
+            pending_sync: false,
+            pending_reveal_conflicts: false,
+            window_handle: Some(window.window_handle()),
+            autofetch: None,
+            last_autofetch: Instant::now(),
         };
         view.branches.set_dialog_focus(cx.focus_handle());
         view.branches.set_list_focus(cx.focus_handle());
@@ -545,13 +575,13 @@ impl RepoView {
                 view._bridge = Some(cx.spawn(async move |this, cx| {
                     while let Some(event) = events.next().await {
                         let is_snapshot = matches!(event, SessionEvent::SnapshotUpdated { .. });
-                        if this
-                            .update(cx, |this, cx| this.on_event(event, cx))
-                            .is_err()
-                        {
+                        let Ok(run_debug) = this.update(cx, |this, cx| {
+                            this.on_event(event, cx);
+                            is_snapshot && this.active && this.debug_launch.is_some()
+                        }) else {
                             break;
-                        }
-                        if is_snapshot {
+                        };
+                        if run_debug {
                             let _ = window_handle.update(cx, |_, window, cx| {
                                 let _ = this.update(cx, |this, cx| {
                                     this.step_debug_launch(window, cx);
@@ -562,7 +592,7 @@ impl RepoView {
                 }));
                 view.session = Some(*session);
                 view.search.init_input(window, cx);
-                crate::autofetch::start(window.window_handle(), cx);
+                view.sync_autofetch(cx);
             }
             Launch::Error { path, error } => view.error = Some((path, error)),
         }
@@ -575,8 +605,91 @@ impl RepoView {
         self.parent_name.as_deref()
     }
 
+    #[cfg(test)]
+    pub(crate) fn has_session(&self) -> bool {
+        self.session.is_some()
+    }
+
     pub(crate) fn repo_display_name(&self) -> Option<&str> {
         self.name.as_deref()
+    }
+
+    pub(crate) fn window_title(&self) -> &str {
+        &self.title
+    }
+
+    pub(crate) fn is_active(&self) -> bool {
+        self.active
+    }
+
+    pub(crate) fn has_operation_in_progress(&self) -> bool {
+        self.is_busy() || self.remote.is_running() || self.in_progress.is_running()
+    }
+
+    pub(crate) fn record_autofetch(&mut self, at: Instant) {
+        self.last_autofetch = at;
+    }
+
+    pub(crate) fn notify_if_active(&self, cx: &mut Context<Self>) {
+        if self.active {
+            cx.notify();
+        }
+    }
+
+    fn notify_tab_state(&self, cx: &mut Context<Self>) {
+        if self.active {
+            cx.notify();
+        } else if let Some(workspace) = self.workspace.as_ref().and_then(|ws| ws.upgrade()) {
+            workspace.update(cx, |workspace, cx| workspace.refresh_tab_strip(cx));
+        }
+    }
+
+    fn sync_autofetch(&mut self, cx: &mut Context<Self>) {
+        let should_run = self.active
+            && self.session.is_some()
+            && crate::settings::Settings::get(cx)
+                .behaviour
+                .auto_fetch_minutes
+                > 0;
+        if should_run {
+            if self.autofetch.is_none()
+                && let Some(window) = self.window_handle
+            {
+                self.autofetch = Some(crate::autofetch::start(window, self.last_autofetch, cx));
+            }
+        } else {
+            self.autofetch = None;
+        }
+    }
+
+    pub(crate) fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
+        if self.active == active {
+            return;
+        }
+        self.active = active;
+        self.sync_autofetch(cx);
+        if active {
+            if std::mem::take(&mut self.pending_sync) {
+                self.sync_after_snapshot(cx);
+            }
+            if std::mem::take(&mut self.pending_reveal_conflicts) {
+                self.reveal_conflicts(cx);
+            }
+            self.settings_changed(cx);
+            cx.notify();
+        }
+    }
+
+    fn sync_after_snapshot(&mut self, cx: &mut Context<Self>) {
+        self.sync_selection(cx);
+        self.settle_edit_selection(cx);
+        self.sync_worktree(cx);
+        self.search_on_snapshot(cx);
+        self.file_history_on_snapshot(cx);
+        // The submodule and worktree lists sit outside the snapshot, so
+        // every publish — including a watcher refresh — re-reads them.
+        self.refresh_extra_lists();
+        self.refresh_in_progress_details();
     }
 
     /// The view's own focus handle, for panels that hand focus back on close.
@@ -601,6 +714,7 @@ impl RepoView {
     /// the old session must not reach the window any more, where its
     /// notification or dialog would land over the new repository.
     pub(crate) fn detach_session(&mut self) -> Option<Session> {
+        self.autofetch = None;
         self.cancel_file_history();
         self.discard_blame();
         self.cancel_diff();
@@ -640,15 +754,11 @@ impl RepoView {
     fn on_event(&mut self, event: SessionEvent, cx: &mut Context<Self>) {
         match event {
             SessionEvent::SnapshotUpdated { .. } => {
-                self.sync_selection(cx);
-                self.settle_edit_selection(cx);
-                self.sync_worktree(cx);
-                self.search_on_snapshot(cx);
-                self.file_history_on_snapshot(cx);
-                // The submodule and worktree lists sit outside the snapshot, so
-                // every publish — including a watcher refresh — re-reads them.
-                self.refresh_extra_lists();
-                self.refresh_in_progress_details();
+                if !self.active {
+                    self.pending_sync = true;
+                    return;
+                }
+                self.sync_after_snapshot(cx);
                 cx.notify();
             }
             SessionEvent::DiffReady { ticket, view } => {
@@ -656,7 +766,7 @@ impl RepoView {
                     return;
                 }
                 if self.worktree.on_diff_ready(ticket, &view) {
-                    cx.notify();
+                    self.notify_if_active(cx);
                     return;
                 }
                 if !self.diff.accept(ticket, Arc::clone(&view)) {
@@ -666,14 +776,14 @@ impl RepoView {
                 // rebuilding it on every frame.
                 self.diff_rows = Rc::new(diff_view::flatten(&view.diff));
                 self.diff_error = None;
-                cx.notify();
+                self.notify_if_active(cx);
             }
             SessionEvent::DiffFailed { ticket, error } => {
                 if self.file_history_diff_failed(ticket, &error, cx) {
                     return;
                 }
                 if self.worktree.on_diff_failed(ticket, &error) {
-                    cx.notify();
+                    self.notify_if_active(cx);
                     return;
                 }
                 if !self.diff.fail(ticket) {
@@ -681,7 +791,7 @@ impl RepoView {
                 }
                 self.diff_rows = Rc::new(Vec::new());
                 self.diff_error = Some(error);
-                cx.notify();
+                self.notify_if_active(cx);
             }
             SessionEvent::QueryReady {
                 ticket,
@@ -704,7 +814,7 @@ impl RepoView {
             }
             SessionEvent::CommitStatReady { ticket, stat } => {
                 if self.stat.accept(ticket, stat) {
-                    cx.notify();
+                    self.notify_if_active(cx);
                 }
             }
             SessionEvent::PathHistoryBatch { ticket, entries } => {
@@ -726,7 +836,7 @@ impl RepoView {
                 worktrees,
             } => {
                 if self.extra_lists.accept(ticket, submodules, worktrees) {
-                    cx.notify();
+                    self.notify_if_active(cx);
                 }
             }
             SessionEvent::InProgressDetailsReady { ticket, details } => {
@@ -734,7 +844,7 @@ impl RepoView {
             }
             SessionEvent::CommandLogged(record) => {
                 self.last_command = Some(command_line(&record));
-                cx.notify();
+                self.notify_if_active(cx);
             }
             SessionEvent::LoadFailed { error } => {
                 if self.debug_launch.is_some()
@@ -747,7 +857,7 @@ impl RepoView {
                     self.debug_launch = None;
                 }
                 self.status_error = Some(error);
-                cx.notify();
+                self.notify_if_active(cx);
             }
             SessionEvent::OperationFinished { id, error } => {
                 // The session refreshed the status before it reported the end,
@@ -757,10 +867,15 @@ impl RepoView {
                     .as_ref()
                     .map_or(0, |session| session.snapshot().conflicts.len());
                 if self.in_progress.finished(id, conflicts) {
-                    self.reveal_conflicts(cx);
+                    if self.active {
+                        self.reveal_conflicts(cx);
+                    } else {
+                        self.pending_reveal_conflicts = true;
+                    }
                 }
                 self.worktree.on_operation_finished(id, error.as_deref());
-                self.remote.on_finished(id, error.as_deref(), cx);
+                self.remote
+                    .on_finished(id, error.as_deref(), cx, self.active);
                 // The label records which operation failed, so the status bar
                 // names it instead of showing a bare git message.
                 let label = self.branches.finish(id, error.as_deref());
@@ -772,12 +887,14 @@ impl RepoView {
                         None => one_line(&error),
                     });
                 }
-                if let Some(retry) = self.branches.take_force_retry() {
+                if self.active
+                    && let Some(retry) = self.branches.take_force_retry()
+                {
                     // The offer opens from an operation result, which has no
                     // window of its own, so it is routed through the active one.
                     crate::branches::offer_force(cx.entity(), retry, cx);
                 }
-                cx.notify();
+                self.notify_tab_state(cx);
             }
             SessionEvent::OperationStarted { id } => {
                 // The snapshot published with `busy` still holds the status
@@ -789,10 +906,13 @@ impl RepoView {
                     .map_or(0, |session| session.snapshot().conflicts.len());
                 // Only a user action queues a job; a refresh just publishes.
                 self.in_progress.started(id, conflicts, true);
-                self.remote.on_started(id, cx)
+                self.remote.on_started(id, cx, self.active);
+                if !self.active {
+                    self.notify_tab_state(cx);
+                }
             }
             SessionEvent::OperationProgress { id, text, percent } => {
-                self.remote.on_progress(id, &text, percent, cx)
+                self.remote.on_progress(id, &text, percent, cx, self.active)
             }
         }
     }
@@ -1039,7 +1159,7 @@ impl RepoView {
             self.load_files(commit, cx);
         }
         self.load_commit_stat(commit, cx);
-        cx.notify();
+        self.notify_if_active(cx);
     }
 
     fn load_files(&mut self, commit: Oid, cx: &mut Context<Self>) {
@@ -1066,7 +1186,7 @@ impl RepoView {
                         this.files = Some(files);
                         this.files_error = None;
                         if empty {
-                            cx.notify();
+                            this.notify_if_active(cx);
                         } else {
                             // The first file is what the diff pane shows by
                             // default, so it is requested as soon as the list
@@ -1076,7 +1196,7 @@ impl RepoView {
                     }
                     Err(error) => {
                         this.files_error = Some(error.to_string());
-                        cx.notify();
+                        this.notify_if_active(cx);
                     }
                 }
             })
@@ -1113,12 +1233,16 @@ impl RepoView {
         if let Some(previous) = self.diff.begin(ticket) {
             session.cancel_diff(previous);
         }
-        cx.notify();
+        self.notify_if_active(cx);
     }
 
     /// Re-requests the history diff when the options it was computed with
     /// changed, so a new context size or ignore-whitespace shows at once.
     fn settings_changed(&mut self, cx: &mut Context<Self>) {
+        self.sync_autofetch(cx);
+        if !self.active {
+            return;
+        }
         let options = history_diff_options(cx);
         if options == self.diff_options {
             return;

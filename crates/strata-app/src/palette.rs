@@ -28,8 +28,10 @@ use gpui_component::dialog::DialogEntrance;
 use gpui_component::input::{Input, InputEvent, InputState};
 
 use crate::actions::{
-    NavigateBack, OpenInEditor, OpenRepository, OpenSettings, OpenTerminalHere, Quit, StashChanges,
-    ToggleFrameStats, TogglePalette,
+    CloseTab, NavigateBack, NewTab, NextTab, OpenInEditor, OpenRepository, OpenSettings,
+    OpenTerminalHere, PreviousTab, Quit, SelectTab1, SelectTab2, SelectTab3, SelectTab4,
+    SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9, StashChanges, ToggleFrameStats,
+    TogglePalette,
 };
 use crate::branches::CreateBranchFromHead;
 use crate::remote::{FetchRemotes, PullBranch, PushBranch};
@@ -102,6 +104,71 @@ const COMMANDS: &[Command] = &[
         label: "Open repository…",
         action: || Box::new(OpenRepository),
         needs_repo: false,
+    },
+    Command {
+        label: "Open in new tab…",
+        action: || Box::new(NewTab),
+        needs_repo: false,
+    },
+    Command {
+        label: "Close tab",
+        action: || Box::new(CloseTab),
+        needs_repo: false,
+    },
+    Command {
+        label: "Next tab",
+        action: || Box::new(NextTab),
+        needs_repo: true,
+    },
+    Command {
+        label: "Previous tab",
+        action: || Box::new(PreviousTab),
+        needs_repo: true,
+    },
+    Command {
+        label: "Switch to tab 1",
+        action: || Box::new(SelectTab1),
+        needs_repo: true,
+    },
+    Command {
+        label: "Switch to tab 2",
+        action: || Box::new(SelectTab2),
+        needs_repo: true,
+    },
+    Command {
+        label: "Switch to tab 3",
+        action: || Box::new(SelectTab3),
+        needs_repo: true,
+    },
+    Command {
+        label: "Switch to tab 4",
+        action: || Box::new(SelectTab4),
+        needs_repo: true,
+    },
+    Command {
+        label: "Switch to tab 5",
+        action: || Box::new(SelectTab5),
+        needs_repo: true,
+    },
+    Command {
+        label: "Switch to tab 6",
+        action: || Box::new(SelectTab6),
+        needs_repo: true,
+    },
+    Command {
+        label: "Switch to tab 7",
+        action: || Box::new(SelectTab7),
+        needs_repo: true,
+    },
+    Command {
+        label: "Switch to tab 8",
+        action: || Box::new(SelectTab8),
+        needs_repo: true,
+    },
+    Command {
+        label: "Switch to tab 9",
+        action: || Box::new(SelectTab9),
+        needs_repo: true,
     },
     Command {
         label: "Back to parent repository",
@@ -481,6 +548,7 @@ pub(crate) fn shortcut_label(keystroke: &str) -> String {
                 "shift" => "Shift",
                 "fn" => "Fn",
                 "escape" => "Esc",
+                "tab" => "Tab",
                 "pageup" => "PgUp",
                 "pagedown" => "PgDn",
                 // Function keys print lower-case and are written upper-case.

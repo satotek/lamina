@@ -77,7 +77,7 @@ impl RepoView {
         };
         let ticket = session.request_commit_stat(commit);
         self.stat.start(commit, ticket);
-        cx.notify();
+        self.notify_if_active(cx);
     }
 
     /// The commit's summary, author, id and parents at the top of the details

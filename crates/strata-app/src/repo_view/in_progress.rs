@@ -91,6 +91,10 @@ pub(crate) struct InProgress {
 }
 
 impl InProgress {
+    pub(crate) fn is_running(&self) -> bool {
+        self.submitted.is_some() || self.running.is_some()
+    }
+
     /// Records what a job this view just submitted is.
     pub(crate) fn submitted(&mut self, id: OperationId, operation: FinishedOperation) {
         self.submitted = Some((id, operation));
@@ -550,7 +554,7 @@ impl RepoView {
         cx: &mut Context<Self>,
     ) {
         if self.in_progress.accept_details(ticket, details) {
-            cx.notify();
+            self.notify_if_active(cx);
         }
     }
 

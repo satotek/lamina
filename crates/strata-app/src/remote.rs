@@ -346,17 +346,18 @@ pub(crate) struct Colors {
 }
 
 impl Remote {
-    fn is_running(&self) -> bool {
+    pub(crate) fn is_running(&self) -> bool {
         self.running.is_some()
     }
 
     /// An operation of this module started; nothing else to record, the
     /// progress and the outcome arrive separately.
-    pub(crate) fn on_started(&mut self, id: OperationId, cx: &mut Context<RepoView>) {
+    pub(crate) fn on_started(&mut self, id: OperationId, cx: &mut Context<RepoView>, active: bool) {
         if self
             .running
             .as_ref()
             .is_some_and(|running| running.id == id)
+            && active
         {
             cx.notify();
         }
@@ -368,6 +369,7 @@ impl Remote {
         text: &str,
         percent: Option<u8>,
         cx: &mut Context<RepoView>,
+        active: bool,
     ) {
         let Some(running) = self.running.as_mut().filter(|running| running.id == id) else {
             return;
@@ -378,7 +380,9 @@ impl Remote {
         if percent.is_some() {
             running.percent = percent;
         }
-        cx.notify();
+        if active {
+            cx.notify();
+        }
     }
 
     /// Records the end of an operation this module started and tells the user
@@ -388,6 +392,7 @@ impl Remote {
         id: OperationId,
         error: Option<&str>,
         cx: &mut Context<RepoView>,
+        active: bool,
     ) {
         let Some(running) = self.running.take() else {
             return;
@@ -415,13 +420,15 @@ impl Remote {
         let entity = cx.entity();
         // Clear the status-bar segment even when there is no window left to
         // announce the outcome in.
-        cx.notify();
+        if active {
+            cx.notify();
+        }
         let Some(window) = window_handle(cx) else {
             return;
         };
         let _ = window.update(cx, |_, window, cx| {
             window.push_notification(note, cx);
-            if let Some(offer) = offer {
+            if active && let Some(offer) = offer {
                 open_force_dialog(entity, offer, window, cx);
             }
         });

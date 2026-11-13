@@ -488,7 +488,7 @@ impl RepoView {
                     Err(error) => this.tree.fail_listing(epoch, commit, error),
                 };
                 if accepted {
-                    cx.notify();
+                    this.notify_if_active(cx);
                 }
             })
             .ok();
@@ -522,7 +522,7 @@ impl RepoView {
             this.update(cx, |this, cx| {
                 let content = read.unwrap_or_else(FileContent::Notice);
                 if this.tree.accept_file(epoch, commit, &path, content) {
-                    cx.notify();
+                    this.notify_if_active(cx);
                 }
             })
             .ok();

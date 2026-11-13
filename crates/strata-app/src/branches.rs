@@ -1833,6 +1833,15 @@ fn submodule_row(
                     });
                 }
             };
+            let open_new_tab = {
+                let entity = menu_entity.clone();
+                let path = menu_path.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    entity.update(cx, |view, cx| {
+                        view.open_repository_in_new_tab(Path::new(&path), window, cx)
+                    });
+                }
+            };
             let open_new_window = {
                 let entity = menu_entity.clone();
                 let path = menu_path.clone();
@@ -1865,6 +1874,11 @@ fn submodule_row(
                     PopupMenuItem::new(crate::ui::menu_label("Open", open_blocked))
                         .disabled(open_blocked.is_some())
                         .on_click(open),
+                )
+                .item(
+                    PopupMenuItem::new(crate::ui::menu_label("Open in New Tab", open_blocked))
+                        .disabled(open_blocked.is_some())
+                        .on_click(open_new_tab),
                 )
                 .item(
                     PopupMenuItem::new(crate::ui::menu_label("Open in New Window", open_blocked))
@@ -2023,6 +2037,15 @@ fn worktree_row(
                     });
                 }
             };
+            let open_new_tab = {
+                let entity = menu_entity.clone();
+                let path = copy_path.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    entity.update(cx, |view, cx| {
+                        view.open_repository_in_new_tab(Path::new(&path), window, cx)
+                    });
+                }
+            };
             let open_new_window = {
                 let entity = menu_entity.clone();
                 let path = copy_path.clone();
@@ -2047,6 +2070,14 @@ fn worktree_row(
                 PopupMenuItem::new(crate::ui::menu_label("Open", open_in_window_blocked))
                     .disabled(open_in_window_blocked.is_some())
                     .on_click(open),
+            )
+            .item(
+                PopupMenuItem::new(crate::ui::menu_label(
+                    "Open in New Tab",
+                    open_in_window_blocked,
+                ))
+                .disabled(open_in_window_blocked.is_some())
+                .on_click(open_new_tab),
             )
             .item(
                 PopupMenuItem::new(crate::ui::menu_label(

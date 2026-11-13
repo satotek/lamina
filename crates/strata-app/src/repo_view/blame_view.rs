@@ -632,7 +632,7 @@ impl RepoView {
         if !self.blame.progress(ticket, lines, &hunks, &commits) {
             return;
         }
-        cx.notify();
+        self.notify_if_active(cx);
 
         let Some(lines) = highlight_lines_arg else {
             return;
@@ -651,7 +651,7 @@ impl RepoView {
                 .await;
             this.update(cx, |this, cx| {
                 if this.blame.set_partial_highlights(ticket, highlights) {
-                    cx.notify();
+                    this.notify_if_active(cx);
                 }
             })
             .ok();
@@ -669,7 +669,7 @@ impl RepoView {
         if !self.blame.accept(ticket) {
             return;
         }
-        cx.notify();
+        self.notify_if_active(cx);
         let Some(path) = self.blame.path().map(str::to_owned) else {
             return;
         };
@@ -690,7 +690,7 @@ impl RepoView {
                 .await;
             this.update(cx, |this, cx| {
                 if this.blame.ready(ticket, data) {
-                    cx.notify();
+                    this.notify_if_active(cx);
                 }
             })
             .ok();
@@ -708,7 +708,7 @@ impl RepoView {
         if !self.blame.fail(ticket, error.to_owned()) {
             return false;
         }
-        cx.notify();
+        self.notify_if_active(cx);
         true
     }
 
@@ -729,12 +729,12 @@ impl RepoView {
                     Some(parent) => this.open_blame_target(parent, path, cx),
                     None => {
                         this.status_error = Some("this commit has no parent to blame".to_owned());
-                        cx.notify();
+                        this.notify_if_active(cx);
                     }
                 },
                 Err(error) => {
                     this.status_error = Some(error.to_string());
-                    cx.notify();
+                    this.notify_if_active(cx);
                 }
             })
             .ok();

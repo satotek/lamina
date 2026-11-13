@@ -421,7 +421,7 @@ impl RepoView {
         if let Some(previous) = self.search.begin(ticket) {
             session.cancel_query(previous);
         }
-        cx.notify();
+        self.notify_if_active(cx);
     }
 
     /// Applies a `QueryReady` answer that belongs to search; returns false when
@@ -456,7 +456,7 @@ impl RepoView {
                         self.select(Some(index), cx);
                     }
                 }
-                cx.notify();
+                self.notify_if_active(cx);
                 true
             }
         }
@@ -472,7 +472,7 @@ impl RepoView {
             return false;
         }
         self.search.set_error(error.to_owned());
-        cx.notify();
+        self.notify_if_active(cx);
         true
     }
 
