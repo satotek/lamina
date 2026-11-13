@@ -41,6 +41,7 @@ use crate::data::SidebarData;
 use crate::repo_view::RepoView;
 use crate::scrollbar::WithScrollbar as _;
 use crate::style::{self, Design};
+use crate::ui::RowTipExt as _;
 
 /// Key context the dialog sets while it is open, so `Enter` and `Escape` mean
 /// confirm and cancel only there.
@@ -1278,7 +1279,7 @@ fn remote_group_header(
             div()
                 .id(format!("remote-group-url-{name}"))
                 .w_full()
-                .tooltip(move |window, cx| {
+                .row_tooltip(move |window, cx| {
                     gpui_component::tooltip::Tooltip::new(url.clone()).build(window, cx)
                 })
                 .child(header)
@@ -1614,7 +1615,7 @@ fn submodule_row(
     .text_size(px(colors.design.small()))
     .text_color(colors.sidebar_foreground)
     .child(div().flex_1().min_w_0().truncate().child(name.to_owned()))
-    .tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx));
+    .row_tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx));
     if let Some((label, tone)) = submodule_badge(status) {
         row_element = row_element.child(crate::ui::status_badge(label, tone, &colors.design));
     }
@@ -1717,7 +1718,7 @@ fn worktree_row(
     .text_size(px(colors.design.small()))
     .text_color(colors.sidebar_foreground)
     .child(div().flex_1().min_w_0().truncate().child(label.to_owned()))
-    .tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx));
+    .row_tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx));
     if is_main {
         row_element = row_element.child(crate::ui::status_badge(
             "main",
@@ -1732,7 +1733,7 @@ fn worktree_row(
         let wrapper = div().id(("worktree-lock", index)).flex_none();
         row_element = row_element.child(match reason {
             Some(reason) => wrapper
-                .tooltip(move |window, cx| Tooltip::new(reason.clone()).build(window, cx))
+                .row_tooltip(move |window, cx| Tooltip::new(reason.clone()).build(window, cx))
                 .child(badge),
             None => wrapper.child(badge),
         });

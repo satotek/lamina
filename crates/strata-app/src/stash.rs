@@ -30,6 +30,7 @@ use strata_core::{ChangeKind, StashInfo};
 
 use crate::repo_view::RepoView;
 use crate::style;
+use crate::ui::RowTipExt as _;
 
 /// Title of the stash dialog and of the notifications it raises.
 const STASH_TITLE: &str = "Stash changes";
@@ -307,7 +308,7 @@ pub(crate) fn sidebar_row(
     .text_size(px(colors.design.small()))
     .text_color(colors.sidebar_foreground)
     .child(div().flex_1().min_w_0().truncate().child(label))
-    .tooltip(move |_window, cx| {
+    .row_tooltip(move |_window, cx| {
         let text = tooltip_entity
             .read(cx)
             .stash_detail(index)

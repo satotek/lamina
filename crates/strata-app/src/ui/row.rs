@@ -19,7 +19,9 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Div, ElementId, FontWeight, Hsla, InteractiveElement as _, Stateful, Styled as _, div, px,
+    AnyView, App, AppContext as _, Context, Div, ElementId, FontWeight, Hsla,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, Stateful,
+    StatefulInteractiveElement, Styled as _, Window, div, px,
 };
 
 use crate::style::Design;
@@ -136,6 +138,53 @@ pub fn list_row(id: impl Into<ElementId>, state: RowState, design: &Design) -> S
         })
 }
 
+/// A row's detail tip: what GPUI shows on hover, laid out so that any press
+/// dismisses it.
+///
+/// GPUI keeps its native tooltip up while the pointer is inside the tooltip
+/// itself, and paints it after every deferred layer. A right press inside the
+/// tip therefore leaves it showing, and the context menu that press opens is
+/// painted *underneath* it: the menu looks like it never opened. The tip here
+/// reports a box of one pixel at the pointer, which keeps the pointer outside
+/// it (so the press dismisses the tip, and the menu is the only thing left on
+/// screen) while the content itself is drawn at the pointer as before.
+///
+/// The cost of the smaller box is GPUI's edge flipping: a tip that would
+/// overflow the window is no longer moved to the other side of the pointer.
+/// The sidebar's tips are one to three short lines and stay inside the window,
+/// which is why the trade is worth it here.
+pub trait RowTipExt: StatefulInteractiveElement + Sized {
+    fn row_tooltip(
+        self,
+        build_tooltip: impl Fn(&mut Window, &mut App) -> AnyView + 'static,
+    ) -> Self {
+        self.tooltip(move |window, cx| {
+            let content = build_tooltip(window, cx);
+            cx.new(|_| RowTip { content }).into()
+        })
+    }
+}
+
+impl<E: StatefulInteractiveElement> RowTipExt for E {}
+
+/// The view behind [`RowTipExt::row_tooltip`]: a one-pixel box at the pointer
+/// with the tip's content drawn from its corner.
+struct RowTip {
+    content: AnyView,
+}
+
+impl Render for RowTip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().w(px(1.0)).h(px(1.0)).child(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .child(self.content.clone()),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -212,5 +261,113 @@ mod tests {
                 "a painted row keeps its own fill"
             );
         }
+    }
+
+    /// A row's tip must be gone by the time the frame that draws the context
+    /// menu the press opened is painted.
+    ///
+    /// GPUI draws its native tooltip after every deferred layer, so a tip left
+    /// showing while the menu opens hides the menu instead: the user sees a
+    /// right click that does nothing. The pointer here stays inside the tip,
+    /// which is the case GPUI does not dismiss on its own.
+    #[gpui::test]
+    fn a_right_press_dismisses_the_row_tip(cx: &mut gpui::TestAppContext) {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        use std::time::Duration;
+
+        use gpui::{
+            AppContext as _, Background, Context, IntoElement, MouseButton, ParentElement as _,
+            Render, Styled as _, VisualTestContext, Window, div, point, px, rgb,
+        };
+        use gpui_component::Root;
+        use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
+
+        const TIP: u32 = 0x7a135e;
+
+        struct Tip;
+        impl Render for Tip {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().w(px(120.0)).h(px(24.0)).bg(rgb(TIP))
+            }
+        }
+
+        struct Probe {
+            opened: Rc<Cell<usize>>,
+        }
+        impl Render for Probe {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let opened = self.opened.clone();
+                div().size_full().child(
+                    list_row("tip-row", RowState::NORMAL, &Design::default())
+                        .w(px(220.0))
+                        .row_tooltip(|_, cx| cx.new(|_| Tip).into())
+                        .context_menu(move |menu, _, _| {
+                            opened.set(opened.get() + 1);
+                            menu.item(PopupMenuItem::new("Item"))
+                        }),
+                )
+            }
+        }
+
+        let paint = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+            });
+        };
+        let showing = |cx: &mut VisualTestContext| {
+            let marker: Background = rgb(TIP).into();
+            cx.update(|window, _| {
+                window
+                    .painted_quads()
+                    .iter()
+                    .any(|quad| quad.background == marker)
+            })
+        };
+
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_reduce_motion(true);
+        });
+        let opened = Rc::new(Cell::new(0));
+        let probe_opened = opened.clone();
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), |window, cx| {
+                    let probe = cx.new(|_| Probe {
+                        opened: probe_opened,
+                    });
+                    cx.new(|cx| Root::new(probe, window, cx))
+                })
+            })
+            .expect("a window");
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        paint(&mut cx);
+
+        // Hover the row's top-left corner: the tip drops to the pointer plus
+        // 1 px and therefore covers the rest of the row.
+        cx.simulate_mouse_move(point(px(10.0), px(2.0)), None, Default::default());
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        paint(&mut cx);
+        assert!(showing(&mut cx), "the hovered row must show its tip");
+
+        // Stay inside the tip, which is also inside the row.
+        let inside_tip = point(px(20.0), px(12.0));
+        cx.simulate_mouse_move(inside_tip, None, Default::default());
+        cx.run_until_parked();
+        paint(&mut cx);
+        assert!(showing(&mut cx), "the tip stays while it is hovered");
+
+        cx.simulate_mouse_down(inside_tip, MouseButton::Right, Default::default());
+        cx.simulate_mouse_up(inside_tip, MouseButton::Right, Default::default());
+        cx.run_until_parked();
+        paint(&mut cx);
+
+        assert_eq!(opened.get(), 1, "the right press must open the menu");
+        assert!(
+            !showing(&mut cx),
+            "the tip must be dismissed or it paints over the menu"
+        );
     }
 }
