@@ -10,6 +10,7 @@
 //! UI forwards them to its own main thread. Nothing here depends on a UI
 //! toolkit or an async runtime.
 
+mod blame;
 mod diffs;
 mod history;
 mod operations;
@@ -25,7 +26,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crate::diff::FileDiff;
-use crate::git_cli::{CommandRecord, Git};
+use crate::git_cli::{CommandRecord, Git, RebaseStep};
 use crate::graph::{GraphRow, GraphRows};
 use crate::highlight::LineHighlights;
 use crate::patch::LineSelection;
@@ -37,6 +38,9 @@ use crate::{
 };
 
 pub use crate::diff::DiffOptions;
+pub use crate::repo::{Blame, BlameCommit, BlameHunk};
+
+use blame::BlameJob;
 
 use diffs::DiffJob;
 use history::LoadCommand;
@@ -323,6 +327,13 @@ pub enum Operation {
     Revert {
         commit: Oid,
     },
+    /// Replay `onto..HEAD` in the order of `steps`, rewording, squashing,
+    /// fixing up or dropping commits (`git rebase -i` with a prepared todo).
+    /// Conflicts stop it with `state == Rebasing`, like a merge.
+    RebaseEdit {
+        onto: Oid,
+        steps: Vec<RebaseStep>,
+    },
     /// `git reset --<mode> <target>` on the current branch.
     Reset {
         target: Oid,
@@ -447,6 +458,12 @@ pub enum SessionEvent {
         ticket: QueryTicket,
         stat: Arc<CommitStat>,
     },
+    /// Line attribution of a file, for a ticket from
+    /// [`Session::request_blame`]. A stale or cancelled ticket emits nothing.
+    BlameReady {
+        ticket: QueryTicket,
+        blame: Arc<Blame>,
+    },
     QueryFailed {
         ticket: QueryTicket,
         error: String,
@@ -496,7 +513,8 @@ struct Senders {
     operations: Sender<OperationJob>,
     diffs: Sender<DiffJob>,
     queries: Sender<QueryJob>,
-    /// Ticket counter and cancellation set shared with the query worker.
+    blame: Sender<BlameJob>,
+    /// Ticket counter and cancellation set shared with the query workers.
     query_state: Arc<queries::QueryState>,
 }
 
@@ -547,6 +565,7 @@ impl Session {
         let (diff_tx, diff_rx) = mpsc::channel();
         let diff_rx = Arc::new(Mutex::new(diff_rx));
         let (query_tx, query_rx) = mpsc::channel();
+        let (blame_tx, blame_rx) = mpsc::channel();
         let query_state = Arc::new(queries::QueryState::new());
 
         let shared = Arc::new(Shared::new(repo, git, events, empty_snapshot()));
@@ -565,7 +584,7 @@ impl Session {
             },
         )?;
 
-        let mut threads = Vec::with_capacity(4 + DIFF_WORKERS);
+        let mut threads = Vec::with_capacity(5 + DIFF_WORKERS);
         threads.push(spawn("strata-session-history", {
             let shared = Arc::clone(&shared);
             move || history::run(shared, load_rx)
@@ -594,6 +613,13 @@ impl Session {
             let state = Arc::clone(&query_state);
             move || queries::run(shared, state, query_rx)
         })?);
+        // Blame walks far more history than the other queries, so it must not
+        // share their worker or a large file would stall every answer.
+        threads.push(spawn("strata-session-blame", {
+            let shared = Arc::clone(&shared);
+            let state = Arc::clone(&query_state);
+            move || blame::run(shared, state, blame_rx)
+        })?);
 
         let session = Self {
             shared,
@@ -603,6 +629,7 @@ impl Session {
                 operations: ops_tx,
                 diffs: diff_tx,
                 queries: query_tx,
+                blame: blame_tx,
                 query_state,
             }),
             watcher: Some(watcher),
@@ -690,6 +717,28 @@ impl Session {
     /// re-request as cheap as the refresh itself.
     pub fn request_submodules_and_worktrees(&self) -> QueryTicket {
         self.queue_query(queries::QueryKind::SubmodulesAndWorktrees)
+    }
+
+    /// Attributes each line of `path` at `commit` to the commit that last
+    /// changed it, following renames of the file.
+    ///
+    /// Runs on the blame worker, so a large file never delays a search, a path
+    /// history or a diff. Answers with [`SessionEvent::BlameReady`], or
+    /// `QueryFailed` with the same ticket when the path or commit cannot be
+    /// read. Cancelling the ticket before the answer is ready emits nothing.
+    pub fn request_blame(&self, commit: Oid, path: impl Into<String>) -> QueryTicket {
+        let Some(senders) = &self.senders else {
+            // Only reachable once the session is shutting down, when no event
+            // could be delivered anyway.
+            return QueryTicket(0);
+        };
+        let ticket = senders.query_state.next_ticket();
+        let _ = senders.blame.send(BlameJob {
+            ticket,
+            commit,
+            path: path.into(),
+        });
+        ticket
     }
 
     pub fn cancel_query(&self, ticket: QueryTicket) {

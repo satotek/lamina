@@ -14,5 +14,8 @@ pub mod session;
 pub mod types;
 pub mod watch;
 
+#[cfg(test)]
+mod test_support;
+
 pub use error::{Error, Result};
 pub use types::*;

@@ -182,6 +182,7 @@ fn changes_refs(operation: &Operation) -> bool {
             | Operation::MergeContinue
             | Operation::CherryPick { .. }
             | Operation::Revert { .. }
+            | Operation::RebaseEdit { .. }
             | Operation::Reset { .. }
             | Operation::CreateTag { .. }
             | Operation::DeleteTag { .. }
@@ -282,6 +283,7 @@ fn execute(shared: &Shared, id: OperationId, operation: &Operation) -> Result<()
         Operation::ResolveWithContent { path, content } => git.resolve_with_content(path, content),
         Operation::CherryPick { commit } => git.cherry_pick(*commit),
         Operation::Revert { commit } => git.revert(*commit),
+        Operation::RebaseEdit { onto, steps } => git.rebase_edit(*onto, steps),
         Operation::Reset { target, mode } => git.reset(*target, *mode),
         Operation::CreateTag {
             name,

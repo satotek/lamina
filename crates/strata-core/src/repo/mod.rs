@@ -6,8 +6,10 @@
 //! `message.rs` (commit and merge messages) and `remotes.rs` (configured
 //! remotes) are owned by separate tasks. `stat.rs` counts the lines a commit
 //! added and removed. `submodules.rs` and `worktrees.rs` list the checkouts a
-//! repository owns beyond its own working tree.
+//! repository owns beyond its own working tree. `blame.rs` attributes each line
+//! of a file to a commit.
 
+mod blame;
 mod conflicts;
 mod history;
 mod log;
@@ -20,6 +22,7 @@ mod tree;
 mod upstream;
 mod worktrees;
 
+pub use blame::{Blame, BlameCommit, BlameHunk};
 pub use history::{PathHistory, PathHistoryEntries, PathHistoryEntry};
 pub use log::CommitWalk;
 pub use submodules::{SubmoduleInfo, SubmoduleStatus};

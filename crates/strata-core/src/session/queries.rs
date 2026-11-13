@@ -68,13 +68,13 @@ impl QueryState {
         lock(&self.cancelled).insert(ticket);
     }
 
-    fn is_cancelled(&self, ticket: QueryTicket) -> bool {
+    pub(crate) fn is_cancelled(&self, ticket: QueryTicket) -> bool {
         lock(&self.cancelled).contains(&ticket)
     }
 
     /// Drops the ticket's cancellation once its job is done, so the set only
     /// holds tickets whose job is still alive.
-    fn forget(&self, ticket: QueryTicket) {
+    pub(crate) fn forget(&self, ticket: QueryTicket) {
         lock(&self.cancelled).remove(&ticket);
     }
 }
