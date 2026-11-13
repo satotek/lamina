@@ -1,15 +1,18 @@
-//! History actions on a commit: cherry-pick, revert, reset and tags.
+//! History actions on a commit: cherry-pick, revert, reset, tags and edits.
 //!
-//! The commit list's context menu and the tag form live here. Nothing in this
-//! module runs git: every write becomes an [`Operation`] handed to
-//! [`RepoView::run_operation`], whose session worker runs it and publishes the
-//! new snapshot. An operation that stops on a conflict is a normal outcome (the
-//! conflict view takes over from the published state), so the handlers only
-//! report failures.
+//! The commit list's context menu, the tag form and the commit-editing rules
+//! live here. Nothing in this module runs git: every write becomes an
+//! [`Operation`] handed to [`RepoView::run_operation`], whose session worker
+//! runs it and publishes the new snapshot. An operation that stops on a
+//! conflict is a normal outcome (the conflict banner takes over from the
+//! published state), so the handlers only report failures.
 //!
 //! The menu's enable rules depend on the commit, HEAD and the repository state
 //! alone, so they are plain functions that the unit tests exercise without a
 //! repository.
+
+use std::collections::HashSet;
+use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
@@ -21,10 +24,17 @@ use gpui_component::WindowExt as _;
 use gpui_component::dialog::DialogFooter;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
-use strata_core::session::{Operation, ResetMode};
-use strata_core::{HeadInfo, Oid, RefKind, RepoState};
+use strata_core::git_cli::{
+    MoveDirection, RebaseAction, RebaseStep, drop_commit, move_commit, reword_commit,
+    squash_commit_into_parent,
+};
+use strata_core::repo::Repo;
+use strata_core::session::{Operation, RepoSnapshot, ResetMode, Session};
+use strata_core::{ChangeKind, Error, HeadInfo, Oid, RefKind, RepoState, Result, WorktreeStatus};
 
 use super::RepoView;
+use super::edit_dialog;
+use crate::data::short_oid;
 use crate::settings::Settings;
 use crate::style::Design;
 use crate::ui;
@@ -53,6 +63,8 @@ pub(crate) struct MenuState {
     busy: bool,
     /// Commit HEAD points at, so picking or reverting it can be disabled.
     head: Option<Oid>,
+    /// Tracked staged or worktree changes. Core refuses a rebase with them.
+    dirty: bool,
 }
 
 impl MenuState {
@@ -67,7 +79,18 @@ impl MenuState {
             pending: state != RepoState::Normal,
             busy,
             head: commit,
+            dirty: false,
         }
+    }
+
+    /// Adds the worktree state the snapshot carries; `read` stays about HEAD.
+    pub(crate) fn with_worktree(mut self, status: &WorktreeStatus) -> Self {
+        self.dirty = !status.staged.is_empty()
+            || status
+                .unstaged
+                .iter()
+                .any(|change| change.kind != ChangeKind::Untracked);
+        self
     }
 
     /// What reset, cherry-pick and revert name: the branch, or HEAD when there
@@ -105,6 +128,400 @@ impl MenuState {
         }
         self.blocked(action)
     }
+}
+
+/// The commit rewrites the context menu can run.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum EditAction {
+    Reword,
+    Squash,
+    Fixup,
+    Drop,
+    MoveUp,
+    MoveDown,
+}
+
+impl EditAction {
+    const ALL: [Self; 6] = [
+        Self::Reword,
+        Self::Squash,
+        Self::Fixup,
+        Self::Drop,
+        Self::MoveUp,
+        Self::MoveDown,
+    ];
+
+    /// The menu entry, without the reason a disabled one shows.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Reword => "Reword…",
+            Self::Squash => "Squash into parent",
+            Self::Fixup => "Fixup into parent",
+            Self::Drop => "Drop commit…",
+            Self::MoveUp => "Move up",
+            Self::MoveDown => "Move down",
+        }
+    }
+
+    /// What the status bar and the command log call the operation.
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Reword => "reword",
+            Self::Squash => "squash",
+            Self::Fixup => "fixup",
+            Self::Drop => "drop",
+            Self::MoveUp => "move up",
+            Self::MoveDown => "move down",
+        }
+    }
+
+    /// The confirmation title; `short` is the commit id.
+    fn title(self, short: &str) -> String {
+        match self {
+            Self::Reword => format!("Reword {short}?"),
+            Self::Squash => format!("Squash {short} into its parent?"),
+            Self::Fixup => format!("Fix up {short} into its parent?"),
+            Self::Drop => format!("Drop commit {short}?"),
+            Self::MoveUp => format!("Move {short} up?"),
+            Self::MoveDown => format!("Move {short} down?"),
+        }
+    }
+}
+
+/// One commit of HEAD's first-parent line and its parents, newest first.
+type LineCommit = (Oid, Vec<Oid>);
+
+/// How far the line walk goes before an unseen commit is called off the line.
+/// The path from HEAD to a visible commit is far shorter in practice.
+const LINE_LIMIT: usize = 10_000;
+
+/// How many ancestry nodes one remote reachability check visits. A remote tip
+/// near HEAD reaches the edited range in a handful of steps; the cap keeps a
+/// remote on an unrelated history from walking the whole repository.
+const REMOTE_WALK_LIMIT: usize = 20_000;
+
+fn head_target(head: Option<&HeadInfo>) -> Option<Oid> {
+    match head? {
+        HeadInfo::Branch { target, .. } => *target,
+        HeadInfo::Detached { target } => Some(*target),
+    }
+}
+
+/// Walks HEAD's first parents until `target` is found, then two commits
+/// further so every action's `onto` commit is in the line. `None` when a commit
+/// cannot be read before the walk knows whether `target` is on the line.
+fn walk_first_parents(
+    head: Oid,
+    target: Oid,
+    mut parents: impl FnMut(Oid) -> Option<Vec<Oid>>,
+) -> Option<(Vec<LineCommit>, Option<usize>)> {
+    let mut line = Vec::new();
+    let mut current = head;
+    let mut seen = HashSet::new();
+    let mut distance = None;
+    while line.len() < LINE_LIMIT {
+        if !seen.insert(current) {
+            return None;
+        }
+        let commit_parents = parents(current)?;
+        line.push((current, commit_parents.clone()));
+        if current == target {
+            distance = Some(line.len() - 1);
+        }
+        if let Some(distance) = distance
+            && line.len() > distance + 2
+        {
+            return Some((line, Some(distance)));
+        }
+        match commit_parents.first() {
+            Some(parent) => current = *parent,
+            None => break,
+        }
+    }
+    Some((line, distance))
+}
+
+fn snapshot_parents(snapshot: &RepoSnapshot, id: Oid) -> Option<Vec<Oid>> {
+    let index = *snapshot.commit_index.get(&id)?;
+    let (commit, _) = snapshot.commits.get(index)?;
+    Some(commit.parents.clone())
+}
+
+/// Everything the edit entries need about one commit, read once when the menu
+/// opens. The rules are methods on plain data so the tests can build a line
+/// without a repository.
+pub(crate) struct EditContext {
+    /// HEAD's first-parent line, newest first, far enough for every action.
+    line: Vec<LineCommit>,
+    /// Where the target sits on the line; `None` when it is not on it.
+    distance: Option<usize>,
+    head: Oid,
+    /// Remote-tracking refs, as `(short name, tip)`.
+    remotes: Vec<(String, Oid)>,
+    snapshot: Arc<RepoSnapshot>,
+    repo: Repo,
+}
+
+impl EditContext {
+    fn read(session: &Session, commit: Oid) -> Option<Self> {
+        let snapshot = session.snapshot();
+        let head = head_target(snapshot.head.as_ref())?;
+        let repo = session.repo().clone();
+        let (line, distance) =
+            walk_first_parents(head, commit, |id| snapshot_parents(&snapshot, id))
+                .or_else(|| walk_first_parents(head, commit, |id| repo.parents(id).ok()))
+                .unwrap_or_default();
+        let remotes = snapshot
+            .refs
+            .iter()
+            .filter(|reference| reference.kind == RefKind::RemoteBranch)
+            .map(|reference| (reference.short_name.clone(), reference.target))
+            .collect();
+        Some(Self {
+            line,
+            distance,
+            head,
+            remotes,
+            snapshot,
+            repo,
+        })
+    }
+
+    /// The `onto` commit and the commits `onto..HEAD` oldest first, which is
+    /// what core's helpers and `git rebase -i` expect.
+    fn plan(&self, action: EditAction) -> Option<(Oid, Vec<Oid>)> {
+        let distance = self.distance?;
+        let onto_index = onto_index(distance, action)?;
+        let onto = self.line.get(onto_index)?.0;
+        Some((onto, range_commits(&self.line, onto_index)))
+    }
+
+    /// Remote-tracking branches that already contain commits in `action`'s
+    /// range, so rewriting them needs a force push.
+    fn pushed_remotes(&self, action: EditAction) -> Vec<String> {
+        let Some((_, commits)) = self.plan(action) else {
+            return Vec::new();
+        };
+        remotes_containing(&commits, &self.remotes, |commit, tip| {
+            self.reachable(commit, tip)
+        })
+    }
+
+    /// Whether `ancestor` is reachable from `descendant`.
+    ///
+    /// The loaded rows answer this without touching objects. A commit the walk
+    /// has not published yet cannot be on the path to an edited commit that
+    /// was, because the walk emits children before parents, so it is a leaf
+    /// and the check stops there. The repository read is the fallback for a
+    /// narrowed history scope that left the remote out.
+    fn reachable(&self, ancestor: Oid, descendant: Oid) -> bool {
+        let mut stack = vec![descendant];
+        let mut seen = HashSet::new();
+        while let Some(id) = stack.pop() {
+            if id == ancestor {
+                return true;
+            }
+            if !seen.insert(id) {
+                continue;
+            }
+            if seen.len() > REMOTE_WALK_LIMIT {
+                return false;
+            }
+            let parents =
+                snapshot_parents(&self.snapshot, id).or_else(|| self.repo.parents(id).ok());
+            if let Some(parents) = parents {
+                stack.extend(parents);
+            }
+        }
+        false
+    }
+}
+
+/// Why `action` cannot run on the commit at `distance`. A merge anywhere in
+/// the range core would replay stops the rewrite; a squash or a downward move
+/// needs the parent's parent as the range base, so a root in that spot has no
+/// `onto` commit to offer.
+fn blocked_on_line(
+    line: &[LineCommit],
+    distance: Option<usize>,
+    action: EditAction,
+) -> Option<&'static str> {
+    let Some(distance) = distance else {
+        return Some("not on the current branch");
+    };
+    let Some((_, parents)) = line.get(distance) else {
+        return Some("not on the current branch");
+    };
+    if parents.is_empty() {
+        return Some("the root commit");
+    }
+    match action {
+        EditAction::Reword | EditAction::Drop => {
+            if merge_within(line, distance) {
+                return Some("history has a merge");
+            }
+        }
+        EditAction::Squash | EditAction::Fixup => {
+            if line.get(distance + 2).is_none() {
+                return Some("the parent is the root commit");
+            }
+            if merge_within(line, distance + 1) {
+                return Some("history has a merge");
+            }
+        }
+        EditAction::MoveUp => {
+            if distance == 0 {
+                return Some("already the newest commit");
+            }
+            if merge_within(line, distance) {
+                return Some("history has a merge");
+            }
+        }
+        EditAction::MoveDown => {
+            if line.get(distance + 2).is_none() {
+                return Some("already the oldest in the range");
+            }
+            if merge_within(line, distance + 1) {
+                return Some("history has a merge");
+            }
+        }
+    }
+    None
+}
+
+/// Whether a merge commit sits between HEAD and the commit at `index`.
+fn merge_within(line: &[LineCommit], index: usize) -> bool {
+    line.iter()
+        .take(index + 1)
+        .any(|(_, parents)| parents.len() > 1)
+}
+
+/// Index in `line` of the commit the range starts after.
+fn onto_index(distance: usize, action: EditAction) -> Option<usize> {
+    Some(match action {
+        EditAction::Reword | EditAction::Drop => distance + 1,
+        EditAction::Squash | EditAction::Fixup | EditAction::MoveDown => distance + 2,
+        EditAction::MoveUp if distance > 0 => distance + 1,
+        EditAction::MoveUp => return None,
+    })
+}
+
+/// `line[..onto]` oldest first: the first-parent list core's helpers expect.
+fn range_commits(line: &[LineCommit], onto_index: usize) -> Vec<Oid> {
+    line[..onto_index]
+        .iter()
+        .rev()
+        .map(|(commit, _)| *commit)
+        .collect()
+}
+
+/// Distance from HEAD the edited result is expected to have once git has
+/// rewritten the branch, so the selection can follow it.
+///
+/// A squash or fixup replaces the selected commit's parent with the combined
+/// commit, and the parent moves up into the selected commit's place. A move
+/// leaves the commit one step above or below where it was.
+fn selection_distance(distance: usize, action: EditAction) -> Option<usize> {
+    match action {
+        EditAction::Reword | EditAction::Squash | EditAction::Fixup | EditAction::Drop => {
+            Some(distance)
+        }
+        EditAction::MoveUp => distance.checked_sub(1),
+        EditAction::MoveDown => Some(distance + 1),
+    }
+}
+
+/// Remote names whose tip reaches a commit of `range`.
+fn remotes_containing(
+    range: &[Oid],
+    remotes: &[(String, Oid)],
+    mut reachable: impl FnMut(Oid, Oid) -> bool,
+) -> Vec<String> {
+    let mut names = Vec::new();
+    for (name, tip) in remotes {
+        if range.iter().any(|commit| reachable(*commit, *tip)) {
+            names.push(name.clone());
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// Whether a rewrite may run, with the reason when it may not.
+///
+/// The state checks come first because they decide the whole repository, then
+/// the line decides the commit, and the worktree comes last because the more
+/// specific reason is more useful than "commit or stash changes first".
+fn edit_blocked(
+    state: &MenuState,
+    edit: Option<&EditContext>,
+    action: EditAction,
+) -> Option<&'static str> {
+    match edit {
+        Some(edit) => edit_blocked_on_line(state, &edit.line, edit.distance, action),
+        None => edit_blocked_on_line(state, &[], None, action),
+    }
+}
+
+fn edit_blocked_on_line(
+    state: &MenuState,
+    line: &[LineCommit],
+    distance: Option<usize>,
+    action: EditAction,
+) -> Option<&'static str> {
+    if state.busy {
+        return Some("an operation is running");
+    }
+    if state.pending {
+        return Some("finish the operation in progress first");
+    }
+    if state.branch.is_none() && state.head.is_some() {
+        return Some("HEAD is detached");
+    }
+    if let Some(reason) = blocked_on_line(line, distance, action) {
+        return Some(reason);
+    }
+    if state.dirty {
+        return Some("commit or stash changes first");
+    }
+    None
+}
+
+/// The selection a finished rewrite should restore: the commit at `distance`
+/// first-parent steps below the new HEAD.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PendingSelection {
+    old_head: Oid,
+    distance: usize,
+}
+
+/// The first-parent commit `distance` steps below `head`, as a row index.
+fn row_at_distance(snapshot: &RepoSnapshot, head: Oid, distance: usize) -> Option<usize> {
+    let mut current = head;
+    for _ in 0..distance {
+        let index = *snapshot.commit_index.get(&current)?;
+        let (commit, _) = snapshot.commits.get(index)?;
+        current = *commit.parents.first()?;
+    }
+    snapshot.commit_index.get(&current).copied()
+}
+
+/// The fixup todo core has no named helper for; every other step is a pick.
+fn fixup_steps(commits: &[Oid], commit: Oid) -> Result<Vec<RebaseStep>> {
+    let position = commits
+        .iter()
+        .position(|candidate| *candidate == commit)
+        .ok_or_else(|| Error::other(format!("commit {commit} is not in the rebase range")))?;
+    let mut steps = commits
+        .iter()
+        .map(|commit| RebaseStep {
+            commit: *commit,
+            action: RebaseAction::Pick,
+        })
+        .collect::<Vec<_>>();
+    steps[position].action = RebaseAction::Fixup;
+    Ok(steps)
 }
 
 /// The parts of a commit row a menu entry needs, owned so the menu closure can
@@ -152,6 +569,7 @@ pub(crate) fn commit_menu(
         return menu;
     };
     let short = target.short;
+    let summary = target.summary;
     let tags = target.tags;
 
     let onto = state.branch_label();
@@ -263,6 +681,38 @@ pub(crate) fn commit_menu(
                 }),
         );
     }
+    let edit = entity.read(cx).edit_context(commit);
+    menu = menu.separator();
+    menu = edit_group(menu, commit, &summary, &state, edit.as_ref(), &entity);
+    menu
+}
+
+/// The "Edit commit" group. Every entry says why it is disabled, because a
+/// popup item has no tooltip.
+fn edit_group(
+    mut menu: PopupMenu,
+    commit: Oid,
+    summary: &str,
+    state: &MenuState,
+    edit: Option<&EditContext>,
+    entity: &Entity<RepoView>,
+) -> PopupMenu {
+    menu = menu.item(PopupMenuItem::label("Edit commit"));
+    for action in EditAction::ALL {
+        let blocked = edit_blocked(state, edit, action);
+        let mut item =
+            PopupMenuItem::new(menu_label(action.label(), blocked)).disabled(blocked.is_some());
+        if blocked.is_none() {
+            let entity = entity.clone();
+            let summary = summary.to_owned();
+            item = item.on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                entity.update(cx, |view, cx| {
+                    view.open_edit(action, commit, summary.clone(), window, cx)
+                });
+            });
+        }
+        menu = menu.item(item);
+    }
     menu
 }
 
@@ -361,11 +811,10 @@ impl RepoView {
     /// (`--fake` has nothing to act on).
     pub(super) fn history_menu_state(&self) -> Option<MenuState> {
         let snapshot = self.session.as_ref()?.snapshot();
-        Some(MenuState::read(
-            snapshot.head.as_ref(),
-            snapshot.state,
-            self.is_busy(),
-        ))
+        Some(
+            MenuState::read(snapshot.head.as_ref(), snapshot.state, self.is_busy())
+                .with_worktree(&snapshot.status),
+        )
     }
 
     /// `(staged, unstaged)` path counts from the snapshot, for the hard-reset
@@ -599,6 +1048,216 @@ impl RepoView {
                 });
             },
         );
+    }
+
+    /// What the edit entries may do to `commit`, or `None` without a session.
+    fn edit_context(&self, commit: Oid) -> Option<EditContext> {
+        EditContext::read(self.session.as_ref()?, commit)
+    }
+
+    /// Runs one menu pick: an editor for a reword, a confirmation for a drop,
+    /// and a direct run for the other three unless history was pushed.
+    pub(crate) fn open_edit(
+        &mut self,
+        action: EditAction,
+        commit: Oid,
+        summary: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.history_menu_state() else {
+            return;
+        };
+        let Some(edit) = self.edit_context(commit) else {
+            return;
+        };
+        // The menu already disabled this entry; the check keeps a stale click
+        // from running git after the repository moved under it.
+        if edit_blocked(&state, Some(&edit), action).is_some() {
+            return;
+        }
+        match action {
+            EditAction::Reword => self.open_reword(commit, window, cx),
+            EditAction::Drop => self.confirm_drop(commit, &summary, &edit, &state, window, cx),
+            _ => self.confirm_or_run_edit(action, commit, &edit, window, cx),
+        }
+    }
+
+    /// Opens the message editor with the commit's full message filled in.
+    fn open_reword(&mut self, commit: Oid, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let message = match session.repo().commit_message(commit) {
+            Ok(message) => message,
+            Err(error) => {
+                self.status_error =
+                    Some(format!("cannot read commit {}: {error}", short_oid(commit)));
+                cx.notify();
+                return;
+            }
+        };
+        edit_dialog::open(self, commit, short_oid(commit), message, window, cx);
+    }
+
+    /// Asks before leaving a commit out of the branch.
+    fn confirm_drop(
+        &mut self,
+        commit: Oid,
+        summary: &str,
+        edit: &EditContext,
+        state: &MenuState,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let above = edit.distance.unwrap_or(0);
+        let branch = state.branch_label();
+        let detail = match above {
+            0 => format!(
+                "\"{summary}\" is removed from {branch}. HEAD moves to the previous commit."
+            ),
+            1 => format!("\"{summary}\" is removed from {branch}. 1 commit above it is rewritten."),
+            count => format!(
+                "\"{summary}\" is removed from {branch}. {count} commits above it are rewritten."
+            ),
+        };
+        self.focus_root(window, cx);
+        let entity = cx.weak_entity();
+        ui::confirm(
+            window,
+            cx,
+            ui::Confirm::new(EditAction::Drop.title(&short_oid(commit)), detail)
+                .ok_label("Drop commit"),
+            move |window, cx| {
+                let _ = entity.update(cx, |view, cx| {
+                    view.run_edit(EditAction::Drop, commit, None, window, cx)
+                });
+            },
+        );
+    }
+
+    /// Runs a squash, fixup or move, warning first when the range is already on
+    /// a remote-tracking branch: a rewrite there needs a force push.
+    fn confirm_or_run_edit(
+        &mut self,
+        action: EditAction,
+        commit: Oid,
+        edit: &EditContext,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let remotes = edit.pushed_remotes(action);
+        if remotes.is_empty() {
+            self.run_edit(action, commit, None, window, cx);
+            return;
+        }
+        let detail = format!(
+            "These commits are already pushed to {}. Rewriting them needs a force push, and anyone who pulled them will have to reset.",
+            remotes.join(", ")
+        );
+        self.focus_root(window, cx);
+        let entity = cx.weak_entity();
+        ui::confirm(
+            window,
+            cx,
+            ui::Confirm::new(action.title(&short_oid(commit)), detail)
+                .ok_label("Rewrite")
+                .always_ask(),
+            move |window, cx| {
+                let _ = entity.update(cx, |view, cx| {
+                    view.run_edit(action, commit, None, window, cx)
+                });
+            },
+        );
+    }
+
+    /// Builds the rebase todo for `action` and hands it to the session, which
+    /// runs it like every other mutation.
+    pub(crate) fn run_edit(
+        &mut self,
+        action: EditAction,
+        commit: Oid,
+        message: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.history_menu_state() else {
+            return;
+        };
+        let Some(edit) = self.edit_context(commit) else {
+            return;
+        };
+        if let Some(reason) = edit_blocked(&state, Some(&edit), action) {
+            self.status_error = Some(format!(
+                "cannot {} {}: {reason}",
+                action.verb(),
+                short_oid(commit)
+            ));
+            cx.notify();
+            return;
+        }
+        let Some((onto, commits)) = edit.plan(action) else {
+            return;
+        };
+        let steps = match action {
+            EditAction::Reword => {
+                let message = message.unwrap_or_default();
+                if message.trim().is_empty() {
+                    self.status_error = Some("a commit message cannot be empty".to_owned());
+                    cx.notify();
+                    return;
+                }
+                reword_commit(&commits, commit, message)
+            }
+            EditAction::Squash => squash_commit_into_parent(&commits, commit),
+            EditAction::Fixup => fixup_steps(&commits, commit),
+            EditAction::Drop => drop_commit(&commits, commit),
+            EditAction::MoveUp => move_commit(&commits, commit, MoveDirection::Up),
+            EditAction::MoveDown => move_commit(&commits, commit, MoveDirection::Down),
+        };
+        let steps = match steps {
+            Ok(steps) => steps,
+            Err(error) => {
+                self.status_error = Some(format!("cannot {}: {error}", action.verb()));
+                cx.notify();
+                return;
+            }
+        };
+        if let Some(distance) = edit
+            .distance
+            .and_then(|distance| selection_distance(distance, action))
+        {
+            self.edit_selection = Some(PendingSelection {
+                old_head: edit.head,
+                distance,
+            });
+        }
+        let label = format!("{} {}", action.verb(), short_oid(commit));
+        self.run_operation(Operation::RebaseEdit { onto, steps }, label, window, cx);
+    }
+
+    /// Follows a rewritten commit to its new position once the reload that
+    /// carries the rewrite has landed. HEAD changes with every rewrite, which
+    /// is what tells the new snapshot from the one published before it.
+    pub(super) fn settle_edit_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(pending) = self.edit_selection else {
+            return;
+        };
+        let Some(session) = self.session.as_ref() else {
+            self.edit_selection = None;
+            return;
+        };
+        let snapshot = session.snapshot();
+        let Some(head) = head_target(snapshot.head.as_ref()) else {
+            return;
+        };
+        if head == pending.old_head {
+            return;
+        }
+        if let Some(index) = row_at_distance(&snapshot, head, pending.distance) {
+            self.select(Some(index), cx);
+        }
+        self.edit_selection = None;
     }
 }
 
@@ -882,6 +1541,249 @@ mod tests {
             validate_tag_name("v1.0.0", &["v1.0.0".to_owned()]),
             Err("A tag with that name already exists."),
             "a tag name has to be free"
+        );
+    }
+
+    /// A linear first-parent line: each commit's only parent is the next.
+    fn line_of(ids: &[Oid]) -> Vec<LineCommit> {
+        ids.iter()
+            .enumerate()
+            .map(|(index, id)| {
+                let parents = ids.get(index + 1).copied().into_iter().collect();
+                (*id, parents)
+            })
+            .collect()
+    }
+
+    fn worktree(kind: strata_core::ChangeKind, staged: bool) -> WorktreeStatus {
+        let change = strata_core::FileChange {
+            path: "file.txt".into(),
+            old_path: None,
+            kind,
+        };
+        if staged {
+            WorktreeStatus {
+                staged: vec![change],
+                unstaged: Vec::new(),
+            }
+        } else {
+            WorktreeStatus {
+                staged: Vec::new(),
+                unstaged: vec![change],
+            }
+        }
+    }
+
+    #[test]
+    fn the_first_parent_walk_finds_a_commit_and_keeps_two_parents() {
+        let ids = [oid(1), oid(2), oid(3), oid(4)];
+        let parents = |id: Oid| {
+            let index = ids.iter().position(|candidate| *candidate == id)?;
+            Some(ids.get(index + 1).copied().into_iter().collect())
+        };
+
+        let (line, distance) =
+            walk_first_parents(ids[0], ids[2], parents).expect("the line is readable");
+        assert_eq!(distance, Some(2));
+        assert_eq!(
+            line.iter().map(|(commit, _)| *commit).collect::<Vec<_>>(),
+            ids,
+            "the target and the two commits below it are kept"
+        );
+
+        let (_, distance) =
+            walk_first_parents(ids[0], oid(9), parents).expect("the line is readable");
+        assert_eq!(
+            distance, None,
+            "a commit off the first-parent line is not found"
+        );
+        assert!(
+            walk_first_parents(ids[0], ids[2], |_| None).is_none(),
+            "an unreadable commit asks for the repository fallback"
+        );
+    }
+
+    #[test]
+    fn every_action_starts_after_the_commit_it_rewrites() {
+        let ids = [oid(1), oid(2), oid(3), oid(4), oid(5), oid(6)];
+        let line = line_of(&ids);
+        let distance = 2;
+
+        // Reword, drop, and moving up only replay the selected commit and the
+        // commits above it; the parent stays outside the range.
+        for action in [EditAction::Reword, EditAction::Drop, EditAction::MoveUp] {
+            let onto = onto_index(distance, action).expect("an onto commit");
+            assert_eq!(line[onto].0, oid(4), "{action:?} starts after the parent");
+            assert_eq!(
+                range_commits(&line, onto),
+                [oid(3), oid(2), oid(1)],
+                "{action:?} replays the range oldest first"
+            );
+        }
+
+        // A squash rewrites its parent, and moving down swaps with the older
+        // commit, so both start one commit deeper.
+        for action in [EditAction::Squash, EditAction::Fixup, EditAction::MoveDown] {
+            let onto = onto_index(distance, action).expect("an onto commit");
+            assert_eq!(line[onto].0, oid(5), "{action:?} includes the parent");
+            assert_eq!(
+                range_commits(&line, onto),
+                [oid(4), oid(3), oid(2), oid(1)],
+                "{action:?} replays the parent too"
+            );
+        }
+
+        assert_eq!(
+            onto_index(0, EditAction::MoveUp),
+            None,
+            "the newest commit cannot move up"
+        );
+        assert_eq!(selection_distance(2, EditAction::Reword), Some(2));
+        assert_eq!(
+            selection_distance(2, EditAction::Squash),
+            Some(2),
+            "the combined commit takes the selected commit's place"
+        );
+        assert_eq!(selection_distance(2, EditAction::Drop), Some(2));
+        assert_eq!(selection_distance(2, EditAction::MoveUp), Some(1));
+        assert_eq!(selection_distance(2, EditAction::MoveDown), Some(3));
+    }
+
+    #[test]
+    fn edit_reasons_mirror_what_core_refuses() {
+        let ids = [oid(1), oid(2), oid(3), oid(4)];
+        let line = line_of(&ids);
+
+        assert_eq!(
+            blocked_on_line(&line, None, EditAction::Reword),
+            Some("not on the current branch")
+        );
+        assert_eq!(
+            blocked_on_line(&line, Some(3), EditAction::Reword),
+            Some("the root commit"),
+            "a root has no parent to rebase onto"
+        );
+        assert_eq!(
+            blocked_on_line(&line, Some(0), EditAction::MoveUp),
+            Some("already the newest commit")
+        );
+        assert_eq!(
+            blocked_on_line(&line, Some(2), EditAction::Squash),
+            Some("the parent is the root commit"),
+            "squashing into the root would need an onto before it"
+        );
+        assert_eq!(
+            blocked_on_line(&line, Some(2), EditAction::MoveDown),
+            Some("already the oldest in the range")
+        );
+        assert_eq!(blocked_on_line(&line, Some(2), EditAction::Reword), None);
+
+        // A merge at HEAD blocks every action whose range contains it.
+        let mut merged = line_of(&ids);
+        merged[0].1.push(oid(9));
+        assert_eq!(
+            blocked_on_line(&merged, Some(0), EditAction::Reword),
+            Some("history has a merge")
+        );
+        assert_eq!(
+            blocked_on_line(&merged, Some(1), EditAction::Drop),
+            Some("history has a merge")
+        );
+
+        // A merge at the parent is outside a reword's range but inside a
+        // squash's, which rewrites the parent.
+        let mut merged_parent = line_of(&ids);
+        merged_parent[1].1.push(oid(9));
+        assert_eq!(
+            blocked_on_line(&merged_parent, Some(0), EditAction::Reword),
+            None
+        );
+        assert_eq!(
+            blocked_on_line(&merged_parent, Some(0), EditAction::Squash),
+            Some("history has a merge")
+        );
+    }
+
+    #[test]
+    fn repository_state_reasons_come_before_the_commit_rules() {
+        let head = branch("main", oid(1));
+        let line = line_of(&[oid(1), oid(2), oid(3)]);
+
+        let pending = MenuState::read(Some(&head), RepoState::Rebasing, false);
+        assert_eq!(
+            edit_blocked_on_line(&pending, &line, Some(0), EditAction::Reword),
+            Some("finish the operation in progress first")
+        );
+
+        let busy = MenuState::read(Some(&head), RepoState::Normal, true);
+        assert_eq!(
+            edit_blocked_on_line(&busy, &line, Some(0), EditAction::Reword),
+            Some("an operation is running")
+        );
+
+        let detached = MenuState::read(
+            Some(&HeadInfo::Detached { target: oid(1) }),
+            RepoState::Normal,
+            false,
+        );
+        assert_eq!(
+            edit_blocked_on_line(&detached, &line, Some(0), EditAction::Reword),
+            Some("HEAD is detached")
+        );
+    }
+
+    #[test]
+    fn tracked_changes_block_a_rewrite_but_untracked_files_do_not() {
+        let head = branch("main", oid(1));
+        let read = |status: WorktreeStatus| {
+            MenuState::read(Some(&head), RepoState::Normal, false).with_worktree(&status)
+        };
+        let line = line_of(&[oid(1), oid(2), oid(3)]);
+
+        let clean = read(WorktreeStatus::default());
+        assert!(!clean.dirty);
+        assert_eq!(
+            edit_blocked_on_line(&clean, &line, Some(0), EditAction::Reword),
+            None
+        );
+
+        let untracked = read(worktree(strata_core::ChangeKind::Untracked, false));
+        assert!(!untracked.dirty, "untracked files do not block a rebase");
+
+        let staged = read(worktree(strata_core::ChangeKind::Modified, true));
+        assert!(staged.dirty);
+        assert_eq!(
+            edit_blocked_on_line(&staged, &line, Some(0), EditAction::Reword),
+            Some("commit or stash changes first")
+        );
+
+        let edited = read(worktree(strata_core::ChangeKind::Modified, false));
+        assert!(edited.dirty);
+    }
+
+    #[test]
+    fn pushed_remotes_are_listed_once_and_sorted() {
+        let range = [oid(1), oid(2)];
+        let remotes = vec![
+            ("upstream/main".to_owned(), oid(8)),
+            ("origin/main".to_owned(), oid(9)),
+            ("origin/topic".to_owned(), oid(7)),
+            ("origin/behind".to_owned(), oid(6)),
+        ];
+
+        let names = remotes_containing(&range, &remotes, |commit, tip| {
+            (commit == oid(1) && (tip == oid(9) || tip == oid(7)))
+                || (commit == oid(2) && tip == oid(8))
+        });
+
+        assert_eq!(
+            names,
+            ["origin/main", "origin/topic", "upstream/main"],
+            "one entry per remote that reaches any commit of the range"
+        );
+        assert!(
+            remotes_containing(&[], &remotes, |_, _| true).is_empty(),
+            "an empty range has no pushed commits"
         );
     }
 }

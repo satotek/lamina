@@ -11,6 +11,7 @@ mod commit_list;
 mod common;
 mod details;
 mod diff_pane;
+mod edit_dialog;
 mod history_ops;
 mod in_progress;
 mod sidebar;
@@ -251,6 +252,9 @@ pub struct RepoView {
     /// Commit whose changed files were requested; guards against reloading the
     /// same selection on every snapshot publish.
     selection_commit: Option<Oid>,
+    /// Position the edited commit should have in the history a rebase edit
+    /// publishes; cleared once the selection follows it there.
+    edit_selection: Option<history_ops::PendingSelection>,
     /// Commit of the ref the sidebar last revealed. Its row keeps the revealed
     /// tint so the target of a branch, tag or stash stays visible; selecting
     /// another commit clears it.
@@ -361,6 +365,7 @@ impl RepoView {
             lanes: LaneWidth::default(),
             selected: None,
             selection_commit: None,
+            edit_selection: None,
             revealed_commit: None,
             commit_scroll: UniformListScrollHandle::default(),
             diff_scroll: UniformListScrollHandle::default(),
@@ -478,6 +483,7 @@ impl RepoView {
         match event {
             SessionEvent::SnapshotUpdated { .. } => {
                 self.sync_selection(cx);
+                self.settle_edit_selection(cx);
                 self.sync_worktree(cx);
                 self.search_on_snapshot(cx);
                 self.file_history_on_snapshot(cx);
@@ -571,6 +577,8 @@ impl RepoView {
                 // names it instead of showing a bare git message.
                 let label = self.branches.finish(id, error.as_deref());
                 if let Some(error) = error {
+                    // A refused or failed edit left the selection where it was.
+                    self.edit_selection = None;
                     self.status_error = Some(match label {
                         Some(label) => format!("{label}: {}", one_line(&error)),
                         None => one_line(&error),
