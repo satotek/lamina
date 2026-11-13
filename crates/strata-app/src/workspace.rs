@@ -2,9 +2,11 @@
 //!
 //! `Root` is created with a fixed child, so the window's content is swapped one
 //! level down: this view owns whichever child is current and replaces it when
-//! the user opens another repository. Replacing the child releases the old
-//! [`RepoView`] once the swap's effects are flushed, and with it its [`Session`],
-//! whose worker threads are joined in `Session::drop`.
+//! the user opens another repository. The replaced [`RepoView`] holds a handle
+//! to itself, so dropping the workspace's handle does not release it (or its
+//! [`Session`]); the swap takes the session out and hands it to a background
+//! thread, because `Session::drop` joins its worker threads and that must not
+//! happen on the UI thread.
 //!
 //! Swapping also gives every repository one place to record "opened": the recent
 //! list is written here, never by a view.
@@ -95,8 +97,16 @@ impl Workspace {
             let path = repo_path(&launch);
             let title = launch.title();
             let view = cx.new(|cx| RepoView::new(launch, window, cx));
-            // Replacing the content drops the previous view and its session.
-            self.content = Content::Repo(view);
+            // Taking the old session out explicitly stops its workers even
+            // though the old view itself is kept alive by its self-handle. The
+            // drop runs on another thread so the swap does not wait for a
+            // running history walk to notice the shutdown.
+            let previous = std::mem::replace(&mut self.content, Content::Repo(view));
+            if let Content::Repo(previous) = previous
+                && let Some(session) = previous.update(cx, |previous, _| previous.detach_session())
+            {
+                crate::repo_view::drop_session_in_background(session);
+            }
             self.path = path;
             // A new view syncs the title only when it differs from the one it
             // was built with, so the swap has to set the window title itself.

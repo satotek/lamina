@@ -283,6 +283,38 @@ pub struct RepoView {
     _bridge: Option<Task<()>>,
 }
 
+/// Hands a session to a background thread that drops it.
+///
+/// `Session::drop` joins its worker threads, which only stop at a cancellation
+/// point: a walk checks between commits, but a status refresh or a diff runs to
+/// completion. Joining them on the UI thread would freeze the window for as
+/// long as that git work takes.
+pub(crate) fn drop_session_in_background(session: Session) {
+    drop_in_background(session);
+}
+
+fn drop_in_background<T: Send + 'static>(value: T) {
+    if let Err(error) = std::thread::Builder::new()
+        .name("strata-session-drop".to_owned())
+        .spawn(move || drop(value))
+    {
+        // Only resource exhaustion gets here, and the failed spawn already
+        // dropped the closure, and the session with it, on this thread.
+        log::warn!("could not start the session drop thread: {error}");
+    }
+}
+
+impl Drop for RepoView {
+    fn drop(&mut self) {
+        // The swap in `Workspace` takes the session out before this runs, so
+        // this covers the other ways a view goes away (window or app teardown)
+        // without ever joining the workers on the UI thread.
+        if let Some(session) = self.detach_session() {
+            drop_session_in_background(session);
+        }
+    }
+}
+
 impl RepoView {
     pub fn new(launch: Launch, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
@@ -388,6 +420,16 @@ impl RepoView {
     /// The view's own focus handle, for panels that hand focus back on close.
     pub(crate) fn view_focus(&self) -> FocusHandle {
         self.focus.clone()
+    }
+
+    /// Takes the session and stops forwarding its events to this view.
+    ///
+    /// The workspace calls this when it replaces the view: a late event from
+    /// the old session must not reach the window any more, where its
+    /// notification or dialog would land over the new repository.
+    pub(crate) fn detach_session(&mut self) -> Option<Session> {
+        self._bridge.take();
+        self.session.take()
     }
 
     pub(crate) fn source(&self) -> Option<Source> {
@@ -1042,6 +1084,43 @@ mod tests {
             old_highlights: Arc::new(Vec::new()),
             new_highlights: Arc::new(Vec::new()),
         })
+    }
+
+    #[test]
+    fn a_background_drop_does_not_block_the_caller() {
+        use std::sync::mpsc;
+
+        // Stands in for a session whose worker threads take a while to join.
+        struct SlowDrop {
+            started: mpsc::Sender<()>,
+            release: mpsc::Receiver<()>,
+        }
+
+        impl Drop for SlowDrop {
+            fn drop(&mut self) {
+                let _ = self.started.send(());
+                let _ = self.release.recv_timeout(Duration::from_secs(5));
+            }
+        }
+
+        let (started, drop_started) = mpsc::channel();
+        let (release, drop_release) = mpsc::channel();
+        let handoff = std::time::Instant::now();
+        drop_in_background(SlowDrop {
+            started,
+            release: drop_release,
+        });
+        assert!(
+            handoff.elapsed() < Duration::from_millis(500),
+            "the caller must not wait for the session's threads"
+        );
+
+        drop_started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the background thread must start the drop");
+        release
+            .send(())
+            .expect("the background thread must still be dropping");
     }
 
     #[test]
