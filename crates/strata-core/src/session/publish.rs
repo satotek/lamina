@@ -19,6 +19,7 @@ pub(crate) struct PendingRefresh {
     pub(crate) head: bool,
     pub(crate) index: bool,
     pub(crate) worktree: bool,
+    pub(crate) config: bool,
 }
 
 impl PendingRefresh {
@@ -27,6 +28,7 @@ impl PendingRefresh {
         self.head |= changes.head;
         self.index |= changes.index;
         self.worktree |= changes.worktree;
+        self.config |= changes.config;
     }
 
     /// A ref or HEAD move invalidates the whole view, not just status.

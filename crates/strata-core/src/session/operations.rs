@@ -123,9 +123,14 @@ fn run_one(
     }
 
     // Clearing `busy` before the refresh lands would flash the pre-operation
-    // status, which is exactly what a commit must not do.
+    // status, which is exactly what a commit must not do. A full history reload
+    // already re-reads the configuration, so only carry the config flag into
+    // this refresh when no reload covers it.
     let (ack_tx, ack_rx) = mpsc::channel();
-    let _ = status.send(RefreshStatus { ack: Some(ack_tx) });
+    let _ = status.send(RefreshStatus {
+        ack: Some(ack_tx),
+        config: held.config && !refs_moved,
+    });
     let _ = ack_rx.recv_timeout(REFRESH_TIMEOUT);
 
     shared.publish(|snapshot| snapshot.busy = None);
@@ -140,8 +145,11 @@ fn run_one(
         let generation = shared.begin_reload();
         let _ = load.send(LoadCommand { generation });
         let _ = status.send(RefreshStatus::default());
-    } else if late.status_changed() {
-        let _ = status.send(RefreshStatus::default());
+    } else if late.config || late.status_changed() {
+        let _ = status.send(RefreshStatus {
+            config: late.config,
+            ..RefreshStatus::default()
+        });
     }
 }
 

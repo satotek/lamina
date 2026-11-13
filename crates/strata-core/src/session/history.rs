@@ -37,7 +37,7 @@ pub(crate) fn run(shared: Arc<Shared>, rx: Receiver<LoadCommand>) {
     }
 }
 
-fn load(shared: &Shared, generation: u64) -> Result<()> {
+fn load(shared: &Arc<Shared>, generation: u64) -> Result<()> {
     let head = shared.repo.head()?;
     let refs = Arc::new(shared.repo.refs()?);
     let refs_by_commit = Arc::new(refs_by_commit(&refs));
@@ -51,13 +51,22 @@ fn load(shared: &Shared, generation: u64) -> Result<()> {
     let remotes = shared.repo.remotes()?;
     // The scope is read here, not carried by the command: a reload that
     // superseded this one fails the generation check before any walking starts.
+    // The walk builds its reachability state before yielding the first commit,
+    // which is the longest uncancellable window of a load. A drop or a newer
+    // reload must stop it there, not only between published rows.
+    let cancelled: Arc<dyn Fn() -> bool + Send + Sync> = {
+        let shared = Arc::clone(shared);
+        Arc::new(move || !shared.is_current(generation))
+    };
     let walk = match shared.history_scope() {
-        HistoryScope::All => shared.repo.walk_commits()?,
-        HistoryScope::Refs(specs) => shared.repo.walk_commits_from_refs(&specs)?,
+        HistoryScope::All => shared.repo.walk_commits_with(Some(cancelled))?,
+        HistoryScope::Refs(specs) => shared
+            .repo
+            .walk_commits_from_refs_with(&specs, Some(cancelled))?,
     };
 
     Loader {
-        shared,
+        shared: shared.as_ref(),
         generation,
         head,
         refs,

@@ -407,6 +407,18 @@ pub enum SessionEvent {
         ticket: QueryTicket,
         error: String,
     },
+    /// One batch of a streaming path history, in walk order. `entries` are rows
+    /// into `snapshot.commits` at `generation`, exactly like `QueryReady`.
+    PathHistoryBatch {
+        ticket: QueryTicket,
+        generation: u64,
+        entries: Arc<Vec<usize>>,
+    },
+    /// The streaming path walk finished; every entry has already arrived.
+    PathHistoryDone {
+        ticket: QueryTicket,
+        generation: u64,
+    },
 }
 
 /// How a session talks to `git`.
@@ -600,6 +612,15 @@ impl Session {
         self.queue_query(queries::QueryKind::Path(path))
     }
 
+    /// Like [`path_history`](Self::path_history), but delivers the rows while
+    /// the walk runs: `PathHistoryBatch` events in walk order, then
+    /// `PathHistoryDone`. Concatenating the batches gives the same rows
+    /// `path_history` answers with. Cancelling the ticket stops the walk and
+    /// suppresses further batches and the done event.
+    pub fn path_history_streaming(&self, path: String) -> QueryTicket {
+        self.queue_query(queries::QueryKind::StreamingPath(path))
+    }
+
     pub fn cancel_query(&self, ticket: QueryTicket) {
         if let Some(senders) = &self.senders {
             senders.query_state.cancel(ticket);
@@ -724,7 +745,8 @@ fn worktree_as_git(repo: &Repo, path: &str) -> Result<Option<Vec<u8>>> {
 }
 
 /// Watcher callback: a ref or HEAD move needs a new walk, a worktree or index
-/// change only a status refresh.
+/// change only a status refresh, and a configuration edit only the
+/// configuration-derived remotes and upstreams.
 fn on_watch(
     shared: &Shared,
     load: &Sender<LoadCommand>,
@@ -742,8 +764,14 @@ fn on_watch(
         let generation = shared.begin_reload();
         let _ = load.send(LoadCommand { generation });
     }
-    if changes.refs || changes.head || changes.index || changes.worktree {
-        let _ = status.send(RefreshStatus::default());
+    // A history reload re-reads the configuration anyway; the extra refresh is
+    // only needed for a config edit that no reload covers.
+    let config = changes.config && !(changes.refs || changes.head);
+    if config || changes.refs || changes.head || changes.index || changes.worktree {
+        let _ = status.send(RefreshStatus {
+            config,
+            ..RefreshStatus::default()
+        });
     }
 }
 

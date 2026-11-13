@@ -60,6 +60,10 @@ impl TestRepo {
         self.workdir.path()
     }
 
+    fn repo_handle(&self) -> Repo {
+        Repo::open(self.path()).expect("open repository")
+    }
+
     fn write(&self, relative: &str, contents: &str) {
         let path = self.path().join(relative);
         if let Some(parent) = path.parent() {
@@ -759,6 +763,84 @@ fn dropping_a_loading_session_stops_its_threads() {
             Err(RecvTimeoutError::Disconnected) => break,
         }
     }
+}
+
+#[test]
+fn dropping_a_session_during_the_initial_walk_is_prompt() {
+    let repo = TestRepo::new();
+    repo.fast_import(20_000);
+
+    // How long the walk builds its reachability state before yielding anything,
+    // measured on the same fixture so the bound scales with the machine. This is
+    // the window a drop has to interrupt.
+    let started = Instant::now();
+    let walk = repo.repo_handle().walk_commits().expect("start walk");
+    let walk_setup = started.elapsed();
+    drop(walk);
+    assert!(
+        walk_setup > Duration::from_millis(50),
+        "fixture is too fast ({walk_setup:?}) to show a long initial walk"
+    );
+
+    let (tx, _rx) = mpsc::channel();
+    let session = Session::open(repo.path(), move |event| {
+        let _ = tx.send(event);
+    })
+    .expect("open session");
+    // Let the loader thread reach the walk, past the cheap reads before it.
+    std::thread::sleep(walk_setup / 4);
+
+    let started = Instant::now();
+    drop(session);
+    let dropped = started.elapsed();
+    assert!(
+        dropped < walk_setup / 2,
+        "dropping the session waited {dropped:?} for the initial walk ({walk_setup:?})"
+    );
+}
+
+#[test]
+fn adding_a_remote_with_git_updates_remotes_without_a_reload() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "one\n");
+    repo.commit_all("base");
+    let harness = Harness::open(repo);
+    harness.wait_for_complete(1);
+    harness.warm_up_watcher();
+
+    let before = harness.session.snapshot();
+    assert!(before.remotes.is_empty());
+
+    // As another terminal would; the session is never told to reload.
+    harness
+        .repo
+        .git(&["remote", "add", "origin", "https://example.com/origin.git"]);
+
+    let after = harness.wait_until(TIMEOUT, |snapshot| {
+        snapshot
+            .remotes
+            .iter()
+            .any(|remote| remote.name == "origin")
+    });
+    let origin = after
+        .remotes
+        .iter()
+        .find(|remote| remote.name == "origin")
+        .expect("origin is listed");
+    assert_eq!(
+        origin.fetch_url.as_deref(),
+        Some("https://example.com/origin.git")
+    );
+    // Only the configuration-derived fields were refreshed: a full reload would
+    // have replaced these Arcs with a new walk.
+    assert!(
+        Arc::ptr_eq(&before.refs, &after.refs),
+        "a config edit reloaded refs"
+    );
+    assert!(
+        Arc::ptr_eq(&before.commit_index, &after.commit_index),
+        "a config edit reloaded history"
+    );
 }
 
 #[test]

@@ -48,13 +48,16 @@ pub struct Changes {
     pub index: bool,
     pub refs: bool,
     pub head: bool,
+    /// `.git/config` changed, so remotes and upstreams may differ. History and
+    /// status do not depend on it and are left alone.
+    pub config: bool,
     /// Worktree paths that changed, deduplicated, in event order.
     pub paths: Vec<PathBuf>,
 }
 
 impl Changes {
     fn is_idle(&self) -> bool {
-        !(self.worktree || self.index || self.refs || self.head)
+        !(self.worktree || self.index || self.refs || self.head || self.config)
     }
 }
 
@@ -208,6 +211,7 @@ impl Watch {
                         Scope::Index => changes.index = true,
                         Scope::Refs => changes.refs = true,
                         Scope::Head => changes.head = true,
+                        Scope::Config => changes.config = true,
                         Scope::Ignored => {}
                     }
                     continue;
@@ -414,6 +418,8 @@ enum Scope {
     Index,
     Refs,
     Head,
+    /// `.git/config`, which decides the configured remotes and upstreams.
+    Config,
     /// Git bookkeeping that cannot change what the UI shows.
     Ignored,
 }
@@ -445,6 +451,11 @@ fn classify_git_dir(relative: &Path) -> Scope {
     }
     if first == OsStr::new("HEAD") {
         return Scope::Head;
+    }
+    // `git remote add/remove/set-url` and `git branch --set-upstream-to` only
+    // edit the configuration, so the file has to be visible to the session.
+    if first == OsStr::new("config") {
+        return Scope::Config;
     }
     // Pseudo-refs that move as a result of ref-changing operations; refreshing
     // refs is the closest match, and it is cheap.
@@ -489,6 +500,7 @@ mod tests {
         assert_eq!(classify_git_dir(Path::new("FETCH_HEAD")), Scope::Refs);
         assert_eq!(classify_git_dir(Path::new("ORIG_HEAD")), Scope::Refs);
         assert_eq!(classify_git_dir(Path::new("MERGE_HEAD")), Scope::Refs);
+        assert_eq!(classify_git_dir(Path::new("config")), Scope::Config);
     }
 
     #[test]
@@ -501,7 +513,6 @@ mod tests {
             "logs/HEAD",
             "gc.pid",
             "fsmonitor--daemon/foo",
-            "config",
             "",
         ] {
             assert_eq!(classify_git_dir(Path::new(path)), Scope::Ignored, "{path}");
@@ -514,6 +525,13 @@ mod tests {
         assert!(
             !Changes {
                 worktree: true,
+                ..Changes::default()
+            }
+            .is_idle()
+        );
+        assert!(
+            !Changes {
+                config: true,
                 ..Changes::default()
             }
             .is_idle()

@@ -281,6 +281,95 @@ impl Harness {
         }
     }
 
+    /// Generation and batch entries of a streaming path history, in arrival
+    /// order, stopping at `PathHistoryDone`.
+    fn wait_for_stream(&self, ticket: QueryTicket) -> (u64, Vec<Vec<usize>>) {
+        let deadline = Instant::now() + TIMEOUT;
+        let mut batches: Vec<(u64, Vec<usize>)> = Vec::new();
+        loop {
+            let now = Instant::now();
+            assert!(now < deadline, "timed out waiting for {ticket:?}");
+            match self.events.recv_timeout(deadline - now) {
+                Ok(SessionEvent::PathHistoryBatch {
+                    ticket: got,
+                    generation,
+                    entries,
+                }) if got == ticket => batches.push((generation, entries.as_ref().clone())),
+                Ok(SessionEvent::PathHistoryDone {
+                    ticket: got,
+                    generation,
+                }) if got == ticket => {
+                    assert!(
+                        batches
+                            .iter()
+                            .all(|(batch_generation, _)| *batch_generation == generation),
+                        "a batch belongs to another snapshot generation"
+                    );
+                    return (
+                        generation,
+                        batches.into_iter().map(|(_, entries)| entries).collect(),
+                    );
+                }
+                Ok(SessionEvent::QueryFailed { ticket: got, error }) if got == ticket => {
+                    panic!("query {ticket:?} failed: {error}")
+                }
+                Ok(_) => {}
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => panic!("session event channel closed"),
+            }
+        }
+    }
+
+    /// Waits for the first batch of a streaming walk.
+    fn wait_for_batch(&self, ticket: QueryTicket) -> Vec<usize> {
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            let now = Instant::now();
+            assert!(now < deadline, "timed out waiting for {ticket:?}");
+            match self.events.recv_timeout(deadline - now) {
+                Ok(SessionEvent::PathHistoryBatch {
+                    ticket: got,
+                    entries,
+                    ..
+                }) if got == ticket => return entries.as_ref().clone(),
+                Ok(SessionEvent::PathHistoryDone { ticket: got, .. }) if got == ticket => {
+                    panic!("the walk finished before a batch was seen")
+                }
+                Ok(_) => {}
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => panic!("session event channel closed"),
+            }
+        }
+    }
+
+    /// Streaming path-history events for `ticket` arriving within `window`, for
+    /// the negative assertions ("this ticket emits nothing more").
+    fn stream_events(&self, ticket: QueryTicket, window: Duration) -> Vec<SessionEvent> {
+        let deadline = Instant::now() + window;
+        let mut events = Vec::new();
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                return events;
+            }
+            match self.events.recv_timeout(deadline - now) {
+                Ok(event) => {
+                    let matches = match &event {
+                        SessionEvent::PathHistoryBatch { ticket: got, .. }
+                        | SessionEvent::PathHistoryDone { ticket: got, .. } => *got == ticket,
+                        _ => false,
+                    };
+                    if matches {
+                        events.push(event);
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) | Err(RecvTimeoutError::Disconnected) => {
+                    return events;
+                }
+            }
+        }
+    }
+
     /// Query events for `ticket` arriving within `window`, for the negative
     /// assertions ("this ticket emits nothing").
     fn query_events(&self, ticket: QueryTicket, window: Duration) -> Vec<SessionEvent> {
@@ -669,6 +758,78 @@ fn session_path_history_returns_rows_of_the_snapshot() {
     let empty = harness.session.path_history("no/such/path".to_string());
     let (_, rows) = harness.wait_for_query(empty);
     assert!(rows.is_empty(), "an unknown path answers with no rows");
+}
+
+#[test]
+fn streaming_path_history_batches_concatenate_to_the_full_result() {
+    let fixture = Fixture::new();
+    fixture.fast_import(5_000);
+    let harness = Harness::open(fixture, 5_000);
+
+    let ticket = harness.session.path_history("file.txt".to_string());
+    let (generation, rows) = harness.wait_for_query(ticket);
+    assert_eq!(rows.len(), 5_000, "every commit changed the file");
+    assert!(
+        rows.windows(2).all(|pair| pair[0] < pair[1]),
+        "the non-streaming rows are in walk order"
+    );
+
+    let ticket = harness
+        .session
+        .path_history_streaming("file.txt".to_string());
+    let (stream_generation, batches) = harness.wait_for_stream(ticket);
+    assert!(stream_generation >= generation);
+    assert!(
+        batches.len() > 1,
+        "the walk should be split into batches, got {}",
+        batches.len()
+    );
+
+    let mut flattened = Vec::new();
+    for batch in &batches {
+        assert!(!batch.is_empty(), "a batch carried no rows");
+        // Batches are contiguous slices of one ordered row list: no row repeats
+        // and no row goes backwards.
+        if let (Some(previous), Some(next)) = (flattened.last(), batch.first()) {
+            assert!(previous < next, "batches are out of order");
+        }
+        flattened.extend_from_slice(batch);
+    }
+    assert_eq!(
+        flattened, rows,
+        "streaming and non-streaming path history disagree"
+    );
+}
+
+#[test]
+fn cancelling_a_streaming_path_history_stops_further_batches() {
+    let fixture = Fixture::new();
+    fixture.fast_import(20_000);
+    let harness = Harness::open(fixture, 20_000);
+
+    let ticket = harness
+        .session
+        .path_history_streaming("file.txt".to_string());
+    let first = harness.wait_for_batch(ticket);
+    assert!(!first.is_empty(), "the first batch carried no rows");
+
+    harness.session.cancel_query(ticket);
+
+    // Batches already handed to the channel may still be in flight; draining a
+    // window first makes the check below about the walk, not about the queue.
+    let _ = harness.stream_events(ticket, Duration::from_millis(200));
+    let after = harness.stream_events(ticket, Duration::from_millis(400));
+    for event in &after {
+        match event {
+            SessionEvent::PathHistoryBatch { .. } => {
+                panic!("a cancelled stream kept emitting batches: {after:?}")
+            }
+            SessionEvent::PathHistoryDone { .. } => {
+                panic!("a cancelled stream reported done: {after:?}")
+            }
+            _ => {}
+        }
+    }
 }
 
 #[test]
