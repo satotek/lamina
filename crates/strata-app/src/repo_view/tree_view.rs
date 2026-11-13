@@ -27,7 +27,7 @@ use strata_core::{Oid, TreeEntry, TreeEntryKind};
 use super::RepoView;
 use super::common::icon;
 use crate::data;
-use crate::diff_view::DiffColors;
+use crate::diff_view::{DiffColors, DiffStyle};
 use crate::scrollbar::WithScrollbar as _;
 use crate::settings::Settings;
 use crate::style::Design;
@@ -732,15 +732,15 @@ impl RepoView {
             FileContent::Text(lines) => {
                 let lines = Arc::clone(lines);
                 let colors = DiffColors::from_theme(cx.theme());
-                let syntax = Settings::get(cx).diff.syntax_highlighting;
-                let mono = design.mono.clone();
-                let size = design.code;
-                let height = (size + 7.0).max(18.0);
+                // The same font and size source as the diff list, so the tree
+                // viewer and the diff pane never drift apart.
+                let style = DiffStyle::from_settings(cx, &design.mono);
+                let height = style.row_height();
                 uniform_list("tree-file", lines.len(), move |range, _window, _cx| {
                     range
                         .map(|index| {
                             let line = &lines[index];
-                            let runs = if syntax {
+                            let runs = if style.shows_syntax() {
                                 line.highlights
                                     .iter()
                                     .map(|(range, kind)| {
@@ -762,15 +762,15 @@ impl RepoView {
                                 .h(px(height))
                                 .w_full()
                                 .flex_none()
-                                .font_family(mono.clone())
-                                .text_size(px(size))
+                                .font_family(style.mono().clone())
+                                .text_size(px(style.font_size()))
                                 .text_color(colors.text)
                                 .child(
                                     div()
                                         .flex_none()
                                         .w(px(GUTTER_WIDTH))
                                         .pr_2()
-                                        .text_color(colors.muted)
+                                        .text_color(colors.gutter)
                                         .child((index + 1).to_string()),
                                 )
                                 .child(div().flex_none().whitespace_nowrap().child(

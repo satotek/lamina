@@ -28,6 +28,7 @@ use strata_core::session::DiffView;
 
 use crate::scrollbar::WithScrollbar as _;
 use crate::settings::{DiffLayout, Settings};
+use crate::style::{CODE_FONT_MAX, CODE_FONT_MIN, Design};
 
 /// Height of one diff row at the default code font size.
 pub const ROW_HEIGHT: f32 = 20.0;
@@ -133,11 +134,18 @@ pub struct DiffColors {
     pub text: Hsla,
     pub muted: Hsla,
     pub border: Hsla,
+    /// The band behind an added or removed line.
     pub added: Hsla,
     pub removed: Hsla,
+    /// The stronger band behind the changed words inside that line.
     pub emphasis_added: Hsla,
     pub emphasis_removed: Hsla,
+    /// The band behind a hunk header.
     pub header: Hsla,
+    /// Line numbers and the `+`/`-` marker column.
+    pub gutter: Hsla,
+    /// The `·` and `→` markers that reveal whitespace.
+    pub whitespace: Hsla,
     /// Accent for the lines picked for a partial stage or discard.
     pub selection: Hsla,
     /// One colour per [`HighlightKind`], indexed by its discriminant.
@@ -145,59 +153,50 @@ pub struct DiffColors {
 }
 
 impl DiffColors {
+    /// The diff's colours, from the app's design palette.
+    ///
+    /// Only the colour half of [`Design`] is read: the sizes and flags it also
+    /// carries never reach a diff row, so the defaults are enough to resolve
+    /// the light or dark table from `theme`. Panes that already hold a
+    /// [`Design`] can call [`Self::from_design`] instead.
     pub fn from_theme(theme: &Theme) -> Self {
-        let dark = theme.is_dark();
-        let (red, green, blue, yellow, magenta, cyan) = if dark {
-            (
-                theme.red,
-                theme.green,
-                theme.blue,
-                theme.yellow,
-                theme.magenta,
-                theme.cyan,
-            )
-        } else {
-            (
-                theme.red_light,
-                theme.green_light,
-                theme.blue_light,
-                theme.yellow_light,
-                theme.magenta_light,
-                theme.cyan_light,
-            )
-        };
-        // The order matches the `HighlightKind` variants; a comment on the first
-        // one alone would rot, so keep this list beside the enum's definition.
+        Self::from_design(&Design::new(theme, &Settings::default()))
+    }
+
+    pub fn from_design(design: &Design) -> Self {
+        // The order matches the `HighlightKind` variants; a comment on the
+        // first one alone would rot, so keep this list beside the enum's
+        // definition.
         let syntax = [
-            magenta,                // Keyword
-            green,                  // String
-            theme.muted_foreground, // Comment
-            blue,                   // Function
-            yellow,                 // Type
-            yellow,                 // Constant
-            cyan,                   // Number
-            theme.foreground,       // Variable
-            blue,                   // Property
-            theme.muted_foreground, // Operator
-            theme.muted_foreground, // Punctuation
-            magenta,                // Attribute
-            red,                    // Tag
-            blue,                   // Label
-            red,                    // Escape
-            cyan,                   // Embedded
+            design.syntax(HighlightKind::Keyword),
+            design.syntax(HighlightKind::String),
+            design.syntax(HighlightKind::Comment),
+            design.syntax(HighlightKind::Function),
+            design.syntax(HighlightKind::Type),
+            design.syntax(HighlightKind::Constant),
+            design.syntax(HighlightKind::Number),
+            design.syntax(HighlightKind::Variable),
+            design.syntax(HighlightKind::Property),
+            design.syntax(HighlightKind::Operator),
+            design.syntax(HighlightKind::Punctuation),
+            design.syntax(HighlightKind::Attribute),
+            design.syntax(HighlightKind::Tag),
+            design.syntax(HighlightKind::Label),
+            design.syntax(HighlightKind::Escape),
+            design.syntax(HighlightKind::Embedded),
         ];
         Self {
-            text: theme.foreground,
-            muted: theme.muted_foreground,
-            border: theme.border,
-            // Low alpha fills keep the diff readable in both appearances while
-            // still making added and removed runs obvious.
-            added: theme.success.opacity(if dark { 0.16 } else { 0.12 }),
-            removed: theme.danger.opacity(if dark { 0.16 } else { 0.12 }),
-            emphasis_added: theme.success.opacity(if dark { 0.42 } else { 0.30 }),
-            emphasis_removed: theme.danger.opacity(if dark { 0.42 } else { 0.30 }),
-            header: theme.muted.opacity(if dark { 0.55 } else { 0.45 }),
-            selection: theme.primary,
+            text: design.text,
+            muted: design.muted,
+            border: design.border,
+            added: design.diff_added_bg,
+            removed: design.diff_removed_bg,
+            emphasis_added: design.diff_added_word,
+            emphasis_removed: design.diff_removed_word,
+            header: design.diff_hunk_header,
+            gutter: design.diff_gutter_fg,
+            whitespace: design.diff_whitespace,
+            selection: design.accent,
             syntax,
         }
     }
@@ -245,7 +244,10 @@ impl DiffStyle {
                 || fallback.clone(),
                 |font| SharedString::from(font.to_owned()),
             ),
-            font_size: settings.appearance.code_font_size.clamp(9.0, 24.0),
+            font_size: settings
+                .appearance
+                .code_font_size
+                .clamp(CODE_FONT_MIN, CODE_FONT_MAX),
             // The settings page offers 1–8 columns. A hand-edited file may ask
             // for more, and there is no reason to refuse it, so only zero (which
             // has no tab stop) is ruled out here.
@@ -282,6 +284,11 @@ impl DiffStyle {
     /// The code font size, for a pane that draws rows of its own.
     pub fn font_size(&self) -> f32 {
         self.font_size
+    }
+
+    /// Whether syntax spans are painted, for a pane that builds its own runs.
+    pub fn shows_syntax(&self) -> bool {
+        self.syntax
     }
 
     /// What changes how a wrapped line breaks: the font, its size, the tab
@@ -659,7 +666,7 @@ fn unified_row(
                 div()
                     .w(px(MARKER_WIDTH))
                     .flex_none()
-                    .text_color(colors.muted)
+                    .text_color(colors.gutter)
                     .child(marker(line.kind)),
             )
             .child(line_content(line, colors, style, highlights, wrap))
@@ -774,7 +781,7 @@ fn side_cell(
             div()
                 .w(px(MARKER_WIDTH))
                 .flex_none()
-                .text_color(colors.muted)
+                .text_color(colors.gutter)
                 .child(marker),
         )
         .when_some(line, |cell, line| {
@@ -890,7 +897,7 @@ fn styled(
             runs.push((
                 start..offset,
                 HighlightStyle {
-                    color: Some(if is_marker { colors.muted } else { colour }),
+                    color: Some(if is_marker { colors.whitespace } else { colour }),
                     background_color: piece.emphasised.then_some(emphasis_bg),
                     ..HighlightStyle::default()
                 },
@@ -1020,7 +1027,7 @@ fn gutter(number: Option<u32>, colors: &DiffColors) -> Div {
         .w(px(GUTTER_WIDTH))
         .flex_none()
         .pr_2()
-        .text_color(colors.muted);
+        .text_color(colors.gutter);
     if let Some(number) = number {
         gutter = gutter.child(format!("{number}"));
     }
@@ -1557,6 +1564,65 @@ mod tests {
         assert_eq!(
             style.clone().one_line_per_row().row_height(),
             style.row_height()
+        );
+    }
+
+    #[test]
+    fn diff_colours_come_from_the_design_palette() {
+        let design = crate::style::Design::default();
+        let colors = DiffColors::from_design(&design);
+
+        assert_eq!(colors.text, design.text);
+        assert_eq!(colors.muted, design.muted);
+        assert_eq!(colors.border, design.border);
+        assert_eq!(colors.added, design.diff_added_bg);
+        assert_eq!(colors.removed, design.diff_removed_bg);
+        assert_eq!(colors.emphasis_added, design.diff_added_word);
+        assert_eq!(colors.emphasis_removed, design.diff_removed_word);
+        assert_eq!(colors.header, design.diff_hunk_header);
+        assert_eq!(colors.gutter, design.diff_gutter_fg);
+        assert_eq!(colors.whitespace, design.diff_whitespace);
+        assert_eq!(colors.selection, design.accent);
+
+        for kind in [
+            HighlightKind::Keyword,
+            HighlightKind::String,
+            HighlightKind::Comment,
+            HighlightKind::Function,
+            HighlightKind::Type,
+            HighlightKind::Constant,
+            HighlightKind::Number,
+            HighlightKind::Variable,
+            HighlightKind::Property,
+            HighlightKind::Operator,
+            HighlightKind::Punctuation,
+            HighlightKind::Attribute,
+            HighlightKind::Tag,
+            HighlightKind::Label,
+            HighlightKind::Escape,
+            HighlightKind::Embedded,
+        ] {
+            assert_eq!(
+                colors.syntax(kind),
+                design.syntax(kind),
+                "{kind:?} must keep the design's colour"
+            );
+        }
+    }
+
+    #[test]
+    fn diff_colours_follow_the_theme() {
+        let light = DiffColors::from_theme(&Theme::default());
+        let mut dark_theme = Theme::default();
+        dark_theme.mode = gpui_component::ThemeMode::Dark;
+        let dark = DiffColors::from_theme(&dark_theme);
+
+        assert_ne!(light.added, dark.added);
+        assert_ne!(light.removed, dark.removed);
+        assert_ne!(light.header, dark.header);
+        assert_ne!(
+            light.syntax(HighlightKind::String),
+            dark.syntax(HighlightKind::String)
         );
     }
 }

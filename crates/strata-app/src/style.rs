@@ -11,6 +11,7 @@ use gpui::{
 use gpui::{Bounds, canvas, fill, point};
 use gpui_component::{ActiveTheme as _, Colorize as _, Icon, Sizable as _, Theme};
 use strata_core::ChangeKind;
+use strata_core::highlight::HighlightKind;
 
 use crate::data::format_time;
 use crate::settings::{DateFormat, Settings};
@@ -19,6 +20,10 @@ use crate::settings::{DateFormat, Settings};
 pub const LANES: usize = 8;
 /// Avatar colours; the index comes from the author's email so it never moves.
 const AVATARS: usize = 6;
+/// The range the settings page offers for the code font. Every pane clamps to
+/// it, so a hand-edited file cannot make one view's text a different size.
+pub const CODE_FONT_MIN: f32 = 9.0;
+pub const CODE_FONT_MAX: f32 = 24.0;
 
 /// Colours and type sizes for one frame, resolved from the theme and settings.
 ///
@@ -51,6 +56,26 @@ pub struct Design {
     pub remote_text: Hsla,
     pub tag_background: Hsla,
     pub tag_text: Hsla,
+    /// The body tint behind an added or removed diff line.
+    pub diff_added_bg: Hsla,
+    pub diff_removed_bg: Hsla,
+    /// The stronger tint behind the changed words inside those lines.
+    pub diff_added_word: Hsla,
+    pub diff_removed_word: Hsla,
+    /// The band behind a hunk header.
+    pub diff_hunk_header: Hsla,
+    /// Line numbers and the `+`/`-` marker column of a diff.
+    pub diff_gutter_fg: Hsla,
+    /// The `·` and `→` markers that reveal whitespace.
+    pub diff_whitespace: Hsla,
+    /// Syntax colours; see [`Design::syntax`].
+    pub syntax_keyword: Hsla,
+    pub syntax_string: Hsla,
+    pub syntax_comment: Hsla,
+    pub syntax_function: Hsla,
+    pub syntax_type: Hsla,
+    pub syntax_number: Hsla,
+    pub syntax_tag: Hsla,
     /// UI font family, when the user picked one.
     pub ui_font: Option<SharedString>,
     /// `history.date_format`.
@@ -74,34 +99,53 @@ pub struct Design {
 
 impl Design {
     pub fn new(theme: &Theme, settings: &Settings) -> Self {
-        let (colors, lane, avatar) = if theme.is_dark() {
-            dark_tables()
+        let palette = if theme.is_dark() {
+            Palette::dark()
         } else {
-            light_tables()
+            Palette::light()
         };
+        Self::from_palette(palette, settings, theme.mono_font_family.clone())
+    }
+
+    /// Fills the settings-dependent fields around one appearance's colours.
+    fn from_palette(palette: Palette, settings: &Settings, fallback_mono: SharedString) -> Self {
         Self {
-            background: colors[0],
-            chrome: colors[1],
-            sidebar: colors[2],
-            panel: colors[3],
-            field: colors[4],
-            border: colors[5],
-            text: colors[6],
-            muted: colors[7],
-            selected: colors[8],
-            row_selected: colors[9],
-            accent: colors[10],
-            accent_soft: colors[11],
-            accent_text: colors[12],
+            background: palette.background,
+            chrome: palette.chrome,
+            sidebar: palette.sidebar,
+            panel: palette.panel,
+            field: palette.field,
+            border: palette.border,
+            text: palette.text,
+            muted: palette.muted,
+            selected: palette.selected,
+            row_selected: palette.row_selected,
+            accent: palette.accent,
+            accent_soft: palette.accent_soft,
+            accent_text: palette.accent_text,
             on_accent: hex(0xffffff),
-            add_background: colors[13],
-            add_text: colors[14],
-            remove_background: colors[15],
-            remove_text: colors[16],
-            remote_background: colors[17],
-            remote_text: colors[18],
-            tag_background: colors[19],
-            tag_text: colors[20],
+            add_background: palette.add_background,
+            add_text: palette.add_text,
+            remove_background: palette.remove_background,
+            remove_text: palette.remove_text,
+            remote_background: palette.remote_background,
+            remote_text: palette.remote_text,
+            tag_background: palette.tag_background,
+            tag_text: palette.tag_text,
+            diff_added_bg: palette.diff_added_bg,
+            diff_removed_bg: palette.diff_removed_bg,
+            diff_added_word: palette.diff_added_word,
+            diff_removed_word: palette.diff_removed_word,
+            diff_hunk_header: palette.diff_hunk_header,
+            diff_gutter_fg: palette.diff_gutter_fg,
+            diff_whitespace: palette.diff_whitespace,
+            syntax_keyword: palette.syntax_keyword,
+            syntax_string: palette.syntax_string,
+            syntax_comment: palette.syntax_comment,
+            syntax_function: palette.syntax_function,
+            syntax_type: palette.syntax_type,
+            syntax_number: palette.syntax_number,
+            syntax_tag: palette.syntax_tag,
             ui_font: settings
                 .appearance
                 .ui_font
@@ -113,14 +157,17 @@ impl Design {
             show_stashes: settings.history.show_stashes,
             summary_hint: settings.behaviour.summary_length_hint,
             ui: settings.appearance.ui_font_size,
-            code: settings.appearance.code_font_size,
+            code: settings
+                .appearance
+                .code_font_size
+                .clamp(CODE_FONT_MIN, CODE_FONT_MAX),
             mono: settings
                 .appearance
                 .code_font
                 .as_deref()
-                .map_or_else(|| theme.mono_font_family.clone(), SharedString::from),
-            lane,
-            avatar,
+                .map_or(fallback_mono, SharedString::from),
+            lane: palette.lane,
+            avatar: palette.avatar,
         }
     }
 
@@ -132,6 +179,26 @@ impl Design {
     /// Captions, badges and status details.
     pub fn tiny(&self) -> f32 {
         (self.ui - 2.5).max(8.0)
+    }
+
+    /// The colour of one syntax class.
+    ///
+    /// Classes with no colour of their own borrow the body text or the muted
+    /// colour, so a grammar with a coarse query still looks deliberate.
+    pub fn syntax(&self, kind: HighlightKind) -> Hsla {
+        match kind {
+            HighlightKind::Keyword | HighlightKind::Attribute => self.syntax_keyword,
+            HighlightKind::String => self.syntax_string,
+            HighlightKind::Comment => self.syntax_comment,
+            HighlightKind::Function | HighlightKind::Property | HighlightKind::Label => {
+                self.syntax_function
+            }
+            HighlightKind::Type | HighlightKind::Constant => self.syntax_type,
+            HighlightKind::Number | HighlightKind::Embedded => self.syntax_number,
+            HighlightKind::Tag | HighlightKind::Escape => self.syntax_tag,
+            HighlightKind::Variable => self.text,
+            HighlightKind::Operator | HighlightKind::Punctuation => self.muted,
+        }
     }
 
     /// The colour of one author's avatar, stable for the same email.
@@ -239,42 +306,9 @@ pub fn sync_component_buttons(cx: &mut App) {
 
 impl Default for Design {
     fn default() -> Self {
-        let (colors, lane, avatar) = light_tables();
-        Self {
-            background: colors[0],
-            chrome: colors[1],
-            sidebar: colors[2],
-            panel: colors[3],
-            field: colors[4],
-            border: colors[5],
-            text: colors[6],
-            muted: colors[7],
-            selected: colors[8],
-            row_selected: colors[9],
-            accent: colors[10],
-            accent_soft: colors[11],
-            accent_text: colors[12],
-            on_accent: hex(0xffffff),
-            add_background: colors[13],
-            add_text: colors[14],
-            remove_background: colors[15],
-            remove_text: colors[16],
-            remote_background: colors[17],
-            remote_text: colors[18],
-            tag_background: colors[19],
-            tag_text: colors[20],
-            ui_font: None,
-            date_format: DateFormat::Relative,
-            show_remote_branches: true,
-            show_tags: true,
-            show_stashes: true,
-            summary_hint: 72,
-            ui: 13.0,
-            code: 12.5,
-            mono: "monospace".into(),
-            lane,
-            avatar,
-        }
+        // The fallback font matches `Settings::default`, so the default design
+        // is the light palette with no user choices applied.
+        Self::from_palette(Palette::light(), &Settings::default(), "monospace".into())
     }
 }
 
@@ -282,98 +316,195 @@ fn hex(value: u32) -> Hsla {
     rgb(value).into()
 }
 
-type Tables = ([Hsla; 21], [Hsla; LANES], [Hsla; AVATARS]);
-
-fn light_tables() -> Tables {
-    (
-        [
-            hex(0xffffff), // background
-            hex(0xf7f8fa), // chrome
-            hex(0xf7f8fa), // sidebar
-            hex(0xfafbfc), // panel
-            hex(0xeef0f3), // field
-            hex(0xe3e6eb), // border
-            hex(0x1b1d22), // text
-            hex(0x5b616e), // muted
-            hex(0xe3e9fb), // selected
-            hex(0xe9eefc), // row_selected
-            hex(0x3d63dd), // accent
-            hex(0xe3e9fb), // accent_soft
-            hex(0x2a4bb8), // accent_text
-            hex(0xe7f6ec), // add_background
-            hex(0x1d7a45), // add_text
-            hex(0xfdecec), // remove_background
-            hex(0xb4352a), // remove_text
-            hex(0xeceef2), // remote_background
-            hex(0x3f4450), // remote_text
-            hex(0xfbf0dc), // tag_background
-            hex(0x8a5a12), // tag_text
-        ],
-        [
-            hex(0x3d63dd),
-            hex(0x2fa58d),
-            hex(0xe0913a),
-            hex(0xc2508a),
-            hex(0x7a5cd6),
-            hex(0x2f9fd0),
-            hex(0x8a9a2e),
-            hex(0xd0553f),
-        ],
-        [
-            hex(0x3d63dd),
-            hex(0x2fa58d),
-            hex(0xe0913a),
-            hex(0xc2508a),
-            hex(0x7a5cd6),
-            hex(0x2f9fd0),
-        ],
-    )
+/// WCAG 2.x contrast ratio between two opaque colours, from 1.0 to 21.0.
+///
+/// The diff is the one place where body text sits on a coloured band, so its
+/// tokens are held to the AA threshold here instead of being eyeballed on a
+/// screenshot. Alpha is ignored: every token this checks is opaque. Only the
+/// palette tests need it, so it stays out of the shipped build.
+#[cfg(test)]
+fn contrast_ratio(first: Hsla, second: Hsla) -> f32 {
+    fn luminance(color: Hsla) -> f32 {
+        let rgb = color.to_rgb();
+        let linear = |channel: f32| {
+            if channel <= 0.039_28 {
+                channel / 12.92
+            } else {
+                ((channel + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * linear(rgb.r) + 0.7152 * linear(rgb.g) + 0.0722 * linear(rgb.b)
+    }
+    let (first, second) = (luminance(first), luminance(second));
+    (first.max(second) + 0.05) / (first.min(second) + 0.05)
 }
 
-fn dark_tables() -> Tables {
-    (
-        [
-            hex(0x16181d), // background
-            hex(0x1b1e24), // chrome
-            hex(0x1b1e24), // sidebar
-            hex(0x1d2027), // panel
-            hex(0x262a32), // field
-            hex(0x2c3039), // border
-            hex(0xe6e8ec), // text
-            hex(0xa0a6b1), // muted
-            hex(0x2a3350), // selected
-            hex(0x243052), // row_selected
-            hex(0x6d8cf0), // accent
-            hex(0x26314f), // accent_soft
-            hex(0xb8c8ff), // accent_text
-            hex(0x173022), // add_background
-            hex(0x5fd08f), // add_text
-            hex(0x3a1f22), // remove_background
-            hex(0xf08a80), // remove_text
-            hex(0x2a2e36), // remote_background
-            hex(0xc9ced8), // remote_text
-            hex(0x3b2f1a), // tag_background
-            hex(0xf1c27d), // tag_text
-        ],
-        [
-            hex(0x3d63dd),
-            hex(0x2fa58d),
-            hex(0xe0913a),
-            hex(0xc2508a),
-            hex(0x7a5cd6),
-            hex(0x2f9fd0),
-            hex(0x8a9a2e),
-            hex(0xd0553f),
-        ],
-        [
-            hex(0x3d63dd),
-            hex(0x2fa58d),
-            hex(0xe0913a),
-            hex(0xc2508a),
-            hex(0x7a5cd6),
-            hex(0x2f9fd0),
-        ],
-    )
+/// The colour half of one appearance.
+///
+/// Named fields rather than an array of slots: a new token is one line per
+/// theme, and reading a value does not mean counting indices.
+struct Palette {
+    background: Hsla,
+    chrome: Hsla,
+    sidebar: Hsla,
+    panel: Hsla,
+    field: Hsla,
+    border: Hsla,
+    text: Hsla,
+    muted: Hsla,
+    selected: Hsla,
+    row_selected: Hsla,
+    accent: Hsla,
+    accent_soft: Hsla,
+    accent_text: Hsla,
+    add_background: Hsla,
+    add_text: Hsla,
+    remove_background: Hsla,
+    remove_text: Hsla,
+    remote_background: Hsla,
+    remote_text: Hsla,
+    tag_background: Hsla,
+    tag_text: Hsla,
+    diff_added_bg: Hsla,
+    diff_removed_bg: Hsla,
+    diff_added_word: Hsla,
+    diff_removed_word: Hsla,
+    diff_hunk_header: Hsla,
+    diff_gutter_fg: Hsla,
+    diff_whitespace: Hsla,
+    syntax_keyword: Hsla,
+    syntax_string: Hsla,
+    syntax_comment: Hsla,
+    syntax_function: Hsla,
+    syntax_type: Hsla,
+    syntax_number: Hsla,
+    syntax_tag: Hsla,
+    lane: [Hsla; LANES],
+    avatar: [Hsla; AVATARS],
+}
+
+impl Palette {
+    fn light() -> Self {
+        Self {
+            background: hex(0xffffff),
+            chrome: hex(0xf7f8fa),
+            sidebar: hex(0xf7f8fa),
+            panel: hex(0xfafbfc),
+            field: hex(0xeef0f3),
+            border: hex(0xe3e6eb),
+            text: hex(0x1b1d22),
+            muted: hex(0x5b616e),
+            selected: hex(0xe3e9fb),
+            row_selected: hex(0xe9eefc),
+            accent: hex(0x3d63dd),
+            accent_soft: hex(0xe3e9fb),
+            accent_text: hex(0x2a4bb8),
+            add_background: hex(0xe7f6ec),
+            add_text: hex(0x1d7a45),
+            remove_background: hex(0xfdecec),
+            remove_text: hex(0xb4352a),
+            remote_background: hex(0xeceef2),
+            remote_text: hex(0x3f4450),
+            tag_background: hex(0xfbf0dc),
+            tag_text: hex(0x8a5a12),
+            // The washes are light enough that the body text keeps 12:1 or
+            // better, and the word tint is one step stronger so the changed
+            // token still reads as the change.
+            diff_added_bg: hex(0xe6f5eb),
+            diff_removed_bg: hex(0xfcebea),
+            diff_added_word: hex(0xd2efdd),
+            diff_removed_word: hex(0xfde1df),
+            diff_hunk_header: hex(0xf0f2f6),
+            // Darker than `muted` so line numbers clear 4.5:1 on the washes.
+            diff_gutter_fg: hex(0x5f6674),
+            // Decorative, but still 3:1 on the line it marks.
+            diff_whitespace: hex(0x7d8592),
+            // Each class clears 4.5:1 on the washes and on the word tints.
+            syntax_keyword: hex(0xa03a75),
+            syntax_string: hex(0x18703d),
+            syntax_comment: hex(0x5b616e),
+            syntax_function: hex(0x2a4bb8),
+            syntax_type: hex(0x8a5a12),
+            syntax_number: hex(0x1f6f8b),
+            syntax_tag: hex(0xb4352a),
+            lane: lanes(),
+            avatar: avatars(),
+        }
+    }
+
+    fn dark() -> Self {
+        Self {
+            background: hex(0x16181d),
+            chrome: hex(0x1b1e24),
+            sidebar: hex(0x1b1e24),
+            panel: hex(0x1d2027),
+            field: hex(0x262a32),
+            border: hex(0x2c3039),
+            text: hex(0xe6e8ec),
+            muted: hex(0xa0a6b1),
+            selected: hex(0x2a3350),
+            row_selected: hex(0x243052),
+            accent: hex(0x6d8cf0),
+            accent_soft: hex(0x26314f),
+            accent_text: hex(0xb8c8ff),
+            add_background: hex(0x173022),
+            add_text: hex(0x5fd08f),
+            remove_background: hex(0x3a1f22),
+            remove_text: hex(0xf08a80),
+            remote_background: hex(0x2a2e36),
+            remote_text: hex(0xc9ced8),
+            tag_background: hex(0x3b2f1a),
+            tag_text: hex(0xf1c27d),
+            // Deep enough to stay a wash under the light body text, strong
+            // enough to separate an added line from the panel behind it.
+            diff_added_bg: hex(0x12291c),
+            diff_removed_bg: hex(0x331a1e),
+            diff_added_word: hex(0x173a24),
+            diff_removed_word: hex(0x4a2126),
+            diff_hunk_header: hex(0x23262e),
+            // Pale enough for 6:1 on the washes, as line numbers are small.
+            diff_gutter_fg: hex(0x9aa2af),
+            // Decorative, but still 3:1 on the line it marks.
+            diff_whitespace: hex(0x78818f),
+            // Each class clears 4.5:1 on the washes and on the word tints.
+            syntax_keyword: hex(0xe59ac9),
+            syntax_string: hex(0x5fd08f),
+            syntax_comment: hex(0xb0b6c1),
+            syntax_function: hex(0xb8c8ff),
+            syntax_type: hex(0xf1c27d),
+            syntax_number: hex(0x7fd6e8),
+            syntax_tag: hex(0xf49a91),
+            lane: lanes(),
+            avatar: avatars(),
+        }
+    }
+}
+
+/// Lane colours, in the order the graph assigns them; the same in both
+/// appearances, because a lane keeps its identity across a theme change.
+fn lanes() -> [Hsla; LANES] {
+    [
+        hex(0x3d63dd),
+        hex(0x2fa58d),
+        hex(0xe0913a),
+        hex(0xc2508a),
+        hex(0x7a5cd6),
+        hex(0x2f9fd0),
+        hex(0x8a9a2e),
+        hex(0xd0553f),
+    ]
+}
+
+/// Avatar colours, kept in the same order in both appearances.
+fn avatars() -> [Hsla; AVATARS] {
+    [
+        hex(0x3d63dd),
+        hex(0x2fa58d),
+        hex(0xe0913a),
+        hex(0xc2508a),
+        hex(0x7a5cd6),
+        hex(0x2f9fd0),
+    ]
 }
 
 /// FNV-1a over the email, so every appearance gives an author the same colour
@@ -654,6 +785,129 @@ mod tests {
         let mut theme = Theme::default();
         theme.mode = ThemeMode::Dark;
         Design::new(&theme, &Settings::default())
+    }
+
+    const SYNTAX_CLASSES: [HighlightKind; 16] = [
+        HighlightKind::Keyword,
+        HighlightKind::String,
+        HighlightKind::Comment,
+        HighlightKind::Function,
+        HighlightKind::Type,
+        HighlightKind::Constant,
+        HighlightKind::Number,
+        HighlightKind::Variable,
+        HighlightKind::Property,
+        HighlightKind::Operator,
+        HighlightKind::Punctuation,
+        HighlightKind::Attribute,
+        HighlightKind::Tag,
+        HighlightKind::Label,
+        HighlightKind::Escape,
+        HighlightKind::Embedded,
+    ];
+
+    #[test]
+    fn contrast_ratio_matches_the_wcag_reference_values() {
+        assert!((contrast_ratio(hex(0x000000), hex(0xffffff)) - 21.0).abs() < 0.01);
+        assert!((contrast_ratio(hex(0xffffff), hex(0xffffff)) - 1.0).abs() < 0.001);
+        // #767676 on white is the familiar AA boundary example, at 4.54:1.
+        assert!((contrast_ratio(hex(0x767676), hex(0xffffff)) - 4.54).abs() < 0.02);
+        assert_eq!(
+            contrast_ratio(hex(0x123456), hex(0xabcdef)),
+            contrast_ratio(hex(0xabcdef), hex(0x123456)),
+            "the ratio does not depend on the argument order"
+        );
+    }
+
+    #[test]
+    fn diff_text_is_readable_on_every_line_tint() {
+        for design in [Design::default(), dark_design()] {
+            for background in [
+                design.diff_added_bg,
+                design.diff_removed_bg,
+                design.diff_added_word,
+                design.diff_removed_word,
+            ] {
+                let ratio = contrast_ratio(design.text, background);
+                assert!(ratio >= 4.5, "body text is {ratio:.2}:1 on a diff tint");
+            }
+            for background in [design.diff_added_bg, design.diff_removed_bg] {
+                let ratio = contrast_ratio(design.diff_gutter_fg, background);
+                assert!(ratio >= 4.5, "line numbers are {ratio:.2}:1 on a diff tint");
+                let ratio = contrast_ratio(design.diff_whitespace, background);
+                assert!(
+                    ratio >= 3.0,
+                    "the whitespace markers are {ratio:.2}:1 on a diff tint"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn syntax_colours_stay_readable_on_the_diff_tints() {
+        for design in [Design::default(), dark_design()] {
+            let tints = [
+                design.diff_added_bg,
+                design.diff_removed_bg,
+                design.diff_added_word,
+                design.diff_removed_word,
+            ];
+            for kind in SYNTAX_CLASSES {
+                for background in tints {
+                    let ratio = contrast_ratio(design.syntax(kind), background);
+                    assert!(ratio >= 4.5, "{kind:?} is {ratio:.2}:1 on a diff tint");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_diff_tokens_follow_the_appearance() {
+        let light = Design::default();
+        let dark = dark_design();
+        for (light, dark) in [
+            (light.diff_added_bg, dark.diff_added_bg),
+            (light.diff_removed_bg, dark.diff_removed_bg),
+            (light.diff_added_word, dark.diff_added_word),
+            (light.diff_removed_word, dark.diff_removed_word),
+            (light.diff_hunk_header, dark.diff_hunk_header),
+            (light.diff_gutter_fg, dark.diff_gutter_fg),
+            (light.diff_whitespace, dark.diff_whitespace),
+        ] {
+            assert_ne!(light, dark, "each appearance has its own value");
+        }
+        assert_ne!(
+            light.syntax(HighlightKind::Keyword),
+            dark.syntax(HighlightKind::Keyword)
+        );
+
+        // The tint strengthens away from the surface: darker in the light
+        // theme, lighter in the dark one.
+        for (design, darker) in [(light, true), (dark, false)] {
+            assert_eq!(
+                design.diff_added_word.l < design.diff_added_bg.l,
+                darker,
+                "the changed word is a stronger tint than its line"
+            );
+            assert_eq!(
+                design.diff_removed_word.l < design.diff_removed_bg.l,
+                darker,
+                "the changed word is a stronger tint than its line"
+            );
+        }
+    }
+
+    #[test]
+    fn the_code_size_is_clamped_like_every_other_pane() {
+        let mut settings = Settings::default();
+        settings.appearance.code_font_size = 40.0;
+        let design = Design::new(&Theme::default(), &settings);
+        assert_eq!(design.code, CODE_FONT_MAX);
+        settings.appearance.code_font_size = 2.0;
+        assert_eq!(
+            Design::new(&Theme::default(), &settings).code,
+            CODE_FONT_MIN
+        );
     }
 
     #[test]
