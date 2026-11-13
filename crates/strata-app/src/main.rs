@@ -19,6 +19,7 @@ mod repo_view;
 mod scrollbar;
 mod search;
 mod settings;
+mod stash;
 mod worktree_panel;
 
 use std::path::Path;

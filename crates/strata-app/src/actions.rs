@@ -22,6 +22,14 @@ actions!(
         SelectLast,
         ToggleFrameStats,
         Quit,
+        /// Opens the settings window. Handled globally by `settings_view`.
+        OpenSettings,
+        /// Opens another repository (picker, recent list). Handled globally
+        /// by the repository-picker module.
+        OpenRepository,
+        /// Stashes the working tree's changes. Handled on `RepoView` by
+        /// `stash.rs`.
+        StashChanges,
     ]
 );
 
@@ -31,6 +39,18 @@ actions!(
 const PLATFORM_QUIT: &str = "cmd-q";
 #[cfg(not(target_os = "macos"))]
 const PLATFORM_QUIT: &str = "ctrl-q";
+#[cfg(target_os = "macos")]
+const PLATFORM_SETTINGS: &str = "cmd-,";
+#[cfg(not(target_os = "macos"))]
+const PLATFORM_SETTINGS: &str = "ctrl-,";
+#[cfg(target_os = "macos")]
+const PLATFORM_OPEN: &str = "cmd-o";
+#[cfg(not(target_os = "macos"))]
+const PLATFORM_OPEN: &str = "ctrl-o";
+#[cfg(target_os = "macos")]
+const PLATFORM_STASH: &str = "cmd-shift-s";
+#[cfg(not(target_os = "macos"))]
+const PLATFORM_STASH: &str = "ctrl-shift-s";
 
 pub fn bind(cx: &mut App) {
     let scope = Some(REPO_VIEW);
@@ -44,6 +64,10 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("home", SelectFirst, scope),
         KeyBinding::new("end", SelectLast, scope),
         KeyBinding::new("f12", ToggleFrameStats, scope),
+        KeyBinding::new(PLATFORM_STASH, StashChanges, scope),
+        // Global: these work whichever window or panel has focus.
+        KeyBinding::new(PLATFORM_SETTINGS, OpenSettings, None),
+        KeyBinding::new(PLATFORM_OPEN, OpenRepository, None),
         // Global: quitting must work whichever panel has focus.
         KeyBinding::new(PLATFORM_QUIT, Quit, None),
     ]);

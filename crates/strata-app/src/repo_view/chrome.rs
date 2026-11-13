@@ -22,7 +22,7 @@ use strata_core::{ChangeKind, HeadInfo, RefKind};
 use super::{DIFF_HEIGHT, PAGE, RepoView, one_line};
 use crate::actions::{
     self, SelectFirst, SelectLast, SelectNext, SelectPageDown, SelectPageUp, SelectPrevious,
-    ToggleFrameStats,
+    StashChanges, ToggleFrameStats,
 };
 use crate::branches::CreateBranchFromHead;
 use crate::data::{self, Badge, RowData, Source};
@@ -89,6 +89,9 @@ impl Render for RepoView {
             .on_action(cx.listener(|this, _: &SearchNext, _, cx| this.step_results(1, cx)))
             .on_action(cx.listener(|this, _: &SearchPrevious, _, cx| this.step_results(-1, cx)))
             .on_action(cx.listener(|this, _: &SearchSubmit, _, cx| this.submit_search(cx)))
+            .on_action(
+                cx.listener(|this, _: &StashChanges, window, cx| this.stash_changes(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &CreateBranchFromHead, window, cx| {
                 this.create_branch_from_head(window, cx)
             }))
