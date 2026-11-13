@@ -68,6 +68,32 @@ pub struct FileChange {
     pub kind: ChangeKind,
 }
 
+/// What a tree entry is, as the file list of a commit needs to draw it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TreeEntryKind {
+    File,
+    Directory,
+    /// A symbolic link; its blob content is the link target.
+    Symlink,
+    /// A gitlink to another repository.
+    Submodule,
+}
+
+/// One entry of a directory at a commit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeEntry {
+    /// The entry's name inside its directory.
+    pub name: String,
+    /// Repository-relative path using `/` separators.
+    pub path: String,
+    pub kind: TreeEntryKind,
+    /// The raw git mode, e.g. `0o100644` or `0o120000`.
+    pub mode: u16,
+    /// Blob size in bytes for files and symlinks. `None` for directories and
+    /// submodules, and when the object header cannot be read cheaply.
+    pub size: Option<u64>,
+}
+
 /// Working tree status split the way the staging UI shows it.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorktreeStatus {

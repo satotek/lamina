@@ -185,6 +185,22 @@ pub struct CommitQuery {
     pub in_hash: bool,
 }
 
+/// Which starting points the commit walk uses.
+///
+/// History loading reloads from this scope, so a UI that offers "show only this
+/// branch" changes one setting instead of filtering an already loaded list.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum HistoryScope {
+    /// HEAD plus every user-facing ref: local branches, remote-tracking
+    /// branches, tags and the stash. The default.
+    #[default]
+    All,
+    /// Only these refs or commits, and everything they reach. Each entry is a
+    /// ref (`refs/heads/topic`, `origin/main`) or a revision git can parse, such
+    /// as an object id.
+    Refs(Vec<String>),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConflictSide {
     Ours,
@@ -608,6 +624,19 @@ impl Session {
             let _ = senders.load.send(LoadCommand { generation });
             let _ = senders.status.send(RefreshStatus::default());
         }
+    }
+
+    /// Reloads history from `scope`, e.g. only one branch. `All` is the
+    /// default. The resulting snapshots still carry the same commit and graph
+    /// types; only the set of walked starting points changes.
+    pub fn set_history_scope(&self, scope: HistoryScope) {
+        self.shared.set_history_scope(scope);
+        self.reload();
+    }
+
+    /// The scope the current or next history load uses.
+    pub fn history_scope(&self) -> HistoryScope {
+        self.shared.history_scope()
     }
 
     pub fn git(&self) -> &Git {

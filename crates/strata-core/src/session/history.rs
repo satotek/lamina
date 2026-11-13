@@ -9,7 +9,7 @@ use crate::graph::GraphLayout;
 use crate::graph::GraphRows;
 use crate::repo::CommitWalk;
 use crate::session::publish::Shared;
-use crate::session::{COMMIT_CHUNK, CommitList, SessionEvent};
+use crate::session::{COMMIT_CHUNK, CommitList, HistoryScope, SessionEvent};
 use crate::{CommitInfo, HeadInfo, Oid, RefInfo, RemoteInfo, Result, StashInfo, UpstreamInfo};
 
 pub(crate) struct LoadCommand {
@@ -49,7 +49,12 @@ fn load(shared: &Shared, generation: u64) -> Result<()> {
     // Remotes come from the configuration, not from refs: one that was never
     // fetched still has to be offered for fetching and pushing.
     let remotes = shared.repo.remotes()?;
-    let walk = shared.repo.walk_commits()?;
+    // The scope is read here, not carried by the command: a reload that
+    // superseded this one fails the generation check before any walking starts.
+    let walk = match shared.history_scope() {
+        HistoryScope::All => shared.repo.walk_commits()?,
+        HistoryScope::Refs(specs) => shared.repo.walk_commits_from_refs(&specs)?,
+    };
 
     Loader {
         shared,

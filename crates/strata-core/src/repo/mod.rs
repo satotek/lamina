@@ -12,9 +12,10 @@ mod log;
 mod message;
 mod remotes;
 mod status;
+mod tree;
 mod upstream;
 
-pub use history::PathHistory;
+pub use history::{PathHistory, PathHistoryEntries, PathHistoryEntry};
 pub use log::CommitWalk;
 
 use std::path::{Path, PathBuf};

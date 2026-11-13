@@ -18,8 +18,8 @@ use strata_core::git_cli::CommandRecord;
 use strata_core::patch::LineSelection;
 use strata_core::repo::Repo;
 use strata_core::session::{
-    DiffRequest, DiffTicket, DiffView, Operation, OperationId, RepoSnapshot, Session, SessionEvent,
-    SessionOptions,
+    DiffRequest, DiffTicket, DiffView, HistoryScope, Operation, OperationId, RepoSnapshot, Session,
+    SessionEvent, SessionOptions,
 };
 use strata_core::{HeadInfo, RefKind, WorktreeStatus};
 use tempfile::TempDir;
@@ -1041,4 +1041,72 @@ fn commit_diff_is_read_against_the_first_parent() {
             .iter()
             .any(|spans| !spans.is_empty())
     );
+}
+
+#[test]
+fn history_scope_walks_only_the_chosen_refs_and_all_restores_everything() {
+    let repo = TestRepo::new();
+    repo.write("base.txt", "base\n");
+    repo.commit_all("base");
+    let base = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+
+    repo.git(&["checkout", "-q", "-b", "feature"]);
+    repo.write("feature.txt", "feature\n");
+    repo.commit_all("feature only");
+    let feature = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+
+    repo.git(&["checkout", "-q", "main"]);
+    repo.write("main.txt", "main\n");
+    repo.commit_all("main only");
+    let main = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
+
+    let harness = Harness::open(repo);
+    assert_eq!(harness.session.history_scope(), HistoryScope::All);
+
+    let loaded_ids = |snapshot: &RepoSnapshot| {
+        (0..snapshot.commits.len())
+            .map(|row| snapshot.commits.get(row).expect("row").0.id.to_string())
+            .collect::<Vec<_>>()
+    };
+    let all = harness.wait_for_complete(3);
+    let mut all_ids = loaded_ids(&all);
+    all_ids.sort();
+    let mut expected = vec![base.clone(), feature.clone(), main.clone()];
+    expected.sort();
+    assert_eq!(all_ids, expected, "All walks every branch");
+
+    harness
+        .session
+        .set_history_scope(HistoryScope::Refs(vec!["refs/heads/feature".into()]));
+    let scoped = harness.wait_until(TIMEOUT, |snapshot| {
+        snapshot.commits.complete && snapshot.commits.len() == 2
+    });
+    let mut scoped_ids = loaded_ids(&scoped);
+    scoped_ids.sort();
+    let mut expected = vec![base.clone(), feature.clone()];
+    expected.sort();
+    assert_eq!(
+        scoped_ids, expected,
+        "the scope excludes the other branch's commit"
+    );
+
+    // A commit id is a valid starting point as well. Waiting on a newer
+    // generation separates this load from the still-published scoped one.
+    let before = harness.session.snapshot().generation;
+    harness
+        .session
+        .set_history_scope(HistoryScope::Refs(vec![main.clone()]));
+    let by_id = harness.wait_until(TIMEOUT, |snapshot| {
+        snapshot.generation > before && snapshot.commits.complete && snapshot.commits.len() == 2
+    });
+    assert!(loaded_ids(&by_id).contains(&main));
+    assert!(!loaded_ids(&by_id).contains(&feature));
+
+    harness.session.set_history_scope(HistoryScope::All);
+    let restored = harness.wait_for_complete(3);
+    let mut restored_ids = loaded_ids(&restored);
+    restored_ids.sort();
+    let mut expected = vec![base, feature, main];
+    expected.sort();
+    assert_eq!(restored_ids, expected, "All restores the full history");
 }

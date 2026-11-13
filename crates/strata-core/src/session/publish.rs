@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 use crate::git_cli::Git;
 use crate::repo::Repo;
-use crate::session::{DiffTicket, OperationId, RepoSnapshot, SessionEvent};
+use crate::session::{DiffTicket, HistoryScope, OperationId, RepoSnapshot, SessionEvent};
 use crate::watch::Changes;
 
 pub(crate) type EventSink = Arc<dyn Fn(SessionEvent) + Send + Sync>;
@@ -53,6 +53,9 @@ pub(crate) struct Shared {
     shutdown: AtomicBool,
     next_operation: AtomicU64,
     next_ticket: AtomicU64,
+    /// Starting points of the next history walk. Read by the loader when it
+    /// starts, so a watch-triggered reload keeps the scope the UI chose.
+    history_scope: RwLock<HistoryScope>,
     cancelled_diffs: Mutex<HashSet<DiffTicket>>,
     operation_active: AtomicBool,
     pending_refresh: Mutex<PendingRefresh>,
@@ -70,6 +73,7 @@ impl Shared {
             shutdown: AtomicBool::new(false),
             next_operation: AtomicU64::new(0),
             next_ticket: AtomicU64::new(0),
+            history_scope: RwLock::new(HistoryScope::All),
             cancelled_diffs: Mutex::new(HashSet::new()),
             operation_active: AtomicBool::new(false),
             pending_refresh: Mutex::new(PendingRefresh::default()),
@@ -135,6 +139,20 @@ impl Shared {
 
     pub(crate) fn operation_running(&self) -> bool {
         self.operation_active.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn history_scope(&self) -> HistoryScope {
+        self.history_scope
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) fn set_history_scope(&self, scope: HistoryScope) {
+        *self
+            .history_scope
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = scope;
     }
 
     pub(crate) fn set_operation_running(&self, running: bool) {

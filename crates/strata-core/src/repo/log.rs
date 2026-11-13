@@ -160,6 +160,45 @@ impl Repo {
         let walk = walk::Walk::new(repo.objects.clone(), graph, &tips, cancelled)?;
         Ok(CommitWalk { repo, walk })
     }
+
+    /// Streams commits reachable from `specs` only, in the same topological
+    /// order as [`walk_commits`](Self::walk_commits).
+    ///
+    /// Each spec names a ref (`refs/heads/topic`, `origin/main`, a tag) or any
+    /// other revision `git rev-parse` accepts, such as a full or abbreviated
+    /// object id. Unlike the full walk, no other refs are included, not even
+    /// HEAD.
+    pub fn walk_commits_from_refs(&self, specs: &[String]) -> Result<CommitWalk> {
+        self.walk_commits_from_refs_with(specs, None)
+    }
+
+    /// [`walk_commits_from_refs`](Self::walk_commits_from_refs) with a cancel
+    /// check, matching [`walk_commits_with`](Self::walk_commits_with).
+    pub(crate) fn walk_commits_from_refs_with(
+        &self,
+        specs: &[String],
+        cancelled: Option<CancelCheck>,
+    ) -> Result<CommitWalk> {
+        let repo = self.local();
+        let graph = repo.commit_graph_if_enabled().ok().flatten();
+        let mut seen = HashSet::new();
+        let mut tips = Vec::new();
+        for spec in specs {
+            // A bad spec is an error on purpose: silently walking a smaller set
+            // would look like a branch with no commits.
+            let id = repo
+                .rev_parse_single(spec.as_str())
+                .map_err(Error::gix)?
+                .detach();
+            if let Some(commit) = resolve_commit(&repo, graph.as_ref(), id, None)?
+                && seen.insert(commit)
+            {
+                tips.push(commit);
+            }
+        }
+        let walk = walk::Walk::new(repo.objects.clone(), graph, &tips, cancelled)?;
+        Ok(CommitWalk { repo, walk })
+    }
 }
 
 fn ref_kind(full_name: &gix::bstr::BStr) -> Option<RefKind> {

@@ -429,6 +429,58 @@ fn remote_tracking_branches_are_listed_without_head_alias() {
 }
 
 #[test]
+fn walk_from_refs_walks_only_the_chosen_branch() {
+    let fixture = Fixture::new();
+    let base = fixture.commit("base.txt", "base\n", BASE_TIME + 100, "base");
+    fixture.git(&["checkout", "--quiet", "-b", "feature"]);
+    let feature = fixture.commit("feature.txt", "feature\n", BASE_TIME + 200, "feature");
+    fixture.git(&["checkout", "--quiet", "main"]);
+    let main = fixture.commit("main.txt", "main\n", BASE_TIME + 300, "main");
+
+    let repo = fixture.open();
+    let walk = |spec: &str| -> Vec<String> {
+        repo.walk_commits_from_refs(&[spec.to_string()])
+            .expect("scoped walk")
+            .map(|commit| commit.expect("commit").id.to_string())
+            .collect()
+    };
+
+    // Same order as `git log --date-order <ref>`, whose ancestry is the only
+    // thing the walk may include.
+    let reference = |spec: &str| -> Vec<String> {
+        fixture
+            .git(&["log", "--date-order", "--format=%H", spec])
+            .lines()
+            .map(str::to_string)
+            .collect()
+    };
+    assert_eq!(walk("refs/heads/feature"), reference("refs/heads/feature"));
+    assert_eq!(
+        walk("refs/heads/feature"),
+        vec![feature.clone(), base.clone()]
+    );
+    assert_eq!(walk("main"), reference("main"));
+    assert_eq!(walk(&main), vec![main.clone(), base.clone()]);
+    assert_eq!(walk("refs/heads/feature"), vec![feature, base]);
+
+    // Every starting point is walked; unrelated history never is.
+    let both = repo
+        .walk_commits_from_refs(&[
+            "refs/heads/main".to_string(),
+            "refs/heads/feature".to_string(),
+        ])
+        .expect("scoped walk")
+        .map(|commit| commit.expect("commit").id.to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(both.len(), 3);
+    assert!(both.contains(&main));
+    // An empty scope walks nothing rather than falling back to all refs.
+    assert_eq!(repo.walk_commits_from_refs(&[]).expect("empty").count(), 0);
+    // An unknown ref is an error, not a silently smaller walk.
+    assert!(repo.walk_commits_from_refs(&["nope".into()]).is_err());
+}
+
+#[test]
 fn many_refs_walk_matches_git_log() {
     let fixture = Fixture::new();
     let mut commits = Vec::new();
