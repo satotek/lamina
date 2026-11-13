@@ -15,6 +15,9 @@ Rust workspace: `crates/strata-core` (UI-independent) and `crates/strata-app` (G
   Set `GIT_CONFIG_GLOBAL=/dev/null`-equivalent isolation and author/committer env vars
   so tests do not depend on the machine's git config.
 - Code comments explain why, not what. English for code, comments, commits.
+- Run cargo through the Nix dev shell: `direnv allow && direnv exec . cargo …`. It provides
+  the native libraries GPUI needs on Linux and sccache, which shares compiled crates
+  between worktrees.
 - Before finishing: `cargo fmt`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
 
 ## Parallel work

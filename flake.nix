@@ -50,6 +50,7 @@
               pkg-config
               rustc
               rustfmt
+              sccache
               xvfb
             ];
 
@@ -98,6 +99,10 @@
             );
 
             RUST_BACKTRACE = "1";
+
+            # Parallel agents each build in their own worktree; sccache lets them
+            # share compiled registry crates (GPUI alone is ~600 crates).
+            RUSTC_WRAPPER = "sccache";
           };
         }
       );
