@@ -258,15 +258,18 @@ fn execute(shared: &Shared, id: OperationId, operation: &Operation) -> Result<()
         Operation::MarkResolved(paths) => git.mark_resolved(paths),
         Operation::MergeContinue => git.merge_continue(),
         Operation::OpenMergetool { path } => git.mergetool(path),
-        // Implemented by the history-operations task.
-        Operation::ResolveWithContent { .. }
-        | Operation::CherryPick { .. }
-        | Operation::Revert { .. }
-        | Operation::Reset { .. }
-        | Operation::CreateTag { .. }
-        | Operation::DeleteTag { .. }
-        | Operation::ContinueInProgress
-        | Operation::AbortInProgress => Err(Error::other("not implemented yet")),
+        Operation::ResolveWithContent { path, content } => git.resolve_with_content(path, content),
+        Operation::CherryPick { commit } => git.cherry_pick(*commit),
+        Operation::Revert { commit } => git.revert(*commit),
+        Operation::Reset { target, mode } => git.reset(*target, *mode),
+        Operation::CreateTag {
+            name,
+            target,
+            message,
+        } => git.create_tag(name, *target, message.as_deref()),
+        Operation::DeleteTag { name } => git.delete_tag(name),
+        Operation::ContinueInProgress => git.continue_in_progress(),
+        Operation::AbortInProgress => git.abort_in_progress(),
     }
 }
 
