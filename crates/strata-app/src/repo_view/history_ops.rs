@@ -34,6 +34,7 @@ use strata_core::{ChangeKind, Error, HeadInfo, Oid, RefKind, RepoState, Result, 
 
 use super::RepoView;
 use super::edit_dialog;
+use super::rebase_dialog::{self, RebaseRequest};
 use crate::data::short_oid;
 use crate::settings::Settings;
 use crate::style::Design;
@@ -294,6 +295,21 @@ impl EditContext {
         let onto_index = onto_index(distance, action)?;
         let onto = self.line.get(onto_index)?.0;
         Some((onto, range_commits(&self.line, onto_index)))
+    }
+
+    /// The first line of `commit`'s message, from the loaded rows when the
+    /// walk has them and from the repository otherwise.
+    fn summary(&self, commit: Oid) -> String {
+        if let Some(&index) = self.snapshot.commit_index.get(&commit)
+            && let Some((info, _)) = self.snapshot.commits.get(index)
+        {
+            return info.summary.clone();
+        }
+        self.repo
+            .commit_message(commit)
+            .ok()
+            .and_then(|message| message.lines().next().map(str::to_owned))
+            .unwrap_or_else(|| short_oid(commit))
     }
 
     /// Remote-tracking branches that already contain commits in `action`'s
@@ -713,7 +729,18 @@ fn edit_group(
         }
         menu = menu.item(item);
     }
-    menu
+    // The dialog edits `onto..HEAD` with `onto` at the commit's parent, which
+    // is the range a reword of this commit replays, so it qualifies the same way.
+    let blocked = edit_blocked(state, edit, EditAction::Reword);
+    let mut item = PopupMenuItem::new(menu_label("Edit history from here…", blocked))
+        .disabled(blocked.is_some());
+    if blocked.is_none() {
+        let entity = entity.clone();
+        item = item.on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+            entity.update(cx, |view, cx| view.open_edit_history(commit, window, cx));
+        });
+    }
+    menu.separator().item(item)
 }
 
 /// A menu label that says why it is disabled; a popup item has no tooltip, so
@@ -1081,6 +1108,34 @@ impl RepoView {
             EditAction::Drop => self.confirm_drop(commit, &summary, &edit, &state, window, cx),
             _ => self.confirm_or_run_edit(action, commit, &edit, window, cx),
         }
+    }
+
+    /// Opens the interactive-rebase dialog for `commit` and everything after it.
+    fn open_edit_history(&mut self, commit: Oid, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(state) = self.history_menu_state() else {
+            return;
+        };
+        let Some(edit) = self.edit_context(commit) else {
+            return;
+        };
+        // Same guard as the single edits: a stale click must not open a dialog
+        // for a repository that has since moved.
+        if edit_blocked(&state, Some(&edit), EditAction::Reword).is_some() {
+            return;
+        }
+        let Some((onto, commits)) = edit.plan(EditAction::Reword) else {
+            return;
+        };
+        let request = RebaseRequest {
+            onto,
+            commits: commits
+                .into_iter()
+                .map(|commit| (commit, edit.summary(commit)))
+                .collect(),
+            pushed: edit.pushed_remotes(EditAction::Reword),
+            repo: edit.repo.clone(),
+        };
+        rebase_dialog::open(self, request, window, cx);
     }
 
     /// Opens the message editor with the commit's full message filled in.

@@ -15,6 +15,8 @@ mod diff_pane;
 mod edit_dialog;
 mod history_ops;
 mod in_progress;
+mod rebase_dialog;
+mod rebase_plan;
 mod sidebar;
 mod status_bar;
 mod title_bar;
