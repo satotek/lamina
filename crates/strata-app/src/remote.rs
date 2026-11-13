@@ -976,6 +976,7 @@ mod tests {
             state: RepoState::Normal,
             conflicts: Arc::new(Vec::new()),
             busy: None,
+            remotes: Vec::new(),
         }
     }
 

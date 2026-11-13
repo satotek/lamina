@@ -190,7 +190,10 @@ fn side_changes(base: &[u8], side: Option<&[u8]>) -> Option<Vec<Change>> {
     let diff = diff_text(
         base,
         side.unwrap_or_default(),
-        &DiffOptions { context_lines: 0 },
+        &DiffOptions {
+            context_lines: 0,
+            ..DiffOptions::default()
+        },
     );
     if diff.binary {
         return None;
