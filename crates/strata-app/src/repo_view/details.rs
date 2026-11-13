@@ -390,7 +390,7 @@ impl RepoView {
 }
 
 /// The commit HEAD points at, when the source knows it.
-fn head_oid(source: Option<&Source>) -> Option<Oid> {
+pub(super) fn head_oid(source: Option<&Source>) -> Option<Oid> {
     match source?.head()? {
         HeadInfo::Branch { target, .. } => *target,
         HeadInfo::Detached { target } => Some(*target),
@@ -400,7 +400,7 @@ fn head_oid(source: Option<&Source>) -> Option<Oid> {
 /// Whether the working tree at `root` has `path`. A final symlink counts as
 /// present even when it dangles, because git tracks the link itself; a
 /// directory does not, because there is no file for the editor to open.
-fn in_working_tree(root: Option<&Path>, path: &str) -> bool {
+pub(super) fn in_working_tree(root: Option<&Path>, path: &str) -> bool {
     root.is_some_and(|root| {
         std::fs::symlink_metadata(root.join(path))
             .map(|metadata| !metadata.is_dir())

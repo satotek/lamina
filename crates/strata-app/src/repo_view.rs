@@ -13,6 +13,7 @@ mod common;
 mod details;
 mod diff_pane;
 mod edit_dialog;
+mod editor;
 mod history_ops;
 mod in_progress;
 mod rebase_dialog;
@@ -385,6 +386,9 @@ pub struct RepoView {
 
     last_command: Option<String>,
     status_error: Option<String>,
+    /// A transient message that is not a failure, such as which copy of a file
+    /// the editor opened. Shown in the status bar while no error is.
+    status_note: Option<String>,
 
     title: String,
     target_frame_ms: f32,
@@ -499,6 +503,7 @@ impl RepoView {
             fake_diffs: Rc::new(Vec::new()),
             last_command: None,
             status_error: None,
+            status_note: None,
             title,
             target_frame_ms: 1000.0 / 60.0,
             overlay: smoke,

@@ -82,7 +82,7 @@ impl Render for RepoView {
             )
             .on_action(cx.listener(|this, _: &OpenTerminalHere, _, cx| this.open_terminal_here(cx)))
             .on_action(
-                cx.listener(|this, _: &OpenInEditor, _, cx| this.open_selection_in_editor(cx)),
+                cx.listener(|this, _: &OpenInEditor, _, cx| this.open_selected_file_in_editor(cx)),
             )
             .on_action(cx.listener(|this, _: &CreateBranchFromHead, window, cx| {
                 this.create_branch_from_head(window, cx)

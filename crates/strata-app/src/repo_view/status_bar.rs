@@ -14,6 +14,7 @@ impl RepoView {
             .clone()
             .unwrap_or_else(|| "no git commands yet".to_owned());
         let error = self.status_error.clone();
+        let note = self.status_note.clone();
         let operation = self.remote_status(&remote::Colors {
             foreground: design.text,
             muted_foreground: design.muted,
@@ -72,7 +73,11 @@ impl RepoView {
                 } else {
                     design.muted
                 })
-                .child(error.unwrap_or_else(|| "Watching for changes".to_owned())),
+                .child(
+                    error
+                        .or(note)
+                        .unwrap_or_else(|| "Watching for changes".to_owned()),
+                ),
         )
         .into_any_element()
     }

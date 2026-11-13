@@ -670,7 +670,7 @@ pub(crate) fn commit_menu(
         let entity = entity.clone();
         let point = commit.to_string();
         let from = format!("from commit {short}");
-        PopupMenuItem::new("Create branch here…")
+        PopupMenuItem::new(menu_label("Create branch here…", branch_blocked))
             .disabled(branch_blocked.is_some())
             .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                 let point = point.clone();

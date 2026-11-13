@@ -14,8 +14,9 @@
 //! A worker thread owns the debounce timer, the ignore filtering and the
 //! callback, so the notify thread never waits on the UI.
 //!
-//! The callback receives at most one [`Changes`] per quiet `debounce` window,
-//! and at least one every second while events keep streaming in.
+//! The callback receives the burst's first [`Changes`] a few milliseconds after
+//! its first event, then at most one per quiet `debounce` window, and at least
+//! one every second while events keep streaming in.
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
@@ -34,6 +35,14 @@ const MAX_PATHS: usize = 1000;
 
 /// Upper bound on how long an uninterrupted event stream can delay a callback.
 const MAX_LATENCY: Duration = Duration::from_secs(1);
+
+/// How long the first event of a burst waits before the first callback.
+///
+/// A single save lands as a handful of events (create, modify, close) within a
+/// few milliseconds, so this settles that burst. It is deliberately much
+/// shorter than the quiet window: the rest of the burst is coalesced *after*
+/// the first refresh rather than in front of it.
+const LEADING_SETTLE: Duration = Duration::from_millis(30);
 
 /// What changed since the last callback.
 ///
@@ -324,6 +333,12 @@ fn push_path(changes: &mut Changes, path: PathBuf) {
 }
 
 /// The debounce loop.
+///
+/// The burst's first callback is a leading edge: it only waits for
+/// [`LEADING_SETTLE`], so one edit shows up immediately. Every callback after
+/// that waits for the quiet window, and a stream that never goes quiet is
+/// still flushed [`MAX_LATENCY`] after the previous callback, so a checkout of
+/// thousands of files costs a few refreshes instead of one per file.
 fn run(rx: Receiver<Wake>, watch: Watch, on_change: impl Fn(Changes)) {
     loop {
         let first = match rx.recv() {
@@ -333,16 +348,24 @@ fn run(rx: Receiver<Wake>, watch: Watch, on_change: impl Fn(Changes)) {
 
         let started = Instant::now();
         let mut last = started;
+        let mut last_flush: Option<Instant> = None;
         let mut batch = vec![first];
         let mut disconnected = false;
 
         loop {
-            // Quiet for `debounce`, but a never-ending stream still flushes
-            // once a second so the UI cannot go stale.
-            let deadline = (last + watch.debounce).min(started + MAX_LATENCY);
+            let deadline = flush_deadline(started, last, last_flush, watch.debounce);
             let now = Instant::now();
             if now >= deadline {
-                break;
+                // Either the leading edge or the quiet window; an empty batch
+                // here means the burst has gone quiet and the worker can block
+                // again.
+                let settled = batch.is_empty();
+                flush(&watch, &mut batch, &on_change);
+                last_flush = Some(now);
+                if settled {
+                    break;
+                }
+                continue;
             }
             match rx.recv_timeout(deadline - now) {
                 Ok(Wake::Event(event)) => {
@@ -351,21 +374,52 @@ fn run(rx: Receiver<Wake>, watch: Watch, on_change: impl Fn(Changes)) {
                 }
                 // The owner is going away; its remaining events are noise.
                 Ok(Wake::Stop) => return,
-                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Timeout) => {
+                    flush(&watch, &mut batch, &on_change);
+                    break;
+                }
                 Err(RecvTimeoutError::Disconnected) => {
+                    flush(&watch, &mut batch, &on_change);
                     disconnected = true;
                     break;
                 }
             }
         }
 
-        let changes = watch.changes(&batch);
-        if !changes.is_idle() {
-            on_change(changes);
-        }
         if disconnected {
             return;
         }
+    }
+}
+
+/// Delivers the events in hand, if any of them changed something.
+fn flush(watch: &Watch, batch: &mut Vec<notify::Result<Event>>, on_change: &impl Fn(Changes)) {
+    if batch.is_empty() {
+        return;
+    }
+    let changes = watch.changes(batch);
+    batch.clear();
+    if !changes.is_idle() {
+        on_change(changes);
+    }
+}
+
+/// When the batch in hand is delivered.
+///
+/// `started` is the burst's first event, `last_event` the newest one folded
+/// into the batch, and `last_flush` the previous delivery if this burst had
+/// one. The leading edge is measured from `started`, so a sustained burst still
+/// gets its first refresh promptly instead of resetting the short window on
+/// every write.
+fn flush_deadline(
+    started: Instant,
+    last_event: Instant,
+    last_flush: Option<Instant>,
+    debounce: Duration,
+) -> Instant {
+    match last_flush {
+        None => started + LEADING_SETTLE,
+        Some(flushed) => (last_event + debounce).min(flushed + MAX_LATENCY),
     }
 }
 
@@ -567,5 +621,151 @@ mod tests {
         }
         assert!(changes.worktree);
         assert_eq!(changes.paths.len(), MAX_PATHS);
+    }
+
+    /// The debounce used by the session, so the rule is tested at its real
+    /// proportions instead of a convenient one.
+    const DEBOUNCE: Duration = Duration::from_millis(150);
+
+    /// Runs the worker's flush loop over a stream of events and returns, in
+    /// order, when a callback carrying events would fire. `events` are offsets
+    /// from the first one, so nothing here sleeps.
+    fn callbacks(events: &[Duration]) -> Vec<Duration> {
+        let start = Instant::now();
+        let mut out = Vec::new();
+        let mut index = 0;
+        // One pass per burst: the worker blocks for an event, coalesces, and
+        // blocks again once a quiet window passes with nothing held.
+        while index < events.len() {
+            let started = start + events[index];
+            index += 1;
+            let mut last_event = started;
+            let mut last_flush = None;
+            let mut batch = 1;
+
+            loop {
+                let deadline = flush_deadline(started, last_event, last_flush, DEBOUNCE);
+                while let Some(offset) = events.get(index) {
+                    let at = start + *offset;
+                    if at >= deadline {
+                        break;
+                    }
+                    index += 1;
+                    batch += 1;
+                    last_event = at;
+                }
+                let deadline = flush_deadline(started, last_event, last_flush, DEBOUNCE);
+                if events
+                    .get(index)
+                    .is_some_and(|offset| start + *offset < deadline)
+                {
+                    continue;
+                }
+                if batch == 0 {
+                    break;
+                }
+                out.push(deadline.duration_since(start));
+                batch = 0;
+                last_flush = Some(deadline);
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn one_edit_is_reported_after_the_leading_settle() {
+        // A single save: create, modify, close, all within a millisecond.
+        let reported = callbacks(&[Duration::ZERO, Duration::from_millis(1)]);
+        assert_eq!(
+            reported.len(),
+            1,
+            "one edit must be one refresh: {reported:?}"
+        );
+        assert_eq!(
+            reported[0], LEADING_SETTLE,
+            "the leading edge waits for the save's burst, not the quiet window"
+        );
+        assert!(
+            reported[0] < DEBOUNCE,
+            "the first refresh must beat the old quiet-window rule"
+        );
+    }
+
+    #[test]
+    fn the_rest_of_a_burst_waits_for_the_quiet_window() {
+        let reported = callbacks(&[
+            Duration::ZERO,
+            Duration::from_millis(1),
+            Duration::from_millis(100),
+            Duration::from_millis(120),
+        ]);
+        assert_eq!(reported.len(), 2, "a late event earns one more refresh");
+        assert_eq!(reported[0], LEADING_SETTLE);
+        assert_eq!(
+            reported[1],
+            Duration::from_millis(120) + DEBOUNCE,
+            "the events after the leading refresh coalesce on the quiet window"
+        );
+    }
+
+    #[test]
+    fn a_flood_of_writes_coalesces_into_a_few_refreshes() {
+        // 200 writes half a millisecond apart, like a checkout of 200 files.
+        let events: Vec<Duration> = (0..200)
+            .map(|index| Duration::from_micros(index * 500))
+            .collect();
+        let reported = callbacks(&events);
+        assert!(
+            reported.len() <= 3,
+            "200 writes produced {} refreshes: {reported:?}",
+            reported.len()
+        );
+        assert_eq!(
+            reported[0], LEADING_SETTLE,
+            "the flood still shows its first refresh promptly"
+        );
+        assert!(
+            reported[1] >= Duration::from_micros(199 * 500) + DEBOUNCE,
+            "the second refresh waits for the writes to stop: {reported:?}"
+        );
+    }
+
+    #[test]
+    fn an_endless_stream_flushes_once_a_second() {
+        let events: Vec<Duration> = (0..63)
+            .map(|index| Duration::from_millis(index * 40))
+            .collect();
+        let reported = callbacks(&events);
+        assert!(
+            reported.len() <= 4,
+            "a 2.5 s stream produced {} refreshes: {reported:?}",
+            reported.len()
+        );
+        assert_eq!(reported[0], LEADING_SETTLE);
+        for pair in reported.windows(2) {
+            let gap = pair[1] - pair[0];
+            assert!(
+                gap <= MAX_LATENCY,
+                "a callback waited {gap:?}, more than {MAX_LATENCY:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_quiet_burst_after_a_flush_delivers_the_rest_once() {
+        // The leading refresh has already happened and the writes stop; the
+        // late event starts a fresh burst with its own leading edge.
+        let reported = callbacks(&[
+            Duration::ZERO,
+            Duration::from_millis(200),
+            Duration::from_millis(210),
+            Duration::from_millis(220),
+        ]);
+        assert_eq!(reported.len(), 2);
+        assert_eq!(
+            reported[1],
+            Duration::from_millis(200) + LEADING_SETTLE,
+            "the late burst leads with one refresh and folds 210/220 into it"
+        );
     }
 }
