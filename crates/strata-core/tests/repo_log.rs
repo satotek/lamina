@@ -1,0 +1,397 @@
+//! Integration tests for HEAD, refs and the commit walk.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::time::Instant;
+
+use strata_core::repo::Repo;
+use strata_core::{HeadInfo, RefInfo, RefKind};
+use tempfile::TempDir;
+
+const BASE_TIME: i64 = 1_700_000_000;
+
+/// A repository in a temp directory driven by the `git` CLI with an isolated
+/// configuration, so nothing depends on the machine's git setup.
+struct Fixture {
+    tmp: TempDir,
+    repo: PathBuf,
+    empty_config: PathBuf,
+}
+
+impl Fixture {
+    fn new() -> Self {
+        let tmp = TempDir::new().expect("temp dir");
+        let repo = tmp.path().join("repo");
+        let empty_config = tmp.path().join("empty-gitconfig");
+        std::fs::write(&empty_config, b"").expect("empty config");
+        std::fs::create_dir_all(&repo).expect("repo dir");
+
+        let fixture = Self {
+            tmp,
+            repo,
+            empty_config,
+        };
+        fixture.git(&["init", "--quiet", "--initial-branch=main"]);
+        fixture
+    }
+
+    fn path(&self) -> &Path {
+        &self.repo
+    }
+
+    fn git(&self, args: &[&str]) -> String {
+        self.git_at(&self.repo, args)
+    }
+
+    fn git_at(&self, dir: &Path, args: &[&str]) -> String {
+        self.run(dir, args, BASE_TIME)
+    }
+
+    fn git_dated(&self, date: i64, args: &[&str]) -> String {
+        self.run(&self.repo, args, date)
+    }
+
+    fn run(&self, dir: &Path, args: &[&str], date: i64) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_CONFIG_GLOBAL", &self.empty_config)
+            .env("GIT_CONFIG_SYSTEM", &self.empty_config)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "Strata Author")
+            .env("GIT_AUTHOR_EMAIL", "author@example.com")
+            .env("GIT_COMMITTER_NAME", "Strata Committer")
+            .env("GIT_COMMITTER_EMAIL", "committer@example.com")
+            .env("GIT_AUTHOR_DATE", format!("@{date} +0000"))
+            .env("GIT_COMMITTER_DATE", format!("@{date} +0000"))
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .expect("git is runnable");
+
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout)
+            .trim_end()
+            .to_string()
+    }
+
+    fn commit(&self, file: &str, content: &str, date: i64, message: &str) -> String {
+        let path = self.repo.join(file);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("file parent");
+        }
+        std::fs::write(&path, content).expect("write file");
+        self.git(&["add", "--", file]);
+        self.git_dated(date, &["commit", "--quiet", "-m", message]);
+        self.git(&["rev-parse", "HEAD"])
+    }
+
+    fn head(&self) -> String {
+        self.git(&["rev-parse", "HEAD"])
+    }
+
+    fn open(&self) -> Repo {
+        Repo::open(self.path()).expect("open repo")
+    }
+
+    fn walk_ids(&self) -> Vec<String> {
+        self.open()
+            .walk_commits()
+            .expect("walk")
+            .map(|commit| commit.expect("commit").id.to_string())
+            .collect()
+    }
+
+    fn git_log_all_date_order(&self) -> Vec<String> {
+        self.git(&["log", "--all", "--date-order", "--format=%H"])
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+}
+
+fn kinds_and_names(refs: &[RefInfo]) -> Vec<(RefKind, String)> {
+    refs.iter().map(|r| (r.kind, r.full_name.clone())).collect()
+}
+
+#[test]
+fn unborn_head_has_no_target() {
+    let fixture = Fixture::new();
+    let repo = fixture.open();
+
+    assert_eq!(
+        repo.head().expect("head"),
+        HeadInfo::Branch {
+            short_name: "main".to_string(),
+            target: None,
+        }
+    );
+    assert!(repo.refs().expect("refs").is_empty());
+    assert_eq!(repo.walk_commits().expect("walk").count(), 0);
+}
+
+#[test]
+fn linear_history_walks_newest_first() {
+    let fixture = Fixture::new();
+    let first = fixture.commit("file.txt", "one\n", BASE_TIME + 100, "first");
+    let second = fixture.commit("file.txt", "two\n", BASE_TIME + 200, "second\n\nbody text");
+    let third = fixture.commit("file.txt", "three\n", BASE_TIME + 300, "third");
+
+    let repo = fixture.open();
+    assert_eq!(
+        repo.head().expect("head"),
+        HeadInfo::Branch {
+            short_name: "main".to_string(),
+            target: Some(third.parse().expect("oid")),
+        }
+    );
+
+    let commits: Vec<_> = repo
+        .walk_commits()
+        .expect("walk")
+        .map(|commit| commit.expect("commit"))
+        .collect();
+    let ids: Vec<String> = commits.iter().map(|c| c.id.to_string()).collect();
+    assert_eq!(ids, vec![third.clone(), second.clone(), first.clone()]);
+
+    let middle = &commits[1];
+    assert_eq!(middle.summary, "second", "summary is only the first line");
+    assert_eq!(middle.author_name, "Strata Author");
+    assert_eq!(middle.author_email, "author@example.com");
+    assert_eq!(middle.author_time, BASE_TIME + 200);
+    assert_eq!(middle.committer_time, BASE_TIME + 200);
+    assert_eq!(middle.parents.len(), 1);
+    assert_eq!(middle.parents[0].to_string(), first);
+}
+
+#[test]
+fn refs_cover_branches_and_peeled_tags() {
+    let fixture = Fixture::new();
+    let first = fixture.commit("file.txt", "one\n", BASE_TIME + 100, "first");
+    let second = fixture.commit("file.txt", "two\n", BASE_TIME + 200, "second");
+
+    fixture.git(&["branch", "feature", &first]);
+    fixture.git(&["tag", "light", &first]);
+    fixture.git(&["tag", "-a", "annotated", "-m", "annotated tag", &second]);
+
+    // A commit that is only reachable through a tag must still be walked.
+    fixture.git(&["checkout", "--quiet", "-b", "side", &first]);
+    let side = fixture.commit("side.txt", "side\n", BASE_TIME + 250, "side only");
+    fixture.git(&["tag", "-a", "side-tag", "-m", "side tag"]);
+    fixture.git(&["checkout", "--quiet", "main"]);
+    fixture.git(&["branch", "-D", "side"]);
+
+    let repo = fixture.open();
+    let refs = repo.refs().expect("refs");
+    assert_eq!(
+        kinds_and_names(&refs),
+        vec![
+            (RefKind::LocalBranch, "refs/heads/feature".to_string()),
+            (RefKind::LocalBranch, "refs/heads/main".to_string()),
+            (RefKind::Tag, "refs/tags/annotated".to_string()),
+            (RefKind::Tag, "refs/tags/light".to_string()),
+            (RefKind::Tag, "refs/tags/side-tag".to_string()),
+        ]
+    );
+
+    let tagged = |name: &str| {
+        refs.iter()
+            .find(|r| r.full_name == name)
+            .unwrap_or_else(|| panic!("{name} is listed"))
+            .target
+            .to_string()
+    };
+    assert_eq!(tagged("refs/tags/light"), first);
+    // An annotated tag must be peeled to the commit, not left as a tag object.
+    assert_eq!(tagged("refs/tags/annotated"), second);
+    assert_eq!(tagged("refs/tags/side-tag"), side);
+
+    let walked = fixture.walk_ids();
+    assert!(
+        walked.contains(&side),
+        "tag-only commit is part of the walk"
+    );
+    assert_eq!(walked, fixture.git_log_all_date_order());
+}
+
+#[test]
+fn merge_is_walked_children_first() {
+    let fixture = Fixture::new();
+    let base = fixture.commit("main.txt", "base\n", BASE_TIME + 100, "base");
+
+    fixture.git(&["checkout", "--quiet", "-b", "feature"]);
+    let feature = fixture.commit("feature.txt", "feature\n", BASE_TIME + 200, "feature work");
+
+    fixture.git(&["checkout", "--quiet", "main"]);
+    let main = fixture.commit("main.txt", "main\n", BASE_TIME + 300, "main work");
+    fixture.git_dated(
+        BASE_TIME + 400,
+        &[
+            "merge",
+            "--quiet",
+            "--no-ff",
+            "-m",
+            "merge feature",
+            "feature",
+        ],
+    );
+    let merge = fixture.head();
+
+    let ids = fixture.walk_ids();
+    assert_eq!(ids, fixture.git_log_all_date_order());
+    assert_eq!(ids, vec![merge.clone(), main, feature, base]);
+
+    let merge_commit = fixture
+        .open()
+        .walk_commits()
+        .expect("walk")
+        .next()
+        .expect("at least one commit")
+        .expect("commit");
+    assert_eq!(merge_commit.id.to_string(), merge);
+    assert_eq!(merge_commit.parents.len(), 2);
+}
+
+#[test]
+fn date_order_keeps_children_before_newer_parents() {
+    let fixture = Fixture::new();
+    // Two branches whose commit dates interleave and include children that are
+    // older than their parents, so a plain date sort would violate topology.
+    fixture.commit("main.txt", "c1\n", BASE_TIME + 1000, "c1");
+    fixture.git(&["checkout", "--quiet", "-b", "feature"]);
+    fixture.commit("feature.txt", "f1\n", BASE_TIME + 2000, "f1");
+    fixture.commit("feature.txt", "f2\n", BASE_TIME + 1100, "f2");
+
+    fixture.git(&["checkout", "--quiet", "main"]);
+    fixture.commit("main.txt", "c2\n", BASE_TIME + 3000, "c2");
+    fixture.commit("main.txt", "c3\n", BASE_TIME + 1200, "c3");
+    fixture.git_dated(
+        BASE_TIME + 4000,
+        &[
+            "merge",
+            "--quiet",
+            "--no-ff",
+            "-m",
+            "merge feature",
+            "feature",
+        ],
+    );
+
+    let expected = fixture.git_log_all_date_order();
+    assert!(expected.len() >= 6);
+    assert_eq!(fixture.walk_ids(), expected);
+
+    // Sanity-check that the test data really required topological sorting.
+    let plain_dates = fixture.git(&["log", "--all", "--format=%ct"]);
+    let dates: Vec<i64> = plain_dates
+        .lines()
+        .map(|d| d.parse().expect("date"))
+        .collect();
+    let mut sorted = dates.clone();
+    sorted.sort_unstable_by(|a, b| b.cmp(a));
+    assert_ne!(dates, sorted, "dates are not already newest-first");
+}
+
+#[test]
+fn detached_head_reports_its_commit() {
+    let fixture = Fixture::new();
+    fixture.commit("file.txt", "one\n", BASE_TIME + 100, "first");
+    let second = fixture.commit("file.txt", "two\n", BASE_TIME + 200, "second");
+    fixture.commit("file.txt", "three\n", BASE_TIME + 300, "third");
+
+    fixture.git(&["checkout", "--quiet", "--detach", "HEAD~1"]);
+
+    assert_eq!(
+        fixture.open().head().expect("head"),
+        HeadInfo::Detached {
+            target: second.parse().expect("oid"),
+        }
+    );
+    assert_eq!(fixture.walk_ids(), fixture.git_log_all_date_order());
+}
+
+#[test]
+fn remote_tracking_branches_are_listed_without_head_alias() {
+    let fixture = Fixture::new();
+    let first = fixture.commit("file.txt", "one\n", BASE_TIME + 100, "first");
+    let second = fixture.commit("file.txt", "two\n", BASE_TIME + 200, "second");
+    fixture.git(&["branch", "topic", &first]);
+
+    let clone = fixture.tmp.path().join("clone");
+    fixture.git_at(
+        fixture.tmp.path(),
+        &[
+            "clone",
+            "--quiet",
+            fixture.repo.to_str().expect("utf-8 path"),
+            clone.to_str().expect("utf-8 path"),
+        ],
+    );
+    // Make the alias and the packed-refs code path explicit instead of relying
+    // on whatever `clone` happens to write.
+    fixture.git_at(
+        &clone,
+        &[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ],
+    );
+    fixture.git_at(&clone, &["pack-refs", "--all"]);
+
+    let refs = Repo::open(&clone)
+        .expect("open clone")
+        .refs()
+        .expect("refs");
+    let remote: Vec<_> = refs
+        .iter()
+        .filter(|r| r.kind == RefKind::RemoteBranch)
+        .map(|r| {
+            (
+                r.full_name.clone(),
+                r.short_name.clone(),
+                r.target.to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        remote,
+        vec![
+            (
+                "refs/remotes/origin/main".to_string(),
+                "origin/main".to_string(),
+                second,
+            ),
+            (
+                "refs/remotes/origin/topic".to_string(),
+                "origin/topic".to_string(),
+                first,
+            ),
+        ],
+        "origin/HEAD is a symbolic alias and must be skipped"
+    );
+}
+
+#[test]
+#[ignore = "walks STRATA_BENCH_REPO; run explicitly with --ignored"]
+fn bench_walk_commits_per_second() {
+    let path = std::env::var("STRATA_BENCH_REPO")
+        .expect("set STRATA_BENCH_REPO to a repository path to benchmark");
+    let repo = Repo::open(path).expect("open benchmark repo");
+
+    let start = Instant::now();
+    let mut count = 0usize;
+    for commit in repo.walk_commits().expect("walk") {
+        commit.expect("commit");
+        count += 1;
+    }
+    let elapsed = start.elapsed();
+
+    println!(
+        "walked {count} commits in {elapsed:?} ({:.0} commits/sec)",
+        count as f64 / elapsed.as_secs_f64()
+    );
+}
