@@ -22,7 +22,7 @@ use gpui_component::Theme;
 use gpui_component::input::InputState;
 use strata_core::git_cli::CommandRecord;
 use strata_core::session::{DiffRequest, DiffTicket, DiffView, Operation, Session, SessionEvent};
-use strata_core::{FileChange, HeadInfo, Oid};
+use strata_core::{FileChange, HeadInfo, Oid, RefKind};
 
 use crate::branches::{BranchStart, Branches};
 use crate::data::{self, LaneWidth, Source};
@@ -697,6 +697,62 @@ impl RepoView {
         let current = self.selected.unwrap_or(0) as isize;
         let next = (current + delta).clamp(0, len as isize - 1) as usize;
         self.jump(next, cx);
+    }
+
+    /// Selects and scrolls to the commit a sidebar entry points at. Nothing
+    /// is checked out: every ref's history is already in the list.
+    pub(crate) fn reveal_ref(
+        &mut self,
+        kind: RefKind,
+        short_name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let snapshot = session.snapshot();
+        let target = snapshot
+            .refs
+            .iter()
+            .find(|info| info.kind == kind && info.short_name == short_name)
+            .map(|info| info.target);
+        self.reveal_commit(target, window, cx);
+    }
+
+    /// Like [`Self::reveal_ref`] for `stash@{index}`.
+    pub(crate) fn reveal_stash(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let target = session
+            .snapshot()
+            .stashes
+            .iter()
+            .find(|stash| stash.index == index)
+            .map(|stash| stash.id);
+        self.reveal_commit(target, window, cx);
+    }
+
+    fn reveal_commit(&mut self, target: Option<Oid>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(index) = target.and_then(|id| {
+            self.session
+                .as_ref()
+                .and_then(|session| session.snapshot().commit_index.get(&id).copied())
+        }) else {
+            // Not loaded yet (the walk is still streaming) or outside the
+            // walked refs; there is nothing to scroll to.
+            return;
+        };
+        if self.mode != MainMode::History {
+            self.close_worktree(window, cx);
+        }
+        self.jump(index, cx);
     }
 
     fn jump(&mut self, index: usize, cx: &mut Context<Self>) {

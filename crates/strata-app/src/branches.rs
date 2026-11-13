@@ -22,8 +22,8 @@ use gpui_component::{
     input::{Input, InputState},
     menu::{ContextMenuExt as _, PopupMenuItem},
 };
-use strata_core::UpstreamInfo;
 use strata_core::session::{Operation, OperationId};
+use strata_core::{RefKind, UpstreamInfo};
 
 use crate::actions::REPO_VIEW;
 use crate::data::SidebarData;
@@ -241,7 +241,30 @@ impl Branches {
                     Section::Remote => {
                         self.remote_row(name, index, &data.local, enabled, busy, colors, entity)
                     }
-                    Section::Tags | Section::Stashes => row(name, colors).into_any_element(),
+                    Section::Tags => {
+                        let tag = name.clone();
+                        let entity = entity.clone();
+                        row(name, colors)
+                            .id(("tag", index))
+                            .cursor_pointer()
+                            .on_click(move |_, window, cx| {
+                                entity.update(cx, |view, cx| {
+                                    view.reveal_ref(RefKind::Tag, &tag, window, cx)
+                                });
+                            })
+                            .into_any_element()
+                    }
+                    // Stash rows are listed in stash@{N} order.
+                    Section::Stashes => {
+                        let entity = entity.clone();
+                        row(name, colors)
+                            .id(("stash", index))
+                            .cursor_pointer()
+                            .on_click(move |_, window, cx| {
+                                entity.update(cx, |view, cx| view.reveal_stash(index, window, cx));
+                            })
+                            .into_any_element()
+                    }
                 });
             }
         }
@@ -338,20 +361,20 @@ impl Branches {
             return row.into_any_element();
         }
 
-        if !busy {
-            let click_entity = entity.clone();
-            let branch = name.to_owned();
-            row = row.on_click(move |event, window, cx| {
-                if event.click_count() < 2 || active {
-                    return;
-                }
-                let branch = branch.clone();
-                click_entity.update(cx, |view, cx| {
+        // One click shows the branch in the graph; a second one checks it out.
+        let click_entity = entity.clone();
+        let branch = name.to_owned();
+        row = row.on_click(move |event, window, cx| {
+            let branch = branch.clone();
+            click_entity.update(cx, |view, cx| {
+                if event.click_count() < 2 {
+                    view.reveal_ref(RefKind::LocalBranch, &branch, window, cx);
+                } else if !busy && !active {
                     let label = format!("check out {branch}");
                     view.run_operation(Operation::Checkout { branch }, label, window, cx);
-                });
+                }
             });
-        }
+        });
 
         let entity_menu = entity.clone();
         let branch = name.to_owned();
@@ -456,22 +479,21 @@ impl Branches {
         // Double-clicking `origin/foo` switches to `foo` when it exists and
         // creates it from the remote ref otherwise.
         let existing = local.iter().any(|branch| branch == &local_name);
-        let row_element = if busy {
-            row_element
-        } else {
+        let row_element = {
             let click_entity = entity.clone();
             let remote = name.to_owned();
             let target = local_name.clone();
             row_element
                 .cursor_pointer()
                 .on_click(move |event, window, cx| {
-                    if event.click_count() < 2 {
-                        return;
-                    }
                     let remote = remote.clone();
                     let target = target.clone();
                     click_entity.update(cx, |view, cx| {
-                        checkout_remote(view, &remote, &target, existing, window, cx)
+                        if event.click_count() < 2 {
+                            view.reveal_ref(RefKind::RemoteBranch, &remote, window, cx);
+                        } else if !busy {
+                            checkout_remote(view, &remote, &target, existing, window, cx)
+                        }
                     });
                 })
         };
