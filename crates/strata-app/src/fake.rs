@@ -1,23 +1,22 @@
-//! Synthetic data for the phase-0 renderer benchmark.
+//! Synthetic data for the `--fake` render benchmark.
 //!
-//! `GraphLayout::push` is still a stub, so the app cannot ask `strata-core` for
-//! graph geometry yet. This module simulates a commit DAG and writes the
-//! resulting [`GraphRow`]s directly, following the geometry model documented in
-//! `strata-core::graph`. The renderer only ever sees [`GraphRow`], so switching
-//! to the real layout means replacing [`FakeRepo::generate`] and nothing else.
+//! A seeded simulation decides the shape of a commit DAG (which commits branch,
+//! merge or end), and the rows are laid out by the same
+//! [`GraphLayout`](strata_core::graph::GraphLayout) a real repository uses. The
+//! benchmark therefore draws exactly the geometry users will see, including the
+//! first and last rows.
 
 use std::ops::Range;
 
+use strata_core::Oid;
 use strata_core::diff::{DiffLine, FileDiff, Hunk, LineKind};
-use strata_core::graph::{GraphRows, Half, PassThrough, Segment};
+use strata_core::graph::{GraphLayout, GraphRows};
 
 /// Number of rows the benchmark hands to the commit list.
 pub const COMMIT_COUNT: usize = 200_000;
-/// Palette slots the renderer has to map, matching `Segment::color`.
-pub const LANE_COLORS: u16 = 8;
 
-/// Lanes are reused aggressively and the graph column is a fixed width, so the
-/// cap keeps the column narrow enough to leave room for the commit columns.
+/// The simulation reuses lanes aggressively so the graph column stays narrow
+/// enough to leave room for the commit columns.
 const MAX_LANES: usize = 6;
 /// 2026-11-13T00:00:00Z, so generated dates look current.
 const BASE_TIME: i64 = 1_794_528_000;
@@ -41,17 +40,18 @@ pub struct FakeRepo {
 }
 
 impl FakeRepo {
-    /// Walks a simulated DAG once, emitting one row per commit in display
-    /// order. Commits on the same lane are emitted in a run so the graph reads
-    /// like `git log --graph` rather than a breadth-first walk.
+    /// Simulates a DAG in display order (children before parents) and lays it
+    /// out row by row. Commits on the same lane are emitted in a run so the
+    /// graph reads like `git log --graph` rather than a breadth-first walk.
     pub fn generate(count: usize) -> Self {
         let mut rng = Rng(0x5EED_1234_9ABC_DEF1);
         let mut next_id = 1u64;
-        let mut next_color = 1u16;
-        let mut lanes: Vec<Option<Pending>> = vec![Some(Pending { id: 0, color: 0 })];
+        // Each slot holds the id a lane is waiting to see as a commit.
+        let mut lanes: Vec<Option<u64>> = vec![Some(0)];
         let mut commits = Vec::with_capacity(count);
+        let mut layout = GraphLayout::new();
         let mut graph = GraphRows::new();
-        let mut max_width = 1u16;
+        let mut parents: Vec<Oid> = Vec::with_capacity(2);
         let mut last_lane = 0usize;
 
         for index in 0..count {
@@ -63,80 +63,37 @@ impl FakeRepo {
             last_lane = current;
 
             let node = lanes[current].expect("the chosen lane has a pending commit");
-            let mut segments = Vec::with_capacity(lanes.len() + 2);
-            let mut width = current as u16 + 1;
-
+            // Other lanes waiting for the same commit converge on it here.
             for (lane, slot) in lanes.iter_mut().enumerate() {
-                if lane == current {
-                    continue;
-                }
-                let Some(pending) = *slot else { continue };
-                width = width.max(lane as u16 + 1);
-                if pending.id == node.id {
-                    // Two children pointed at this commit, so this lane folds
-                    // into the node's lane over the top half of the row.
-                    segments.push(segment(
-                        lane as u16,
-                        current as u16,
-                        Half::Top,
-                        pending.color,
-                    ));
+                if lane != current && *slot == Some(node) {
                     *slot = None;
-                } else {
-                    // A lane that just passes through the row is a top half
-                    // plus a bottom half on the same lane.
-                    segments.push(segment(lane as u16, lane as u16, Half::Top, pending.color));
-                    segments.push(segment(
-                        lane as u16,
-                        lane as u16,
-                        Half::Bottom,
-                        pending.color,
-                    ));
                 }
             }
-            segments.push(segment(
-                current as u16,
-                current as u16,
-                Half::Top,
-                node.color,
-            ));
 
-            // Counted after folding, because the lanes that converged on this
-            // commit are already gone: ending the branch must still leave at
-            // least one lane alive for the next row.
+            parents.clear();
             let remaining = lanes.iter().filter(|slot| slot.is_some()).count();
-            let ends_branch = remaining > 1 && rng.chance(0.03);
+            let last_row = index + 1 == count;
+            // Ending a branch must still leave a lane alive for the next row.
+            let ends_branch = last_row || (remaining > 1 && rng.chance(0.03));
             if ends_branch {
                 lanes[current] = None;
             } else {
-                // Occasionally the commit is a merge: one of its parents is a
-                // commit another lane is already waiting for, which makes the
-                // two lanes converge later on.
+                // Occasionally the first parent is a commit another lane is
+                // already waiting for, so the two lanes converge later on.
                 let join = if rng.chance(0.06) {
                     rng.pick_occupied_except(&lanes, current)
                 } else {
                     None
                 };
-
-                if let Some(target) = join {
-                    let pending = lanes[target].expect("occupied lane");
-                    lanes[current] = Some(pending);
-                    segments.push(segment(
-                        current as u16,
-                        target as u16,
-                        Half::Bottom,
-                        pending.color,
-                    ));
-                } else {
-                    let color = if rng.chance(0.75) {
-                        node.color
-                    } else {
-                        take_color(&mut next_color)
-                    };
-                    lanes[current] = Some(Pending { id: next_id, color });
-                    next_id += 1;
-                    segments.push(segment(current as u16, current as u16, Half::Bottom, color));
-                }
+                let first = match join {
+                    Some(target) => lanes[target].expect("occupied lane"),
+                    None => {
+                        next_id += 1;
+                        next_id - 1
+                    }
+                };
+                lanes[current] = Some(first);
+                parents.push(oid(first));
 
                 // A second parent forks a lane. If none is free the commit
                 // simply stays linear.
@@ -146,48 +103,22 @@ impl FakeRepo {
                     if lane == lanes.len() {
                         lanes.push(None);
                     }
-                    let color = take_color(&mut next_color);
-                    lanes[lane] = Some(Pending { id: next_id, color });
+                    lanes[lane] = Some(next_id);
+                    parents.push(oid(next_id));
                     next_id += 1;
-                    segments.push(segment(current as u16, lane as u16, Half::Bottom, color));
-                    width = width.max(lane as u16 + 1);
                 }
             }
 
-            max_width = max_width.max(width);
-            // A lane with a straight top and bottom half that is not the
-            // node's own lane is a pass-through; everything else is an edge.
-            let node_lane = current as u16;
-            let straight = |half: Half, lane: u16| {
-                segments
-                    .iter()
-                    .any(|s| s.half == half && s.from_lane == lane && s.to_lane == lane)
-            };
-            let passes: Vec<PassThrough> = segments
-                .iter()
-                .filter(|s| s.half == Half::Top && s.from_lane == s.to_lane)
-                .filter(|s| s.from_lane != node_lane && straight(Half::Bottom, s.from_lane))
-                .map(|s| PassThrough {
-                    lane: s.from_lane,
-                    color: s.color,
-                })
-                .collect();
-            let edges: Vec<Segment> = segments
-                .iter()
-                .copied()
-                .filter(|s| {
-                    !(s.from_lane == s.to_lane && passes.iter().any(|p| p.lane == s.from_lane))
-                })
-                .collect();
-            graph.push_row(node_lane, node.color, width, &passes, &edges);
+            layout.push(oid(node), &parents, &mut graph);
             commits.push(CommitRow {
-                id: node.id,
+                id: node,
                 author: rng.below(24) as u8,
                 time: BASE_TIME - index as i64 * SECONDS_PER_COMMIT,
                 summary_seed: rng.next_u32(),
             });
         }
 
+        let max_width = graph.iter().map(|row| row.width).max().unwrap_or(1);
         Self {
             commits,
             graph,
@@ -196,28 +127,14 @@ impl FakeRepo {
     }
 }
 
-#[derive(Clone, Copy)]
-struct Pending {
-    id: u64,
-    color: u16,
+/// Synthetic ids only need to be distinct; the layout never reads objects.
+fn oid(id: u64) -> Oid {
+    let mut bytes = [0u8; 20];
+    bytes[12..].copy_from_slice(&id.to_be_bytes());
+    Oid::from_bytes_or_panic(&bytes)
 }
 
-fn segment(from_lane: u16, to_lane: u16, half: Half, color: u16) -> Segment {
-    Segment {
-        from_lane,
-        to_lane,
-        half,
-        color,
-    }
-}
-
-fn take_color(next: &mut u16) -> u16 {
-    let color = *next;
-    *next = (*next + 1) % LANE_COLORS;
-    color
-}
-
-fn free_lane(lanes: &[Option<Pending>], current: usize) -> Option<usize> {
+fn free_lane(lanes: &[Option<u64>], current: usize) -> Option<usize> {
     lanes
         .iter()
         .enumerate()
@@ -255,7 +172,7 @@ impl Rng {
         unit < probability
     }
 
-    fn pick_occupied(&mut self, lanes: &[Option<Pending>]) -> Option<usize> {
+    fn pick_occupied(&mut self, lanes: &[Option<u64>]) -> Option<usize> {
         let mut seen = 0;
         let target = self.below(lanes.iter().filter(|slot| slot.is_some()).count().max(1));
         for (lane, slot) in lanes.iter().enumerate() {
@@ -269,7 +186,7 @@ impl Rng {
         None
     }
 
-    fn pick_occupied_except(&mut self, lanes: &[Option<Pending>], except: usize) -> Option<usize> {
+    fn pick_occupied_except(&mut self, lanes: &[Option<u64>], except: usize) -> Option<usize> {
         let candidates: Vec<usize> = lanes
             .iter()
             .enumerate()
@@ -536,6 +453,8 @@ fn byte_range(chars: &[(usize, char)], prefix: usize, suffix: usize, len: usize)
 
 #[cfg(test)]
 mod tests {
+    use strata_core::graph::Half;
+
     use super::*;
 
     #[test]
@@ -546,13 +465,24 @@ mod tests {
             for segment in row.edges {
                 assert!(segment.from_lane < row.width);
                 assert!(segment.to_lane < row.width);
-                assert!(segment.color < LANE_COLORS);
             }
             for pass in row.passes {
                 assert!(pass.lane < row.width);
-                assert!(pass.color < LANE_COLORS);
             }
         }
+    }
+
+    #[test]
+    fn first_row_has_nothing_above_its_node() {
+        let repo = FakeRepo::generate(500);
+        let first = repo.graph.get(0).expect("rows were generated");
+        assert!(first.passes.is_empty());
+        assert!(
+            first
+                .edges
+                .iter()
+                .all(|segment| segment.half == Half::Bottom)
+        );
     }
 
     #[test]
