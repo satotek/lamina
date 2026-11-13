@@ -28,6 +28,7 @@ use strata_core::{ChangeKind, FileChange, HeadInfo, RepoState, WorktreeStatus};
 use crate::conflicts::{Conflicts, MarkFileResolved, UseOurs, UseTheirs};
 use crate::diff_view::{self, DiffColors, Row as DiffRow, RowOptions};
 use crate::repo_view::RepoView;
+use crate::scrollbar::WithScrollbar as _;
 
 /// Key context of the file lists and the diff picker.
 ///
@@ -1873,6 +1874,7 @@ impl WorktreePanel {
                 .collect::<Vec<_>>()
         })
         .track_scroll(&scroll)
+        .with_scrollbar(&scroll)
         .h(px(ROW_HEIGHT * visible_rows as f32))
         .flex_none();
 
@@ -2052,6 +2054,7 @@ impl WorktreePanel {
                 .collect::<Vec<_>>()
         })
         .track_scroll(&self.diff_scroll)
+        .with_scrollbar(&self.diff_scroll)
         .flex_1()
         .min_h_0()
         .into_any_element()

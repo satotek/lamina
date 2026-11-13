@@ -24,6 +24,7 @@ use strata_core::session::{DiffRequest, DiffTicket, DiffView, QueryTicket};
 use crate::data;
 use crate::diff_view::{self, DiffColors, Row as DiffRow};
 use crate::repo_view::RepoView;
+use crate::scrollbar::WithScrollbar as _;
 use crate::search::{QuerySlot, Ready};
 
 const LIST_WIDTH: f32 = 520.0;
@@ -549,6 +550,7 @@ impl RepoView {
             },
         )
         .track_scroll(&history.scroll)
+        .with_scrollbar(&history.scroll)
         .w(px(LIST_WIDTH))
         .flex_none()
         .border_r_1()
@@ -645,6 +647,7 @@ impl RepoView {
             },
         )
         .track_scroll(&history.diff_scroll)
+        .with_scrollbar(&history.diff_scroll)
         .flex_1()
         .min_h_0()
         .into_any_element()

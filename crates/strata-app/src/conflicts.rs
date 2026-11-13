@@ -25,6 +25,7 @@ use strata_core::session::{ConflictSide, Operation, OperationId, RepoSnapshot};
 use strata_core::{ConflictEntry, ConflictKind, ConflictSides, RepoState};
 
 use crate::repo_view::RepoView;
+use crate::scrollbar::WithScrollbar as _;
 use crate::worktree_panel::WORKTREE_PANEL;
 
 actions!(strata_conflicts, [UseOurs, UseTheirs, MarkFileResolved]);
@@ -1011,6 +1012,7 @@ impl Conflicts {
             },
         )
         .track_scroll(&self.list_scroll)
+        .with_scrollbar(&self.list_scroll)
         .h(px(ROW_HEIGHT * visible as f32))
         .flex_none();
 

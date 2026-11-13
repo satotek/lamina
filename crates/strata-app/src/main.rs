@@ -16,6 +16,7 @@ mod graph_canvas;
 mod metrics;
 mod remote;
 mod repo_view;
+mod scrollbar;
 mod search;
 mod worktree_panel;
 

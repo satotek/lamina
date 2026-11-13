@@ -30,6 +30,7 @@ use crate::diff_view::{self, DiffColors, Row as DiffRow};
 use crate::graph_canvas;
 use crate::remote;
 use crate::remote::{Command, FetchRemotes, PullBranch, PushBranch};
+use crate::scrollbar::WithScrollbar as _;
 use crate::search::{
     Field, FocusSearch, SEARCH_BAR, SearchDismiss, SearchNext, SearchPrevious, SearchSubmit,
 };
@@ -409,6 +410,7 @@ impl RepoView {
                 .collect::<Vec<_>>()
         })
         .track_scroll(&self.commit_scroll)
+        .with_scrollbar(&self.commit_scroll)
         .flex_1();
 
         let body: AnyElement = if count == 0 {
@@ -705,6 +707,7 @@ impl RepoView {
                 .collect::<Vec<_>>()
         })
         .track_scroll(&self.file_scroll)
+        .with_scrollbar(&self.file_scroll)
         .w(px(FILE_LIST_WIDTH))
         .flex_none()
         .border_r_1()
@@ -747,6 +750,7 @@ impl RepoView {
                 .collect::<Vec<_>>()
         })
         .track_scroll(&self.diff_scroll)
+        .with_scrollbar(&self.diff_scroll)
         .flex_1()
         .min_h_0()
         .into_any_element()
