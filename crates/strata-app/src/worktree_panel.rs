@@ -1581,6 +1581,9 @@ impl WorktreePanel {
                     "Stage all",
                 )
                 .kind(crate::ui::ButtonKind::Normal)
+                // Header actions sit on a 11 px caption row; anything larger
+                // overflows the 290 px column and clips "Unstage all".
+                .size(crate::ui::ButtonSize::Tiny)
                 .disabled(files.is_empty())
                 .on_click(move |_, _, cx| {
                     entity.update(cx, |this, cx| this.stage_all_worktree(cx));
@@ -1594,6 +1597,9 @@ impl WorktreePanel {
                     "Unstage all",
                 )
                 .kind(crate::ui::ButtonKind::Normal)
+                // Header actions sit on a 11 px caption row; anything larger
+                // overflows the 290 px column and clips "Unstage all".
+                .size(crate::ui::ButtonSize::Tiny)
                 .disabled(files.is_empty())
                 .on_click(move |_, _, cx| {
                     entity.update(cx, |this, cx| this.unstage_all_worktree(cx));

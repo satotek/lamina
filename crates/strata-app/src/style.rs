@@ -400,6 +400,21 @@ pub mod glyph {
     pub const TAG: &[u8] = include_bytes!("../assets/icons/tag.svg");
     pub const ARCHIVE: &[u8] = include_bytes!("../assets/icons/archive.svg");
     pub const COMMIT: &[u8] = include_bytes!("../assets/icons/commit.svg");
+    /// "STRATA" as outlines; see resources/icon/wordmark.py.
+    pub const WORDMARK: &[u8] = include_bytes!("../assets/icons/wordmark.svg");
+}
+
+/// The title bar's "STRATA" wordmark at `height`, in `color`.
+pub fn wordmark(height: f32, color: Hsla) -> Icon {
+    // The SVG's viewBox is 10400 x 1550; keep that aspect so the letters are
+    // not squeezed into the icon's default square.
+    const ASPECT: f32 = 10400.0 / 1550.0;
+    // No `with_size`: it forces a square that overrides the width set here.
+    Icon::default()
+        .data(glyph::WORDMARK)
+        .w(px(height * ASPECT))
+        .h(px(height))
+        .text_color(color)
 }
 
 /// A [`glyph`] at `size`, in `color`.

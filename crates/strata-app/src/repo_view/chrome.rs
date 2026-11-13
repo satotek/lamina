@@ -339,7 +339,19 @@ impl RepoView {
                     .items_center()
                     .gap_2()
                     .flex_none()
-                    .child(style::app_mark(20.0))
+                    // The app's name reads as a label, not a control: muted
+                    // spaced capitals, set off from the repository chip by a
+                    // divider so a repository named "strata" is not confused
+                    // with it.
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(7.0))
+                            .child(style::app_mark(16.0))
+                            .child(style::wordmark(9.5, design.muted)),
+                    )
+                    .child(div().w(px(1.0)).h(px(18.0)).mx_1().bg(design.border))
                     .child(repository)
                     .child(branch_chip),
             )
@@ -1484,16 +1496,18 @@ fn stash_button(design: &Design) -> AnyElement {
         .ghost()
         .w(px(52.0))
         .h(px(40.0))
-        .text_size(px(10.0))
         .on_click(|_, window, cx| {
             window.dispatch_action(Box::new(actions::StashChanges), cx);
         })
         .child(
+            // The label size goes on the content: the button sets its own text
+            // size, which would override one set on the button itself.
             div()
                 .flex()
                 .flex_col()
                 .items_center()
                 .gap(px(2.0))
+                .text_size(px(10.0))
                 .child(glyph(style::glyph::ARCHIVE, 16.0, design.text))
                 .child("Stash"),
         )
