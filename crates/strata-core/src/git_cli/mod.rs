@@ -17,6 +17,7 @@ mod progress;
 mod rebase;
 
 pub use command_log::{CommandLog, CommandRecord, MAX_CAPTURE_BYTES, MAX_LOG_ENTRIES, StreamLine};
+pub use history::CherryPickOutcome;
 pub use ops::{ApplyMode, CommitOptions, StashEntry};
 pub use rebase::{
     MoveDirection, RebaseAction, RebaseStep, drop_commit, move_commit, reword_commit,
@@ -120,15 +121,30 @@ impl Git {
     /// [`Error::GitCommand`] carrying the captured stderr.
     pub fn run<S: AsRef<str>>(&self, args: &[S], stdin: Option<&[u8]>) -> Result<Output> {
         let args = to_args(args);
+        let output = self.run_output(&args, stdin)?;
+        if output.status.success() {
+            Ok(output)
+        } else {
+            Err(command_error(&args, &output))
+        }
+    }
+
+    /// Run `git` and return its output whatever the exit status; only a spawn
+    /// or I/O failure is an error.
+    ///
+    /// A multi-commit cherry-pick expects exit 1 both for a conflict and for an
+    /// empty pick, and needs the streams to tell them apart, so it cannot use
+    /// [`run`](Self::run), which folds a failure into a message.
+    fn run_output(&self, args: &[String], stdin: Option<&[u8]>) -> Result<Output> {
         let started_at = SystemTime::now();
-        let mut command = self.command(&args);
+        let mut command = self.command(args);
         if stdin.is_some() {
             command.stdin(Stdio::piped());
         }
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
-                self.log_spawn_failure(&args, started_at, &error);
+                self.log_spawn_failure(args, started_at, &error);
                 return Err(error.into());
             }
         };
@@ -143,12 +159,8 @@ impl Git {
             });
         }
         let output = child.wait_with_output()?;
-        self.log_output(&args, started_at, &output);
-        if output.status.success() {
-            Ok(output)
-        } else {
-            Err(command_error(&args, &output))
-        }
+        self.log_output(args, started_at, &output);
+        Ok(output)
     }
 
     /// Like [`run`](Self::run), but reports stderr lines as they arrive.

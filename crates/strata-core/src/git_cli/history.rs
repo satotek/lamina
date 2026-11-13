@@ -13,7 +13,26 @@ use crate::repo::Repo;
 use crate::session::ResetMode;
 use crate::{Error, Oid, RepoState, Result};
 
-use super::{Git, checked_ref};
+use super::{Git, checked_ref, command_error};
+
+/// `--empty=drop` arrived in git 2.45; older git stops on an empty pick.
+const EMPTY_DROP_VERSION: (u32, u32, u32) = (2, 45, 0);
+
+/// What a multi-commit cherry-pick left out.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CherryPickOutcome {
+    /// Commits dropped because the branch already carried their change.
+    pub skipped: Vec<Oid>,
+}
+
+/// How a pick sequence moves past a commit that becomes empty.
+#[derive(Clone, Copy)]
+enum EmptyPicks {
+    /// git drops it by itself (`--empty=drop`).
+    Drop,
+    /// git stops on it; detect the empty stop and run `--skip`.
+    Skip,
+}
 
 impl Git {
     /// Write `content` as the worktree form of `path`, then stage it.
@@ -109,6 +128,132 @@ impl Git {
     /// it is skipped to keep the repository clean and reported as an error.
     pub fn cherry_pick(&self, commit: Oid) -> Result<()> {
         self.apply_commit("cherry-pick", commit, RepoState::CherryPicking, false)
+    }
+
+    /// `git cherry-pick <commit>...` for several commits, oldest first.
+    ///
+    /// A pick whose change the branch already has is dropped instead of
+    /// stopping the sequence, and the remaining commits still apply. Git does
+    /// that itself from 2.45 (`--empty=drop`); an older git stops on the empty
+    /// pick, which is then skipped by hand. A real conflict still stops the
+    /// sequence in the cherry-picking state for the user to resolve, exactly
+    /// like [`Git::cherry_pick`].
+    pub fn cherry_pick_many(&self, commits: &[Oid]) -> Result<CherryPickOutcome> {
+        if commits.is_empty() {
+            return Ok(CherryPickOutcome::default());
+        }
+        // A failed `git --version` does not block the pick: the skip path works
+        // on every supported git and the pick itself would report the failure.
+        let empty = match self.version() {
+            Ok(version) if version >= EMPTY_DROP_VERSION => EmptyPicks::Drop,
+            _ => EmptyPicks::Skip,
+        };
+        self.cherry_pick_sequence(commits, empty)
+    }
+
+    fn cherry_pick_sequence(
+        &self,
+        commits: &[Oid],
+        empty: EmptyPicks,
+    ) -> Result<CherryPickOutcome> {
+        let merges = self.merge_commits(commits)?;
+        // `-m` applies to every commit on one command line, so a run that mixes
+        // a merge with anything else cannot be replayed as one sequence.
+        if merges > 0 && commits.len() > 1 {
+            return Err(Error::other(
+                "cherry-picking several commits cannot include a merge commit; pick it on its own",
+            ));
+        }
+
+        let mut args = vec!["cherry-pick".to_owned()];
+        if matches!(empty, EmptyPicks::Drop) {
+            args.push("--empty=drop".to_owned());
+        }
+        if merges == 1 {
+            args.extend(["-m".to_owned(), "1".to_owned()]);
+        }
+        args.extend(commits.iter().map(ToString::to_string));
+
+        self.pick_sequence(args, empty)
+    }
+
+    /// Runs a pick command until the sequence finishes or a conflict stops it.
+    ///
+    /// A pick that is still empty (one that was empty to begin with) is skipped
+    /// by hand. Each `--skip` continues the sequence on its own, so the next
+    /// iteration handles a later empty pick or conflict too.
+    fn pick_sequence(&self, mut args: Vec<String>, empty: EmptyPicks) -> Result<CherryPickOutcome> {
+        let mut skipped = Vec::new();
+        loop {
+            let output = self.run_output(&args, None)?;
+            if output.status.success() {
+                if matches!(empty, EmptyPicks::Drop) {
+                    skipped.extend(dropped_commits(&output.stderr));
+                }
+                return Ok(CherryPickOutcome { skipped });
+            }
+
+            let error = command_error(&args, &output);
+            if matches!(empty, EmptyPicks::Drop) {
+                // Drops made before an exit 1 remain skipped; the sequence
+                // stops on the commit that failed, not on them.
+                skipped.extend(dropped_commits(&output.stderr));
+            }
+            if !matches!(error, Error::GitCommand { code: Some(1), .. }) {
+                return Err(error);
+            }
+            if self.has_unmerged_paths()? {
+                return Ok(CherryPickOutcome { skipped });
+            }
+
+            if is_empty_commit_output(&error) && self.state()? == RepoState::CherryPicking {
+                // `--empty=drop` already handled a commit that became empty;
+                // this is one that was empty to begin with, which even that
+                // flag leaves stopped in the sequence.
+                if let Some(commit) = self.cherry_pick_head()? {
+                    skipped.push(commit);
+                }
+                args = vec!["cherry-pick".to_owned(), "--skip".to_owned()];
+                continue;
+            }
+
+            // Another exit 1 that left the pick in progress (for example a
+            // failed commit hook) belongs to the existing stopped flow.
+            if self.state()? == RepoState::CherryPicking {
+                return Ok(CherryPickOutcome { skipped });
+            }
+            return Err(error);
+        }
+    }
+
+    /// How many of `commits` are merge commits, in one `rev-list` call.
+    fn merge_commits(&self, commits: &[Oid]) -> Result<usize> {
+        let mut stdin = commits
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        stdin.push('\n');
+        let output = self.run(
+            &["rev-list", "--parents", "--no-walk", "--stdin"],
+            Some(stdin.as_bytes()),
+        )?;
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| line.split_whitespace().count() > 2)
+            .count())
+    }
+
+    /// The commit git stopped on in a cherry-pick sequence, if any.
+    fn cherry_pick_head(&self) -> Result<Option<Oid>> {
+        match self.run(
+            &["rev-parse", "--verify", "--quiet", "CHERRY_PICK_HEAD"],
+            None,
+        ) {
+            Ok(output) => Ok(String::from_utf8_lossy(&output.stdout).trim().parse().ok()),
+            Err(Error::GitCommand { code: Some(1), .. }) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     /// `git revert --no-edit <commit>` (`-m 1` for a merge), with the same
@@ -318,5 +463,66 @@ fn empty_commit_message(stopped: RepoState) -> &'static str {
     match stopped {
         RepoState::Reverting => "The commit is already reverted: reverting it changes nothing.",
         _ => "The commit is already applied: cherry-picking it changes nothing.",
+    }
+}
+
+/// Commits git reports as dropped, from lines like
+/// `dropping <oid> <subject> -- patch contents already upstream`.
+///
+/// Only `--empty=drop` prints these, and `LC_ALL=C` pins the wording. A git
+/// whose message differs only loses the note, not the skip.
+fn dropped_commits(stderr: &[u8]) -> Vec<Oid> {
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .filter_map(|line| {
+            let rest = line.trim().strip_prefix("dropping ")?;
+            rest.split_whitespace().next()?.parse().ok()
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::TestRepo;
+
+    #[test]
+    fn parses_dropped_commit_lines() {
+        let oid: Oid = "0705b8830170255f6e2bfda69769a64d028c2e7b"
+            .parse()
+            .expect("oid");
+        let line = format!("dropping {oid} two -- patch contents already upstream\n");
+        assert_eq!(dropped_commits(line.as_bytes()), vec![oid]);
+        assert!(dropped_commits(b"error: could not apply abc\n").is_empty());
+    }
+
+    /// Git before 2.45 has no `--empty=drop`; the skip path must still drop an
+    /// empty middle pick and apply the rest.
+    #[test]
+    fn the_skip_path_drops_an_empty_middle_pick() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "base\n");
+        repo.commit("base");
+        repo.git(&["checkout", "-q", "-b", "side"]);
+        repo.write("one.txt", "one\n");
+        let first = repo.commit("one");
+        repo.write("shared.txt", "shared\n");
+        let empty = repo.commit("shared");
+        repo.write("three.txt", "three\n");
+        let last = repo.commit("three");
+        repo.git(&["checkout", "-q", "main"]);
+        repo.write("shared.txt", "shared\n");
+        repo.commit("shared already");
+
+        let outcome = repo
+            .git_handle()
+            .cherry_pick_sequence(&[first, empty, last], EmptyPicks::Skip)
+            .expect("the skip path applies the remaining commits");
+
+        assert_eq!(outcome.skipped, vec![empty]);
+        assert_eq!(repo.open().state().expect("state"), RepoState::Normal);
+        assert_eq!(repo.git(&["log", "-1", "--format=%s"]).trim(), "three");
+        assert_eq!(repo.git(&["rev-list", "--count", "HEAD"]).trim(), "4");
+        assert_eq!(repo.git(&["status", "--porcelain=v2"]), "");
     }
 }

@@ -181,6 +181,7 @@ fn changes_refs(operation: &Operation) -> bool {
             | Operation::MergeAbort
             | Operation::MergeContinue
             | Operation::CherryPick { .. }
+            | Operation::CherryPickMany { .. }
             | Operation::Revert { .. }
             | Operation::RebaseEdit { .. }
             | Operation::Reset { .. }
@@ -282,6 +283,28 @@ fn execute(shared: &Shared, id: OperationId, operation: &Operation) -> Result<()
         Operation::OpenMergetool { path } => git.mergetool(path),
         Operation::ResolveWithContent { path, content } => git.resolve_with_content(path, content),
         Operation::CherryPick { commit } => git.cherry_pick(*commit),
+        Operation::CherryPickMany { commits } => {
+            let mut progress = ProgressReporter::new(shared, id);
+            let result = git.cherry_pick_many(commits);
+            if let Ok(outcome) = &result
+                && !outcome.skipped.is_empty()
+            {
+                let ids: Vec<String> = outcome
+                    .skipped
+                    .iter()
+                    .map(|commit| {
+                        let id = commit.to_string();
+                        id[..7.min(id.len())].to_owned()
+                    })
+                    .collect();
+                progress.line(
+                    &format!("skipped {} (already applied)", ids.join(", ")),
+                    None,
+                );
+            }
+            progress.finish();
+            result.map(|_| ())
+        }
         Operation::Revert { commit } => git.revert(*commit),
         Operation::RebaseEdit { onto, steps } => git.rebase_edit(*onto, steps),
         Operation::Reset { target, mode } => git.reset(*target, *mode),

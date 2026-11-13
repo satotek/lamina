@@ -354,6 +354,14 @@ pub enum Operation {
     CherryPick {
         commit: Oid,
     },
+    /// `git cherry-pick <commit>...` in the order given, oldest first.
+    ///
+    /// Picks whose change the branch already has are skipped and reported as
+    /// progress output instead of stopping the sequence; a real conflict stops
+    /// it with `state == CherryPicking`, like [`Operation::CherryPick`].
+    CherryPickMany {
+        commits: Vec<Oid>,
+    },
     /// `git revert --no-edit <commit>` (`-m 1` for a merge).
     Revert {
         commit: Oid,

@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use strata_core::git_cli::Git;
 use strata_core::repo::Repo;
 use strata_core::session::{
-    Operation, OperationId, RepoSnapshot, ResetMode, Session, SessionEvent,
+    InProgressDetails, Operation, OperationId, RepoSnapshot, ResetMode, Session, SessionEvent,
 };
 use strata_core::{ConflictEntry, ConflictKind, HeadInfo, Oid, RefKind, RepoState};
 use tempfile::TempDir;
@@ -164,6 +164,14 @@ fn conflict(path: &str, kind: ConflictKind) -> ConflictEntry {
     }
 }
 
+/// Commit subjects of HEAD's history, newest first.
+fn subjects(repo: &TestRepo) -> Vec<String> {
+    repo.git(&["log", "--format=%s"])
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
 struct Harness {
     // Session first: it owns threads and a watcher that must stop before the
     // temporary repository disappears.
@@ -238,6 +246,52 @@ impl Harness {
     fn run(&self, operation: Operation) -> Option<String> {
         let id = self.session.run(operation);
         self.wait_for_operation(id)
+    }
+
+    /// Like `run`, but keeps the operation's progress notes so a test can
+    /// check what the user would see.
+    fn run_with_progress(&self, operation: Operation) -> (Option<String>, Vec<String>) {
+        let id = self.session.run(operation);
+        let mut notes = Vec::new();
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            let now = Instant::now();
+            assert!(now < deadline, "timed out waiting for operation {id:?}");
+            match self.events.recv_timeout(deadline - now) {
+                Ok(SessionEvent::OperationProgress {
+                    id: progress_id,
+                    text,
+                    ..
+                }) if progress_id == id => notes.push(text),
+                Ok(SessionEvent::OperationFinished {
+                    id: finished,
+                    error,
+                }) if finished == id => return (error, notes),
+                Ok(_) => {}
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => panic!("session event channel closed"),
+            }
+        }
+    }
+
+    /// Asks the session for the stopped operation's details and waits for the
+    /// answer, like the in-progress banner does.
+    fn wait_for_details(&self) -> Option<InProgressDetails> {
+        let ticket = self.session.request_in_progress_details();
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            let now = Instant::now();
+            assert!(now < deadline, "timed out waiting for in-progress details");
+            match self.events.recv_timeout(deadline - now) {
+                Ok(SessionEvent::InProgressDetailsReady {
+                    ticket: ready,
+                    details,
+                }) if ready == ticket => return details,
+                Ok(_) => {}
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => panic!("session event channel closed"),
+            }
+        }
     }
 }
 
@@ -336,6 +390,270 @@ fn cherry_pick_of_an_already_applied_commit_is_skipped_and_reported() {
         "2",
         "the pick must not add a commit to main"
     );
+}
+
+#[test]
+fn a_cherry_pick_sequence_skips_an_empty_commit_in_the_middle() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "base\n");
+    repo.commit_all("base");
+    repo.git(&["checkout", "-q", "-b", "side"]);
+    repo.write("one.txt", "one\n");
+    repo.commit_all("one");
+    repo.write("shared.txt", "shared\n");
+    repo.commit_all("shared");
+    let empty = repo.head();
+    repo.write("three.txt", "three\n");
+    repo.commit_all("three");
+    let first = repo.oid("side~2");
+    let last = repo.head();
+
+    repo.git(&["checkout", "-q", "main"]);
+    repo.write("shared.txt", "shared\n");
+    repo.commit_all("shared already");
+
+    let outcome = repo
+        .git_handle()
+        .cherry_pick_many(&[first, empty, last])
+        .expect("a sequence with an empty middle pick succeeds");
+
+    assert_eq!(
+        outcome.skipped,
+        vec![empty],
+        "the middle pick is reported as skipped"
+    );
+    assert_eq!(repo.open().state().expect("state"), RepoState::Normal);
+    assert_eq!(subjects(&repo), ["three", "one", "shared already", "base"]);
+    assert_eq!(repo.read("one.txt"), "one\n");
+    assert_eq!(repo.read("three.txt"), "three\n");
+    assert_eq!(repo.read("shared.txt"), "shared\n");
+    assert_eq!(repo.status(), "");
+    assert_eq!(repo.git(&["rev-list", "--count", "HEAD"]).trim(), "4");
+    assert!(
+        !repo.path().join(".git/sequencer").exists(),
+        "the finished sequence must not leave its todo behind"
+    );
+}
+
+#[test]
+fn a_cherry_pick_sequence_skips_an_empty_first_commit() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "base\n");
+    repo.commit_all("base");
+    repo.git(&["checkout", "-q", "-b", "side"]);
+    repo.write("shared.txt", "shared\n");
+    repo.commit_all("shared");
+    let empty = repo.head();
+    repo.write("one.txt", "one\n");
+    repo.commit_all("one");
+    repo.write("three.txt", "three\n");
+    repo.commit_all("three");
+    let middle = repo.oid("side~1");
+    let last = repo.head();
+
+    repo.git(&["checkout", "-q", "main"]);
+    repo.write("shared.txt", "shared\n");
+    repo.commit_all("shared already");
+
+    let outcome = repo
+        .git_handle()
+        .cherry_pick_many(&[empty, middle, last])
+        .expect("a sequence whose first pick is empty succeeds");
+
+    assert_eq!(outcome.skipped, vec![empty]);
+    assert_eq!(repo.open().state().expect("state"), RepoState::Normal);
+    assert_eq!(subjects(&repo), ["three", "one", "shared already", "base"]);
+    assert_eq!(repo.status(), "");
+}
+
+#[test]
+fn a_cherry_pick_sequence_skips_an_empty_last_commit() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "base\n");
+    repo.commit_all("base");
+    repo.git(&["checkout", "-q", "-b", "side"]);
+    repo.write("one.txt", "one\n");
+    repo.commit_all("one");
+    let first = repo.head();
+    repo.write("three.txt", "three\n");
+    repo.commit_all("three");
+    let middle = repo.head();
+    repo.write("shared.txt", "shared\n");
+    repo.commit_all("shared");
+    let empty = repo.head();
+
+    repo.git(&["checkout", "-q", "main"]);
+    repo.write("shared.txt", "shared\n");
+    repo.commit_all("shared already");
+
+    let outcome = repo
+        .git_handle()
+        .cherry_pick_many(&[first, middle, empty])
+        .expect("a sequence whose last pick is empty succeeds");
+
+    assert_eq!(outcome.skipped, vec![empty]);
+    assert_eq!(repo.open().state().expect("state"), RepoState::Normal);
+    assert_eq!(subjects(&repo), ["three", "one", "shared already", "base"]);
+    assert_eq!(repo.status(), "");
+}
+
+#[test]
+fn a_cherry_pick_sequence_of_only_empty_picks_leaves_the_branch_alone() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "base\n");
+    repo.commit_all("base");
+    repo.git(&["checkout", "-q", "-b", "side"]);
+    repo.write("one.txt", "one\n");
+    repo.commit_all("one");
+    let first = repo.head();
+    repo.write("two.txt", "two\n");
+    repo.commit_all("two");
+    let middle = repo.head();
+    repo.write("three.txt", "three\n");
+    repo.commit_all("three");
+    let last = repo.head();
+
+    repo.git(&["checkout", "-q", "main"]);
+    repo.write("one.txt", "one\n");
+    repo.write("two.txt", "two\n");
+    repo.write("three.txt", "three\n");
+    repo.commit_all("all already");
+    let before = repo.head();
+
+    let outcome = repo
+        .git_handle()
+        .cherry_pick_many(&[first, middle, last])
+        .expect("a sequence of empty picks is not a failure");
+
+    assert_eq!(outcome.skipped, vec![first, middle, last]);
+    assert_eq!(
+        repo.head(),
+        before,
+        "no empty pick may add a commit to main"
+    );
+    assert_eq!(repo.open().state().expect("state"), RepoState::Normal);
+    assert_eq!(subjects(&repo), ["all already", "base"]);
+    assert_eq!(repo.status(), "");
+    assert_eq!(repo.git(&["rev-list", "--count", "HEAD"]).trim(), "2");
+}
+
+#[test]
+fn a_cherry_pick_sequence_skips_an_initially_empty_commit() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "base\n");
+    repo.commit_all("base");
+    repo.git(&["checkout", "-q", "-b", "side"]);
+    repo.write("one.txt", "one\n");
+    repo.commit_all("one");
+    let first = repo.head();
+    repo.git(&["commit", "-q", "--allow-empty", "-m", "marker"]);
+    let empty = repo.head();
+    repo.write("three.txt", "three\n");
+    repo.commit_all("three");
+    let last = repo.head();
+
+    repo.git(&["checkout", "-q", "main"]);
+
+    let outcome = repo
+        .git_handle()
+        .cherry_pick_many(&[first, empty, last])
+        .expect("a sequence with an initially empty pick succeeds");
+
+    assert_eq!(outcome.skipped, vec![empty]);
+    assert_eq!(repo.open().state().expect("state"), RepoState::Normal);
+    assert_eq!(subjects(&repo), ["three", "one", "base"]);
+    assert_eq!(repo.status(), "");
+}
+
+#[test]
+fn a_cherry_pick_sequence_skips_an_empty_pick_before_a_conflict() {
+    let repo = TestRepo::new();
+    repo.write("conflict.txt", "base\n");
+    repo.commit_all("base");
+    repo.git(&["checkout", "-q", "-b", "side"]);
+    repo.write("shared.txt", "shared\n");
+    repo.commit_all("empty on main");
+    let empty = repo.head();
+    repo.write("conflict.txt", "theirs\n");
+    repo.commit_all("theirs");
+    let conflicting = repo.head();
+    repo.write("three.txt", "three\n");
+    repo.commit_all("three");
+    let last = repo.head();
+
+    repo.git(&["checkout", "-q", "main"]);
+    repo.write("conflict.txt", "ours\n");
+    repo.commit_all("ours");
+    repo.write("shared.txt", "shared\n");
+    repo.commit_all("shared already");
+
+    let harness = Harness::open(repo);
+    harness.wait_for_complete(6);
+
+    let (error, notes) = harness.run_with_progress(Operation::CherryPickMany {
+        commits: vec![empty, conflicting, last],
+    });
+    assert_eq!(
+        error, None,
+        "a conflict stops the sequence; it is not an operation failure"
+    );
+    assert!(
+        notes.iter().any(|note| note.contains("already applied")),
+        "the skipped pick needs a note, got {notes:?}"
+    );
+
+    let stopped = harness.wait_until(|snapshot| {
+        snapshot.state == RepoState::CherryPicking && !snapshot.conflicts.is_empty()
+    });
+    assert_eq!(
+        stopped.conflicts.as_ref(),
+        &vec![conflict("conflict.txt", ConflictKind::BothModified)]
+    );
+    assert_eq!(
+        harness.repo.head(),
+        harness.repo.oid("main"),
+        "only the empty pick was skipped, so no commit was added before the stop"
+    );
+    assert_eq!(harness.repo.read("shared.txt"), "shared\n");
+    assert!(
+        !harness.repo.path().join("three.txt").exists(),
+        "the commit after the conflict must wait for it"
+    );
+
+    let details = harness
+        .wait_for_details()
+        .expect("the stopped sequence has details");
+    let InProgressDetails::CherryPick { commit, remaining } = details else {
+        panic!("expected CherryPick details, got {details:?}");
+    };
+    let commit = commit.expect("CHERRY_PICK_HEAD commit");
+    assert_eq!(commit.id, Some(conflicting));
+    assert_eq!(
+        remaining,
+        Some(2),
+        "the stopped commit and the one after it are still queued"
+    );
+
+    assert_eq!(
+        harness.run(Operation::ResolveWithContent {
+            path: "conflict.txt".into(),
+            content: b"resolved\n".to_vec(),
+        }),
+        None
+    );
+    assert_eq!(harness.run(Operation::ContinueInProgress), None);
+
+    let done = harness.wait_until(|snapshot| {
+        snapshot.state == RepoState::Normal && snapshot.conflicts.is_empty()
+    });
+    assert_eq!(
+        subjects(&harness.repo),
+        ["three", "theirs", "shared already", "ours", "base"]
+    );
+    assert_eq!(harness.repo.read("conflict.txt"), "resolved\n");
+    assert_eq!(harness.repo.read("three.txt"), "three\n");
+    assert_eq!(harness.repo.status(), "");
+    assert_eq!(done.state, RepoState::Normal);
 }
 
 #[test]
