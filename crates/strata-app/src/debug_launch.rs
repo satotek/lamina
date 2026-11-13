@@ -108,12 +108,20 @@ impl TreeTarget {
     }
 }
 
+/// Target for `--blame <rev>:<path>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BlameTarget {
+    pub rev: String,
+    pub path: String,
+}
+
 /// Debug launch options applied once the window and first snapshot are ready.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct DebugLaunch {
     pub select: Option<String>,
     pub file_history: Option<String>,
     pub tree: Option<TreeTarget>,
+    pub blame: Option<BlameTarget>,
     pub worktree: bool,
     pub dialog: Option<DebugDialog>,
     pub window_size: Option<WindowSize>,
@@ -124,6 +132,7 @@ impl DebugLaunch {
         self.select.is_some()
             || self.file_history.is_some()
             || self.tree.is_some()
+            || self.blame.is_some()
             || self.worktree
             || self.dialog.is_some_and(DebugDialog::needs_repo)
     }
@@ -282,6 +291,14 @@ where
                         }
                     }
                 }
+                "--blame" => {
+                    if let Some(val) = take_value(flag, inline_val, &raw, &mut index, &mut errors) {
+                        match parse_rev_path("--blame", &val) {
+                            Ok((rev, path)) => debug.blame = Some(BlameTarget { rev, path }),
+                            Err(msg) => errors.push(msg),
+                        }
+                    }
+                }
                 "--dialog" => {
                     if let Some(val) = take_value(flag, inline_val, &raw, &mut index, &mut errors) {
                         match DebugDialog::parse(&val) {
@@ -381,21 +398,22 @@ fn parse_tree_arg(value: &str) -> Result<TreeTarget, String> {
 }
 
 fn parse_tree_file_arg(value: &str) -> Result<TreeTarget, String> {
+    let (rev, path) = parse_rev_path("--tree-file", value)?;
+    Ok(TreeTarget::File { rev, path })
+}
+
+/// Splits `<rev>:<path>` for the flags that name one file in a revision.
+fn parse_rev_path(flag: &str, value: &str) -> Result<(String, String), String> {
     let Some((rev, path)) = value.split_once(':') else {
-        return Err(format!(
-            "invalid --tree-file '{value}': expected <rev>:<path>"
-        ));
+        return Err(format!("invalid {flag} '{value}': expected <rev>:<path>"));
     };
+    // A leading slash is how a path looks from the repository root, which is
+    // the only base these targets accept.
     let path = path.trim_start_matches('/');
     if rev.is_empty() || path.is_empty() {
-        return Err(format!(
-            "invalid --tree-file '{value}': expected <rev>:<path>"
-        ));
+        return Err(format!("invalid {flag} '{value}': expected <rev>:<path>"));
     }
-    Ok(TreeTarget::File {
-        rev: rev.to_owned(),
-        path: path.to_owned(),
-    })
+    Ok((rev.to_owned(), path.to_owned()))
 }
 
 fn parse_window_size(value: &str) -> Result<WindowSize, String> {
@@ -433,9 +451,10 @@ pub(crate) fn help_text() -> String {
          Debug launch options (applied once the first snapshot loads):\n\
          \x20 --select <rev>         Select and scroll to a commit (id or ref)\n\
          \x20 --file-history <path>  Open file history for <path>\n\
-         \x20 --tree <rev>[:<dir>]   Open the tree browser at <rev>\n\
+         \x20 --tree <rev>[:<dir>]   Open the tree browser at <rev>, or in <dir>\n\
          \x20 --tree-file <rev>:<path>\n\
-         \x20                        Open the tree browser for <rev> / <path>\n\
+         \x20                        Open <path> in the tree browser at <rev>\n\
+         \x20 --blame <rev>:<path>   Open blame for <path> at <rev>\n\
          \x20 --worktree             Start in the working-tree view\n\
          \x20 --dialog <name>        Open a dialog ({})\n\
          \x20 --window-size <W>x<H>  Request an initial window size",
@@ -651,6 +670,8 @@ mod tests {
             "--file-history=crates/strata-app/src/main.rs",
             "--tree",
             "main:crates/strata-app",
+            "--blame",
+            "HEAD:crates/strata-app/src/main.rs",
             "--worktree",
             "--dialog",
             "create-branch",
@@ -669,6 +690,13 @@ mod tests {
             Some(TreeTarget::Directory {
                 rev: "main".into(),
                 dir: Some("crates/strata-app".into()),
+            })
+        );
+        assert_eq!(
+            parsed.debug.blame,
+            Some(BlameTarget {
+                rev: "HEAD".into(),
+                path: "crates/strata-app/src/main.rs".into(),
             })
         );
         assert!(parsed.debug.worktree);
@@ -714,6 +742,59 @@ mod tests {
             })
         );
         assert!(file.errors.is_empty());
+
+        let rooted_file = parse(&["--tree-file", "HEAD:/crates/strata-app/Cargo.toml"]);
+        assert_eq!(
+            rooted_file.debug.tree,
+            Some(TreeTarget::File {
+                rev: "HEAD".into(),
+                path: "crates/strata-app/Cargo.toml".into(),
+            })
+        );
+        assert!(rooted_file.errors.is_empty());
+    }
+
+    #[test]
+    fn blame_target_parses_rev_and_path() {
+        let parsed = parse(&["--blame", "HEAD~2:src/repo_view.rs"]);
+        assert!(parsed.errors.is_empty());
+        assert_eq!(
+            parsed.debug.blame,
+            Some(BlameTarget {
+                rev: "HEAD~2".into(),
+                path: "src/repo_view.rs".into(),
+            })
+        );
+        assert!(parsed.debug.has_repo_actions());
+
+        let rooted = parse(&["--blame=deadbeef:/src/main.rs"]);
+        assert!(rooted.errors.is_empty());
+        assert_eq!(
+            rooted.debug.blame,
+            Some(BlameTarget {
+                rev: "deadbeef".into(),
+                path: "src/main.rs".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn blame_and_tree_file_reject_incomplete_targets() {
+        for value in ["main", "main:", ":src/lib.rs"] {
+            let parsed = parse(&["--blame", value]);
+            assert_eq!(parsed.debug.blame, None, "{value}");
+            assert_eq!(parsed.errors.len(), 1, "{value}");
+            assert!(
+                parsed.errors[0].contains("expected <rev>:<path>"),
+                "{value}: {}",
+                parsed.errors[0]
+            );
+        }
+
+        let tree_file = parse(&["--tree-file", "main:"]);
+        assert_eq!(tree_file.debug.tree, None);
+        assert_eq!(tree_file.errors.len(), 1);
+        assert!(tree_file.errors[0].starts_with("invalid --tree-file"));
     }
 
     #[test]

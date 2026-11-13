@@ -390,6 +390,18 @@ fn file_content(
 impl RepoView {
     /// Opens the tree of the selected commit at its root.
     pub(super) fn open_tree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_tree_at(None, None, window, cx);
+    }
+
+    /// Opens the tree of the selected commit in `dir`, or on `file` with the
+    /// file's directory loaded so Backspace returns to the surrounding listing.
+    pub(super) fn open_tree_at(
+        &mut self,
+        dir: Option<String>,
+        file: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(commit) = self.selection_commit else {
             return;
         };
@@ -398,6 +410,16 @@ impl RepoView {
         }
         self.discard_blame();
         let epoch = self.tree.open(commit);
+        let dir = dir.unwrap_or_else(|| file.as_deref().map_or_else(String::new, parent_dir));
+        let epoch = if dir.is_empty() {
+            epoch
+        } else {
+            self.tree.enter_dir(dir)
+        };
+        if let Some(path) = file {
+            let file_epoch = self.tree.begin_file(path.clone());
+            self.request_tree_file(file_epoch, path, cx);
+        }
         cx.bind_keys([KeyBinding::new("escape", CloseTreeBrowser, Some(TREE_VIEW))]);
         self.focus_root(window, cx);
         self.request_tree_listing(epoch, cx);

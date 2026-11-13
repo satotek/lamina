@@ -156,9 +156,11 @@ has loaded (printing one `debug-launch:` line per applied option to stderr):
 
 - `--select <rev>`: select and scroll to a commit (id or ref name).
 - `--file-history <path>`: open file history for a path.
-- `--tree <rev>[:<dir>]`: open the tree browser at a commit (currently opens at
-  the commit root; `--tree-file <rev>:<path>` is also accepted and opens the
-  tree root while `tree_view` exposes only root opening).
+- `--tree <rev>[:<dir>]`: open the tree browser at the commit root, or in the
+  subdirectory `<dir>`.
+- `--tree-file <rev>:<path>`: open the tree browser with `<path>` selected and
+  its contents shown.
+- `--blame <rev>:<path>`: open the blame view for `<path>` at `<rev>`.
 - `--worktree`: start in the working-tree view.
 - `--dialog <name>`: open a dialog (`create-branch`, `stash`, `settings`,
   `palette`, `open-repository`, `add-worktree`, `create-tag`).

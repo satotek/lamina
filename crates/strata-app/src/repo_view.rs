@@ -1668,8 +1668,20 @@ impl RepoView {
         } else {
             true
         };
+        let blame_ready = if let Some(target) = runner.launch.blame.clone() {
+            runner.resolve_rev(
+                &target.rev,
+                RevSlot::Blame,
+                &snapshot,
+                session.repo().clone(),
+                window,
+                cx,
+            )
+        } else {
+            true
+        };
 
-        if !select_ready || !tree_ready {
+        if !select_ready || !tree_ready || !blame_ready {
             self.debug_launch = Some(runner);
             return;
         }
@@ -1707,23 +1719,25 @@ impl RepoView {
                 Some(Ok(oid)) => match snapshot.commit_index.get(&oid).copied() {
                     Some(index) => {
                         self.jump(index, cx);
-                        self.open_tree(window, cx);
                         match target {
                             TreeTarget::Directory { dir: None, .. } => {
+                                self.open_tree(window, cx);
                                 eprintln!(
                                     "debug-launch: applied --tree {rev} -> {}",
                                     data::short_oid(oid)
                                 );
                             }
                             TreeTarget::Directory { dir: Some(dir), .. } => {
+                                self.open_tree_at(Some(dir.clone()), None, window, cx);
                                 eprintln!(
-                                    "debug-launch: applied --tree {rev} -> {} (opened root; subdirectory '{dir}' is not yet exposed by tree_view)",
+                                    "debug-launch: applied --tree {rev} -> {} (dir '{dir}')",
                                     data::short_oid(oid)
                                 );
                             }
                             TreeTarget::File { path, .. } => {
+                                self.open_tree_at(None, Some(path.clone()), window, cx);
                                 eprintln!(
-                                    "debug-launch: applied --tree-file {rev} -> {} (opened root; opening '{path}' directly is not yet exposed by tree_view)",
+                                    "debug-launch: applied --tree-file {rev}:{path} -> {}",
                                     data::short_oid(oid)
                                 );
                             }
@@ -1749,6 +1763,29 @@ impl RepoView {
         if launch.worktree {
             self.open_worktree(window, cx);
             eprintln!("debug-launch: applied --worktree");
+        }
+
+        if let Some(target) = &launch.blame {
+            let rev = target.rev.as_str();
+            match runner.blame_oid {
+                Some(Ok(oid)) => {
+                    // The blamed commit need not be one of the loaded rows, so
+                    // the pane opens either way; selecting it is a nicety.
+                    if let Some(index) = snapshot.commit_index.get(&oid).copied() {
+                        self.jump(index, cx);
+                    }
+                    self.open_blame(oid, target.path.clone(), window, cx);
+                    eprintln!(
+                        "debug-launch: applied --blame {rev}:{} -> {}",
+                        target.path,
+                        data::short_oid(oid)
+                    );
+                }
+                Some(Err(err)) => {
+                    eprintln!("debug-launch: error: --blame '{rev}' failed: {err}");
+                }
+                None => {}
+            }
         }
 
         if let Some(dialog) = launch.dialog {
@@ -1831,6 +1868,10 @@ impl RepoView {
                 runner.tree_resolving = false;
                 runner.tree_oid = Some(resolved);
             }
+            RevSlot::Blame => {
+                runner.blame_resolving = false;
+                runner.blame_oid = Some(resolved);
+            }
         }
         self.step_debug_launch(window, cx);
     }
@@ -1840,6 +1881,7 @@ impl RepoView {
 enum RevSlot {
     Select,
     Tree,
+    Blame,
 }
 
 struct DebugLaunchRunner {
@@ -1848,6 +1890,8 @@ struct DebugLaunchRunner {
     select_resolving: bool,
     tree_oid: Option<Result<Oid, String>>,
     tree_resolving: bool,
+    blame_oid: Option<Result<Oid, String>>,
+    blame_resolving: bool,
 }
 
 impl DebugLaunchRunner {
@@ -1858,6 +1902,8 @@ impl DebugLaunchRunner {
             select_resolving: false,
             tree_oid: None,
             tree_resolving: false,
+            blame_oid: None,
+            blame_resolving: false,
         }
     }
 
@@ -1876,6 +1922,7 @@ impl DebugLaunchRunner {
         let (slot, resolving) = match which {
             RevSlot::Select => (&mut self.select_oid, &mut self.select_resolving),
             RevSlot::Tree => (&mut self.tree_oid, &mut self.tree_resolving),
+            RevSlot::Blame => (&mut self.blame_oid, &mut self.blame_resolving),
         };
 
         if slot.is_none() {
