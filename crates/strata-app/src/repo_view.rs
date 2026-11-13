@@ -571,6 +571,7 @@ impl RepoView {
                 // The submodule and worktree lists sit outside the snapshot, so
                 // every publish — including a watcher refresh — re-reads them.
                 self.refresh_extra_lists();
+                self.refresh_in_progress_details();
                 cx.notify();
             }
             SessionEvent::DiffReady { ticket, view } => {
@@ -650,6 +651,9 @@ impl RepoView {
                 if self.extra_lists.accept(ticket, submodules, worktrees) {
                     cx.notify();
                 }
+            }
+            SessionEvent::InProgressDetailsReady { ticket, details } => {
+                self.on_in_progress_details_ready(ticket, details, cx);
             }
             SessionEvent::CommandLogged(record) => {
                 self.last_command = Some(command_line(&record));

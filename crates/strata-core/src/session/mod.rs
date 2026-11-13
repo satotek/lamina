@@ -38,7 +38,9 @@ use crate::{
 };
 
 pub use crate::diff::DiffOptions;
-pub use crate::repo::{Blame, BlameCommit, BlameHunk};
+pub use crate::repo::{
+    Blame, BlameCommit, BlameHunk, InProgressCommit, InProgressDetails, RebaseOnto,
+};
 
 use blame::BlameJob;
 
@@ -492,6 +494,12 @@ pub enum SessionEvent {
         submodules: Arc<Vec<SubmoduleInfo>>,
         worktrees: Arc<Vec<WorktreeInfo>>,
     },
+    /// Details of an unfinished git operation for a ticket from
+    /// [`Session::request_in_progress_details`].
+    InProgressDetailsReady {
+        ticket: QueryTicket,
+        details: Option<InProgressDetails>,
+    },
 }
 
 /// How a session talks to `git`.
@@ -722,6 +730,16 @@ impl Session {
     /// re-request as cheap as the refresh itself.
     pub fn request_submodules_and_worktrees(&self) -> QueryTicket {
         self.queue_query(queries::QueryKind::SubmodulesAndWorktrees)
+    }
+
+    /// Reads details of an unfinished git operation off the UI thread; answers
+    /// with [`SessionEvent::InProgressDetailsReady`], or `QueryFailed` with the
+    /// same ticket when the repository cannot be read.
+    ///
+    /// These details sit outside [`RepoSnapshot`], so the UI re-requests them
+    /// whenever `SnapshotUpdated` arrives with a non-normal state.
+    pub fn request_in_progress_details(&self) -> QueryTicket {
+        self.queue_query(queries::QueryKind::InProgressDetails)
     }
 
     /// Attributes each line of `path` at `commit` to the commit that last

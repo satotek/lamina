@@ -43,6 +43,8 @@ pub(crate) enum QueryKind {
     CommitStat(Oid),
     /// Submodules and linked worktrees, read directly from the repository.
     SubmodulesAndWorktrees,
+    /// Details of an unfinished merge/rebase/cherry-pick/revert/bisect/am.
+    InProgressDetails,
 }
 
 /// Ticket allocation and cancellation, shared between the session and the
@@ -130,6 +132,16 @@ fn answer(shared: Arc<Shared>, state: Arc<QueryState>, job: &QueryJob) -> Result
                 ticket: job.ticket,
                 submodules: Arc::new(submodules),
                 worktrees: Arc::new(worktrees),
+            });
+        }
+        QueryKind::InProgressDetails => {
+            let details = shared.repo.in_progress_details()?;
+            if state.is_cancelled(job.ticket) || shared.is_shutdown() {
+                return Ok(());
+            }
+            shared.emit(SessionEvent::InProgressDetailsReady {
+                ticket: job.ticket,
+                details,
             });
         }
         QueryKind::Search(query) => {
