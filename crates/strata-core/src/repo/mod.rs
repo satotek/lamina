@@ -17,6 +17,7 @@ mod in_progress;
 mod log;
 mod message;
 mod remotes;
+mod renames;
 mod stat;
 mod status;
 mod submodules;
@@ -43,8 +44,9 @@ use crate::{Error, Result};
 pub struct Repo {
     inner: gix::ThreadSafeRepository,
     workdir: Option<PathBuf>,
-    /// Clones share the cache, so the worker that counts a commit's lines sees
-    /// the tree diff the UI thread just computed for the same commit.
+    /// Clones share the cache, so the worker that counts a commit's lines and
+    /// the one that lists its files share a single first-parent tree walk,
+    /// whichever of the two runs first.
     pub(crate) commit_diffs: Arc<Mutex<CommitDiffCache>>,
 }
 

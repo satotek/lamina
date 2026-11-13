@@ -6,14 +6,18 @@
 //! no line counts.
 //!
 //! Counting never materialises hunks or line text: only the edit script's
-//! ranges are read. The tree diff a stat needs is the same one the commit's
-//! file list needs, so it is cached per commit.
+//! ranges are read. The first-parent tree walk is the same one the commit's
+//! file list needs, so it is computed once per commit and shared: whichever
+//! request arrives first runs it and the other reuses it. Rename detection is a
+//! separate pass only the file list needs, so a line count never waits for it.
 
-use std::borrow::Cow;
-use std::sync::{Arc, MutexGuard, PoisonError};
+use std::collections::HashMap;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 
 use gix::bstr::{BString, ByteSlice};
 use gix::object::tree::EntryMode;
+use gix::object::tree::diff::ChangeDetached;
+use gix::objs::TreeRefIter;
 
 use super::Repo;
 use crate::{ChangeKind, CommitStat, Error, FileStat, Oid, Result};
@@ -23,9 +27,10 @@ use crate::{ChangeKind, CommitStat, Error, FileStat, Oid, Result};
 /// way the UI shows "no line counts" (like a binary) instead.
 const MAX_STAT_BYTES: u64 = 4 * 1024 * 1024;
 
-/// How many commit diffs to keep. The UI looks at one commit at a time, and a
-/// couple of neighbours make walking up and down the log cheap.
-const DIFF_CACHE_COMMITS: usize = 4;
+/// How many commit diffs to keep. The UI looks at one commit at a time; a
+/// selected commit and the one next to it are enough to make moving through the
+/// log cheap without holding a large merge's file list forever.
+const DIFF_CACHE_COMMITS: usize = 2;
 
 impl Repo {
     /// Added and removed lines of `commit` against its first parent, with the
@@ -34,54 +39,93 @@ impl Repo {
     /// Binary files are flagged and contribute nothing to the totals, as are
     /// files too large to count that `git` would have diffed.
     pub fn commit_stat(&self, commit: Oid) -> Result<CommitStat> {
-        // Any cached diff of this commit is usable: a rename-aware one is
-        // counted as a whole deletion plus a whole addition, which is what the
-        // no-rename tree diff would have listed.
-        let diff = self.commit_stat_diff(commit)?;
+        // The shared walk has no rewrite detection: a rename is still the
+        // deletion and the addition that `--no-renames` counts, which is what a
+        // stat needs. Rename detection is the file list's job.
+        let diff = self.commit_diff(commit)?;
         let repo = self.local();
 
         let mut stat = CommitStat::default();
-        for file in &diff.files {
-            for file in file.no_rename_sides(diff.renames) {
-                let file = file_stat(&repo, &file)?;
-                stat.added += file.added;
-                stat.removed += file.removed;
-                stat.files.push(file);
-            }
+        for file in diff.changes.iter().filter_map(changed_file) {
+            let file = file_stat(&repo, &file)?;
+            stat.added += file.added;
+            stat.removed += file.removed;
+            stat.files.push(file);
         }
         stat.files.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(stat)
     }
 
-    /// The first-parent tree diff of `commit`.
+    /// The first-parent tree walk of `commit`, without rewrite detection.
     ///
-    /// `renames` asks for rewrite detection, which is what `commit_changes`
-    /// reports. Both variants are cached by commit id: the UI asks for the file
-    /// list and the line counts of the same commit, and the tree walk is the
-    /// expensive half of both.
-    pub(crate) fn commit_diff(&self, commit: Oid, renames: bool) -> Result<Arc<CommitDiff>> {
-        if let Some(diff) = self.commit_diffs().get(commit, renames) {
-            return Ok(diff);
+    /// `commit_stat` counts these entries and `commit_changes` pairs renames in
+    /// them. The UI asks for both when a commit is selected, so the walk happens
+    /// once: a second caller finds it cached, or waits for the walk already
+    /// running instead of walking the same trees again. A stat never waits for
+    /// rename detection, which is the file list's own, separate pass.
+    pub(crate) fn commit_diff(&self, commit: Oid) -> Result<Arc<CommitDiff>> {
+        enum Claim {
+            Cached(Arc<CommitDiff>),
+            Waiting(Arc<Pending>),
+            Leader(Arc<Pending>),
         }
 
-        let diff = Arc::new(self.diff_first_parent(commit, renames)?);
-        self.commit_diffs().insert(commit, &diff);
-        Ok(diff)
+        let claim = {
+            let mut cache = self.commit_diffs();
+            if let Some(diff) = cache.get(commit) {
+                Claim::Cached(diff)
+            } else if let Some(pending) = cache.pending.get(&commit) {
+                Claim::Waiting(Arc::clone(pending))
+            } else {
+                let pending = Arc::new(Pending::default());
+                cache.pending.insert(commit, Arc::clone(&pending));
+                Claim::Leader(pending)
+            }
+        };
+
+        match claim {
+            Claim::Cached(diff) => Ok(diff),
+            Claim::Waiting(pending) => pending.wait(),
+            Claim::Leader(pending) => {
+                let mut leader = DiffLeader {
+                    cache: Arc::clone(&self.commit_diffs),
+                    commit,
+                    pending,
+                    finished: false,
+                };
+                let result = self
+                    .diff_first_parent(commit)
+                    .map(|changes| CommitDiff { changes })
+                    .map(Arc::new);
+                leader.finish(&result);
+                result
+            }
+        }
     }
 
-    /// The tree diff a line count needs: whichever variant of `commit` is
-    /// cached, because both carry the same paths and blob ids.
-    fn commit_stat_diff(&self, commit: Oid) -> Result<Arc<CommitDiff>> {
-        if let Some(diff) = self.commit_diffs().get_any(commit) {
-            return Ok(diff);
+    /// The changed files of `commit`, with renames and copies applied.
+    ///
+    /// Rename detection is the expensive half of the file list, so its result is
+    /// cached with the walk. It runs over the walk's added and deleted entries,
+    /// never over the trees again.
+    pub(crate) fn commit_files(&self, commit: Oid) -> Result<Arc<Vec<ChangedFile>>> {
+        if let Some(files) = self.commit_diffs().get_rewritten(commit) {
+            return Ok(files);
         }
 
-        let diff = Arc::new(self.diff_first_parent(commit, false)?);
-        self.commit_diffs().insert(commit, &diff);
-        Ok(diff)
+        let diff = self.commit_diff(commit)?;
+        #[cfg(test)]
+        self.commit_diffs().record_rewrite_pass();
+        let repo = self.local();
+        let files = Arc::new(super::renames::apply(&diff.changes, &repo)?);
+        self.commit_diffs().cache_rewritten(commit, &files);
+        Ok(files)
     }
 
-    fn diff_first_parent(&self, commit: Oid, renames: bool) -> Result<CommitDiff> {
+    fn diff_first_parent(&self, commit: Oid) -> Result<Vec<ChangeDetached>> {
+        #[cfg(test)]
+        self.commit_diffs().record_tree_diff();
+
         let repo = self.local();
         let commit = repo.find_commit(commit).map_err(Error::gix)?;
         let tree = commit.tree().map_err(Error::gix)?;
@@ -95,74 +139,205 @@ impl Repo {
             // A root commit added everything, so the empty tree is the other side.
             None => None,
         };
+        let empty = repo.empty_tree();
+        let parent_tree = parent_tree.as_ref().unwrap_or(&empty);
 
-        let options = if renames {
-            gix::diff::Options::default().with_rewrites(Some(gix::diff::Rewrites::default()))
-        } else {
-            gix::diff::Options::default()
-        };
-        let changes = repo
-            .diff_tree_to_tree(parent_tree.as_ref(), Some(&tree), Some(options))
-            .map_err(Error::gix)?;
+        // The walk needs no blobs, attributes or rename configuration, so it
+        // runs without the resource cache a rewrite-aware diff prepares.
+        let mut recorder = gix::diff::tree::Recorder::default();
+        let mut state = gix::diff::tree::State::default();
+        gix::diff::tree(
+            TreeRefIter::from_bytes(&parent_tree.data, parent_tree.id.kind()),
+            TreeRefIter::from_bytes(&tree.data, tree.id.kind()),
+            &mut state,
+            &repo.objects,
+            &mut recorder,
+        )
+        .map_err(Error::gix)?;
 
-        Ok(CommitDiff {
-            renames,
-            files: changes.into_iter().filter_map(changed_file).collect(),
-        })
+        Ok(recorder.records.into_iter().map(detached_change).collect())
     }
 
     fn commit_diffs(&self) -> MutexGuard<'_, CommitDiffCache> {
-        self.commit_diffs
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        lock(&self.commit_diffs)
+    }
+
+    /// How many first-parent tree walks have run. Tests use it to prove that
+    /// the stat and the file list share one.
+    #[cfg(test)]
+    pub(crate) fn tree_diff_count(&self) -> u64 {
+        self.commit_diffs().tree_diffs
+    }
+
+    /// How many rename passes have run. Tests use it to prove that a stat never
+    /// waits for one and that the file list runs it once.
+    #[cfg(test)]
+    pub(crate) fn rewrite_pass_count(&self) -> u64 {
+        self.commit_diffs().rewrite_passes
+    }
+
+    /// How many commits the diff cache currently holds.
+    #[cfg(test)]
+    pub(crate) fn cached_commit_diffs(&self) -> usize {
+        self.commit_diffs().entries.len()
     }
 }
 
-/// One first-parent tree diff. `renames` records whether rewrite detection ran,
-/// because that decides how a rewrite is counted.
+/// One first-parent tree walk, without rewrite detection.
 pub(crate) struct CommitDiff {
-    pub(crate) renames: bool,
-    pub(crate) files: Vec<ChangedFile>,
+    /// The tree changes as the walk emitted them. The stat skips directory
+    /// entries; rename detection pairs the added and deleted ones.
+    changes: Vec<ChangeDetached>,
 }
 
-/// Recent commit diffs, at most one entry per commit and rewrite mode.
+/// One cached commit: the shared walk, and the file list built from it once
+/// rename detection has run.
+struct CacheEntry {
+    commit: Oid,
+    diff: Arc<CommitDiff>,
+    /// `None` until the file list asks for it; a stat never fills it.
+    rewritten: Option<Arc<Vec<ChangedFile>>>,
+}
+
+/// Recent commit diffs and the ones being computed.
 #[derive(Default)]
 pub(crate) struct CommitDiffCache {
-    entries: Vec<(Oid, bool, Arc<CommitDiff>)>,
+    /// Least recently used first, at most one entry per commit.
+    entries: Vec<CacheEntry>,
+    /// Walks in flight, so a second request waits for the same walk.
+    pending: HashMap<Oid, Arc<Pending>>,
+    #[cfg(test)]
+    tree_diffs: u64,
+    #[cfg(test)]
+    rewrite_passes: u64,
 }
 
 impl CommitDiffCache {
-    fn get(&mut self, commit: Oid, renames: bool) -> Option<Arc<CommitDiff>> {
-        self.get_by(|id, with_renames| *id == commit && with_renames == renames)
-    }
-
-    /// Any cached diff of `commit`, regardless of rewrite detection.
-    fn get_any(&mut self, commit: Oid) -> Option<Arc<CommitDiff>> {
-        self.get_by(|id, _| *id == commit)
-    }
-
-    fn get_by(&mut self, predicate: impl Fn(&Oid, bool) -> bool) -> Option<Arc<CommitDiff>> {
+    fn get(&mut self, commit: Oid) -> Option<Arc<CommitDiff>> {
         let index = self
             .entries
             .iter()
-            .position(|(id, renames, _)| predicate(id, *renames))?;
+            .position(|entry| entry.commit == commit)?;
         // A hit becomes the most recently used entry.
         let entry = self.entries.remove(index);
-        let diff = Arc::clone(&entry.2);
+        let diff = Arc::clone(&entry.diff);
         self.entries.push(entry);
         Some(diff)
     }
 
+    fn get_rewritten(&mut self, commit: Oid) -> Option<Arc<Vec<ChangedFile>>> {
+        let index = self
+            .entries
+            .iter()
+            .position(|entry| entry.commit == commit)?;
+        let entry = self.entries.remove(index);
+        let files = entry.rewritten.clone();
+        self.entries.push(entry);
+        files
+    }
+
+    fn cache_rewritten(&mut self, commit: Oid, files: &Arc<Vec<ChangedFile>>) {
+        // Only an entry that is still cached may be upgraded; a commit evicted
+        // while its rename pass ran must not resurrect itself.
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.commit == commit) {
+            entry.rewritten = Some(Arc::clone(files));
+        }
+    }
+
     fn insert(&mut self, commit: Oid, diff: &Arc<CommitDiff>) {
-        self.entries
-            .retain(|(id, renames, _)| !(*id == commit && *renames == diff.renames));
-        self.entries.push((commit, diff.renames, Arc::clone(diff)));
+        self.entries.retain(|entry| entry.commit != commit);
+        self.entries.push(CacheEntry {
+            commit,
+            diff: Arc::clone(diff),
+            rewritten: None,
+        });
         if self.entries.len() > DIFF_CACHE_COMMITS {
             self.entries.remove(0);
         }
     }
+
+    #[cfg(test)]
+    fn record_tree_diff(&mut self) {
+        self.tree_diffs += 1;
+    }
+
+    #[cfg(test)]
+    fn record_rewrite_pass(&mut self) {
+        self.rewrite_passes += 1;
+    }
 }
 
+/// A diff one thread is computing. Others wait here rather than walking the
+/// same trees: on a large merge the difference is hundreds of milliseconds.
+#[derive(Default)]
+struct Pending {
+    outcome: Mutex<Option<Result<Arc<CommitDiff>, String>>>,
+    ready: Condvar,
+}
+
+impl Pending {
+    fn wait(&self) -> Result<Arc<CommitDiff>> {
+        let mut outcome = lock(&self.outcome);
+        while outcome.is_none() {
+            outcome = self
+                .ready
+                .wait(outcome)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        match outcome.as_ref().expect("filled in by the leader") {
+            Ok(diff) => Ok(Arc::clone(diff)),
+            Err(message) => Err(Error::other(message.clone())),
+        }
+    }
+
+    fn finish(&self, result: &Result<Arc<CommitDiff>>) {
+        let mut outcome = lock(&self.outcome);
+        *outcome = Some(match result {
+            Ok(diff) => Ok(Arc::clone(diff)),
+            Err(error) => Err(error.to_string()),
+        });
+        drop(outcome);
+        self.ready.notify_all();
+    }
+}
+
+/// Publishes a leader's result to its waiters and the cache.
+///
+/// The drop path covers a panic in the walk: waiters get an error instead of
+/// blocking forever on a thread that will never finish.
+struct DiffLeader {
+    cache: Arc<Mutex<CommitDiffCache>>,
+    commit: Oid,
+    pending: Arc<Pending>,
+    finished: bool,
+}
+
+impl DiffLeader {
+    fn finish(&mut self, result: &Result<Arc<CommitDiff>>) {
+        let mut cache = lock(&self.cache);
+        cache.pending.remove(&self.commit);
+        if let Ok(diff) = result {
+            cache.insert(self.commit, diff);
+        }
+        self.pending.finish(result);
+        self.finished = true;
+    }
+}
+
+impl Drop for DiffLeader {
+    fn drop(&mut self) {
+        if !self.finished {
+            let mut cache = lock(&self.cache);
+            cache.pending.remove(&self.commit);
+            self.pending
+                .finish(&Err(Error::other("the first-parent tree diff panicked")));
+        }
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
 /// One file of a first-parent tree diff, before its lines are counted.
 ///
 /// Shared with `commit_changes`, which reports the same entries as git's
@@ -183,56 +358,56 @@ impl ChangedFile {
     fn uncountable(&self) -> bool {
         !countable(self.old_mode) || !countable(self.new_mode)
     }
+}
 
-    /// The entries a no-rename diff would list for this one.
-    ///
-    /// A rewrite hides a deletion and an addition: the file list shows one
-    /// renamed path, while `--numstat --no-renames` counts the old and the new
-    /// content in full, on two paths. A copy keeps its source, so only the
-    /// added side is counted.
-    fn no_rename_sides(&self, renames: bool) -> Vec<Cow<'_, ChangedFile>> {
-        match (renames, self.kind) {
-            (true, ChangeKind::Renamed) => {
-                let mut sides = Vec::with_capacity(2);
-                if let Some(old_path) = &self.old_path {
-                    sides.push(Cow::Owned(ChangedFile {
-                        path: old_path.clone(),
-                        old_path: None,
-                        old_id: self.old_id,
-                        new_id: None,
-                        old_mode: self.old_mode,
-                        new_mode: None,
-                        kind: ChangeKind::Deleted,
-                    }));
-                }
-                sides.push(Cow::Owned(ChangedFile {
-                    path: self.path.clone(),
-                    old_path: None,
-                    old_id: None,
-                    new_id: self.new_id,
-                    old_mode: None,
-                    new_mode: self.new_mode,
-                    kind: ChangeKind::Added,
-                }));
-                sides
-            }
-            (true, ChangeKind::Copied) => vec![Cow::Owned(ChangedFile {
-                path: self.path.clone(),
-                old_path: None,
-                old_id: None,
-                new_id: self.new_id,
-                old_mode: None,
-                new_mode: self.new_mode,
-                kind: ChangeKind::Added,
-            })],
-            _ => vec![Cow::Borrowed(self)],
-        }
+/// A change from the walk, with the location the recorder tracked for it.
+fn detached_change(change: gix::diff::tree::recorder::Change) -> ChangeDetached {
+    use gix::diff::tree::recorder::Change;
+
+    match change {
+        Change::Addition {
+            entry_mode,
+            oid,
+            path,
+            relation,
+        } => ChangeDetached::Addition {
+            location: path,
+            relation,
+            entry_mode,
+            id: oid,
+        },
+        Change::Deletion {
+            entry_mode,
+            oid,
+            path,
+            relation,
+        } => ChangeDetached::Deletion {
+            location: path,
+            relation,
+            entry_mode,
+            id: oid,
+        },
+        Change::Modification {
+            previous_entry_mode,
+            previous_oid,
+            entry_mode,
+            oid,
+            path,
+        } => ChangeDetached::Modification {
+            location: path,
+            previous_entry_mode,
+            previous_id: previous_oid,
+            entry_mode,
+            id: oid,
+        },
     }
 }
 
 /// The parsed tree change of one entry; `None` for a directory entry, whose
 /// children carry the changes.
-fn changed_file(change: gix::object::tree::diff::ChangeDetached) -> Option<ChangedFile> {
+pub(crate) fn changed_file(
+    change: &gix::object::tree::diff::ChangeDetached,
+) -> Option<ChangedFile> {
     use gix::object::tree::diff::ChangeDetached;
 
     let (path, old_path, old_id, new_id, old_mode, new_mode, kind) = match change {
@@ -250,9 +425,9 @@ fn changed_file(change: gix::object::tree::diff::ChangeDetached) -> Option<Chang
                 location,
                 None,
                 None,
-                Some(id),
+                Some(*id),
                 None,
-                Some(entry_mode),
+                Some(*entry_mode),
                 ChangeKind::Added,
             )
         }
@@ -268,9 +443,9 @@ fn changed_file(change: gix::object::tree::diff::ChangeDetached) -> Option<Chang
             (
                 location,
                 None,
-                Some(id),
+                Some(*id),
                 None,
-                Some(entry_mode),
+                Some(*entry_mode),
                 None,
                 ChangeKind::Deleted,
             )
@@ -290,9 +465,9 @@ fn changed_file(change: gix::object::tree::diff::ChangeDetached) -> Option<Chang
                 (
                     location,
                     None,
-                    Some(previous_id),
+                    Some(*previous_id),
                     None,
-                    Some(previous_entry_mode),
+                    Some(*previous_entry_mode),
                     None,
                     ChangeKind::Deleted,
                 )
@@ -302,13 +477,13 @@ fn changed_file(change: gix::object::tree::diff::ChangeDetached) -> Option<Chang
                     location,
                     None,
                     None,
-                    Some(id),
+                    Some(*id),
                     None,
-                    Some(entry_mode),
+                    Some(*entry_mode),
                     ChangeKind::Added,
                 )
             } else {
-                let kind = if kind_changed(previous_entry_mode, entry_mode) {
+                let kind = if kind_changed(*previous_entry_mode, *entry_mode) {
                     ChangeKind::TypeChanged
                 } else {
                     ChangeKind::Modified
@@ -316,10 +491,10 @@ fn changed_file(change: gix::object::tree::diff::ChangeDetached) -> Option<Chang
                 (
                     location,
                     None,
-                    Some(previous_id),
-                    Some(id),
-                    Some(previous_entry_mode),
-                    Some(entry_mode),
+                    Some(*previous_id),
+                    Some(*id),
+                    Some(*previous_entry_mode),
+                    Some(*entry_mode),
                     kind,
                 )
             }
@@ -340,11 +515,11 @@ fn changed_file(change: gix::object::tree::diff::ChangeDetached) -> Option<Chang
             (
                 location,
                 Some(source_location),
-                Some(source_id),
-                Some(id),
-                Some(source_entry_mode),
-                Some(entry_mode),
-                if copy {
+                Some(*source_id),
+                Some(*id),
+                Some(*source_entry_mode),
+                Some(*entry_mode),
+                if *copy {
                     ChangeKind::Copied
                 } else {
                     ChangeKind::Renamed
@@ -354,8 +529,8 @@ fn changed_file(change: gix::object::tree::diff::ChangeDetached) -> Option<Chang
     };
 
     Some(ChangedFile {
-        path: to_path(&path),
-        old_path: old_path.map(|path| to_path(&path)),
+        path: to_path(path),
+        old_path: old_path.map(to_path),
         old_id,
         new_id,
         old_mode,
@@ -497,8 +672,12 @@ fn to_path(path: &BString) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Barrier};
+
     use super::*;
+    use crate::FileChange;
     use crate::diff::{DiffOptions, LineKind, diff_text};
+    use crate::test_support::TestRepo;
 
     /// The counts of the full text diff, which used to back the stat.
     fn text_counts(old: &[u8], new: &[u8]) -> (u64, u64) {
@@ -546,5 +725,210 @@ mod tests {
         assert_eq!(count_lines(b"one\n"), 1);
         assert_eq!(count_lines(b"one\ntwo"), 2);
         assert_eq!(count_lines(b"one\n\n"), 2);
+    }
+
+    /// A root commit and one commit that renames and edits a file: the file
+    /// list detects the rename while the stat still counts both sides of it.
+    fn rename_repo() -> (TestRepo, Oid) {
+        let repo = TestRepo::new();
+        repo.write("old.txt", "one\ntwo\nthree\n");
+        repo.commit("root");
+        repo.write("new.txt", "one\ntwo\nthree\nfour\n");
+        std::fs::remove_file(repo.path().join("old.txt")).expect("remove old file");
+        let commit = repo.commit("rename and edit");
+        (repo, commit)
+    }
+
+    fn assert_rename_sides(stat: &CommitStat, changes: &[FileChange]) {
+        assert!(
+            changes
+                .iter()
+                .any(|change| change.kind == ChangeKind::Renamed),
+            "the file list should detect the rename: {changes:?}"
+        );
+        let paths: Vec<&str> = stat.files.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["new.txt", "old.txt"],
+            "the stat counts the rename as a deletion and an addition"
+        );
+    }
+
+    #[test]
+    fn a_stat_then_the_file_list_walks_the_tree_once() {
+        let (repo, commit) = rename_repo();
+        let handle = repo.open();
+
+        let stat = handle.commit_stat(commit).expect("commit stat");
+        assert_eq!(handle.tree_diff_count(), 1);
+        assert_eq!(
+            handle.rewrite_pass_count(),
+            0,
+            "a line count must not pay for rename detection"
+        );
+        let changes = handle.commit_changes(commit).expect("commit changes");
+        assert_eq!(
+            handle.tree_diff_count(),
+            1,
+            "the file list must reuse the stat's tree walk"
+        );
+        assert_eq!(handle.rewrite_pass_count(), 1);
+        assert_rename_sides(&stat, &changes);
+
+        // The cached file list is not rebuilt on the next request.
+        assert_eq!(
+            handle.commit_changes(commit).expect("commit changes"),
+            changes
+        );
+        assert_eq!(handle.rewrite_pass_count(), 1);
+
+        let fresh = repo.open();
+        assert_eq!(fresh.commit_stat(commit).expect("commit stat"), stat);
+        assert_eq!(
+            fresh.commit_changes(commit).expect("commit changes"),
+            changes
+        );
+    }
+
+    #[test]
+    fn a_file_list_then_the_stat_walks_the_tree_once() {
+        let (repo, commit) = rename_repo();
+        let handle = repo.open();
+
+        let changes = handle.commit_changes(commit).expect("commit changes");
+        assert_eq!(handle.tree_diff_count(), 1);
+        assert_eq!(handle.rewrite_pass_count(), 1);
+        let stat = handle.commit_stat(commit).expect("commit stat");
+        assert_eq!(
+            handle.tree_diff_count(),
+            1,
+            "the stat must reuse the file list's tree walk"
+        );
+        assert_eq!(handle.rewrite_pass_count(), 1);
+        assert_rename_sides(&stat, &changes);
+
+        let fresh = repo.open();
+        assert_eq!(
+            fresh.commit_changes(commit).expect("commit changes"),
+            changes
+        );
+        assert_eq!(fresh.commit_stat(commit).expect("commit stat"), stat);
+    }
+
+    #[test]
+    fn concurrent_requests_wait_for_one_tree_diff() {
+        let (repo, commit) = rename_repo();
+        let handle = repo.open();
+        let barrier = Arc::new(Barrier::new(2));
+
+        let stat_thread = {
+            let repo = handle.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                repo.commit_stat(commit).expect("commit stat")
+            })
+        };
+        let changes_thread = {
+            let repo = handle.clone();
+            let barrier = Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                barrier.wait();
+                repo.commit_changes(commit).expect("commit changes")
+            })
+        };
+        let stat = stat_thread.join().expect("stat thread");
+        let changes = changes_thread.join().expect("changes thread");
+
+        assert_eq!(
+            handle.tree_diff_count(),
+            1,
+            "a second request must wait for the walk already running"
+        );
+        assert_eq!(handle.rewrite_pass_count(), 1);
+        assert_rename_sides(&stat, &changes);
+    }
+
+    #[test]
+    fn a_renamed_directory_lists_every_file() {
+        let repo = TestRepo::new();
+        repo.write("dir/a.txt", "one\ntwo\nthree\n");
+        repo.write("dir/b.txt", "unchanged\n");
+        repo.commit("root");
+
+        repo.git(&["mv", "dir", "moved"]);
+        repo.write("moved/a.txt", "one\ntwo\nthree\nfour\n");
+        let commit = repo.commit("move and edit");
+
+        let changes = repo.open().commit_changes(commit).expect("commit changes");
+        let renamed: Vec<(&str, &str)> = changes
+            .iter()
+            .filter(|change| change.kind == ChangeKind::Renamed)
+            .map(|change| {
+                (
+                    change.path.as_str(),
+                    change.old_path.as_deref().expect("old path"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            renamed,
+            [("moved/a.txt", "dir/a.txt"), ("moved/b.txt", "dir/b.txt")]
+        );
+    }
+
+    #[test]
+    fn identical_files_are_paired_by_name() {
+        let repo = TestRepo::new();
+        repo.write("dir/a.txt", "same\n");
+        repo.write("dir/b.txt", "same\n");
+        repo.commit("root");
+
+        repo.git(&["mv", "dir", "moved"]);
+        let commit = repo.commit("move");
+
+        let changes = repo.open().commit_changes(commit).expect("commit changes");
+        let renamed: Vec<(&str, &str)> = changes
+            .iter()
+            .filter(|change| change.kind == ChangeKind::Renamed)
+            .map(|change| {
+                (
+                    change.path.as_str(),
+                    change.old_path.as_deref().expect("old path"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            renamed,
+            [("moved/a.txt", "dir/a.txt"), ("moved/b.txt", "dir/b.txt")],
+            "identical contents must pair by file name"
+        );
+    }
+
+    #[test]
+    fn the_diff_cache_keeps_only_the_last_commits() {
+        let repo = TestRepo::new();
+        let mut commits = Vec::new();
+        for index in 0..3 {
+            repo.write("file.txt", &format!("line {index}\n"));
+            commits.push(repo.commit(&format!("commit {index}")));
+        }
+
+        let handle = repo.open();
+        for commit in &commits {
+            handle.commit_changes(*commit).expect("commit changes");
+        }
+        assert_eq!(handle.rewrite_pass_count(), 3);
+        assert!(
+            handle.cached_commit_diffs() <= 2,
+            "the cache must stay bounded"
+        );
+
+        // The oldest commit was evicted and has to be computed again; the newest
+        // one is still cached.
+        handle.commit_changes(commits[0]).expect("commit changes");
+        assert_eq!(handle.rewrite_pass_count(), 4);
+        handle.commit_changes(commits[2]).expect("commit changes");
+        assert_eq!(handle.rewrite_pass_count(), 4);
     }
 }

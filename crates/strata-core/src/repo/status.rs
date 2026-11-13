@@ -60,13 +60,12 @@ impl Repo {
 
     /// Files changed by `commit` relative to its first parent (or the empty tree).
     ///
-    /// Renames are detected. The tree diff is shared with
-    /// [`commit_stat`](Self::commit_stat) through the repository's cache, which
-    /// matters for a commit that touches thousands of files.
+    /// Renames are detected. The tree walk is shared with
+    /// [`commit_stat`](Self::commit_stat): whichever of the two requests arrives
+    /// first computes it, and only the file list runs rename detection over it.
     pub fn commit_changes(&self, commit: Oid) -> Result<Vec<FileChange>> {
-        let diff = self.commit_diff(commit, true)?;
+        let diff = self.commit_files(commit)?;
         let mut changes: Vec<FileChange> = diff
-            .files
             .iter()
             .map(|file| FileChange {
                 path: file.path.clone(),
