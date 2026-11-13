@@ -7,6 +7,13 @@
 //! session, whose own workers do the work.
 
 mod chrome;
+mod commit_list;
+mod common;
+mod details;
+mod diff_pane;
+mod sidebar;
+mod status_bar;
+mod title_bar;
 
 use std::path::Path;
 use std::rc::Rc;
