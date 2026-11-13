@@ -544,6 +544,9 @@ impl RepoView {
             SessionEvent::PathHistoryDone { ticket, generation } => {
                 self.file_history_done(ticket, generation, cx);
             }
+            // The sidebar sections and the blame view that ask for these land
+            // in later changes; nothing requests them yet.
+            SessionEvent::BlameReady { .. } | SessionEvent::SubmodulesAndWorktreesReady { .. } => {}
             SessionEvent::CommandLogged(record) => {
                 self.last_command = Some(command_line(&record));
                 cx.notify();
