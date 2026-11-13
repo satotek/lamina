@@ -11,10 +11,12 @@ mod conflicts;
 mod data;
 mod diff_view;
 mod fake;
+mod file_history;
 mod graph_canvas;
 mod metrics;
 mod remote;
 mod repo_view;
+mod search;
 mod worktree_panel;
 
 use std::path::Path;
@@ -42,6 +44,7 @@ fn main() {
             branches::bind(cx);
             conflicts::bind(cx);
             remote::bind(cx);
+            search::bind(cx);
 
             let bounds = Bounds::centered(None, size(px(1360.0), px(860.0)), cx);
             cx.open_window(

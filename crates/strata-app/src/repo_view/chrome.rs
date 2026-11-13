@@ -11,14 +11,15 @@ use gpui::{
     AnyElement, App, ClickEvent, Context, Div, FontWeight, Hsla, InteractiveElement, ParentElement,
     Render, SharedString, Styled, Window, div, px, uniform_list,
 };
+use gpui_component::input::Input;
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
-use gpui_component::{ActiveTheme, Theme, TitleBar};
+use gpui_component::{ActiveTheme, Sizable as _, Theme, TitleBar};
 use strata_core::diff::LineKind;
 use strata_core::highlight::LineHighlights;
 use strata_core::session::DiffView;
 use strata_core::{ChangeKind, HeadInfo, RefKind};
 
-use super::{DIFF_HEIGHT, PAGE, RepoView};
+use super::{DIFF_HEIGHT, PAGE, RepoView, one_line};
 use crate::actions::{
     self, SelectFirst, SelectLast, SelectNext, SelectPageDown, SelectPageUp, SelectPrevious,
     ToggleFrameStats,
@@ -29,6 +30,9 @@ use crate::diff_view::{self, DiffColors, Row as DiffRow};
 use crate::graph_canvas;
 use crate::remote;
 use crate::remote::{Command, FetchRemotes, PullBranch, PushBranch};
+use crate::search::{
+    Field, FocusSearch, SEARCH_BAR, SearchDismiss, SearchNext, SearchPrevious, SearchSubmit,
+};
 use crate::worktree_panel::MainMode;
 
 const SIDEBAR_WIDTH: f32 = 240.0;
@@ -77,6 +81,13 @@ impl Render for RepoView {
             .on_action(cx.listener(|this, _: &SelectFirst, _, cx| this.jump(0, cx)))
             .on_action(cx.listener(|this, _: &SelectLast, _, cx| this.select_last(cx)))
             .on_action(cx.listener(|this, _: &ToggleFrameStats, _, cx| this.toggle_frame_stats(cx)))
+            .on_action(
+                cx.listener(|this, _: &FocusSearch, window, cx| this.focus_search(window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &SearchDismiss, window, cx| this.dismiss(window, cx)))
+            .on_action(cx.listener(|this, _: &SearchNext, _, cx| this.step_results(1, cx)))
+            .on_action(cx.listener(|this, _: &SearchPrevious, _, cx| this.step_results(-1, cx)))
+            .on_action(cx.listener(|this, _: &SearchSubmit, _, cx| this.submit_search(cx)))
             .on_action(cx.listener(|this, _: &CreateBranchFromHead, window, cx| {
                 this.create_branch_from_head(window, cx)
             }))
@@ -95,17 +106,27 @@ impl Render for RepoView {
             root = root.child(self.error_screen(path, error, &palette));
         } else {
             let sidebar = self.sidebar(cx, &palette);
-            let main = match self.mode {
-                MainMode::History => div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_w_0()
-                    .min_h_0()
-                    .child(self.commit_pane(entity.clone(), &palette))
-                    .child(self.diff_pane(entity.clone(), cx.theme(), &palette))
-                    .into_any_element(),
-                MainMode::Worktree => self.worktree_view(entity.clone(), window, cx),
+            // The worktree view owns the main area while it is open; a file
+            // history belongs to the history view, so it is dropped instead of
+            // coming back stale.
+            if self.mode != MainMode::History {
+                self.discard_file_history();
+            }
+            let main = if self.mode == MainMode::History && self.file_history.is_some() {
+                self.file_history_view(entity.clone(), cx)
+            } else {
+                match self.mode {
+                    MainMode::History => div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_w_0()
+                        .min_h_0()
+                        .child(self.commit_pane(entity.clone(), &palette))
+                        .child(self.diff_pane(entity.clone(), cx.theme(), &palette))
+                        .into_any_element(),
+                    MainMode::Worktree => self.worktree_view(entity.clone(), window, cx),
+                }
             };
             root = root
                 .child(
@@ -325,24 +346,44 @@ impl RepoView {
         // Branch creation from a commit row is only meaningful for a real
         // repository, and only when no operation is in flight.
         let branch_menu = self.session.is_some() && !self.is_busy();
-        let list = uniform_list("commits", len, move |range, _window, _cx| {
+        let filter = self.search.filter().cloned();
+        let count = filter.as_ref().map_or(len, |rows| rows.len());
+        let list_entity = entity.clone();
+        let list = uniform_list("commits", count, move |range, _window, _cx| {
             range
-                .map(|index| {
-                    let entity = entity.clone();
+                .map(|position| {
+                    let entity = list_entity.clone();
                     let focus = focus.clone();
+                    // While a search filters the list, `position` is a row of
+                    // the result set and `index` the commit it points at.
+                    let index = filter
+                        .as_ref()
+                        .and_then(|rows| rows.get(position).copied())
+                        .unwrap_or(position);
                     let Some(row) = source.row(index) else {
                         return div().into_any_element();
                     };
+                    let filtered = filter.is_some();
                     let click_entity = entity.clone();
-                    let element = commit_row(&row, selected == Some(index), lanes, &row_palette)
-                        .id(("commit-row", index))
-                        .cursor_pointer()
-                        .on_click(move |_event, window, cx| {
-                            click_entity.update(cx, |this, cx| {
+                    let element = if filtered {
+                        // The graph is hidden while filtered: spaced-out rows
+                        // would draw lanes that never existed between them.
+                        filtered_commit_row(&row, selected == Some(index), &row_palette)
+                    } else {
+                        commit_row(&row, selected == Some(index), lanes, &row_palette)
+                    }
+                    .id(("commit-row", index))
+                    .cursor_pointer()
+                    .on_click(move |_event, window, cx| {
+                        click_entity.update(cx, |this, cx| {
+                            if filtered {
+                                this.select_result(index, position, cx);
+                            } else {
                                 this.jump(index, cx);
-                                window.focus(&focus, cx);
-                            });
+                            }
+                            window.focus(&focus, cx);
                         });
+                    });
                     let Some(commit) = source.commit_id(index).filter(|_| branch_menu) else {
                         return element.into_any_element();
                     };
@@ -370,8 +411,14 @@ impl RepoView {
         .track_scroll(&self.commit_scroll)
         .flex_1();
 
+        let body: AnyElement = if count == 0 {
+            empty_pane("No commits match the search", palette)
+        } else {
+            list.into_any_element()
+        };
+
         let mut column = div().flex().flex_col().flex_1().min_h_0().min_w_0();
-        column = column.child(list);
+        column = column.child(self.search_bar(entity, palette)).child(body);
         if !self.source().is_some_and(|source| source.complete()) {
             column = column.child(
                 div()
@@ -386,6 +433,74 @@ impl RepoView {
             );
         }
         column.into_any_element()
+    }
+
+    /// Search field, match toggles and the match count, above the commit list.
+    fn search_bar(&self, entity: gpui::Entity<Self>, palette: &Palette) -> AnyElement {
+        let mut bar = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .h(px(34.0))
+            .flex_none()
+            .px_2()
+            .border_b_1()
+            .border_color(palette.border)
+            .key_context(SEARCH_BAR);
+
+        let Some(input) = self.search.input() else {
+            return bar
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(palette.muted_foreground)
+                        .child("Search needs a real repository"),
+                )
+                .into_any_element();
+        };
+
+        bar = bar
+            .child(div().flex_1().min_w_0().child(Input::new(input).small()))
+            .child(search_chip(
+                "summary",
+                Field::Summary,
+                self.search.fields(),
+                entity.clone(),
+                palette,
+            ))
+            .child(search_chip(
+                "author",
+                Field::Author,
+                self.search.fields(),
+                entity.clone(),
+                palette,
+            ))
+            .child(search_chip(
+                "hash",
+                Field::Hash,
+                self.search.fields(),
+                entity,
+                palette,
+            ));
+
+        let label = match self.search.error() {
+            Some(error) => one_line(error),
+            None => self.search.count_label(self.commit_count()),
+        };
+        bar.child(
+            div()
+                .flex_none()
+                .max_w(px(220.0))
+                .truncate()
+                .text_size(px(10.5))
+                .text_color(if self.search.error().is_some() {
+                    palette.danger
+                } else {
+                    palette.muted_foreground
+                })
+                .child(label),
+        )
+        .into_any_element()
     }
 
     fn diff_pane(
@@ -565,10 +680,25 @@ impl RepoView {
                     if selected == Some(index) {
                         row = row.bg(list_palette.selection);
                     }
+                    let click_entity = entity.clone();
+                    let menu_entity = entity;
+                    let menu_path = path.clone();
                     row.cursor_pointer()
                         .id(("changed-file", index))
                         .on_click(move |_event, _window, cx| {
-                            entity.update(cx, |this, cx| this.select_file(index, cx));
+                            click_entity.update(cx, |this, cx| this.select_file(index, cx));
+                        })
+                        .context_menu(move |menu, _window, _cx| {
+                            let entity = menu_entity.clone();
+                            let path = menu_path.clone();
+                            menu.item(PopupMenuItem::new("Show file history").on_click(
+                                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                                    let path = path.clone();
+                                    entity.update(cx, |this, cx| {
+                                        this.open_file_history(path, window, cx);
+                                    });
+                                },
+                            ))
                         })
                         .into_any_element()
                 })
@@ -824,6 +954,89 @@ fn commit_row(data: &RowData<'_>, selected: bool, lanes: u16, palette: &Palette)
         row = row.bg(palette.selection);
     }
     row
+}
+
+/// A commit row in the filtered result set. The graph column is left out: the
+/// matching commits are not adjacent in history, so lanes between them would
+/// draw connections that never existed.
+fn filtered_commit_row(data: &RowData<'_>, selected: bool, palette: &Palette) -> Div {
+    let mut row = div()
+        .flex()
+        .items_center()
+        .h(px(graph_canvas::ROW_HEIGHT))
+        .w_full()
+        .text_size(px(12.0))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .pl_3()
+                .text_color(palette.foreground)
+                .child(data.summary.to_string()),
+        )
+        .child(
+            div()
+                .w(px(150.0))
+                .flex_none()
+                .truncate()
+                .pl_2()
+                .text_size(px(11.0))
+                .text_color(palette.muted_foreground)
+                .child(data.author.to_string()),
+        )
+        .child(
+            div()
+                .w(px(120.0))
+                .flex_none()
+                .text_size(px(11.0))
+                .text_color(palette.muted_foreground)
+                .child(data::format_time(data.time)),
+        )
+        .child(
+            div()
+                .w(px(70.0))
+                .flex_none()
+                .font_family(palette.mono.clone())
+                .text_size(px(11.0))
+                .text_color(palette.muted_foreground)
+                .child(data.id.to_string()),
+        );
+
+    if selected {
+        row = row.bg(palette.selection);
+    }
+    row
+}
+
+/// One of the three match toggles above the commit list.
+fn search_chip(
+    label: &'static str,
+    field: Field,
+    fields: crate::search::Fields,
+    entity: gpui::Entity<RepoView>,
+    palette: &Palette,
+) -> AnyElement {
+    let on = fields.enabled(field);
+    div()
+        .id(format!("search-chip-{label}"))
+        .flex_none()
+        .px_1p5()
+        .py_0p5()
+        .rounded_sm()
+        .cursor_pointer()
+        .bg(if on { palette.accent } else { palette.muted })
+        .text_size(px(10.0))
+        .text_color(if on {
+            palette.accent_foreground
+        } else {
+            palette.muted_foreground
+        })
+        .child(label)
+        .on_click(move |_event, _window, cx| {
+            entity.update(cx, |this, cx| this.toggle_search_field(field, cx));
+        })
+        .into_any_element()
 }
 
 fn badge_chip(badge: &Badge<'_>, palette: &Palette) -> Div {

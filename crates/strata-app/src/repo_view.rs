@@ -28,8 +28,10 @@ use crate::branches::{BranchStart, Branches};
 use crate::data::{self, LaneWidth, Source};
 use crate::diff_view::{self, Row as DiffRow};
 use crate::fake::{self, FakeRepo};
+use crate::file_history::FileHistory;
 use crate::metrics::FrameMetrics;
 use crate::remote::Remote;
+use crate::search::SearchState;
 use crate::worktree_panel::{MainMode, WorktreePanel};
 
 /// Height of the diff pane below the commit list.
@@ -190,10 +192,14 @@ pub struct RepoView {
     pub(crate) branches: Branches,
     /// Fetch/pull/push state, progress and the dialogs that decide them.
     pub(crate) remote: Remote,
+    /// Commit search over the loaded history, with its text field.
+    pub(crate) search: SearchState,
+    /// The file-history view while it is open.
+    pub(crate) file_history: Option<FileHistory>,
 
     /// Running maximum of graph widths, updated as chunks arrive.
     lanes: LaneWidth,
-    selected: Option<usize>,
+    pub(crate) selected: Option<usize>,
     /// Commit whose changed files were requested; guards against reloading the
     /// same selection on every snapshot publish.
     selection_commit: Option<Oid>,
@@ -249,6 +255,8 @@ impl RepoView {
             entity,
             branches: Branches::default(),
             remote: Remote::default(),
+            search: SearchState::default(),
+            file_history: None,
             lanes: LaneWidth::default(),
             selected: None,
             selection_commit: None,
@@ -311,6 +319,7 @@ impl RepoView {
                     }
                 }));
                 view.session = Some(session);
+                view.search.init_input(window, cx);
             }
             Launch::Error { path, error } => view.error = Some((path, error)),
         }
@@ -323,7 +332,7 @@ impl RepoView {
         self.focus.clone()
     }
 
-    fn source(&self) -> Option<Source> {
+    pub(crate) fn source(&self) -> Option<Source> {
         if let Some(fake) = &self.fake {
             Some(Source::Fake(Rc::clone(fake)))
         } else {
@@ -342,9 +351,14 @@ impl RepoView {
             SessionEvent::SnapshotUpdated { .. } => {
                 self.sync_selection(cx);
                 self.sync_worktree(cx);
+                self.search_on_snapshot(cx);
+                self.file_history_on_snapshot(cx);
                 cx.notify();
             }
             SessionEvent::DiffReady { ticket, view } => {
+                if self.file_history_diff_ready(ticket, &view, cx) {
+                    return;
+                }
                 if self.worktree.on_diff_ready(ticket, &view) {
                     cx.notify();
                     return;
@@ -359,6 +373,9 @@ impl RepoView {
                 cx.notify();
             }
             SessionEvent::DiffFailed { ticket, error } => {
+                if self.file_history_diff_failed(ticket, &error, cx) {
+                    return;
+                }
                 if self.worktree.on_diff_failed(ticket, &error) {
                     cx.notify();
                     return;
@@ -369,6 +386,20 @@ impl RepoView {
                 self.diff_rows = Rc::new(Vec::new());
                 self.diff_error = Some(error);
                 cx.notify();
+            }
+            SessionEvent::QueryReady {
+                ticket,
+                generation,
+                rows,
+            } => {
+                if !self.search_ready(ticket, generation, &rows, cx) {
+                    self.file_history_ready(ticket, generation, &rows, cx);
+                }
+            }
+            SessionEvent::QueryFailed { ticket, error } => {
+                if !self.search_failed(ticket, &error, cx) {
+                    self.file_history_failed(ticket, &error, cx);
+                }
             }
             SessionEvent::CommandLogged(record) => {
                 self.last_command = Some(command_line(&record));
@@ -402,8 +433,6 @@ impl RepoView {
             SessionEvent::OperationProgress { id, text, percent } => {
                 self.remote.on_progress(id, &text, percent, cx)
             }
-            // Query results get their UI with commit search.
-            SessionEvent::QueryReady { .. } | SessionEvent::QueryFailed { .. } => {}
         }
     }
 
@@ -576,7 +605,7 @@ impl RepoView {
         }
     }
 
-    fn select(&mut self, index: Option<usize>, cx: &mut Context<Self>) {
+    pub(crate) fn select(&mut self, index: Option<usize>, cx: &mut Context<Self>) {
         let Some(source) = self.source() else {
             return;
         };
@@ -695,7 +724,7 @@ impl RepoView {
         self.jump(last, cx);
     }
 
-    fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+    pub(crate) fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
         let len = self.commit_count();
         if len == 0 {
             return;
@@ -758,7 +787,21 @@ impl RepoView {
         if self.mode != MainMode::History {
             self.close_worktree(window, cx);
         }
+        // The jump addresses the full list, so neither a file history nor a
+        // search filter may stay in front of it.
+        self.close_file_history(window, cx);
+        if self.search.is_active() {
+            self.clear_search(window, cx);
+        }
         self.jump(index, cx);
+    }
+
+    /// Scrolls the commit list to a row without changing the selection. While a
+    /// search filters the list the argument is a visible position, not a commit
+    /// index.
+    pub(crate) fn scroll_to_position(&mut self, position: usize) {
+        self.commit_scroll
+            .scroll_to_item(position, ScrollStrategy::Center);
     }
 
     fn jump(&mut self, index: usize, cx: &mut Context<Self>) {
