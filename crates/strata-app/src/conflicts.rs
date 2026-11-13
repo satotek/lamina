@@ -805,7 +805,8 @@ pub(crate) fn confirm_abort_merge(entity: Entity<RepoView>, window: &mut Window,
             "Abort the merge?",
             "Git restores HEAD and the worktree from before the merge. Conflicts resolved so far are lost.",
         )
-        .ok_label("Abort merge"),
+        .ok_label("Abort merge")
+        .cancel_label("Keep resolving"),
         move |_, cx| {
             entity.update(cx, |this, cx| this.abort_merge(cx));
         },

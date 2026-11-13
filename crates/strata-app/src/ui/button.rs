@@ -2,19 +2,21 @@
 //!
 //! Every button is a [`gpui_component::button::Button`] underneath, so it keeps
 //! that component's focus ring, keyboard activation, disabled styling and
-//! accessibility metadata — and its theme palette, which is what keeps buttons
-//! consistent with the inputs, checkboxes and dialogs beside them. This module
-//! only names the four roles the app uses and the four sizes it draws, so a
-//! caller writes `ui::button(...).danger()` instead of picking colours.
+//! accessibility metadata — and its palette, which this module points at the
+//! app's [`Design`](crate::style::Design) colours. This module only names the
+//! four roles the app uses and the four sizes it draws, so a caller writes
+//! `ui::button(...).danger()` instead of picking colours.
 
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, IntoElement, ParentElement as _, RenderOnce,
-    SharedString, StyleRefinement, Styled, Window,
+    AnyElement, App, ClickEvent, ElementId, FocusHandle, IntoElement, ParentElement as _,
+    RenderOnce, SharedString, StyleRefinement, Styled, Window,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{Disableable as _, Icon, Sizable as _, Size, StyledExt as _};
+
+use crate::style;
 
 /// What a button means, which decides its fill.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -58,6 +60,7 @@ pub struct UiButton {
     size: ButtonSize,
     disabled: bool,
     tooltip: Option<SharedString>,
+    focus: Option<FocusHandle>,
     on_click: Option<ClickHandler>,
     children: Vec<AnyElement>,
     style: StyleRefinement,
@@ -89,6 +92,7 @@ impl UiButton {
             size: ButtonSize::default(),
             disabled: false,
             tooltip: None,
+            focus: None,
             on_click: None,
             children: Vec::new(),
             style: StyleRefinement::default(),
@@ -135,6 +139,16 @@ impl UiButton {
         self
     }
 
+    /// Uses a caller-owned focus handle instead of the button's own.
+    ///
+    /// A feature that has to move focus onto this button, or read whether it
+    /// has it, keeps the handle it handed over (the confirmation footer does
+    /// both).
+    pub fn track_focus(mut self, focus: &FocusHandle) -> Self {
+        self.focus = Some(focus.clone());
+        self
+    }
+
     pub fn on_click(
         mut self,
         handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
@@ -157,7 +171,7 @@ impl Styled for UiButton {
 }
 
 impl RenderOnce for UiButton {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let Self {
             id,
             label,
@@ -166,10 +180,13 @@ impl RenderOnce for UiButton {
             size,
             disabled,
             tooltip,
+            focus,
             on_click,
             children,
             style,
         } = self;
+
+        style::sync_component_buttons(cx);
 
         let mut button = Button::new(id);
         let labelled = label.is_some();
@@ -190,6 +207,9 @@ impl RenderOnce for UiButton {
             ButtonSize::Small => Size::Small,
             ButtonSize::Medium => Size::Medium,
         });
+        if let Some(focus) = focus {
+            button = button.track_focus(&focus);
+        }
         button = button.disabled(disabled);
         if let Some(tooltip) = tooltip {
             button = button.tooltip(tooltip.clone());

@@ -338,11 +338,28 @@ impl Render for Gallery {
                         })),
                 )
                 .child(
+                    button("gallery-confirm-cancel-label", "Abort merge…")
+                        .danger()
+                        .on_click(cx.listener(|_, _, window, cx| {
+                            super::confirm(
+                                window,
+                                cx,
+                                Confirm::new(
+                                    "Abort the merge?",
+                                    "Conflicts resolved so far are lost.",
+                                )
+                                .ok_label("Abort merge")
+                                .cancel_label("Keep resolving"),
+                                |_, _| {},
+                            );
+                        })),
+                )
+                .child(
                     div()
                         .text_size(px(design.small()))
                         .text_color(design.muted)
                         .child(
-                            "Opens the same dialog the worktree uses. Esc cancels, Enter confirms.",
+                            "The same dialog the worktree uses. It opens on Cancel: Enter cancels, Tab then Enter discards, Esc cancels too.",
                         ),
                 ),
         ));

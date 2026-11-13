@@ -6,10 +6,10 @@
 //! come from here so a change lands in one place.
 
 use gpui::{
-    AnyElement, Hsla, IntoElement, ParentElement as _, SharedString, Styled as _, div, px, rgb,
+    AnyElement, App, Hsla, IntoElement, ParentElement as _, SharedString, Styled as _, div, px, rgb,
 };
 use gpui::{Bounds, canvas, fill, point};
-use gpui_component::{Icon, Sizable as _, Theme};
+use gpui_component::{ActiveTheme as _, Colorize as _, Icon, Sizable as _, Theme};
 use strata_core::ChangeKind;
 
 use crate::data::format_time;
@@ -138,6 +138,103 @@ impl Design {
     pub fn avatar_color(&self, email: &str) -> Hsla {
         self.avatar[avatar_index(email)]
     }
+
+    /// The fill of a filled primary button.
+    pub fn primary_button(&self) -> ButtonColors {
+        ButtonColors::filled(self.accent, self.on_accent)
+    }
+
+    /// The fill of a destructive button, in the app's own danger colour.
+    ///
+    /// The surface colour is the fill's high-contrast partner in either theme:
+    /// white under the dark red of the light theme, near-black under the pale
+    /// salmon of the dark one.
+    pub fn danger_button(&self) -> ButtonColors {
+        ButtonColors::filled(self.remove_text, self.background)
+    }
+}
+
+/// The colours of a filled button, one per pointer state.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct ButtonColors {
+    /// The fill at rest.
+    pub background: Hsla,
+    /// Text and icons drawn on the fill.
+    pub foreground: Hsla,
+    /// The fill under the pointer.
+    pub hover: Hsla,
+    /// The fill while pressed.
+    pub active: Hsla,
+}
+
+/// How far hover and pressed move away from the rest fill.
+const HOVER_DARKEN: f32 = 0.08;
+const ACTIVE_DARKEN: f32 = 0.16;
+
+impl ButtonColors {
+    fn filled(background: Hsla, foreground: Hsla) -> Self {
+        Self {
+            background,
+            foreground,
+            // Darkening keeps the foreground readable; lightening a fill that
+            // already carries white text would wash the two together.
+            hover: background.darken(HOVER_DARKEN),
+            active: background.darken(ACTIVE_DARKEN),
+        }
+    }
+}
+
+/// Puts gpui-component's button palette on the [`Design`] colours.
+///
+/// A component button paints its rest, hover, pressed and disabled states from
+/// the theme, so a fill set on the element itself is replaced as soon as the
+/// pointer enters it. Writing the tokens is the supported way to change them;
+/// it also keeps the dialogs, menus and inputs beside the buttons on the same
+/// palette. The guard makes the write happen once per palette, because a
+/// button renders every frame.
+pub fn sync_component_buttons(cx: &mut App) {
+    let (primary, danger) = {
+        let design = Design::new(cx.theme(), Settings::get(cx));
+        (design.primary_button(), design.danger_button())
+    };
+    let theme = cx.theme();
+    let in_sync = theme.primary == primary.background
+        && theme.primary_hover == primary.hover
+        && theme.primary_active == primary.active
+        && theme.primary_foreground == primary.foreground
+        && theme.button_primary == primary.background
+        && theme.button_primary_hover == primary.hover
+        && theme.button_primary_active == primary.active
+        && theme.button_primary_foreground == primary.foreground
+        && theme.danger == danger.background
+        && theme.danger_hover == danger.hover
+        && theme.danger_active == danger.active
+        && theme.danger_foreground == danger.foreground
+        && theme.button_danger == danger.background
+        && theme.button_danger_hover == danger.hover
+        && theme.button_danger_active == danger.active
+        && theme.button_danger_foreground == danger.foreground;
+    if in_sync {
+        return;
+    }
+    Theme::update(cx, |theme| {
+        theme.primary = primary.background;
+        theme.primary_hover = primary.hover;
+        theme.primary_active = primary.active;
+        theme.primary_foreground = primary.foreground;
+        theme.button_primary = primary.background;
+        theme.button_primary_hover = primary.hover;
+        theme.button_primary_active = primary.active;
+        theme.button_primary_foreground = primary.foreground;
+        theme.danger = danger.background;
+        theme.danger_hover = danger.hover;
+        theme.danger_active = danger.active;
+        theme.danger_foreground = danger.foreground;
+        theme.button_danger = danger.background;
+        theme.button_danger_hover = danger.hover;
+        theme.button_danger_active = danger.active;
+        theme.button_danger_foreground = danger.foreground;
+    });
 }
 
 impl Default for Design {
@@ -463,6 +560,7 @@ pub fn app_mark(size: f32) -> AnyElement {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui_component::ThemeMode;
 
     #[test]
     fn relative_dates_cover_every_boundary() {
@@ -546,5 +644,45 @@ mod tests {
             (design.remove_background, design.remove_text)
         );
         assert_eq!(kind_marker(ChangeKind::Renamed), "R");
+    }
+
+    fn dark_design() -> Design {
+        // `Design` reads only the mode from the theme; loading the dark theme
+        // file would need a running app.
+        let mut theme = Theme::default();
+        theme.mode = ThemeMode::Dark;
+        Design::new(&theme, &Settings::default())
+    }
+
+    #[test]
+    fn filled_buttons_use_the_design_accents_in_both_themes() {
+        for design in [Design::default(), dark_design()] {
+            let primary = design.primary_button();
+            assert_eq!(primary.background, design.accent);
+            assert_eq!(primary.foreground, design.on_accent);
+            assert!(
+                primary.hover.l < primary.background.l,
+                "hover darkens the fill"
+            );
+            assert!(
+                primary.active.l < primary.hover.l,
+                "pressed darkens it further than hover"
+            );
+
+            let danger = design.danger_button();
+            assert_eq!(danger.background, design.remove_text);
+            assert_eq!(
+                danger.foreground, design.background,
+                "the surface colour keeps the label readable on the danger fill"
+            );
+            assert_eq!(danger.hover, danger.background.darken(HOVER_DARKEN));
+            assert_eq!(danger.active, danger.background.darken(ACTIVE_DARKEN));
+        }
+
+        assert_ne!(
+            Design::default().primary_button().background,
+            dark_design().primary_button().background,
+            "each theme has its own accent"
+        );
     }
 }
