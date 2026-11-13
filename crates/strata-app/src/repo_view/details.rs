@@ -266,6 +266,7 @@ impl RepoView {
         };
         let entity = self.entity();
         let selected = self.selected_file;
+        let blame_commit = self.selection_commit;
         let list_design = design.clone();
         let count = files.len();
         let entries: Vec<(String, ChangeKind)> = files
@@ -324,14 +325,29 @@ impl RepoView {
                         .context_menu(move |menu, _window, _cx| {
                             let entity = menu_entity.clone();
                             let path = menu_path.clone();
-                            menu.item(PopupMenuItem::new("Show file history").on_click(
-                                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                                    let path = path.clone();
-                                    entity.update(cx, |this, cx| {
-                                        this.open_file_history(path, window, cx);
-                                    });
-                                },
-                            ))
+                            let mut menu =
+                                menu.item(PopupMenuItem::new("Show file history").on_click(
+                                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                                        let path = path.clone();
+                                        entity.update(cx, |this, cx| {
+                                            this.open_file_history(path, window, cx);
+                                        });
+                                    },
+                                ));
+                            if let Some(commit) = blame_commit {
+                                let entity = menu_entity.clone();
+                                let path = menu_path.clone();
+                                menu =
+                                    menu.item(PopupMenuItem::new("Blame at this commit").on_click(
+                                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                                            let path = path.clone();
+                                            entity.update(cx, |this, cx| {
+                                                this.open_blame(commit, path, window, cx);
+                                            });
+                                        },
+                                    ));
+                            }
+                            menu
                         })
                         .into_any_element()
                 })

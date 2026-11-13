@@ -6,6 +6,7 @@
 //! runs on the UI thread: file lists and diffs are requested through the
 //! session, whose own workers do the work.
 
+mod blame_view;
 mod chrome;
 mod commit_list;
 mod common;
@@ -339,6 +340,8 @@ pub struct RepoView {
     stat: details::CommitStatSlot,
     /// The selected commit's file tree while it replaces the diff pane.
     tree: tree_view::TreeBrowser,
+    /// The blame pane while it replaces the diff pane.
+    blame: blame_view::BlameView,
 
     diff: DiffSlot,
     /// The options `diff` was requested with, so a settings change that does
@@ -444,6 +447,7 @@ impl RepoView {
             selected_file: None,
             stat: details::CommitStatSlot::default(),
             tree: tree_view::TreeBrowser::default(),
+            blame: blame_view::BlameView::default(),
             diff: DiffSlot::default(),
             diff_options,
             diff_rows: Rc::new(Vec::new()),
@@ -616,8 +620,10 @@ impl RepoView {
                 if self.extra_lists.fail(ticket) {
                     return;
                 }
-                if !self.search_failed(ticket, &error, cx) {
-                    self.file_history_failed(ticket, &error, cx);
+                if !self.search_failed(ticket, &error, cx)
+                    && !self.file_history_failed(ticket, &error, cx)
+                {
+                    self.blame_failed(ticket, &error, cx);
                 }
             }
             SessionEvent::CommitStatReady { ticket, stat } => {
@@ -635,9 +641,7 @@ impl RepoView {
             SessionEvent::PathHistoryDone { ticket, generation } => {
                 self.file_history_done(ticket, generation, cx);
             }
-            // The blame view that asks for this lands in a later change; nothing
-            // requests it yet.
-            SessionEvent::BlameReady { .. } => {}
+            SessionEvent::BlameReady { ticket, blame } => self.blame_ready(ticket, &blame, cx),
             SessionEvent::SubmodulesAndWorktreesReady {
                 ticket,
                 submodules,

@@ -57,7 +57,7 @@ pub(crate) struct FileHistory {
     /// True while the rename walk runs; it is started once per path.
     names_walking: bool,
     /// Snapshot row index of the commit whose diff is shown.
-    selected: Option<usize>,
+    pub(crate) selected: Option<usize>,
     scroll: UniformListScrollHandle,
     diff_scroll: UniformListScrollHandle,
 
@@ -93,7 +93,7 @@ impl FileHistory {
         }
     }
 
-    fn rows(&self) -> &[usize] {
+    pub(crate) fn rows(&self) -> &[usize] {
         &self.walk.rows
     }
 
@@ -107,7 +107,7 @@ impl FileHistory {
 
     /// The path `index`'s commit knew the file under, falling back to the path
     /// the view was opened with until the rename walk has answered.
-    fn path_at(&self, index: usize, source: Option<&data::Source>) -> String {
+    pub(crate) fn path_at(&self, index: usize, source: Option<&data::Source>) -> String {
         let named = source
             .and_then(|source| source.commit_id(index))
             .and_then(|commit| self.names.get(&commit).cloned());
@@ -218,6 +218,7 @@ impl RepoView {
         if self.session.is_none() {
             return;
         }
+        self.discard_blame();
         self.cancel_file_history();
         self.file_history = Some(FileHistory::new(path));
         self.focus_root(window, cx);
@@ -647,6 +648,19 @@ impl RepoView {
                     });
                 })
         };
+        let blame = {
+            let entity = entity.clone();
+            crate::ui::button("file-history-blame", "Blame")
+                .icon(gpui_kit_assets::IconName::FileText)
+                .size(crate::ui::ButtonSize::Tiny)
+                .ghost()
+                .disabled(history.selected.is_none())
+                .on_click(move |_, window, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.blame_file_history(window, cx);
+                    });
+                })
+        };
         let count = {
             let rows = history.rows().len();
             let plural = if rows == 1 { "" } else { "s" };
@@ -685,6 +699,7 @@ impl RepoView {
                     .text_color(colors.accent)
                     .child(history.path.clone()),
             )
+            .child(blame)
             .child(
                 div()
                     .flex_none()

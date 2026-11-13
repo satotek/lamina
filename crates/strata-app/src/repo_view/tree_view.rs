@@ -396,6 +396,7 @@ impl RepoView {
         if self.session.is_none() {
             return;
         }
+        self.discard_blame();
         let epoch = self.tree.open(commit);
         cx.bind_keys([KeyBinding::new("escape", CloseTreeBrowser, Some(TREE_VIEW))]);
         self.focus_root(window, cx);
@@ -580,6 +581,22 @@ impl RepoView {
             });
 
         let path = self.tree.path().to_owned();
+        let blame = self.tree.commit().and_then(|commit| {
+            self.tree.file.as_ref().map(|file| {
+                let entity = self.entity();
+                let path = file.path.clone();
+                crate::ui::button("tree-blame", "Blame")
+                    .icon(IconName::FileText)
+                    .size(crate::ui::ButtonSize::Tiny)
+                    .ghost()
+                    .on_click(move |_, window, cx| {
+                        let path = path.clone();
+                        entity.update(cx, |this, cx| {
+                            this.open_blame(commit, path, window, cx);
+                        });
+                    })
+            })
+        });
         let crumbs = breadcrumbs(&path);
         let count = crumbs.len();
         let mut trail = div()
@@ -628,6 +645,7 @@ impl RepoView {
             .border_color(design.border)
             .child(back)
             .child(trail)
+            .when_some(blame, |bar, blame| bar.child(blame))
             .when_some(self.tree.commit(), |bar, commit| {
                 bar.child(
                     div()

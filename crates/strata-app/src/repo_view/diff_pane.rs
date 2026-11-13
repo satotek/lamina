@@ -17,6 +17,12 @@ const DETAILS_WIDTH: f32 = 320.0;
 
 impl RepoView {
     pub(super) fn diff_pane(&self, design: &Design, cx: &mut App) -> AnyElement {
+        // Blame replaces the whole pane: it needs the width the details column
+        // would take for its annotations.
+        if self.blame.is_open() {
+            return self.blame_pane(design, cx);
+        }
+
         let rows = if self.fake.is_some() {
             self.selected
                 .and_then(|index| self.fake_diffs.get(index % self.fake_diffs.len().max(1)))
