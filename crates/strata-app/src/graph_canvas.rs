@@ -1,9 +1,9 @@
 //! The commit-graph column.
 //!
-//! Each row paints its own [`GraphRow`] with the low-level canvas API: stroked
-//! paths for lane lines and lane changes, a filled quad for the commit node.
-//! No text lives here, so the row can be painted independently of the list's
-//! text layout.
+//! Each row paints its own [`GraphRow`] with the low-level canvas API: filled
+//! quads for the straight lane lines, one stroked path per colour for the lane
+//! changes, and a filled quad for the commit node. No text lives here, so the
+//! row can be painted independently of the list's text layout.
 //!
 //! Lane x positions are global: lane `i` sits at the same distance from the
 //! canvas' left edge on every row, so lines run straight down the list. The
@@ -16,10 +16,12 @@
 
 use gpui::prelude::*;
 use gpui::{
-    Bounds, ContentMask, Hsla, PathBuilder, Pixels, Window, canvas, div, fill, linear_color_stop,
-    linear_gradient, point, px, size,
+    Bounds, ContentMask, Hsla, PathBuilder, Pixels, Point, Window, canvas, div, fill,
+    linear_color_stop, linear_gradient, point, px, size,
 };
 use strata_core::graph::{GraphRow, Half, PassThrough, Segment};
+
+use crate::style::LANES;
 
 pub const ROW_HEIGHT: f32 = 28.0;
 /// Distance between two lane centres.
@@ -98,7 +100,7 @@ pub fn row_lanes(row: GraphRow<'_>) -> u16 {
 /// A row's graph, sized to that row's own indent.
 ///
 /// `fade` is the colour behind the row, used by the gradient at a clipped edge.
-pub fn graph_column(row: GraphRow<'_>, colors: [Hsla; 8], fade: Hsla) -> impl IntoElement {
+pub fn graph_column(row: GraphRow<'_>, colors: [Hsla; LANES], fade: Hsla) -> impl IntoElement {
     let lanes = row_lanes(row);
     let width = px(indent(lanes));
     // The paint closure must own its data; only visible rows are copied.
@@ -127,9 +129,130 @@ struct OwnedRow {
     edges: Vec<Segment>,
 }
 
+/// A point in lane space: `x` is a distance from the row's left edge, `y` a
+/// fraction of the row's height. Keeping the geometry free of pixels lets the
+/// batching helpers be tested without a window.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Pt {
+    x: f32,
+    y: f32,
+}
+
+/// A straight run of line, which a filled quad paints exactly.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Straight {
+    /// Left edge to the line's centre.
+    x: f32,
+    /// Start and end of the run, as fractions of the row's height.
+    from: f32,
+    to: f32,
+}
+
+/// A lane change: a cubic Bézier, which only the tessellator can paint.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Curve {
+    from: Pt,
+    control_a: Pt,
+    control_b: Pt,
+    to: Pt,
+}
+
+/// One row's lines, as far as the paint pass is concerned.
+///
+/// Straight runs are kept apart from curves because a quad is all a straight
+/// run needs; curves are sorted by palette slot so a row builds one path per
+/// colour instead of one per segment.
+#[derive(Default)]
+struct Linework {
+    straight: Vec<(usize, Straight)>,
+    curves: Vec<(usize, Curve)>,
+}
+
+/// The palette slot a segment's colour index resolves to.
+fn slot(color: u16) -> usize {
+    usize::from(color) % LANES
+}
+
+/// Splits a row's linework into quads and curves, dropping what the cap hides.
+///
+/// `visible` is the number of lanes the row actually paints. An edge that
+/// starts or ends inside the cap is kept whole: its far end runs under the
+/// fade rather than stopping at the clip.
+fn linework(row: &OwnedRow, visible: u16) -> Linework {
+    // Every pass and edge contributes at most one run, so the buffers never
+    // grow while they are filled.
+    let capacity = row.passes.len() + row.edges.len();
+    let mut straight = Vec::with_capacity(capacity);
+    let mut curves = Vec::with_capacity(capacity);
+
+    for pass in &row.passes {
+        if pass.lane >= visible {
+            continue;
+        }
+        straight.push((
+            slot(pass.color),
+            Straight {
+                x: lane_offset(pass.lane),
+                from: 0.0,
+                to: 1.0,
+            },
+        ));
+    }
+
+    for segment in &row.edges {
+        if segment.from_lane.min(segment.to_lane) >= visible {
+            continue;
+        }
+        let color = slot(segment.color);
+        let from_x = lane_offset(segment.from_lane);
+        let to_x = lane_offset(segment.to_lane);
+        let (from_y, to_y, control_y) = match segment.half {
+            Half::Top => (0.0, 0.5, 0.25),
+            Half::Bottom => (0.5, 1.0, 0.75),
+        };
+
+        if segment.from_lane == segment.to_lane {
+            straight.push((
+                color,
+                Straight {
+                    x: from_x,
+                    from: from_y,
+                    to: to_y,
+                },
+            ));
+            continue;
+        }
+
+        // Both tangents are vertical, so the curve leaves and enters its lanes
+        // straight down; the controls sit a quarter row in from each end.
+        curves.push((
+            color,
+            Curve {
+                from: Pt {
+                    x: from_x,
+                    y: from_y,
+                },
+                control_a: Pt {
+                    x: from_x,
+                    y: control_y,
+                },
+                control_b: Pt {
+                    x: to_x,
+                    y: control_y,
+                },
+                to: Pt { x: to_x, y: to_y },
+            },
+        ));
+    }
+
+    curves.sort_by_key(|(color, _)| *color);
+
+    Linework { straight, curves }
+}
+
 fn paint_row(
     row: &OwnedRow,
-    colors: &[Hsla; 8],
+    colors: &[Hsla; LANES],
     fade: Hsla,
     bounds: Bounds<Pixels>,
     window: &mut Window,
@@ -137,8 +260,7 @@ fn paint_row(
     let top = bounds.origin.y;
     let height = bounds.size.height;
     let middle = top + height / 2.0;
-    let bottom = top + height;
-    let quarter = height / 4.0;
+    let left = bounds.origin.x;
 
     let clipped = row.lanes > MAX_LANES;
     let visible = row.lanes.min(MAX_LANES);
@@ -150,61 +272,40 @@ fn paint_row(
         bounds
     };
 
+    let lines = linework(row, visible);
+
     window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
-        for pass in &row.passes {
-            if pass.lane >= visible {
-                continue;
-            }
-            let color = colors[usize::from(pass.color) % colors.len()];
-            let x = lane_x(bounds, pass.lane);
-            let mut path = PathBuilder::stroke(px(STROKE_WIDTH));
-            path.move_to(point(x, top));
-            path.line_to(point(x, bottom));
-            if let Ok(path) = path.build() {
-                window.paint_path(path, color);
-            }
+        // A straight run has the shape its stroke would have tessellated into,
+        // so a quad paints the same pixels without touching the tessellator.
+        for (color, run) in &lines.straight {
+            let x = left + px(run.x) - px(STROKE_WIDTH / 2.0);
+            window.paint_quad(fill(
+                Bounds::new(
+                    point(x, top + height * run.from),
+                    size(px(STROKE_WIDTH), height * (run.to - run.from)),
+                ),
+                colors[*color],
+            ));
         }
 
-        for segment in &row.edges {
-            // An edge entirely past the cap has nothing to contribute once
-            // clipped; one that crosses it still enters from the fade.
-            if segment.from_lane.min(segment.to_lane) >= visible {
-                continue;
-            }
-            let color = colors[usize::from(segment.color) % colors.len()];
-            let from_x = lane_x(bounds, segment.from_lane);
-            let to_x = lane_x(bounds, segment.to_lane);
-            let mut path = PathBuilder::stroke(px(STROKE_WIDTH));
-
-            match segment.half {
-                Half::Top => {
-                    path.move_to(point(from_x, top));
-                    if segment.from_lane == segment.to_lane {
-                        path.line_to(point(to_x, middle));
-                    } else {
-                        path.cubic_bezier_to(
-                            point(to_x, middle),
-                            point(from_x, middle - quarter),
-                            point(to_x, middle - quarter),
-                        );
-                    }
-                }
-                Half::Bottom => {
-                    path.move_to(point(from_x, middle));
-                    if segment.from_lane == segment.to_lane {
-                        path.line_to(point(to_x, bottom));
-                    } else {
-                        path.cubic_bezier_to(
-                            point(to_x, bottom),
-                            point(from_x, middle + quarter),
-                            point(to_x, bottom - quarter),
-                        );
-                    }
-                }
-            }
-
-            if let Ok(path) = path.build() {
-                window.paint_path(path, color);
+        // Curves are sorted by colour, so this builds at most one path per
+        // palette slot per row. `PathBuilder` has no capacity to reserve; not
+        // rebuilding one per segment is what keeps its buffers from growing.
+        let mut paths: [Option<PathBuilder>; LANES] = std::array::from_fn(|_| None);
+        for (color, curve) in &lines.curves {
+            let path = paths[*color].get_or_insert_with(|| PathBuilder::stroke(px(STROKE_WIDTH)));
+            path.move_to(lane_point(left, top, height, curve.from));
+            path.cubic_bezier_to(
+                lane_point(left, top, height, curve.to),
+                lane_point(left, top, height, curve.control_a),
+                lane_point(left, top, height, curve.control_b),
+            );
+        }
+        for (color, path) in paths.into_iter().enumerate() {
+            if let Some(path) = path
+                && let Ok(path) = path.build()
+            {
+                window.paint_path(path, colors[color]);
             }
         }
     });
@@ -235,11 +336,11 @@ fn paint_row(
             bounds,
             middle,
             row.node_lane,
-            colors[usize::from(row.node_color) % colors.len()],
+            colors[slot(row.node_color)],
             window,
         );
     } else if let Some(x) = node_marker(row.node_lane, row.lanes) {
-        let color = colors[usize::from(row.node_color) % colors.len()];
+        let color = colors[slot(row.node_color)];
         let diameter = MARKER_RADIUS * 2.0;
         window.paint_quad(
             fill(
@@ -255,6 +356,11 @@ fn paint_row(
             .corner_radii(px(MARKER_RADIUS)),
         );
     }
+}
+
+/// Turns a lane-space point into a canvas coordinate.
+fn lane_point(left: Pixels, top: Pixels, height: Pixels, at: Pt) -> Point<Pixels> {
+    point(left + px(at.x), top + height * at.y)
 }
 
 fn paint_node(bounds: Bounds<Pixels>, middle: Pixels, lane: u16, color: Hsla, window: &mut Window) {
@@ -295,6 +401,16 @@ mod tests {
             width,
             passes,
             edges,
+        }
+    }
+
+    fn owned(node_lane: u16, lanes: u16, passes: &[PassThrough], edges: &[Segment]) -> OwnedRow {
+        OwnedRow {
+            node_lane,
+            node_color: 0,
+            lanes,
+            passes: passes.to_vec(),
+            edges: edges.to_vec(),
         }
     }
 
@@ -359,5 +475,215 @@ mod tests {
             "width zero uses the node"
         );
         assert_eq!(row_lanes(row(0, 0, &[], &[])), 1, "never zero lanes");
+    }
+
+    #[test]
+    fn passes_become_full_height_straight_runs() {
+        let passes = [
+            PassThrough { lane: 0, color: 2 },
+            // A colour index past the table wraps to the same slot a paint
+            // would have resolved it to.
+            PassThrough {
+                lane: 2,
+                color: LANES as u16 + 2,
+            },
+        ];
+        let lines = linework(&owned(0, 3, &passes, &[]), 3);
+
+        assert!(lines.curves.is_empty());
+        assert_eq!(
+            lines.straight,
+            vec![
+                (
+                    2,
+                    Straight {
+                        x: lane_offset(0),
+                        from: 0.0,
+                        to: 1.0,
+                    },
+                ),
+                (
+                    2,
+                    Straight {
+                        x: lane_offset(2),
+                        from: 0.0,
+                        to: 1.0,
+                    },
+                ),
+            ],
+            "one quad per pass, full row height, at the lane's centre"
+        );
+    }
+
+    #[test]
+    fn straight_edges_become_quads_and_lane_changes_become_curves() {
+        let edges = [
+            Segment {
+                from_lane: 1,
+                to_lane: 1,
+                half: Half::Top,
+                color: 0,
+            },
+            Segment {
+                from_lane: 3,
+                to_lane: 3,
+                half: Half::Bottom,
+                color: 1,
+            },
+            Segment {
+                from_lane: 0,
+                to_lane: 2,
+                half: Half::Top,
+                color: 1,
+            },
+            Segment {
+                from_lane: 4,
+                to_lane: 1,
+                half: Half::Bottom,
+                color: 0,
+            },
+        ];
+        let lines = linework(&owned(1, 5, &[], &edges), 5);
+
+        assert_eq!(
+            lines.straight,
+            vec![
+                (
+                    0,
+                    Straight {
+                        x: lane_offset(1),
+                        from: 0.0,
+                        to: 0.5,
+                    },
+                ),
+                (
+                    1,
+                    Straight {
+                        x: lane_offset(3),
+                        from: 0.5,
+                        to: 1.0,
+                    },
+                ),
+            ],
+            "edges that stay in their lane are straight quads for their half"
+        );
+        assert_eq!(
+            lines.curves,
+            vec![
+                (
+                    0,
+                    Curve {
+                        from: Pt {
+                            x: lane_offset(4),
+                            y: 0.5,
+                        },
+                        control_a: Pt {
+                            x: lane_offset(4),
+                            y: 0.75,
+                        },
+                        control_b: Pt {
+                            x: lane_offset(1),
+                            y: 0.75,
+                        },
+                        to: Pt {
+                            x: lane_offset(1),
+                            y: 1.0,
+                        },
+                    },
+                ),
+                (
+                    1,
+                    Curve {
+                        from: Pt {
+                            x: lane_offset(0),
+                            y: 0.0,
+                        },
+                        control_a: Pt {
+                            x: lane_offset(0),
+                            y: 0.25,
+                        },
+                        control_b: Pt {
+                            x: lane_offset(2),
+                            y: 0.25,
+                        },
+                        to: Pt {
+                            x: lane_offset(2),
+                            y: 0.5,
+                        },
+                    },
+                ),
+            ],
+            "lane changes keep their vertical tangents, grouped by colour"
+        );
+    }
+
+    #[test]
+    fn curves_are_grouped_so_a_row_builds_one_path_per_colour() {
+        // Colours alternate so an unsorted batch would open a new path per
+        // segment instead of per colour.
+        let edges: Vec<Segment> = (0..6)
+            .map(|lane| Segment {
+                from_lane: lane,
+                to_lane: lane + 1,
+                half: Half::Top,
+                color: lane % 3,
+            })
+            .collect();
+        let lines = linework(&owned(0, 7, &[], &edges), 7);
+
+        let colours: Vec<usize> = lines.curves.iter().map(|(color, _)| *color).collect();
+        assert_eq!(colours, vec![0, 0, 1, 1, 2, 2]);
+        let mut runs = colours.clone();
+        runs.dedup();
+        assert_eq!(runs.len(), 3, "one run per colour, not per segment");
+    }
+
+    #[test]
+    fn the_cap_drops_hidden_lanes_but_keeps_edges_that_cross_it() {
+        let passes = [
+            PassThrough {
+                lane: MAX_LANES - 1,
+                color: 0,
+            },
+            PassThrough {
+                lane: MAX_LANES,
+                color: 1,
+            },
+        ];
+        let edges = [
+            // Entirely past the cap: nothing of it is visible.
+            Segment {
+                from_lane: MAX_LANES,
+                to_lane: MAX_LANES + 3,
+                half: Half::Top,
+                color: 0,
+            },
+            // Leaves the cap from a visible lane: its visible part runs under
+            // the fade.
+            Segment {
+                from_lane: MAX_LANES - 1,
+                to_lane: 40,
+                half: Half::Bottom,
+                color: 2,
+            },
+            // Enters from a hidden lane: same.
+            Segment {
+                from_lane: 30,
+                to_lane: 0,
+                half: Half::Top,
+                color: 3,
+            },
+        ];
+        let lines = linework(&owned(0, 40, &passes, &edges), MAX_LANES);
+
+        assert_eq!(
+            lines.straight.len(),
+            1,
+            "the only visible pass is the one inside the cap"
+        );
+        assert_eq!(lines.straight[0].1.x, lane_offset(MAX_LANES - 1));
+        assert_eq!(lines.curves.len(), 2, "crossing edges are painted");
+        assert_eq!(lines.curves[0].0, 2);
+        assert_eq!(lines.curves[1].0, 3);
     }
 }
