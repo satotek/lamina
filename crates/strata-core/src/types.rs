@@ -37,8 +37,13 @@ pub struct RefInfo {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeadInfo {
     /// HEAD points to a branch. `target` is `None` for an unborn branch.
-    Branch { short_name: String, target: Option<Oid> },
-    Detached { target: Oid },
+    Branch {
+        short_name: String,
+        target: Option<Oid>,
+    },
+    Detached {
+        target: Oid,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
