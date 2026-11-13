@@ -3,6 +3,7 @@
 //! Path history is checked against `git log`, because the contract is the git
 //! semantics, not this implementation's own expectations.
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -651,6 +652,91 @@ fn path_history_matches_git_log_across_branches() {
         "a commit that left the path alone is not listed"
     );
     assert!(!commits.contains(&main_one));
+}
+
+#[test]
+fn path_history_keeps_date_order_when_commits_share_a_timestamp() {
+    let fixture = Fixture::new();
+    // Everything happens in the same second, so the order is decided by
+    // parenthood and by the walk's insertion order, exactly as git's
+    // `--date-order` does it.
+    let base = fixture.commit("shared.txt", "0\n", BASE_TIME + 100, "base");
+
+    fixture.git(&["checkout", "--quiet", "-b", "topic"]);
+    let topic_one = fixture.commit("shared.txt", "1\n", BASE_TIME + 100, "topic one");
+    let topic_two = fixture.commit("shared.txt", "2\n", BASE_TIME + 100, "topic two");
+
+    fixture.git(&["checkout", "--quiet", "main"]);
+    let main = fixture.commit("main.txt", "1\n", BASE_TIME + 100, "main only");
+    fixture.git_dated(
+        BASE_TIME + 100,
+        &["merge", "--quiet", "--no-ff", "-m", "merge topic", "topic"],
+    );
+    let merge = fixture.head();
+
+    assert_eq!(
+        fixture.history("shared.txt"),
+        fixture.git_history("shared.txt")
+    );
+    assert_eq!(
+        fixture.history("shared.txt"),
+        vec![merge, topic_two, topic_one, base]
+    );
+    assert!(!fixture.history("shared.txt").contains(&main));
+}
+
+#[test]
+fn path_history_keeps_the_log_order_across_merges() {
+    let fixture = Fixture::new();
+    fixture.write("shared.txt", "0\n");
+    fixture.commit("shared.txt", "base\n", BASE_TIME + 100, "base");
+    for round in 0..3 {
+        let topic = format!("topic{round}");
+        fixture.git(&["checkout", "--quiet", "-b", &topic]);
+        for step in 0..3 {
+            // Each topic commit is older than its parent: clock skew must not
+            // reorder the walk.
+            fixture.commit(
+                "shared.txt",
+                &format!("topic {round} {step}\n"),
+                BASE_TIME + 50 + step,
+                &format!("topic {round} {step}"),
+            );
+        }
+        fixture.git(&["checkout", "--quiet", "main"]);
+        fixture.commit(
+            "main.txt",
+            &format!("main {round}\n"),
+            BASE_TIME + 60,
+            &format!("main {round}"),
+        );
+        fixture.git_dated(
+            BASE_TIME + 60,
+            &["merge", "--quiet", "--no-ff", "-m", "merge topic", &topic],
+        );
+    }
+
+    let repo = fixture.open();
+    let history: Vec<String> = repo
+        .path_history("shared.txt")
+        .expect("path history")
+        .map(|id| id.expect("commit id").to_string())
+        .collect();
+    let in_history: HashSet<String> = history.iter().cloned().collect();
+    let expected: Vec<String> = repo
+        .walk_commits()
+        .expect("commit walk")
+        .map(|commit| commit.expect("commit").id.to_string())
+        .filter(|id| in_history.contains(id))
+        .collect();
+
+    // The base, nine topic commits and the three merges, which take the topic
+    // side of the file and so differ from their first parent.
+    assert_eq!(history.len(), 13);
+    assert_eq!(
+        history, expected,
+        "a path walk must keep the log's order, not just its rows"
+    );
 }
 
 #[test]

@@ -18,8 +18,8 @@ use strata_core::git_cli::CommandRecord;
 use strata_core::patch::LineSelection;
 use strata_core::repo::Repo;
 use strata_core::session::{
-    DiffRequest, DiffTicket, DiffView, HistoryScope, Operation, OperationId, RepoSnapshot, Session,
-    SessionEvent, SessionOptions,
+    DiffRequest, DiffTicket, DiffView, FIRST_COMMIT_CHUNK, HistoryScope, Operation, OperationId,
+    RepoSnapshot, Session, SessionEvent, SessionOptions,
 };
 use strata_core::{HeadInfo, RefKind, WorktreeStatus};
 use tempfile::TempDir;
@@ -334,8 +334,8 @@ fn first_snapshot_arrives_and_history_completes() {
 
     let first = harness.wait_until(TIMEOUT, |snapshot| !snapshot.commits.is_empty());
     assert!(
-        first.commits.len() >= 2_000,
-        "the first publish should hold the first chunk, got {} commits",
+        first.commits.len() >= FIRST_COMMIT_CHUNK,
+        "the first publish should hold at least the small first chunk, got {} commits",
         first.commits.len()
     );
 

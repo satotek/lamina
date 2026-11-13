@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use strata_core::repo::Repo;
 use strata_core::session::{Session, SessionEvent};
-use strata_core::{CommitStat, Oid};
+use strata_core::{ChangeKind, CommitStat, Oid};
 use tempfile::TempDir;
 
 const TIMEOUT: Duration = Duration::from_secs(60);
@@ -202,6 +202,144 @@ fn commit_stat_flags_a_binary_file_without_counting_lines() {
     assert!(binary.binary);
     assert_eq!((binary.added, binary.removed), (0, 0));
     assert_eq!((stat.added, stat.removed), (0, 0), "binary adds no lines");
+}
+
+#[test]
+fn commit_stat_counts_a_rename_as_a_deletion_and_an_addition() {
+    let repo = TestRepo::new();
+    repo.write("old.txt", "one\ntwo\nthree\n");
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "-q", "-m", "root"]);
+
+    // A rename that also edits the file: without rename detection the old path
+    // is deleted in full and the new one added in full.
+    repo.write("new.txt", "one\ntwo\nthree\nfour\n");
+    fs::remove_file(repo.path().join("old.txt")).expect("remove old file");
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "-q", "-m", "rename and edit"]);
+    let commit = repo.head();
+
+    let stat = stat_of(&repo, commit);
+    assert_matches_git(&repo, commit, &stat);
+    let paths: Vec<&str> = stat.files.iter().map(|file| file.path.as_str()).collect();
+    assert_eq!(paths, ["new.txt", "old.txt"]);
+}
+
+#[test]
+fn a_stat_after_the_file_list_reuses_the_rename_aware_diff() {
+    let repo = TestRepo::new();
+    repo.write("old.txt", "one\ntwo\nthree\n");
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "-q", "-m", "root"]);
+
+    repo.write("new.txt", "one\ntwo\nthree\nfour\n");
+    fs::remove_file(repo.path().join("old.txt")).expect("remove old file");
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "-q", "-m", "rename and edit"]);
+    let commit = repo.head();
+
+    // The UI asks for the file list and the line counts of one commit. The
+    // cached list detects the rename, while the counts still have to match
+    // `--no-renames`.
+    let handle = repo.open();
+    let changes = handle.commit_changes(commit).expect("commit changes");
+    assert!(
+        changes
+            .iter()
+            .any(|change| change.kind == ChangeKind::Renamed),
+        "the file list should detect the rename: {changes:?}"
+    );
+    let stat = handle.commit_stat(commit).expect("commit stat");
+    assert_matches_git(&repo, commit, &stat);
+}
+
+#[test]
+fn commit_stat_skips_a_file_too_large_to_count() {
+    let repo = TestRepo::new();
+    repo.write("small.txt", "one\n");
+    // Counting this would cost more than the commit view is worth; it is
+    // reported like a binary file instead of being diffed in full.
+    let mut large = String::new();
+    let line = "0123456789abcdef0123456789abcdef\n";
+    while large.len() <= 4 * 1024 * 1024 {
+        large.push_str(line);
+    }
+    repo.write("large.txt", &large);
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "-q", "-m", "large file"]);
+    let commit = repo.head();
+
+    let stat = stat_of(&repo, commit);
+    let large = stat
+        .files
+        .iter()
+        .find(|file| file.path == "large.txt")
+        .expect("large file in stat");
+    assert!(large.binary, "a file over the stat limit is flagged");
+    assert_eq!((large.added, large.removed), (0, 0));
+    let small = stat
+        .files
+        .iter()
+        .find(|file| file.path == "small.txt")
+        .expect("small file in stat");
+    assert!(!small.binary);
+    assert_eq!((small.added, small.removed), (1, 0));
+}
+
+/// One commit touching 3000 files with half of every file rewritten: the shape
+/// of a huge merge's file list, where counting must not render every line.
+#[test]
+#[ignore = "perf: builds a 3000-file commit"]
+fn commit_stat_on_3000_files_is_fast() {
+    let repo = TestRepo::new();
+    for index in 0..3000 {
+        let mut body = String::new();
+        for line in 0..100 {
+            body.push_str(&format!(
+                "line {line} of file {index} original content with some words\n"
+            ));
+        }
+        repo.write(&format!("src/file{index:04}.txt"), &body);
+    }
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "-q", "-m", "base"]);
+
+    for index in 0..3000 {
+        let mut body = String::new();
+        for line in 0..100 {
+            if line % 2 == 0 {
+                body.push_str(&format!(
+                    "line {line} of file {index} changed content with other words\n"
+                ));
+            } else {
+                body.push_str(&format!(
+                    "line {line} of file {index} original content with some words\n"
+                ));
+            }
+        }
+        repo.write(&format!("src/file{index:04}.txt"), &body);
+    }
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "-q", "-m", "touch 3000 files"]);
+    let commit = repo.head();
+
+    let start = Instant::now();
+    let stat = stat_of(&repo, commit);
+    let elapsed = start.elapsed();
+    eprintln!("commit_stat over 3000 changed files: {elapsed:?}");
+    assert_eq!(stat.files.len(), 3000);
+    assert_eq!((stat.added, stat.removed), (150_000, 150_000));
+
+    // Debug builds are for coverage, not for the timing contract.
+    let limit = if cfg!(debug_assertions) {
+        Duration::from_secs(10)
+    } else {
+        Duration::from_millis(500)
+    };
+    assert!(
+        elapsed < limit,
+        "stat took {elapsed:?}, expected under {limit:?}"
+    );
 }
 
 #[test]

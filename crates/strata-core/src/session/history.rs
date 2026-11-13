@@ -9,16 +9,12 @@ use crate::graph::GraphLayout;
 use crate::graph::GraphRows;
 use crate::repo::CommitWalk;
 use crate::session::publish::Shared;
-use crate::session::{COMMIT_CHUNK, CommitList, HistoryScope, SessionEvent};
+use crate::session::{COMMIT_CHUNK, CommitList, FIRST_COMMIT_CHUNK, HistoryScope, SessionEvent};
 use crate::{CommitInfo, HeadInfo, Oid, RefInfo, RemoteInfo, Result, StashInfo, UpstreamInfo};
 
 pub(crate) struct LoadCommand {
     pub(crate) generation: u64,
 }
-
-/// The first chunk is published well before the walk finishes, so the log
-/// appears while older history is still being read.
-const FIRST_PUBLISH_COMMITS: usize = 2_000;
 
 pub(crate) fn run(shared: Arc<Shared>, rx: Receiver<LoadCommand>) {
     while let Ok(command) = rx.recv() {
@@ -136,11 +132,7 @@ impl Loader<'_> {
     }
 
     fn publish_due(&self) -> bool {
-        if self.published == 0 {
-            self.loaded >= FIRST_PUBLISH_COMMITS
-        } else {
-            self.loaded - self.published >= COMMIT_CHUNK
-        }
+        publish_due(self.published, self.loaded)
     }
 
     fn publish(&mut self, complete: bool) -> bool {
@@ -173,5 +165,37 @@ impl Loader<'_> {
                 snapshot.commits = commits;
                 snapshot.commit_index = commit_index;
             })
+    }
+}
+
+/// Whether a walk that loaded `loaded` commits and published `published` of
+/// them should publish again.
+fn publish_due(published: usize, loaded: usize) -> bool {
+    let chunk = if published == 0 {
+        FIRST_COMMIT_CHUNK
+    } else {
+        COMMIT_CHUNK
+    };
+    loaded - published >= chunk
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_first_publish_is_a_small_chunk() {
+        assert!(!publish_due(0, FIRST_COMMIT_CHUNK - 1));
+        assert!(publish_due(0, FIRST_COMMIT_CHUNK));
+    }
+
+    #[test]
+    fn later_publishes_wait_for_a_full_chunk() {
+        let published = FIRST_COMMIT_CHUNK;
+        assert!(!publish_due(published, published + COMMIT_CHUNK - 1));
+        assert!(publish_due(published, published + COMMIT_CHUNK));
+        // A walk that ends earlier publishes only its tail, from `run`.
+        let tail = publish_due(published + COMMIT_CHUNK, published + COMMIT_CHUNK + 1);
+        assert!(!tail);
     }
 }

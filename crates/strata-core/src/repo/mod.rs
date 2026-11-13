@@ -29,6 +29,9 @@ pub use submodules::{SubmoduleInfo, SubmoduleStatus};
 pub use worktrees::WorktreeInfo;
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use stat::CommitDiffCache;
 
 use crate::{Error, Result};
 
@@ -37,6 +40,9 @@ use crate::{Error, Result};
 pub struct Repo {
     inner: gix::ThreadSafeRepository,
     workdir: Option<PathBuf>,
+    /// Clones share the cache, so the worker that counts a commit's lines sees
+    /// the tree diff the UI thread just computed for the same commit.
+    pub(crate) commit_diffs: Arc<Mutex<CommitDiffCache>>,
 }
 
 impl Repo {
@@ -46,7 +52,11 @@ impl Repo {
         let inner = gix::ThreadSafeRepository::discover(path)
             .map_err(|_| Error::NotARepository(path.to_path_buf()))?;
         let workdir = inner.work_dir().map(Path::to_path_buf);
-        Ok(Self { inner, workdir })
+        Ok(Self {
+            inner,
+            workdir,
+            commit_diffs: Arc::new(Mutex::new(CommitDiffCache::default())),
+        })
     }
 
     pub fn workdir(&self) -> Option<&Path> {

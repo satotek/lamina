@@ -1,5 +1,6 @@
 //! Owned by the repo-log task: commit walk, refs, HEAD.
 
+mod path;
 mod walk;
 
 use std::collections::HashSet;
@@ -9,6 +10,8 @@ use gix::objs::commit::ref_iter::Token as CommitToken;
 
 use super::Repo;
 use crate::{CommitInfo, Error, HeadInfo, Oid, RefInfo, RefKind, Result, StashInfo};
+
+pub(crate) use path::PathWalk;
 
 /// Cooperative cancellation for a walk: returns `true` to stop it.
 ///
@@ -201,6 +204,20 @@ impl Repo {
         }
         let walk = walk::Walk::new(repo.objects.clone(), graph, &tips, cancelled)?;
         Ok(CommitWalk { repo, walk })
+    }
+
+    /// A commit walk for path-limited history.
+    ///
+    /// It yields the same `--date-order` sequence as
+    /// [`walk_commits_with`](Self::walk_commits_with), but keeps only the
+    /// ordering counters instead of a node per commit: a file history needs the
+    /// order of the commits that touched the file, not the reachability state of
+    /// the whole repository.
+    pub(crate) fn path_walk_with(&self, cancelled: Option<CancelCheck>) -> Result<PathWalk> {
+        let repo = self.local();
+        let graph = repo.commit_graph_if_enabled().ok().flatten();
+        let tips = walk_tips(&repo, graph.as_ref())?;
+        PathWalk::new(repo.objects.clone(), graph, &tips, cancelled)
     }
 }
 

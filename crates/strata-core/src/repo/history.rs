@@ -17,8 +17,9 @@ use std::collections::HashMap;
 use gix::object::tree::diff::ChangeDetached;
 use gix::objs::{FindExt, TreeRefIter};
 
+use super::Repo;
 use super::log::CancelCheck;
-use super::{CommitWalk, Repo};
+use super::log::PathWalk;
 use crate::{Error, Oid, Result};
 
 /// Resolved entries are kept per tree id. In linear history a commit's tree is
@@ -55,7 +56,7 @@ pub struct PathHistoryEntry {
 /// other parents.
 pub struct PathHistoryEntries {
     repo: gix::Repository,
-    walk: CommitWalk,
+    walk: PathWalk,
     /// Path components of the file in the commit being inspected. Moves from
     /// the queried name to older names as the walk goes back past renames.
     components: Vec<Vec<u8>>,
@@ -93,7 +94,7 @@ impl Iterator for PathHistoryEntries {
                     return Some(Err(error));
                 }
             };
-            match self.changed(commit.id, commit.parents.first().copied()) {
+            match self.changed(commit.id, commit.parent) {
                 Ok(true) => {
                     // The entry names the file at this commit, before the
                     // tracked path moves to the old name for older commits.
@@ -101,9 +102,7 @@ impl Iterator for PathHistoryEntries {
                         commit: commit.id,
                         path: self.display_path.clone(),
                     };
-                    if let Err(error) =
-                        self.follow_rename(commit.id, commit.parents.first().copied())
-                    {
+                    if let Err(error) = self.follow_rename(commit.id, commit.parent) {
                         self.failed = true;
                         return Some(Err(error));
                     }
@@ -347,7 +346,7 @@ impl Repo {
         cancelled: Option<CancelCheck>,
     ) -> Result<PathHistoryEntries> {
         let mut repo = self.local();
-        let walk = self.walk_commits_with(cancelled.clone())?;
+        let walk = self.path_walk_with(cancelled.clone())?;
         // A missing or corrupt graph only costs speed here.
         let graph = repo.commit_graph_if_enabled().ok().flatten();
         repo.object_cache_size_if_unset(OBJECT_CACHE_BYTES);

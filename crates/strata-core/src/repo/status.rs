@@ -59,32 +59,21 @@ impl Repo {
     }
 
     /// Files changed by `commit` relative to its first parent (or the empty tree).
+    ///
+    /// Renames are detected. The tree diff is shared with
+    /// [`commit_stat`](Self::commit_stat) through the repository's cache, which
+    /// matters for a commit that touches thousands of files.
     pub fn commit_changes(&self, commit: Oid) -> Result<Vec<FileChange>> {
-        let repo = self.local();
-        let commit = repo.find_commit(commit).map_err(Error::gix)?;
-        let tree = commit.tree().map_err(Error::gix)?;
-        let parent_tree = match commit.parent_ids().next() {
-            Some(parent) => Some(
-                repo.find_commit(parent.detach())
-                    .map_err(Error::gix)?
-                    .tree()
-                    .map_err(Error::gix)?,
-            ),
-            None => None,
-        };
-
-        let changes = repo
-            .diff_tree_to_tree(
-                parent_tree.as_ref(),
-                Some(&tree),
-                Some(
-                    gix::diff::Options::default()
-                        .with_rewrites(Some(gix::diff::Rewrites::default())),
-                ),
-            )
-            .map_err(Error::gix)?;
-
-        let mut changes: Vec<FileChange> = changes.into_iter().filter_map(tree_change).collect();
+        let diff = self.commit_diff(commit, true)?;
+        let mut changes: Vec<FileChange> = diff
+            .files
+            .iter()
+            .map(|file| FileChange {
+                path: file.path.clone(),
+                old_path: file.old_path.clone(),
+                kind: file.kind,
+            })
+            .collect();
         changes.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(changes)
     }
@@ -355,83 +344,6 @@ fn unstaged_change(item: gix::status::index_worktree::Item) -> Option<FileChange
                 ChangeKind::Renamed
             },
         ),
-    };
-
-    Some(FileChange {
-        path: to_path(&path),
-        old_path: old_path.map(|path| to_path(&path)),
-        kind,
-    })
-}
-
-/// One entry of `git diff-tree -r --name-status`: trees are not listed, their
-/// entries are, and a file/directory replacement shows up as the deletion and
-/// addition git reports.
-fn tree_change(change: gix::object::tree::diff::ChangeDetached) -> Option<FileChange> {
-    use gix::object::tree::diff::ChangeDetached;
-
-    let (path, old_path, kind) = match change {
-        ChangeDetached::Addition {
-            location,
-            entry_mode,
-            ..
-        } => {
-            // Directories are reported through their children.
-            if entry_mode.is_tree() {
-                return None;
-            }
-            (location, None, ChangeKind::Added)
-        }
-        ChangeDetached::Deletion {
-            location,
-            entry_mode,
-            ..
-        } => {
-            if entry_mode.is_tree() {
-                return None;
-            }
-            (location, None, ChangeKind::Deleted)
-        }
-        ChangeDetached::Modification {
-            location,
-            previous_entry_mode,
-            entry_mode,
-            ..
-        } => {
-            if entry_mode.is_tree() && previous_entry_mode.is_tree() {
-                // A changed directory is reported through its children; the
-                // directory itself is not a file `git diff-tree -r` lists.
-                return None;
-            } else if entry_mode.is_tree() {
-                (location, None, ChangeKind::Deleted)
-            } else if previous_entry_mode.is_tree() {
-                (location, None, ChangeKind::Added)
-            } else if kind_changed(previous_entry_mode, entry_mode) {
-                (location, None, ChangeKind::TypeChanged)
-            } else {
-                (location, None, ChangeKind::Modified)
-            }
-        }
-        ChangeDetached::Rewrite {
-            location,
-            source_location,
-            entry_mode,
-            copy,
-            ..
-        } => {
-            if entry_mode.is_tree() {
-                return None;
-            }
-            (
-                location,
-                Some(source_location),
-                if copy {
-                    ChangeKind::Copied
-                } else {
-                    ChangeKind::Renamed
-                },
-            )
-        }
     };
 
     Some(FileChange {

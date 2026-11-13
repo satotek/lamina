@@ -53,6 +53,11 @@ use refresh::RefreshStatus;
 /// without copying it on every append.
 pub const COMMIT_CHUNK: usize = 4096;
 
+/// The first publish holds only a few rows: the newest commits are what the user
+/// sees first, and waiting for a full chunk makes the log stay empty while a
+/// large history is read. Later publishes wait for a full [`COMMIT_CHUNK`].
+pub const FIRST_COMMIT_CHUNK: usize = 200;
+
 /// Quiet window of the filesystem watcher. Long enough for one git command's
 /// burst of writes to collapse into a single refresh.
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(150);
