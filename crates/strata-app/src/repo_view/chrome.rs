@@ -12,7 +12,7 @@ use gpui::{
     Render, SharedString, Styled, Window, div, px, uniform_list,
 };
 use gpui_component::menu::{ContextMenuExt as _, PopupMenuItem};
-use gpui_component::{ActiveTheme, Theme, TitleBar, window_border};
+use gpui_component::{ActiveTheme, Theme, TitleBar};
 use strata_core::diff::LineKind;
 use strata_core::highlight::LineHighlights;
 use strata_core::session::DiffView;
@@ -23,6 +23,7 @@ use crate::actions::{
     self, SelectFirst, SelectLast, SelectNext, SelectPageDown, SelectPageUp, SelectPrevious,
     ToggleFrameStats,
 };
+use crate::branches::CreateBranchFromHead;
 use crate::data::{self, Badge, RowData, Source};
 use crate::diff_view::{self, DiffColors, Row as DiffRow};
 use crate::graph_canvas;
@@ -73,9 +74,10 @@ impl Render for RepoView {
             .on_action(cx.listener(|this, _: &SelectPageDown, _, cx| this.move_selection(PAGE, cx)))
             .on_action(cx.listener(|this, _: &SelectFirst, _, cx| this.jump(0, cx)))
             .on_action(cx.listener(|this, _: &SelectLast, _, cx| this.select_last(cx)))
-            .on_action(
-                cx.listener(|this, _: &ToggleFrameStats, _, cx| this.toggle_frame_stats(cx)),
-            );
+            .on_action(cx.listener(|this, _: &ToggleFrameStats, _, cx| this.toggle_frame_stats(cx)))
+            .on_action(cx.listener(|this, _: &CreateBranchFromHead, window, cx| {
+                this.create_branch_from_head(window, cx)
+            }));
 
         root = root.child(self.header(&palette));
         if let Some((path, error)) = &self.error {
@@ -117,9 +119,7 @@ impl Render for RepoView {
             window.request_animation_frame();
         }
 
-        // Client-side decorations need a drawn border, shadow and resize
-        // edges on Linux; elsewhere this is a plain full-size wrapper.
-        window_border().child(root)
+        root
     }
 }
 

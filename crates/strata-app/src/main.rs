@@ -21,7 +21,7 @@ use gpui::{
     App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions,
     px, size,
 };
-use gpui_component::TitleBar;
+use gpui_component::{Root, TitleBar};
 use gpui_platform::application;
 
 use repo_view::{Launch, RepoView};
@@ -58,7 +58,12 @@ fn main() {
                 },
                 move |window, cx| {
                     gpui_component::Theme::sync_system_appearance(Some(window), cx);
-                    cx.new(|cx| RepoView::new(launch, window, cx))
+                    {
+                        let view = cx.new(|cx| RepoView::new(launch, window, cx));
+                        // Root hosts gpui-component's dialog, notification and
+                        // tooltip layers and draws the client-side window border.
+                        cx.new(|cx| Root::new(view, window, cx))
+                    }
                 },
             )
             .expect("failed to open the Strata window");

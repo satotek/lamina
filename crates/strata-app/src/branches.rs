@@ -48,51 +48,14 @@ const CREATE_BRANCH_KEY: &str = "cmd-shift-b";
 #[cfg(not(target_os = "macos"))]
 const CREATE_BRANCH_KEY: &str = "ctrl-shift-b";
 
-/// Binds the branch commands.
-///
-/// `CreateBranchFromHead` is handled by a global listener because the sidebar
-/// is not on the root element's focus path: an `on_action` on the sidebar would
-/// never see an action dispatched from the focused root. The listener also runs
-/// while its window is checked out of the app, where `window.update` fails, so
-/// it opens the dialog from a foreground task instead.
+/// Binds the branch commands. Their handlers live on `RepoView`'s root
+/// element, which is on the focus path whenever the history view has focus.
 pub fn bind(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new(CREATE_BRANCH_KEY, CreateBranchFromHead, Some(REPO_VIEW)),
         KeyBinding::new("enter", ConfirmBranchDialog, Some(BRANCH_DIALOG)),
         KeyBinding::new("escape", CancelBranchDialog, Some(BRANCH_DIALOG)),
     ]);
-    cx.on_action(|_: &CreateBranchFromHead, cx| {
-        let handles = cx.windows();
-        if handles.is_empty() {
-            return;
-        }
-        cx.spawn(async move |cx| {
-            cx.update(move |cx| {
-                for handle in handles {
-                    let opened = handle
-                        .update(cx, |view, window, cx| {
-                            let Ok(view) = view.downcast::<RepoView>() else {
-                                return false;
-                            };
-                            view.update(cx, |view, cx| {
-                                // A second press while the dialog is open is not
-                                // an error; it just leaves the dialog alone.
-                                if view.branches.dialog_open() {
-                                    return false;
-                                }
-                                view.create_branch_from_head(window, cx);
-                                true
-                            })
-                        })
-                        .unwrap_or(false);
-                    if opened {
-                        break;
-                    }
-                }
-            });
-        })
-        .detach();
-    });
 }
 
 /// The colours the sections and dialogs paint with, taken from the window
