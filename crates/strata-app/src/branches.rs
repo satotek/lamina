@@ -20,10 +20,11 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, ClickEvent, ClipboardItem, Context, Div, ElementId, Entity, FocusHandle,
-    FontWeight, Hsla, InteractiveElement, IntoElement, KeyBinding, ParentElement, Pixels, Size,
-    Stateful, StatefulInteractiveElement as _, Styled, UniformListScrollHandle, Window, actions,
-    anchored, deferred, div, hsla, point, px, uniform_list,
+    AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Div, ElementId, Entity,
+    FocusHandle, Focusable as _, FontWeight, Hsla, InteractiveElement, IntoElement, KeyBinding,
+    ParentElement, Pixels, Size, Stateful, StatefulInteractiveElement as _, Styled,
+    UniformListScrollHandle, Window, actions, anchored, deferred, div, hsla, point, px,
+    uniform_list,
 };
 use gpui_component::{
     Icon,
@@ -33,11 +34,11 @@ use gpui_component::{
     tooltip::Tooltip,
 };
 use strata_core::repo::{SubmoduleInfo, SubmoduleStatus, WorktreeInfo};
-use strata_core::session::{HistoryScope, Operation, OperationId};
-use strata_core::{HeadInfo, RefKind, RemoteInfo, UpstreamInfo};
+use strata_core::session::{HistoryScope, Operation, OperationId, RemoteBranch};
+use strata_core::{HeadInfo, RefInfo, RefKind, RemoteInfo, UpstreamInfo};
 
 use crate::actions::REPO_VIEW;
-use crate::data::SidebarData;
+use crate::data::{SidebarData, Source};
 use crate::repo_view::RepoView;
 use crate::repo_view::rebase_onto::rebase_menu_item;
 use crate::scrollbar::WithScrollbar as _;
@@ -538,6 +539,11 @@ struct Dialog {
 
 enum DialogKind {
     Create(CreateForm),
+    Rename(RenameForm),
+    Upstream(UpstreamForm),
+    AddRemote(AddRemoteForm),
+    RenameRemote(RenameRemoteForm),
+    EditRemote(EditRemoteForm),
 }
 
 struct CreateForm {
@@ -547,11 +553,168 @@ struct CreateForm {
     error: Option<String>,
 }
 
+/// The rename dialog: the current name in an input, and, for a branch that
+/// has an upstream, the option to rename that remote branch too.
+struct RenameForm {
+    input: Entity<InputState>,
+    branch: String,
+    /// The branch's configured remote branch, when it has one. This is what a
+    /// remote-side rename deletes and re-points.
+    upstream: Option<RemoteBranch>,
+    /// `origin/topic`, for the dialog's "current upstream" line.
+    upstream_label: Option<String>,
+    rename_remote: bool,
+    error: Option<String>,
+}
+
+/// One remote branch the set-upstream dialog can pick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct UpstreamChoice {
+    /// `origin/main`, as the sidebar labels it.
+    pub(crate) label: String,
+    pub(crate) remote: String,
+    pub(crate) remote_branch: String,
+}
+
+struct UpstreamForm {
+    branch: String,
+    choices: Vec<UpstreamChoice>,
+    selected: Option<usize>,
+    /// The upstream the branch has now, if any.
+    current: Option<String>,
+    error: Option<String>,
+}
+
+struct AddRemoteForm {
+    name: Entity<InputState>,
+    url: Entity<InputState>,
+    fetch: bool,
+    error: Option<String>,
+}
+
+/// Renaming a remote keeps its URLs and moves its tracking branches; the
+/// dialog only needs the new name.
+struct RenameRemoteForm {
+    input: Entity<InputState>,
+    name: String,
+    error: Option<String>,
+}
+
+/// The edit-URL dialog. The push field only exists for a remote that already
+/// pushes somewhere other than it fetches.
+struct EditRemoteForm {
+    name: String,
+    fetch: Entity<InputState>,
+    push: Option<Entity<InputState>>,
+    error: Option<String>,
+}
+
 /// The validated contents of the create dialog.
 pub(crate) struct CreateRequest {
     pub(crate) name: String,
     pub(crate) start_point: Option<String>,
     pub(crate) checkout: bool,
+}
+
+/// The validated contents of the rename dialog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RenameRequest {
+    pub(crate) name: String,
+    pub(crate) new_name: String,
+    /// The remote branch to rename along with the local one, or `None` when
+    /// the user left that unchecked (or the branch has no upstream).
+    pub(crate) rename_upstream: Option<RemoteBranch>,
+}
+
+impl RenameRequest {
+    /// Validates the typed name and drops the remote-side rename when there is
+    /// no upstream to rename.
+    fn parse(
+        name: &str,
+        typed: &str,
+        upstream: Option<&RemoteBranch>,
+        rename_remote: bool,
+    ) -> Result<Self, String> {
+        let new_name = typed.trim();
+        if new_name == name {
+            return Err("Enter a different branch name.".to_owned());
+        }
+        validate_branch_name(new_name).map_err(str::to_owned)?;
+        Ok(Self {
+            name: name.to_owned(),
+            new_name: new_name.to_owned(),
+            rename_upstream: if rename_remote {
+                upstream.cloned()
+            } else {
+                None
+            },
+        })
+    }
+}
+
+/// The validated contents of the add-remote dialog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AddRemoteRequest {
+    pub(crate) name: String,
+    pub(crate) url: String,
+    pub(crate) fetch: bool,
+}
+
+impl AddRemoteRequest {
+    fn parse(typed_name: &str, typed_url: &str, fetch: bool) -> Result<Self, String> {
+        let name = typed_name.trim();
+        validate_remote_name(name).map_err(str::to_owned)?;
+        let url = validate_remote_url(typed_url).map_err(str::to_owned)?;
+        Ok(Self {
+            name: name.to_owned(),
+            url: url.to_owned(),
+            fetch,
+        })
+    }
+}
+
+/// The validated contents of the edit-URL dialog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EditRemoteUrlRequest {
+    pub(crate) name: String,
+    pub(crate) fetch_url: String,
+    pub(crate) push_url: Option<String>,
+}
+
+impl EditRemoteUrlRequest {
+    fn parse(name: &str, typed_fetch: &str, typed_push: Option<&str>) -> Result<Self, String> {
+        let fetch_url = validate_remote_url(typed_fetch).map_err(str::to_owned)?;
+        let push_url = match typed_push {
+            Some(push) => Some(
+                validate_remote_url(push)
+                    .map_err(|_| "Enter a push URL, or clear it to use the fetch URL.".to_owned())?
+                    .to_owned(),
+            ),
+            None => None,
+        };
+        Ok(Self {
+            name: name.to_owned(),
+            fetch_url: fetch_url.to_owned(),
+            push_url,
+        })
+    }
+}
+
+/// What the open dialog submits, once its fields validate.
+pub(crate) enum DialogRequest {
+    Create(CreateRequest),
+    Rename(RenameRequest),
+    SetUpstream {
+        branch: String,
+        remote: String,
+        remote_branch: String,
+    },
+    AddRemote(AddRemoteRequest),
+    RenameRemote {
+        name: String,
+        new_name: String,
+    },
+    EditRemoteUrl(EditRemoteUrlRequest),
 }
 
 impl Branches {
@@ -896,8 +1059,22 @@ impl Branches {
 
     fn dialog_overlay(&self, colors: &Colors, entity: &Entity<RepoView>) -> Option<AnyElement> {
         let dialog = self.dialog.as_ref()?;
-        let DialogKind::Create(form) = &dialog.kind;
-        let card = create_card(form, colors, entity, dialog.focus.as_ref());
+        let card = match &dialog.kind {
+            DialogKind::Create(form) => create_card(form, colors, entity, dialog.focus.as_ref()),
+            DialogKind::Rename(form) => rename_card(form, colors, entity, dialog.focus.as_ref()),
+            DialogKind::Upstream(form) => {
+                upstream_card(form, colors, entity, dialog.focus.as_ref())
+            }
+            DialogKind::AddRemote(form) => {
+                add_remote_card(form, colors, entity, dialog.focus.as_ref())
+            }
+            DialogKind::RenameRemote(form) => {
+                rename_remote_card(form, colors, entity, dialog.focus.as_ref())
+            }
+            DialogKind::EditRemote(form) => {
+                edit_remote_card(form, colors, entity, dialog.focus.as_ref())
+            }
+        };
         let viewport = dialog.viewport;
 
         // A deferred layer so the dialog is not clipped by the sidebar. The app
@@ -1042,6 +1219,95 @@ impl Branches {
         self.dialog = None;
     }
 
+    pub(crate) fn open_rename(
+        &mut self,
+        input: Entity<InputState>,
+        branch: String,
+        upstream: Option<RemoteBranch>,
+        upstream_label: Option<String>,
+    ) {
+        self.dialog = Some(Dialog {
+            kind: DialogKind::Rename(RenameForm {
+                input,
+                branch,
+                upstream,
+                upstream_label,
+                // Renaming the branch on its remote is a push and a delete
+                // there, so it is an explicit second step, never the default.
+                rename_remote: false,
+                error: None,
+            }),
+            viewport: self.viewport,
+            focus: self.dialog_focus.clone(),
+        });
+    }
+
+    pub(crate) fn open_upstream(
+        &mut self,
+        branch: String,
+        choices: Vec<UpstreamChoice>,
+        current: Option<String>,
+    ) {
+        let selected = current
+            .as_ref()
+            .and_then(|current| choices.iter().position(|choice| &choice.label == current))
+            .or_else(|| (!choices.is_empty()).then_some(0));
+        self.dialog = Some(Dialog {
+            kind: DialogKind::Upstream(UpstreamForm {
+                branch,
+                choices,
+                selected,
+                current,
+                error: None,
+            }),
+            viewport: self.viewport,
+            focus: self.dialog_focus.clone(),
+        });
+    }
+
+    pub(crate) fn open_add_remote(&mut self, name: Entity<InputState>, url: Entity<InputState>) {
+        self.dialog = Some(Dialog {
+            kind: DialogKind::AddRemote(AddRemoteForm {
+                name,
+                url,
+                fetch: true,
+                error: None,
+            }),
+            viewport: self.viewport,
+            focus: self.dialog_focus.clone(),
+        });
+    }
+
+    pub(crate) fn open_rename_remote(&mut self, input: Entity<InputState>, name: String) {
+        self.dialog = Some(Dialog {
+            kind: DialogKind::RenameRemote(RenameRemoteForm {
+                input,
+                name,
+                error: None,
+            }),
+            viewport: self.viewport,
+            focus: self.dialog_focus.clone(),
+        });
+    }
+
+    pub(crate) fn open_edit_remote(
+        &mut self,
+        name: String,
+        fetch: Entity<InputState>,
+        push: Option<Entity<InputState>>,
+    ) {
+        self.dialog = Some(Dialog {
+            kind: DialogKind::EditRemote(EditRemoteForm {
+                name,
+                fetch,
+                push,
+                error: None,
+            }),
+            viewport: self.viewport,
+            focus: self.dialog_focus.clone(),
+        });
+    }
+
     pub(crate) fn set_checkout(&mut self, checkout: bool) {
         if let Some(Dialog {
             kind: DialogKind::Create(form),
@@ -1052,22 +1318,60 @@ impl Branches {
         }
     }
 
-    pub(crate) fn set_create_error(&mut self, message: String) {
+    pub(crate) fn set_rename_remote(&mut self, rename_remote: bool) {
         if let Some(Dialog {
-            kind: DialogKind::Create(form),
+            kind: DialogKind::Rename(form),
             ..
         }) = &mut self.dialog
         {
-            form.error = Some(message);
+            form.rename_remote = rename_remote;
+        }
+    }
+
+    pub(crate) fn set_fetch_now(&mut self, fetch: bool) {
+        if let Some(Dialog {
+            kind: DialogKind::AddRemote(form),
+            ..
+        }) = &mut self.dialog
+        {
+            form.fetch = fetch;
+        }
+    }
+
+    /// Picks the remote branch the set-upstream dialog would set.
+    pub(crate) fn set_upstream_choice(&mut self, index: usize) {
+        if let Some(Dialog {
+            kind: DialogKind::Upstream(form),
+            ..
+        }) = &mut self.dialog
+            && index < form.choices.len()
+        {
+            form.selected = Some(index);
+            form.error = None;
+        }
+    }
+
+    pub(crate) fn set_dialog_error(&mut self, message: String) {
+        match self.dialog.as_mut().map(|dialog| &mut dialog.kind) {
+            Some(DialogKind::Create(form)) => form.error = Some(message),
+            Some(DialogKind::Rename(form)) => form.error = Some(message),
+            Some(DialogKind::Upstream(form)) => form.error = Some(message),
+            Some(DialogKind::AddRemote(form)) => form.error = Some(message),
+            Some(DialogKind::RenameRemote(form)) => form.error = Some(message),
+            Some(DialogKind::EditRemote(form)) => form.error = Some(message),
+            None => {}
         }
     }
 
     /// The create dialog's input, validated. `None` when it is not open.
     pub(crate) fn create_request(&self, cx: &App) -> Option<Result<CreateRequest, String>> {
-        let Dialog {
-            kind: DialogKind::Create(form),
-            ..
-        } = self.dialog.as_ref()?;
+        let form = match self.dialog.as_ref()? {
+            Dialog {
+                kind: DialogKind::Create(form),
+                ..
+            } => form,
+            _ => return None,
+        };
         let name = form.input.read(cx).value().to_string();
         Some(match validate_branch_name(&name) {
             Ok(()) => Ok(CreateRequest {
@@ -1076,6 +1380,65 @@ impl Branches {
                 checkout: form.checkout,
             }),
             Err(message) => Err(message.to_owned()),
+        })
+    }
+
+    /// Whatever the open dialog submits, validated. `None` when no dialog is
+    /// open, so the caller can tell "nothing to submit" from "invalid".
+    pub(crate) fn dialog_request(&self, cx: &App) -> Option<Result<DialogRequest, String>> {
+        let dialog = self.dialog.as_ref()?;
+        Some(match &dialog.kind {
+            DialogKind::Create(_) => self.create_request(cx)?.map(DialogRequest::Create),
+            DialogKind::Rename(form) => {
+                let typed = form.input.read(cx).value().to_string();
+                RenameRequest::parse(
+                    &form.branch,
+                    &typed,
+                    form.upstream.as_ref(),
+                    form.rename_remote,
+                )
+                .map(DialogRequest::Rename)
+            }
+            DialogKind::Upstream(form) => match form.selected.and_then(|index| {
+                form.choices
+                    .get(index)
+                    .map(|choice| (choice.remote.clone(), choice.remote_branch.clone()))
+            }) {
+                Some((remote, remote_branch)) => Ok(DialogRequest::SetUpstream {
+                    branch: form.branch.clone(),
+                    remote,
+                    remote_branch,
+                }),
+                None => Err("Fetch a remote and choose its branch first.".to_owned()),
+            },
+            DialogKind::AddRemote(form) => {
+                let name = form.name.read(cx).value().to_string();
+                let url = form.url.read(cx).value().to_string();
+                AddRemoteRequest::parse(&name, &url, form.fetch).map(DialogRequest::AddRemote)
+            }
+            DialogKind::RenameRemote(form) => {
+                let typed = form.input.read(cx).value().to_string();
+                let new_name = typed.trim();
+                if new_name == form.name {
+                    return Some(Err("Enter a different remote name.".to_owned()));
+                }
+                match validate_remote_name(new_name) {
+                    Ok(()) => Ok(DialogRequest::RenameRemote {
+                        name: form.name.clone(),
+                        new_name: new_name.to_owned(),
+                    }),
+                    Err(message) => Err(message.to_owned()),
+                }
+            }
+            DialogKind::EditRemote(form) => {
+                let fetch = form.fetch.read(cx).value().to_string();
+                let push = form
+                    .push
+                    .as_ref()
+                    .map(|push| push.read(cx).value().to_string());
+                EditRemoteUrlRequest::parse(&form.name, &fetch, push.as_deref())
+                    .map(DialogRequest::EditRemoteUrl)
+            }
         })
     }
 }
@@ -1123,6 +1486,7 @@ fn item_element(
             fetch_url.as_deref(),
             *count,
             *collapsed,
+            busy,
             colors,
             entity,
         ),
@@ -1270,7 +1634,7 @@ fn section_header(
     }
 
     match section {
-        Section::Submodules | Section::Worktrees => {
+        Section::Remote | Section::Submodules | Section::Worktrees => {
             let menu_entity = entity.clone();
             crate::ui::context_menu(
                 ("branch-section-menu", index),
@@ -1294,6 +1658,20 @@ fn section_menu(
     cx: &App,
 ) -> PopupMenu {
     match section {
+        Section::Remote => {
+            let add = {
+                let entity = entity.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    entity.update(cx, |view, cx| view.open_add_remote(window, cx));
+                }
+            };
+            let blocked = busy.then_some("an operation is running");
+            menu.item(
+                PopupMenuItem::new(crate::ui::menu_label("Add Remote…", blocked))
+                    .disabled(blocked.is_some())
+                    .on_click(add),
+            )
+        }
         Section::Submodules => {
             let update = {
                 let entity = entity.clone();
@@ -1355,15 +1733,18 @@ fn blocked_section(busy: bool, empty: bool, empty_reason: &'static str) -> Optio
 }
 
 /// A remote's own collapsing header, above its branch list.
+#[allow(clippy::too_many_arguments)]
 fn remote_group_header(
     name: &str,
     fetch_url: Option<&str>,
     count: usize,
     collapsed: bool,
+    busy: bool,
     colors: &Colors,
     entity: Entity<RepoView>,
 ) -> AnyElement {
     let click_group = name.to_owned();
+    let click_entity = entity.clone();
     let mut header =
         crate::ui::section_header(format!("remote-group-{name}"), name, &colors.design)
             .disclosure(!collapsed)
@@ -1377,7 +1758,7 @@ fn remote_group_header(
             .h(px(ITEM_HEIGHT))
             .on_click(move |_, cx| {
                 let group = click_group.clone();
-                entity.update(cx, |view, cx| {
+                click_entity.update(cx, |view, cx| {
                     view.branches.toggle_remote_group(group);
                     cx.notify();
                 });
@@ -1385,6 +1766,73 @@ fn remote_group_header(
     if count > 0 {
         header = header.count(count);
     }
+
+    let menu_entity = entity.clone();
+    let menu_name = name.to_owned();
+    let header = crate::ui::context_menu(
+        format!("remote-group-menu-{name}"),
+        &colors.design,
+        header,
+        move |menu, _window, _cx| {
+            let blocked = busy.then_some("an operation is running");
+            let fetch = {
+                let entity = menu_entity.clone();
+                let name = menu_name.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let name = name.clone();
+                    entity.update(cx, |view, cx| view.fetch_remote(name, window, cx));
+                }
+            };
+            let rename = {
+                let entity = menu_entity.clone();
+                let name = menu_name.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let name = name.clone();
+                    entity.update(cx, |view, cx| view.open_rename_remote(name, window, cx));
+                }
+            };
+            let edit_url = {
+                let entity = menu_entity.clone();
+                let name = menu_name.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let name = name.clone();
+                    entity.update(cx, |view, cx| view.open_edit_remote(name, window, cx));
+                }
+            };
+            let remove = {
+                let entity = menu_entity.clone();
+                let name = menu_name.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    let name = name.clone();
+                    entity.update(cx, |view, cx| view.confirm_remove_remote(name, window, cx));
+                }
+            };
+            menu.item(
+                PopupMenuItem::new(crate::ui::menu_label("Fetch", blocked))
+                    .disabled(blocked.is_some())
+                    .on_click(fetch),
+            )
+            .separator()
+            .item(
+                PopupMenuItem::new(crate::ui::menu_label("Rename…", blocked))
+                    .disabled(blocked.is_some())
+                    .on_click(rename),
+            )
+            .item(
+                PopupMenuItem::new(crate::ui::menu_label("Edit URL…", blocked))
+                    .disabled(blocked.is_some())
+                    .on_click(edit_url),
+            )
+            .separator()
+            .item(
+                PopupMenuItem::new(crate::ui::menu_label("Remove…", blocked))
+                    .disabled(blocked.is_some())
+                    .on_click(remove),
+            )
+        },
+    )
+    .w_full();
+
     match fetch_url {
         Some(url) => {
             let url = url.to_owned();
@@ -1467,6 +1915,21 @@ fn local_row(
             let rebase = entity_menu
                 .read(cx)
                 .branch_rebase_target(RefKind::LocalBranch, &branch);
+            let rename_blocked = busy.then_some("an operation is running");
+            let view = entity_menu.read(cx);
+            let upstream = view.branch_upstream(&branch);
+            let has_upstream = upstream.is_some();
+            let has_remote_branches = !view.upstream_choices().is_empty();
+            let set_blocked = if !has_remote_branches {
+                Some("no remote branches")
+            } else {
+                busy.then_some("an operation is running")
+            };
+            let unset_blocked = if !has_upstream {
+                Some("no upstream")
+            } else {
+                busy.then_some("an operation is running")
+            };
             menu.item(
                 PopupMenuItem::new(crate::ui::menu_label("Checkout", checkout_blocked))
                     .disabled(checkout_blocked.is_some())
@@ -1551,6 +2014,49 @@ fn local_row(
                         });
                     }
                 }),
+            )
+            .separator()
+            .item(
+                PopupMenuItem::new(crate::ui::menu_label("Rename…", rename_blocked))
+                    .disabled(rename_blocked.is_some())
+                    .on_click({
+                        let entity = entity_menu.clone();
+                        let branch = branch.clone();
+                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                            let branch = branch.clone();
+                            entity.update(cx, |view, cx| {
+                                view.open_rename_branch(branch, window, cx);
+                            });
+                        }
+                    }),
+            )
+            .item(
+                PopupMenuItem::new(crate::ui::menu_label("Set Upstream…", set_blocked))
+                    .disabled(set_blocked.is_some())
+                    .on_click({
+                        let entity = entity_menu.clone();
+                        let branch = branch.clone();
+                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                            let branch = branch.clone();
+                            entity.update(cx, |view, cx| {
+                                view.open_set_upstream(branch, window, cx);
+                            });
+                        }
+                    }),
+            )
+            .item(
+                PopupMenuItem::new(crate::ui::menu_label("Unset Upstream", unset_blocked))
+                    .disabled(unset_blocked.is_some())
+                    .on_click({
+                        let entity = entity_menu.clone();
+                        let branch = branch.clone();
+                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                            let branch = branch.clone();
+                            entity.update(cx, |view, cx| {
+                                view.unset_branch_upstream(branch, window, cx);
+                            });
+                        }
+                    }),
             )
             .separator()
             .item(
@@ -2205,6 +2711,230 @@ pub(crate) fn same_path(a: &Path, b: &Path) -> bool {
 }
 
 impl RepoView {
+    /// The upstream of a local branch, as the last snapshot read it.
+    fn branch_upstream(&self, branch: &str) -> Option<UpstreamInfo> {
+        match self.source()? {
+            Source::Repo(snapshot) => snapshot.upstreams.get(branch).cloned(),
+            Source::Fake(_) => None,
+        }
+    }
+
+    /// One configured remote from the last snapshot.
+    fn configured_remote(&self, name: &str) -> Option<RemoteInfo> {
+        match self.source()? {
+            Source::Repo(snapshot) => snapshot
+                .remotes
+                .iter()
+                .find(|remote| remote.name == name)
+                .cloned(),
+            Source::Fake(_) => None,
+        }
+    }
+
+    /// Every remote branch the set-upstream dialog can offer.
+    fn upstream_choices(&self) -> Vec<UpstreamChoice> {
+        match self.source() {
+            Some(Source::Repo(snapshot)) => upstream_choices(&snapshot.refs, &snapshot.remotes),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Focuses a dialog that has no text field to hand focus to.
+    fn focus_dialog(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(focus) = self.branches.dialog_focus.clone() {
+            window.defer(cx, move |window, cx| window.focus(&focus, cx));
+        }
+    }
+
+    pub(crate) fn open_rename_branch(
+        &mut self,
+        branch: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session.is_none() {
+            return;
+        }
+        self.branches.set_viewport(window.viewport_size());
+        let value = branch.clone();
+        let input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx).placeholder("branch name");
+            state.set_value(value, window, cx);
+            state
+        });
+        let handle = input.focus_handle(cx);
+        // The remote side of the rename comes from the configured upstream,
+        // not from the tracking ref: a remote branch deleted on the server
+        // still has to be deletable here.
+        let target = self
+            .session
+            .as_ref()
+            .and_then(|session| {
+                session
+                    .repo()
+                    .branch_upstream_target(&branch)
+                    .ok()
+                    .flatten()
+            })
+            .map(|target| RemoteBranch {
+                remote: target.remote,
+                branch: target.branch,
+            });
+        let label = self.branch_upstream(&branch).map(|upstream| upstream.name);
+        self.branches.open_rename(input, branch, target, label);
+        window.defer(cx, move |window, cx| handle.focus(window, cx));
+        cx.notify();
+    }
+
+    pub(crate) fn open_set_upstream(
+        &mut self,
+        branch: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session.is_none() {
+            return;
+        }
+        self.branches.set_viewport(window.viewport_size());
+        let choices = self.upstream_choices();
+        let current = self.branch_upstream(&branch).map(|upstream| upstream.name);
+        self.branches.open_upstream(branch, choices, current);
+        self.focus_dialog(window, cx);
+        cx.notify();
+    }
+
+    pub(crate) fn open_add_remote(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.session.is_none() {
+            return;
+        }
+        self.branches.set_viewport(window.viewport_size());
+        let name = cx.new(|cx| InputState::new(window, cx).placeholder("origin"));
+        let url = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("https://example.com/repo.git or a path")
+        });
+        let handle = name.focus_handle(cx);
+        self.branches.open_add_remote(name, url);
+        window.defer(cx, move |window, cx| handle.focus(window, cx));
+        cx.notify();
+    }
+
+    pub(crate) fn open_rename_remote(
+        &mut self,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session.is_none() {
+            return;
+        }
+        self.branches.set_viewport(window.viewport_size());
+        let value = name.clone();
+        let input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx).placeholder("remote name");
+            state.set_value(value, window, cx);
+            state
+        });
+        let handle = input.focus_handle(cx);
+        self.branches.open_rename_remote(input, name);
+        window.defer(cx, move |window, cx| handle.focus(window, cx));
+        cx.notify();
+    }
+
+    pub(crate) fn open_edit_remote(
+        &mut self,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(remote) = self.configured_remote(&name) else {
+            return;
+        };
+        self.branches.set_viewport(window.viewport_size());
+        let fetch_value = remote.fetch_url.clone().unwrap_or_default();
+        let fetch = cx.new(|cx| {
+            let mut state = InputState::new(window, cx).placeholder("fetch URL");
+            state.set_value(fetch_value, window, cx);
+            state
+        });
+        let push = remote.push_url.clone().map(|value| {
+            cx.new(|cx| {
+                let mut state = InputState::new(window, cx).placeholder("push URL");
+                state.set_value(value, window, cx);
+                state
+            })
+        });
+        let handle = fetch.focus_handle(cx);
+        self.branches.open_edit_remote(name, fetch, push);
+        window.defer(cx, move |window, cx| handle.focus(window, cx));
+        cx.notify();
+    }
+
+    /// Asks before removing a remote: its remote-tracking branches go with it.
+    pub(crate) fn confirm_remove_remote(
+        &mut self,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session.is_none() {
+            return;
+        }
+        self.focus_root(window, cx);
+        let entity = cx.weak_entity();
+        crate::ui::confirm(
+            window,
+            cx,
+            crate::ui::Confirm::new(
+                format!("Remove remote {name}?"),
+                "Its remote-tracking branches are removed too. The branches on the server stay.",
+            )
+            .ok_label("Remove remote"),
+            move |window, cx| {
+                let name = name.clone();
+                let _ = entity.update(cx, |view, cx| view.remove_remote(name, window, cx));
+            },
+        );
+    }
+
+    pub(crate) fn remove_remote(
+        &mut self,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let label = format!("remove remote {name}");
+        self.run_operation(Operation::RemoveRemote { name }, label, window, cx);
+    }
+
+    pub(crate) fn fetch_remote(
+        &mut self,
+        name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let prune = crate::settings::Settings::get(cx).behaviour.prune_on_fetch;
+        let label = format!("fetch {name}");
+        self.run_operation(
+            Operation::Fetch {
+                remote: Some(name),
+                prune,
+            },
+            label,
+            window,
+            cx,
+        );
+    }
+
+    pub(crate) fn unset_branch_upstream(
+        &mut self,
+        branch: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let label = format!("unset upstream of {branch}");
+        self.run_operation(Operation::UnsetBranchUpstream { branch }, label, window, cx);
+    }
+
     /// Runs the force form of an operation the user just confirmed.
     pub(crate) fn run_retry(&mut self, retry: Retry, window: &mut Window, cx: &mut Context<Self>) {
         match retry {
@@ -2561,7 +3291,7 @@ fn dialog_card(colors: &Colors, entity: &Entity<RepoView>, focus: Option<&FocusH
         }
     };
     div()
-        .w(px(380.0))
+        .w(px(420.0))
         .p_4()
         .flex()
         .flex_col()
@@ -2577,6 +3307,374 @@ fn dialog_card(colors: &Colors, entity: &Entity<RepoView>, focus: Option<&FocusH
         .key_context(BRANCH_DIALOG)
         .on_action(confirm)
         .on_action(cancel)
+}
+
+/// The Cancel and OK row every dialog ends with.
+fn dialog_buttons(
+    entity: &Entity<RepoView>,
+    ok_id: &'static str,
+    ok_label: &'static str,
+    enabled: bool,
+) -> Div {
+    let confirm = {
+        let entity = entity.clone();
+        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+            entity.update(cx, |view, cx| view.submit_branch_dialog(window, cx));
+        }
+    };
+    let cancel = {
+        let entity = entity.clone();
+        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+            entity.update(cx, |view, cx| {
+                view.branches.close_dialog();
+                view.focus_root(window, cx);
+                cx.notify();
+            });
+        }
+    };
+    div()
+        .flex()
+        .justify_end()
+        .gap_2()
+        .pt_1()
+        .child(
+            crate::ui::button("branch-dialog-cancel", "Cancel")
+                .size(crate::ui::ButtonSize::Medium)
+                .on_click(cancel),
+        )
+        .child(
+            crate::ui::button(ok_id, ok_label)
+                .size(crate::ui::ButtonSize::Medium)
+                .disabled(!enabled)
+                .on_click(confirm),
+        )
+}
+
+fn rename_card(
+    form: &RenameForm,
+    colors: &Colors,
+    entity: &Entity<RepoView>,
+    focus: Option<&FocusHandle>,
+) -> AnyElement {
+    let toggle = {
+        let entity = entity.clone();
+        move |checked: &bool, _: &mut Window, cx: &mut App| {
+            let checked = *checked;
+            entity.update(cx, |view, cx| {
+                view.branches.set_rename_remote(checked);
+                cx.notify();
+            });
+        }
+    };
+
+    let mut card = dialog_card(colors, entity, focus)
+        .child(
+            div()
+                .text_size(px(13.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child("Rename branch"),
+        )
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(colors.muted_foreground)
+                .child(format!("Renaming {}", form.branch)),
+        )
+        .child(Input::new(&form.input).w_full());
+    match &form.upstream_label {
+        Some(label) => {
+            card = card.child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(colors.muted_foreground)
+                    .child(format!("Current upstream: {label}")),
+            );
+            if form.upstream.is_some() {
+                card = card
+                    .child(
+                        Checkbox::new("branch-rename-remote")
+                            .checked(form.rename_remote)
+                            .label("Rename the branch on the remote too")
+                            .on_change(toggle),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(colors.muted_foreground)
+                            .child(
+                                "Pushes the new name, deletes the old remote branch and sets \
+                                 the upstream.",
+                            ),
+                    );
+            }
+        }
+        None => {
+            card = card.child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(colors.muted_foreground)
+                    .child("This branch has no upstream."),
+            );
+        }
+    }
+    if let Some(error) = &form.error {
+        card = card.child(
+            div()
+                .text_size(px(11.0))
+                .text_color(colors.danger)
+                .child(error.clone()),
+        );
+    }
+    card.child(dialog_buttons(
+        entity,
+        "branch-rename-ok",
+        "Rename branch",
+        true,
+    ))
+    .into_any_element()
+}
+
+fn upstream_card(
+    form: &UpstreamForm,
+    colors: &Colors,
+    entity: &Entity<RepoView>,
+    focus: Option<&FocusHandle>,
+) -> AnyElement {
+    let mut card = dialog_card(colors, entity, focus)
+        .child(
+            div()
+                .text_size(px(13.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child("Set upstream"),
+        )
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(colors.muted_foreground)
+                .child(match &form.current {
+                    Some(current) => format!("{} now tracks {current}.", form.branch),
+                    None => format!("{} has no upstream.", form.branch),
+                }),
+        );
+
+    if form.choices.is_empty() {
+        card = card.child(
+            div()
+                .text_size(px(11.0))
+                .text_color(colors.muted_foreground)
+                .child("No remote branches. Fetch a remote first."),
+        );
+    } else {
+        let rows = form
+            .choices
+            .iter()
+            .enumerate()
+            .map(|(index, choice)| {
+                let select = {
+                    let entity = entity.clone();
+                    move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                        entity.update(cx, |view, cx| {
+                            view.branches.set_upstream_choice(index);
+                            cx.notify();
+                        });
+                    }
+                };
+                crate::ui::list_row(
+                    ("upstream-choice", index),
+                    crate::ui::RowState::NORMAL.selected(form.selected == Some(index)),
+                    &colors.design,
+                )
+                .cursor_pointer()
+                .on_click(select)
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(choice.label.clone()),
+                )
+            })
+            .collect::<Vec<_>>();
+        card = card.child(
+            div()
+                .id("upstream-choice-list")
+                .flex()
+                .flex_col()
+                .gap_1()
+                .max_h(px(200.0))
+                .overflow_y_scroll()
+                .children(rows),
+        );
+    }
+
+    if let Some(error) = &form.error {
+        card = card.child(
+            div()
+                .text_size(px(11.0))
+                .text_color(colors.danger)
+                .child(error.clone()),
+        );
+    }
+    card.child(dialog_buttons(
+        entity,
+        "branch-upstream-ok",
+        "Set upstream",
+        form.selected.is_some(),
+    ))
+    .into_any_element()
+}
+
+fn add_remote_card(
+    form: &AddRemoteForm,
+    colors: &Colors,
+    entity: &Entity<RepoView>,
+    focus: Option<&FocusHandle>,
+) -> AnyElement {
+    let toggle = {
+        let entity = entity.clone();
+        move |checked: &bool, _: &mut Window, cx: &mut App| {
+            let checked = *checked;
+            entity.update(cx, |view, cx| {
+                view.branches.set_fetch_now(checked);
+                cx.notify();
+            });
+        }
+    };
+    let mut card = dialog_card(colors, entity, focus)
+        .child(
+            div()
+                .text_size(px(13.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child("Add remote"),
+        )
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(colors.muted_foreground)
+                .child("A remote is a name for a repository URL."),
+        )
+        .child(
+            div()
+                .text_size(px(11.0))
+                .font_weight(FontWeight::MEDIUM)
+                .child("Name"),
+        )
+        .child(Input::new(&form.name).w_full())
+        .child(
+            div()
+                .text_size(px(11.0))
+                .font_weight(FontWeight::MEDIUM)
+                .child("URL"),
+        )
+        .child(Input::new(&form.url).w_full())
+        .child(
+            Checkbox::new("remote-add-fetch")
+                .checked(form.fetch)
+                .label("Fetch it now")
+                .on_change(toggle),
+        );
+    if let Some(error) = &form.error {
+        card = card.child(
+            div()
+                .text_size(px(11.0))
+                .text_color(colors.danger)
+                .child(error.clone()),
+        );
+    }
+    card.child(dialog_buttons(entity, "remote-add-ok", "Add remote", true))
+        .into_any_element()
+}
+
+fn rename_remote_card(
+    form: &RenameRemoteForm,
+    colors: &Colors,
+    entity: &Entity<RepoView>,
+    focus: Option<&FocusHandle>,
+) -> AnyElement {
+    let mut card = dialog_card(colors, entity, focus)
+        .child(
+            div()
+                .text_size(px(13.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child("Rename remote"),
+        )
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(colors.muted_foreground)
+                .child(format!(
+                    "Renaming {}. Its URLs and remote-tracking branches follow the new name.",
+                    form.name
+                )),
+        )
+        .child(Input::new(&form.input).w_full());
+    if let Some(error) = &form.error {
+        card = card.child(
+            div()
+                .text_size(px(11.0))
+                .text_color(colors.danger)
+                .child(error.clone()),
+        );
+    }
+    card.child(dialog_buttons(
+        entity,
+        "remote-rename-ok",
+        "Rename remote",
+        true,
+    ))
+    .into_any_element()
+}
+
+fn edit_remote_card(
+    form: &EditRemoteForm,
+    colors: &Colors,
+    entity: &Entity<RepoView>,
+    focus: Option<&FocusHandle>,
+) -> AnyElement {
+    let mut card = dialog_card(colors, entity, focus)
+        .child(
+            div()
+                .text_size(px(13.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(format!("Edit remote {}", form.name)),
+        )
+        .child(
+            div()
+                .text_size(px(11.0))
+                .font_weight(FontWeight::MEDIUM)
+                .child("Fetch URL"),
+        )
+        .child(Input::new(&form.fetch).w_full());
+    match &form.push {
+        Some(push) => {
+            card = card
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .font_weight(FontWeight::MEDIUM)
+                        .child("Push URL"),
+                )
+                .child(Input::new(push).w_full());
+        }
+        None => {
+            card = card.child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(colors.muted_foreground)
+                    .child("Pushes use the fetch URL."),
+            );
+        }
+    }
+    if let Some(error) = &form.error {
+        card = card.child(
+            div()
+                .text_size(px(11.0))
+                .text_color(colors.danger)
+                .child(error.clone()),
+        );
+    }
+    card.child(dialog_buttons(entity, "remote-url-ok", "Save URL", true))
+        .into_any_element()
 }
 
 /// Offers the force form of an operation git refused.
@@ -2666,8 +3764,67 @@ pub(crate) fn validate_branch_name(name: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// The sidebar label for a branch's upstream: `↑2 ↓1`, `↑3`, `↓1`, `gone`, or
-/// nothing when the branch is level with its upstream.
+/// Names git accepts for a remote.
+///
+/// A remote's branches live under `refs/remotes/<name>/`, so git applies the
+/// ref-name rules to the name; these are the same rules as for a branch, with
+/// the message naming a remote instead. Unlike a branch, a remote name may
+/// contain `/` (git stores the tracking refs below it), so parts are only
+/// checked for the forbidden forms.
+pub(crate) fn validate_remote_name(name: &str) -> Result<(), &'static str> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("Enter a name for the remote.");
+    }
+    if name.starts_with('-') {
+        return Err("A remote name must not start with '-'.");
+    }
+    if name.starts_with('/') || name.ends_with('/') {
+        return Err("A remote name must not start or end with '/'.");
+    }
+    if name.contains("//") {
+        return Err("A remote name must not contain '//'.");
+    }
+    if name.contains("..") {
+        return Err("A remote name must not contain '..'.");
+    }
+    if name.contains("@{") {
+        return Err("A remote name must not contain '@{'.");
+    }
+    if name
+        .chars()
+        .any(|character| character.is_whitespace() || character.is_control())
+    {
+        return Err("A remote name must not contain spaces or control characters.");
+    }
+    if name.contains(['~', '^', ':', '?', '*', '[', '\\']) {
+        return Err("A remote name must not contain any of ~ ^ : ? * [ \\.");
+    }
+    if name.ends_with('.') {
+        return Err("A remote name must not end with '.'.");
+    }
+    if name.split('/').any(|part| {
+        part.is_empty() || part.starts_with('.') || part.ends_with('.') || part.ends_with(".lock")
+    }) {
+        return Err("Each part must not start with '.' or end with '.' or '.lock'.");
+    }
+    Ok(())
+}
+
+/// The URL a remote command receives: non-empty, and not something git would
+/// read as an option.
+pub(crate) fn validate_remote_url(url: &str) -> Result<&str, &'static str> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Err("Enter a URL for the remote.");
+    }
+    if url.starts_with('-') {
+        return Err("A URL must not start with '-'.");
+    }
+    Ok(url)
+}
+
+/// The sidebar label for a branch's upstream: `↑2 ↓1`, `↑3`, `↓1`, `gone`, or/// nothing when the branch is level with its upstream.
 pub(crate) fn upstream_label(upstream: &UpstreamInfo) -> Option<String> {
     if upstream.gone {
         return Some("gone".to_owned());
@@ -2696,6 +3853,60 @@ pub(crate) fn local_name_for_remote(remote: &str) -> Option<&str> {
         return None;
     }
     Some(local)
+}
+
+/// Every remote branch, as the set-upstream dialog lists it: the sidebar's
+/// natural order, with the remote's symbolic `HEAD` left out.
+pub(crate) fn upstream_choices(refs: &[RefInfo], remotes: &[RemoteInfo]) -> Vec<UpstreamChoice> {
+    let mut choices: Vec<UpstreamChoice> = refs
+        .iter()
+        .filter(|info| info.kind == RefKind::RemoteBranch)
+        .filter_map(|info| {
+            let (remote, remote_branch) = split_remote_branch(&info.short_name, remotes)?;
+            if remote_branch == "HEAD" {
+                return None;
+            }
+            Some(UpstreamChoice {
+                label: info.short_name.clone(),
+                remote: remote.to_owned(),
+                remote_branch: remote_branch.to_owned(),
+            })
+        })
+        .collect();
+    choices.sort_by(|a, b| natural_cmp(&a.label, &b.label));
+    choices
+}
+
+/// Splits `origin/topic` into the remote and the branch on it.
+///
+/// git accepts remote names that contain `/`, so the configured remote names
+/// are matched longest first instead of taking the first component. A tracking
+/// ref whose remote is no longer configured falls back to that first component,
+/// which is all that is left to go on.
+fn split_remote_branch<'a>(
+    short_name: &'a str,
+    remotes: &'a [RemoteInfo],
+) -> Option<(&'a str, &'a str)> {
+    let mut best: Option<(&str, &str)> = None;
+    for remote in remotes {
+        let Some(rest) = short_name
+            .strip_prefix(remote.name.as_str())
+            .and_then(|rest| rest.strip_prefix('/'))
+        else {
+            continue;
+        };
+        if rest.is_empty() {
+            continue;
+        }
+        if best.is_none_or(|(name, _)| remote.name.len() > name.len()) {
+            best = Some((remote.name.as_str(), rest));
+        }
+    }
+    best.or_else(|| {
+        short_name
+            .split_once('/')
+            .filter(|(_, rest)| !rest.is_empty())
+    })
 }
 
 /// `git branch -d` refuses a branch with commits that are not reachable from
@@ -2805,6 +4016,218 @@ mod tests {
         );
         assert_eq!(strip_stash_prefix("main"), "main");
         assert_eq!(strip_stash_prefix("stash@{0}"), "stash@{0}");
+    }
+
+    #[test]
+    fn remote_names_follow_git_s_ref_rules() {
+        for name in ["origin", "upstream", "team/one", "backup-2", "a.b"] {
+            assert_eq!(validate_remote_name(name), Ok(()), "{name} should be valid");
+        }
+
+        for name in [
+            "",
+            "  ",
+            "-origin",
+            "/origin",
+            "origin/",
+            "ori//gin",
+            "ori..gin",
+            "ori@{1}gin",
+            "ori gin",
+            "ori\ngin",
+            "ori~gin",
+            "ori:gin",
+            "ori?gin",
+            "ori*gin",
+            "ori[gin",
+            "ori\\gin",
+            "origin.",
+            ".origin",
+            "origin.lock",
+            "origin.lock/main",
+        ] {
+            assert!(
+                validate_remote_name(name).is_err(),
+                "{name} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn a_remote_url_must_be_present_and_not_an_option() {
+        assert_eq!(
+            validate_remote_url("  https://example.invalid/repo.git "),
+            Ok("https://example.invalid/repo.git")
+        );
+        assert_eq!(validate_remote_url("/tmp/repo.git"), Ok("/tmp/repo.git"));
+        assert!(validate_remote_url("   ").is_err());
+        assert!(validate_remote_url("--upload-pack=evil").is_err());
+    }
+
+    #[test]
+    fn the_rename_dialog_renames_the_remote_only_when_asked() {
+        let upstream = RemoteBranch {
+            remote: "origin".into(),
+            branch: "topic".into(),
+        };
+        let request =
+            RenameRequest::parse("topic", "  feature/login ", Some(&upstream), false).unwrap();
+        assert_eq!(request.new_name, "feature/login");
+        assert_eq!(
+            request.rename_upstream, None,
+            "renaming on the remote is opt-in"
+        );
+
+        let both = RenameRequest::parse("topic", "feature", Some(&upstream), true).unwrap();
+        assert_eq!(both.rename_upstream, Some(upstream));
+    }
+
+    #[test]
+    fn the_rename_dialog_refuses_an_invalid_or_unchanged_name() {
+        assert!(RenameRequest::parse("topic", "topic", None, false).is_err());
+        assert!(RenameRequest::parse("topic", "  topic  ", None, false).is_err());
+        assert!(RenameRequest::parse("topic", "bad..name", None, false).is_err());
+        assert!(RenameRequest::parse("topic", "", None, false).is_err());
+        // A branch without an upstream has nothing to rename on a remote even
+        // if the flag somehow arrived ticked.
+        let request = RenameRequest::parse("topic", "renamed", None, true).unwrap();
+        assert_eq!(request.rename_upstream, None);
+    }
+
+    #[test]
+    fn the_add_remote_dialog_validates_its_name_and_url() {
+        let request = AddRemoteRequest::parse(" origin ", " /tmp/repo.git ", true).unwrap();
+        assert_eq!(request.name, "origin");
+        assert_eq!(request.url, "/tmp/repo.git");
+        assert!(request.fetch);
+
+        assert!(AddRemoteRequest::parse("", "/tmp/repo.git", false).is_err());
+        assert!(AddRemoteRequest::parse("origin", "", false).is_err());
+        assert!(AddRemoteRequest::parse("bad name", "/tmp/repo.git", false).is_err());
+        assert!(AddRemoteRequest::parse("origin", "-x", false).is_err());
+    }
+
+    #[test]
+    fn the_edit_url_dialog_sets_a_push_url_only_when_the_remote_has_one() {
+        let fetch_only = EditRemoteUrlRequest::parse("origin", " /tmp/a.git ", None).unwrap();
+        assert_eq!(fetch_only.fetch_url, "/tmp/a.git");
+        assert_eq!(fetch_only.push_url, None);
+
+        let both =
+            EditRemoteUrlRequest::parse("origin", "/tmp/a.git", Some(" /tmp/b.git ")).unwrap();
+        assert_eq!(both.push_url.as_deref(), Some("/tmp/b.git"));
+
+        assert!(EditRemoteUrlRequest::parse("origin", "", None).is_err());
+        assert!(
+            EditRemoteUrlRequest::parse("origin", "/tmp/a.git", Some("  ")).is_err(),
+            "a push URL that is shown must stay filled in"
+        );
+    }
+
+    fn ref_info(kind: RefKind, short_name: &str) -> RefInfo {
+        RefInfo {
+            full_name: match kind {
+                RefKind::LocalBranch => format!("refs/heads/{short_name}"),
+                RefKind::RemoteBranch => format!("refs/remotes/{short_name}"),
+                RefKind::Tag => format!("refs/tags/{short_name}"),
+            },
+            short_name: short_name.to_owned(),
+            kind,
+            target: oid(1),
+        }
+    }
+
+    #[test]
+    fn set_upstream_lists_remote_branches_and_drops_the_symbolic_head() {
+        let remotes = [
+            remote("origin", Some("/tmp/origin.git")),
+            remote("team/one", Some("/tmp/team.git")),
+        ];
+        let refs = [
+            ref_info(RefKind::RemoteBranch, "origin/main"),
+            ref_info(RefKind::RemoteBranch, "origin/HEAD"),
+            ref_info(RefKind::RemoteBranch, "origin/feature"),
+            ref_info(RefKind::RemoteBranch, "team/one/main"),
+            ref_info(RefKind::LocalBranch, "main"),
+            ref_info(RefKind::Tag, "v1"),
+        ];
+
+        let choices = upstream_choices(&refs, &remotes);
+        let labels: Vec<&str> = choices.iter().map(|choice| choice.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["origin/feature", "origin/main", "team/one/main"],
+            "remote branches in natural order, without the remote's HEAD"
+        );
+        assert_eq!(
+            choices[2].remote, "team/one",
+            "a remote name with a slash is not split at its first component"
+        );
+        assert_eq!(choices[2].remote_branch, "main");
+    }
+
+    #[test]
+    fn a_tracking_ref_of_an_unconfigured_remote_falls_back_to_its_first_part() {
+        let refs = [ref_info(RefKind::RemoteBranch, "gone/main")];
+        let choices = upstream_choices(&refs, &[]);
+        assert_eq!(choices[0].remote, "gone");
+        assert_eq!(choices[0].remote_branch, "main");
+        assert_eq!(split_remote_branch("origin", &[]), None);
+    }
+
+    #[test]
+    fn the_upstream_dialog_starts_on_the_current_upstream_or_the_first_branch() {
+        let choice = |label: &str, remote: &str, branch: &str| UpstreamChoice {
+            label: label.to_owned(),
+            remote: remote.to_owned(),
+            remote_branch: branch.to_owned(),
+        };
+        let choices = vec![
+            choice("origin/main", "origin", "main"),
+            choice("origin/topic", "origin", "topic"),
+        ];
+
+        let mut branches = Branches::default();
+        branches.open_upstream(
+            "feature".into(),
+            choices.clone(),
+            Some("origin/topic".into()),
+        );
+        let selected = match &branches.dialog {
+            Some(Dialog {
+                kind: DialogKind::Upstream(form),
+                ..
+            }) => form.selected,
+            _ => panic!("the upstream dialog is open"),
+        };
+        assert_eq!(
+            selected,
+            Some(1),
+            "the branch's current upstream is the starting choice"
+        );
+
+        branches.open_upstream("feature".into(), choices.clone(), None);
+        let selected = match &branches.dialog {
+            Some(Dialog {
+                kind: DialogKind::Upstream(form),
+                ..
+            }) => form.selected,
+            _ => panic!("the upstream dialog is open"),
+        };
+        assert_eq!(selected, Some(0));
+
+        branches.open_upstream("feature".into(), Vec::new(), None);
+        let selected = match &branches.dialog {
+            Some(Dialog {
+                kind: DialogKind::Upstream(form),
+                ..
+            }) => form.selected,
+            _ => panic!("the upstream dialog is open"),
+        };
+        assert_eq!(
+            selected, None,
+            "with nothing to choose there is no default upstream"
+        );
     }
 
     #[test]

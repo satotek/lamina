@@ -12,6 +12,7 @@ mod blame;
 mod clone;
 mod command_log;
 mod history;
+mod manage;
 mod merge;
 mod ops;
 mod progress;
@@ -676,7 +677,7 @@ fn is_read_only(args: &[String]) -> bool {
     match subcommand {
         "--version" | "version" | "status" | "log" | "diff" | "show" | "rev-parse" | "rev-list"
         | "for-each-ref" | "cat-file" | "ls-files" | "ls-tree" | "blame" | "shortlog"
-        | "describe" => true,
+        | "describe" | "check-ref-format" => true,
         "stash" => matches!(rest.next(), Some("list" | "show")),
         "branch" => {
             let rest: Vec<&str> = rest.collect();

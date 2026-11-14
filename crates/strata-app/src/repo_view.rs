@@ -1141,31 +1141,72 @@ impl RepoView {
         self.run_operation(Operation::DeleteBranch { name, force }, label, window, cx);
     }
 
-    /// Confirms whichever branch dialog is open.
+    /// Confirms whichever branch, remote or upstream dialog is open.
     pub(crate) fn submit_branch_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(request) = self.branches.create_request(cx) {
-            match request {
-                Ok(request) => {
-                    let label = format!("create branch {}", request.name);
-                    self.branches.close_dialog();
-                    self.focus_root(window, cx);
-                    self.run_operation(
-                        Operation::CreateBranch {
-                            name: request.name,
-                            start_point: request.start_point,
-                            checkout: request.checkout,
-                        },
-                        label,
-                        window,
-                        cx,
-                    );
-                }
-                Err(message) => {
-                    self.branches.set_create_error(message);
-                    cx.notify();
-                }
+        let Some(request) = self.branches.dialog_request(cx) else {
+            return;
+        };
+        let (operation, label) = match request {
+            Ok(crate::branches::DialogRequest::Create(request)) => (
+                Operation::CreateBranch {
+                    name: request.name.clone(),
+                    start_point: request.start_point,
+                    checkout: request.checkout,
+                },
+                format!("create branch {}", request.name),
+            ),
+            Ok(crate::branches::DialogRequest::Rename(request)) => (
+                Operation::RenameBranch {
+                    name: request.name.clone(),
+                    new_name: request.new_name.clone(),
+                    rename_upstream: request.rename_upstream,
+                },
+                format!("rename branch {} to {}", request.name, request.new_name),
+            ),
+            Ok(crate::branches::DialogRequest::SetUpstream {
+                branch,
+                remote,
+                remote_branch,
+            }) => (
+                Operation::SetBranchUpstream {
+                    branch: branch.clone(),
+                    remote: remote.clone(),
+                    remote_branch: remote_branch.clone(),
+                },
+                format!("set upstream of {branch} to {remote}/{remote_branch}"),
+            ),
+            Ok(crate::branches::DialogRequest::AddRemote(request)) => (
+                Operation::AddRemote {
+                    name: request.name.clone(),
+                    url: request.url,
+                    fetch: request.fetch,
+                },
+                format!("add remote {}", request.name),
+            ),
+            Ok(crate::branches::DialogRequest::RenameRemote { name, new_name }) => (
+                Operation::RenameRemote {
+                    name: name.clone(),
+                    new_name: new_name.clone(),
+                },
+                format!("rename remote {name} to {new_name}"),
+            ),
+            Ok(crate::branches::DialogRequest::EditRemoteUrl(request)) => (
+                Operation::SetRemoteUrl {
+                    name: request.name.clone(),
+                    fetch_url: request.fetch_url,
+                    push_url: request.push_url,
+                },
+                format!("change the URL of {}", request.name),
+            ),
+            Err(message) => {
+                self.branches.set_dialog_error(message);
+                cx.notify();
+                return;
             }
-        }
+        };
+        self.branches.close_dialog();
+        self.focus_root(window, cx);
+        self.run_operation(operation, label, window, cx);
     }
 
     /// Returns focus from a dialog to the commit list, which owns the keys.

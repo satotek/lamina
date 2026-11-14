@@ -289,6 +289,51 @@ pub enum Operation {
         name: String,
         force: bool,
     },
+    /// `git branch -m <name> <new_name>`.
+    ///
+    /// With `rename_upstream`, the branch's remote branch is renamed to match:
+    /// the new name is pushed, the old remote branch deleted, and the local
+    /// branch pointed at the new one. `rename_upstream` holds the remote and
+    /// remote branch the upstream currently names.
+    RenameBranch {
+        name: String,
+        new_name: String,
+        rename_upstream: Option<RemoteBranch>,
+    },
+    /// `git branch --set-upstream-to=<remote>/<branch> <branch>`.
+    SetBranchUpstream {
+        branch: String,
+        remote: String,
+        /// Branch name on the remote.
+        remote_branch: String,
+    },
+    /// `git branch --unset-upstream <branch>`.
+    UnsetBranchUpstream {
+        branch: String,
+    },
+    /// `git remote add <name> <url>`, optionally fetching it right away.
+    AddRemote {
+        name: String,
+        url: String,
+        fetch: bool,
+    },
+    /// `git remote rename <name> <new_name>`. Branch upstreams and the
+    /// remote-tracking refs follow the new name.
+    RenameRemote {
+        name: String,
+        new_name: String,
+    },
+    /// `git remote set-url <name> <url>`, plus the push URL when the remote
+    /// pushes somewhere else than it fetches.
+    SetRemoteUrl {
+        name: String,
+        fetch_url: String,
+        push_url: Option<String>,
+    },
+    /// `git remote remove <name>`; its remote-tracking branches go with it.
+    RemoveRemote {
+        name: String,
+    },
     Fetch {
         remote: Option<String>,
         prune: bool,
@@ -425,6 +470,14 @@ pub enum Operation {
     /// `git commit-graph write --reachable --changed-paths`: make future
     /// history walks faster. Never started without an explicit user action.
     WriteCommitGraph,
+}
+
+/// A branch on a remote, as `branch.<name>.remote` and `.merge` record it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteBranch {
+    pub remote: String,
+    /// Branch name on the remote, without `refs/heads/`.
+    pub branch: String,
 }
 
 /// How far `Operation::Reset` rewinds.

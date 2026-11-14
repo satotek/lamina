@@ -173,6 +173,13 @@ fn changes_refs(operation: &Operation) -> bool {
             | Operation::Checkout { .. }
             | Operation::CreateBranch { .. }
             | Operation::DeleteBranch { .. }
+            | Operation::RenameBranch { .. }
+            | Operation::SetBranchUpstream { .. }
+            | Operation::UnsetBranchUpstream { .. }
+            | Operation::AddRemote { .. }
+            | Operation::RenameRemote { .. }
+            | Operation::SetRemoteUrl { .. }
+            | Operation::RemoveRemote { .. }
             | Operation::Fetch { .. }
             | Operation::Pull { .. }
             | Operation::Push { .. }
@@ -234,6 +241,25 @@ fn execute(shared: &Shared, id: OperationId, operation: &Operation) -> Result<()
             checkout,
         } => git.create_branch(name, start_point.as_deref(), *checkout),
         Operation::DeleteBranch { name, force } => git.delete_branch(name, *force),
+        Operation::RenameBranch {
+            name,
+            new_name,
+            rename_upstream,
+        } => git.rename_branch(name, new_name, rename_upstream.as_ref()),
+        Operation::SetBranchUpstream {
+            branch,
+            remote,
+            remote_branch,
+        } => git.set_branch_upstream(branch, remote, remote_branch),
+        Operation::UnsetBranchUpstream { branch } => git.unset_branch_upstream(branch),
+        Operation::AddRemote { name, url, fetch } => git.add_remote(name, url, *fetch),
+        Operation::RenameRemote { name, new_name } => git.rename_remote(name, new_name),
+        Operation::SetRemoteUrl {
+            name,
+            fetch_url,
+            push_url,
+        } => git.set_remote_url(name, fetch_url, push_url.as_deref()),
+        Operation::RemoveRemote { name } => git.remove_remote(name),
         Operation::Fetch { remote, prune } => {
             let mut progress = ProgressReporter::new(shared, id);
             let result = git.fetch_with_progress(remote.as_deref(), *prune, |text, percent| {

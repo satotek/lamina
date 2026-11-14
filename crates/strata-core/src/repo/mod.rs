@@ -36,6 +36,7 @@ pub use in_progress::{InProgressCommit, InProgressDetails, RebaseOnto};
 pub use log::CommitWalk;
 pub use status::MAX_INCREMENTAL_PATHS;
 pub use submodules::{SubmoduleInfo, SubmoduleStatus};
+pub use upstream::UpstreamTarget;
 pub use worktrees::WorktreeInfo;
 
 use std::path::{Path, PathBuf};

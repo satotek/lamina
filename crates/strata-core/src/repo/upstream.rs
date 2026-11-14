@@ -10,7 +10,49 @@ use gix::revwalk::graph::Commit;
 use super::Repo;
 use crate::{Error, Oid, Result, UpstreamInfo};
 
+/// The remote branch a local branch's upstream is configured to be.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpstreamTarget {
+    pub remote: String,
+    /// Branch name on the remote, without `refs/heads/`.
+    pub branch: String,
+}
+
 impl Repo {
+    /// The remote and remote branch behind `branch`'s upstream.
+    ///
+    /// Unlike [`upstreams`](Self::upstreams), which follows the fetch refspec
+    /// to a remote-tracking ref, this reports the configured values even when
+    /// that ref is gone: a remote-side rename needs the old remote branch name
+    /// in order to delete it. `branch.<name>.remote = .` names another local
+    /// branch and has no remote side, so it yields `None`.
+    pub fn branch_upstream_target(&self, branch: &str) -> Result<Option<UpstreamTarget>> {
+        let mut repo = self.local();
+        let _ = repo.reload();
+        let config = repo.config_snapshot();
+        let config = config.plumbing();
+        let branch = branch.as_bytes().as_bstr();
+        let (Some(remote), Some(merge)) = (
+            config.string_by("branch", Some(branch), "remote"),
+            config.string_by("branch", Some(branch), "merge"),
+        ) else {
+            return Ok(None);
+        };
+        if remote.as_bstr() == b".".as_bstr() {
+            return Ok(None);
+        }
+        let Some(merge) = std::str::from_utf8(merge.as_ref())
+            .ok()
+            .and_then(|merge| merge.strip_prefix("refs/heads/"))
+        else {
+            return Ok(None);
+        };
+        Ok(Some(UpstreamTarget {
+            remote: remote.to_string(),
+            branch: merge.to_owned(),
+        }))
+    }
+
     /// Upstream state of every local branch that has one configured, keyed by
     /// the branch's short name (e.g. `main`).
     ///
