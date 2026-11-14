@@ -81,6 +81,12 @@
             packages = with pkgs; [
               cargo
               clippy
+              # fc-list/fc-match for checking what the headless GUI can render.
+              fontconfig
+              # CJK coverage for the Xvfb checks: without it Japanese text in a
+              # scratch repository draws as tofu, which hides every path,
+              # commit and diff bug this shell is meant to surface.
+              noto-fonts-cjk-sans
               # LD_LIBRARY_PATH below points at Nix's glibc-linked libraries,
               # so the host's ssh-keygen fails to load. Signing tests and
               # `git log %G?` on SSH-signed commits need a Nix one.
@@ -128,6 +134,8 @@
               fontDirectories = [
                 pkgs.dejavu_fonts
                 pkgs.liberation_ttf
+                # The app's CJK fallback chain names Noto Sans CJK JP first.
+                pkgs.noto-fonts-cjk-sans
               ];
             };
 

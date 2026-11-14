@@ -5,10 +5,11 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use crate::Result;
-use crate::diff::{DiffOptions, diff_text};
+use crate::diff::{DiffOptions, diff_bytes};
+use crate::encoding::decode_for_display;
 use crate::error::Error;
 use crate::git_cli::{ApplyMode, CommitOptions};
-use crate::patch::{LineEnding, LineSelection, PatchFile, PatchMode, build_patch};
+use crate::patch::{BytePatchFile, LineEnding, LineSelection, PatchMode, build_patch_bytes};
 use crate::session::history::LoadCommand;
 use crate::session::publish::Shared;
 use crate::session::refresh::RefreshStatus;
@@ -426,12 +427,25 @@ fn apply_lines(
     // whitespace-insensitive comparison would drop changes from the patch, and
     // zero context would produce a patch `git apply` refuses without
     // `--unidiff-zero`.
-    let diff = diff_text(
-        old.as_deref().unwrap_or_default(),
-        new.as_deref().unwrap_or_default(),
-        &DiffOptions::default(),
-    );
-    let file = PatchFile {
+    //
+    // The diff reads raw bytes, not the decoded text the view showed, so a
+    // Shift_JIS file is staged with the same bytes it has on disk.
+    let old_bytes = old.as_deref().unwrap_or_default();
+    let new_bytes = new.as_deref().unwrap_or_default();
+    for (bytes, side) in [(old_bytes, "index"), (new_bytes, "working tree")] {
+        let (_, encoding) = decode_for_display(bytes, || repo.working_tree_encoding(path));
+        if encoding.is_utf16() {
+            // A text patch is split at `\n` bytes, which would drop the second
+            // byte of every UTF-16 code unit. Refuse rather than write broken
+            // bytes; the whole-file action stages it through git.
+            return Err(Error::other(format!(
+                "hunk staging is not available for the UTF-16 {side} of {path}; \
+                 stage the whole file instead"
+            )));
+        }
+    }
+    let diff = diff_bytes(old_bytes, new_bytes, &DiffOptions::default());
+    let file = BytePatchFile {
         path,
         old_path: old.is_some().then_some(path),
         diff: &diff,
@@ -439,10 +453,10 @@ fn apply_lines(
         is_deleted: new.is_none() && old.is_some(),
     };
     // Nothing selected, no changes left, or a binary file: no patch to apply.
-    let Some(patch) = build_patch(&file, selection, mode) else {
+    let Some(patch) = build_patch_bytes(&file, selection, mode) else {
         return Ok(());
     };
-    shared.git.apply_patch(&patch, apply_mode(mode))
+    shared.git.apply_patch_bytes(&patch, apply_mode(mode))
 }
 
 fn apply_mode(mode: PatchMode) -> ApplyMode {

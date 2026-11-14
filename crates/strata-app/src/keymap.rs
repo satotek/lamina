@@ -1723,6 +1723,12 @@ fn install_capture(cx: &mut App) {
             cx.global_mut::<KeymapState>().pending_edit = Some(spec);
             return;
         }
+        // An IME still has to compose: its keys are not bindings, and capturing
+        // "k" from the preedit of "か" would bind a key the user never chose.
+        if is_ime_composition(&event.keystroke) {
+            cx.global_mut::<KeymapState>().pending_edit = Some(spec);
+            return;
+        }
         if event.keystroke.key == "escape" && !event.keystroke.modifiers.modified() {
             cx.refresh_windows();
             return;
@@ -1747,6 +1753,38 @@ fn install_capture(cx: &mut App) {
 pub fn begin_capture(cx: &mut App, spec: &'static ActionSpec) {
     cx.global_mut::<KeymapState>().pending_edit = Some(spec);
     cx.refresh_windows();
+}
+
+/// True when a keystroke belongs to an IME composition rather than a binding.
+///
+/// Platforms deliver the keys typed during a preedit as ordinary key events:
+/// X11's XIM sends the key that started the composition with no character,
+/// and the IME reports its own control keys by name. Accepting those would bind
+/// the romaji "k" while the candidate window composes "か". Modifiers, Enter,
+/// arrows and other named keys still bind, so every real shortcut stays
+/// capturable.
+fn is_ime_composition(keystroke: &Keystroke) -> bool {
+    const IME_KEYS: [&str; 9] = [
+        "process",
+        "henkan",
+        "muhenkan",
+        "convert",
+        "nonconvert",
+        "kana_mode",
+        "eisu_toggle",
+        "romaji",
+        "codeinput",
+    ];
+    if keystroke.is_modifier_key() {
+        return false;
+    }
+    if IME_KEYS.contains(&keystroke.key.as_str()) {
+        return true;
+    }
+    // A printable key without a character is still being composed. Function
+    // keys and named keys ("escape", "f12") have multi-byte names, so they are
+    // not caught here. A modified key is an explicit shortcut, not composition.
+    !keystroke.modifiers.modified() && keystroke.key.len() == 1 && keystroke.key_char.is_none()
 }
 
 /// Creates `keymap.json` with an empty list when it does not exist yet.
@@ -2142,5 +2180,37 @@ mod tests {
         );
         let modifier = Keystroke::parse_with_os("shift", OperatingSystem::Linux).unwrap();
         assert_eq!(keystroke_text(&modifier, OperatingSystem::Linux), None);
+    }
+
+    /// A key capture must not bind the keys an IME is using to compose text.
+    #[test]
+    fn key_capture_ignores_ime_composition() {
+        let mut composing = Keystroke::parse_with_os("k", OperatingSystem::Linux).unwrap();
+        composing.key_char = None;
+        assert!(is_ime_composition(&composing));
+        assert!(
+            keystroke_text(&composing, OperatingSystem::Linux).is_some(),
+            "the guard is what keeps this key out of the keymap"
+        );
+
+        let mut committed = Keystroke::parse_with_os("k", OperatingSystem::Linux).unwrap();
+        committed.key_char = Some("k".to_owned());
+        assert!(!is_ime_composition(&committed));
+
+        for name in ["henkan", "muhenkan", "process", "eisu_toggle"] {
+            let ime = Keystroke::parse_with_os(name, OperatingSystem::Linux).unwrap_or_else(|_| {
+                Keystroke {
+                    modifiers: Default::default(),
+                    key: name.to_owned(),
+                    key_char: None,
+                }
+            });
+            assert!(is_ime_composition(&ime), "{name} belongs to the IME");
+        }
+
+        let enter = Keystroke::parse_with_os("enter", OperatingSystem::Linux).unwrap();
+        assert!(!is_ime_composition(&enter), "Enter is still capturable");
+        let secondary = Keystroke::parse_with_os("ctrl-k", OperatingSystem::Linux).unwrap();
+        assert!(!is_ime_composition(&secondary));
     }
 }

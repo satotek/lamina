@@ -2158,6 +2158,8 @@ mod tests {
             new_highlights: Arc::new(Vec::new()),
             old_text: Arc::from(old),
             new_text: Arc::from(new),
+            old_encoding: strata_core::encoding::TextEncoding::UTF_8,
+            new_encoding: strata_core::encoding::TextEncoding::UTF_8,
             gaps: Arc::from(gaps),
             lfs: None,
             image: None,
@@ -2289,6 +2291,8 @@ mod tests {
             lfs: None,
             old_text: Arc::from(big.clone()),
             new_text: Arc::from("a\n"),
+            old_encoding: strata_core::encoding::TextEncoding::UTF_8,
+            new_encoding: strata_core::encoding::TextEncoding::UTF_8,
             gaps: Arc::from(vec![strata_core::diff::Gap {
                 old_start: 1,
                 new_start: 1,

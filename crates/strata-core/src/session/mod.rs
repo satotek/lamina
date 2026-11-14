@@ -28,6 +28,7 @@ use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crate::diff::FileDiff;
+use crate::encoding::TextEncoding;
 use crate::git_cli::{CommandRecord, Git, RebaseStep};
 use crate::graph::{GraphRow, GraphRows};
 use crate::highlight::LineHighlights;
@@ -567,10 +568,15 @@ pub struct DiffView {
     /// LFS metadata when either side is a pointer. `diff` then holds the real
     /// content when both objects are local, or no hunks when they are not.
     pub lfs: Option<crate::lfs::LfsDiffSummary>,
-    /// The old side of the diff, lossily decoded as the diff reads it.
+    /// The old side of the diff, decoded for display.
     pub old_text: Arc<str>,
-    /// The new side of the diff, lossily decoded as the diff reads it.
+    /// The new side of the diff, decoded for display.
     pub new_text: Arc<str>,
+    /// The encoding `old_text` was decoded from. A view shows a label when it
+    /// is not UTF-8, so the reader knows the file is in a legacy encoding.
+    pub old_encoding: TextEncoding,
+    /// The encoding `new_text` was decoded from.
+    pub new_encoding: TextEncoding,
     /// Runs of unchanged lines the diff left out, indexed by the hunk they
     /// precede; the last entry follows the last hunk. Empty gaps sit where two
     /// hunks or a hunk and a file edge meet directly.

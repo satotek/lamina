@@ -22,6 +22,7 @@ use gpui::{
 };
 use gpui_component::ActiveTheme as _;
 use gpui_kit_assets::IconName;
+use strata_core::encoding::{TextEncoding, decode_for_display};
 use strata_core::highlight::{Highlighter, LineHighlights, language_for_path};
 use strata_core::lfs::{LfsInfo, LfsPointer, format_size, read_object, short_label};
 use strata_core::{Oid, TreeEntry, TreeEntryKind};
@@ -91,7 +92,10 @@ struct OpenFile {
 
 enum FileContent {
     Loading,
-    Text(Arc<Vec<TextLine>>),
+    Text {
+        lines: Arc<Vec<TextLine>>,
+        encoding: TextEncoding,
+    },
     Notice(String),
 }
 
@@ -114,6 +118,14 @@ impl TreeBrowser {
         self.file
             .as_ref()
             .map_or(self.dir.as_str(), |file| file.path.as_str())
+    }
+
+    /// The encoding of the open file, when it is not UTF-8.
+    fn non_utf8_encoding(&self) -> Option<TextEncoding> {
+        match &self.file.as_ref()?.content {
+            FileContent::Text { encoding, .. } if !encoding.is_utf8() => Some(*encoding),
+            _ => None,
+        }
     }
 
     /// Resets to the root of `commit` and returns the listing epoch to load.
@@ -360,6 +372,7 @@ fn split_lines(text: &str) -> Vec<&str> {
 fn file_content(
     path: &str,
     bytes: Vec<u8>,
+    attribute: Option<String>,
     highlighter: &Mutex<Highlighter>,
     tab_width: usize,
 ) -> FileContent {
@@ -370,20 +383,21 @@ fn file_content(
             format_bytes(MAX_FILE_BYTES as u64)
         ));
     }
-    if bytes.contains(&0) {
+    let (decoded, encoding) = decode_for_display(&bytes, || attribute);
+    // A UTF-16 file contains NUL bytes in its code units; only another
+    // encoding's NUL marks a binary file.
+    if !encoding.is_utf16() && bytes.contains(&0) {
         return FileContent::Notice("Binary file — contents are not shown.".to_owned());
     }
-    let Ok(text) = String::from_utf8(bytes) else {
-        return FileContent::Notice("Binary file — contents are not shown.".to_owned());
-    };
+    let text = decoded.as_ref();
 
     let highlight = language_for_path(path)
         .and_then(|language| {
             let mut highlighter = highlighter.lock().ok()?;
-            Some(highlighter.highlight(language, &text))
+            Some(highlighter.highlight(language, text))
         })
         .unwrap_or_default();
-    let lines = split_lines(&text)
+    let lines = split_lines(text)
         .into_iter()
         .enumerate()
         .map(|(index, raw)| {
@@ -394,7 +408,10 @@ fn file_content(
         })
         .collect();
 
-    FileContent::Text(Arc::new(lines))
+    FileContent::Text {
+        lines: Arc::new(lines),
+        encoding,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -572,6 +589,7 @@ impl RepoView {
                     Ok::<FileContent, String>(file_content(
                         &read_path,
                         bytes,
+                        repo.working_tree_encoding(&read_path),
                         &highlighter,
                         tab_width,
                     ))
@@ -703,6 +721,13 @@ impl RepoView {
             .border_color(design.border)
             .child(back)
             .child(trail)
+            .when_some(self.tree.non_utf8_encoding(), |bar, encoding| {
+                bar.child(crate::ui::status_badge(
+                    encoding.label(),
+                    crate::ui::BadgeTone::Neutral,
+                    design,
+                ))
+            })
             .when_some(blame, |bar, blame| bar.child(blame))
             .when_some(self.tree.commit(), |bar, commit| {
                 bar.child(
@@ -791,7 +816,7 @@ impl RepoView {
             FileContent::Notice(notice) => {
                 crate::ui::message(notice.clone(), design.muted, design).into_any_element()
             }
-            FileContent::Text(lines) => {
+            FileContent::Text { lines, encoding: _ } => {
                 let lines = Arc::clone(lines);
                 let colors = DiffColors::from_theme(cx.theme());
                 // The same font and size source as the diff list, so the tree
@@ -1019,14 +1044,21 @@ mod tests {
     fn binary_and_oversized_blobs_show_a_notice() {
         let highlighter = Mutex::new(Highlighter::new());
         assert!(matches!(
-            file_content("logo.png", vec![0, 1, 2], &highlighter, 4),
+            file_content("logo.png", vec![0, 1, 2], None, &highlighter, 4),
             FileContent::Notice(_)
         ));
         assert!(matches!(
-            file_content("big.txt", vec![b'a'; MAX_FILE_BYTES + 1], &highlighter, 4),
+            file_content(
+                "big.txt",
+                vec![b'a'; MAX_FILE_BYTES + 1],
+                None,
+                &highlighter,
+                4
+            ),
             FileContent::Notice(_)
         ));
-        let FileContent::Text(lines) = file_content("a.txt", b"ok\n".to_vec(), &highlighter, 4)
+        let FileContent::Text { lines, .. } =
+            file_content("a.txt", b"ok\n".to_vec(), None, &highlighter, 4)
         else {
             panic!("text file must load");
         };

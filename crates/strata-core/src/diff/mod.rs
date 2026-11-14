@@ -11,6 +11,7 @@ pub use expand::{
     Expansion, Gap, GapAction, GapView, MAX_EXPAND_BYTES, REVEAL_STEP, Reveal, gap_view, gaps,
     line_count, within_expand_cap,
 };
+pub use lines::is_binary;
 
 use std::borrow::Cow;
 use std::fmt::Write as _;
@@ -18,7 +19,7 @@ use std::ops::Range;
 
 use imara_diff::{Algorithm, Diff, InternedInput};
 
-use lines::Line;
+use lines::ByteLine;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LineKind {
@@ -56,6 +57,34 @@ pub struct FileDiff {
     pub binary: bool,
 }
 
+/// One line of a diff that has not been decoded for display yet.
+///
+/// Patch generation reads these bytes, so staging a hunk in a Shift_JIS file
+/// applies the original bytes instead of a lossy UTF-8 rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RawDiffLine<'a> {
+    pub kind: LineKind,
+    pub old_lineno: Option<u32>,
+    pub new_lineno: Option<u32>,
+    pub content: &'a [u8],
+    pub no_newline_at_eof: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RawHunk<'a> {
+    pub old_start: u32,
+    pub old_len: u32,
+    pub new_start: u32,
+    pub new_len: u32,
+    pub lines: Vec<RawDiffLine<'a>>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RawFileDiff<'a> {
+    pub hunks: Vec<RawHunk<'a>>,
+    pub binary: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DiffOptions {
     /// Unchanged lines shown around each hunk, as `git diff -U<n>`.
@@ -81,27 +110,68 @@ struct Change {
 }
 
 pub fn diff_text(old: &[u8], new: &[u8], opts: &DiffOptions) -> FileDiff {
-    if lines::is_binary(old) || lines::is_binary(new) {
+    let raw = diff_bytes(old, new, opts);
+    if raw.binary {
         return FileDiff {
             hunks: Vec::new(),
             binary: true,
         };
     }
 
-    let old = String::from_utf8_lossy(old);
-    let new = String::from_utf8_lossy(new);
-    let old_text: &str = &old;
-    let new_text: &str = &new;
-    let old_lines = lines::split(old_text);
-    let new_lines = lines::split(new_text);
-    let old_tokens_text = comparison_text(old_text, opts.ignore_whitespace);
-    let new_tokens_text = comparison_text(new_text, opts.ignore_whitespace);
-    let old_tokens = lines::split(&old_tokens_text);
-    let new_tokens = lines::split(&new_tokens_text);
+    let mut hunks: Vec<Hunk> = raw
+        .hunks
+        .into_iter()
+        .map(|hunk| Hunk {
+            old_start: hunk.old_start,
+            old_len: hunk.old_len,
+            new_start: hunk.new_start,
+            new_len: hunk.new_len,
+            lines: hunk
+                .lines
+                .into_iter()
+                .map(|line| DiffLine {
+                    kind: line.kind,
+                    old_lineno: line.old_lineno,
+                    new_lineno: line.new_lineno,
+                    content: String::from_utf8_lossy(line.content).into_owned(),
+                    no_newline_at_eof: line.no_newline_at_eof,
+                    emphasis: Vec::new(),
+                })
+                .collect(),
+        })
+        .collect();
+    for hunk in &mut hunks {
+        emphasis::emphasize(&mut hunk.lines);
+    }
 
-    // imara's `&str` source tokenises whole lines including their terminator,
-    // which is what makes CRLF/LF and a dropped final newline show up.
-    let input = InternedInput::new(old_tokens_text.as_ref(), new_tokens_text.as_ref());
+    FileDiff {
+        hunks,
+        binary: false,
+    }
+}
+
+/// The diff before any display decoding, keeping the text as the bytes it
+/// came from.
+///
+/// Line boundaries are byte boundaries, so a file in a legacy encoding diffs
+/// by its real lines and a patch can be built from the same hunks the UI
+/// showed.
+pub(crate) fn diff_bytes<'a>(old: &'a [u8], new: &'a [u8], opts: &DiffOptions) -> RawFileDiff<'a> {
+    if lines::is_binary(old) || lines::is_binary(new) {
+        return RawFileDiff {
+            hunks: Vec::new(),
+            binary: true,
+        };
+    }
+
+    let old_lines = lines::split_bytes(old);
+    let new_lines = lines::split_bytes(new);
+    let old_tokens = comparison_bytes(old, opts.ignore_whitespace);
+    let new_tokens = comparison_bytes(new, opts.ignore_whitespace);
+
+    // imara's line tokeniser keeps the terminator, which is what makes
+    // CRLF/LF and a dropped final newline show up.
+    let input = InternedInput::new(old_tokens.as_ref(), new_tokens.as_ref());
     let mut diff = Diff::compute(Algorithm::Histogram, &input);
     diff.postprocess_lines(&input);
 
@@ -114,22 +184,22 @@ pub fn diff_text(old: &[u8], new: &[u8], opts: &DiffOptions) -> FileDiff {
         .collect();
 
     let context = opts.context_lines as usize;
-    let old_side = Side {
-        lines: &old_lines,
-        tokens: &old_tokens,
-    };
-    let new_side = Side {
-        lines: &new_lines,
-        tokens: &new_tokens,
-    };
+    let old_side = Side { lines: &old_lines };
+    let new_side = Side { lines: &new_lines };
     let mut hunks = Vec::new();
     for (first, last) in group_changes(&changes, context) {
-        let mut hunk = build_hunk(old_side, new_side, &changes, first, last, context);
-        emphasis::emphasize(&mut hunk.lines);
-        hunks.push(hunk);
+        hunks.push(build_hunk(
+            old_side,
+            new_side,
+            &changes,
+            first,
+            last,
+            context,
+            opts.ignore_whitespace,
+        ));
     }
 
-    FileDiff {
+    RawFileDiff {
         hunks,
         binary: false,
     }
@@ -140,27 +210,30 @@ pub fn diff_text(old: &[u8], new: &[u8], opts: &DiffOptions) -> FileDiff {
 ///
 /// Keeping one token per line is what lets a whitespace-insensitive diff keep
 /// the line numbers of the file, so the hunks still index the real text.
-fn comparison_text(text: &str, ignore_whitespace: bool) -> Cow<'_, str> {
+/// Whitespace stripping has to decode, because `-w` is about Unicode
+/// whitespace; the bytes only matter for building the patch, which always uses
+/// the default options.
+fn comparison_bytes(text: &[u8], ignore_whitespace: bool) -> Cow<'_, [u8]> {
     if !ignore_whitespace {
         return Cow::Borrowed(text);
     }
-    let mut stripped = String::with_capacity(text.len());
-    for line in lines::split(text) {
+    let decoded = String::from_utf8_lossy(text);
+    let mut stripped = String::with_capacity(decoded.len());
+    for line in lines::split(&decoded) {
         stripped.extend(line.content.chars().filter(|c| !c.is_whitespace()));
         // The terminator stays, so a missing final newline is still a change.
         if !line.no_newline {
             stripped.push('\n');
         }
     }
-    Cow::Owned(stripped)
+    Cow::Owned(stripped.into_bytes())
 }
 
-/// One side of the diff: the text the hunks carry and the text that was
-/// compared. The two differ only when whitespace is ignored.
+/// One side of the diff. The hunks carry the real line bytes; the compared
+/// text differs only when whitespace is ignored.
 #[derive(Clone, Copy)]
-struct Side<'a> {
-    lines: &'a [Line<'a>],
-    tokens: &'a [Line<'a>],
+struct Side<'s, 'a> {
+    lines: &'s [ByteLine<'a>],
 }
 
 /// Groups changes the way `git diff` does: changes stay in one hunk when the
@@ -185,14 +258,15 @@ fn group_changes(changes: &[Change], context: usize) -> Vec<(usize, usize)> {
     groups
 }
 
-fn build_hunk(
-    old: Side<'_>,
-    new: Side<'_>,
+fn build_hunk<'s, 'a>(
+    old: Side<'s, 'a>,
+    new: Side<'s, 'a>,
     changes: &[Change],
     first: usize,
     last: usize,
     context: usize,
-) -> Hunk {
+    ignore_whitespace: bool,
+) -> RawHunk<'a> {
     let ctx_before = context
         .min(changes[first].old.start)
         .min(changes[first].new.start);
@@ -210,46 +284,44 @@ fn build_hunk(
     let mut new_pos = new_start;
 
     for _ in 0..ctx_before {
-        lines.push(context_line(old, old_pos, new, new_pos));
+        lines.push(context_line(old, old_pos, new, new_pos, ignore_whitespace));
         old_pos += 1;
         new_pos += 1;
     }
     for change in &changes[first..=last] {
         while old_pos < change.old.start {
-            lines.push(context_line(old, old_pos, new, new_pos));
+            lines.push(context_line(old, old_pos, new, new_pos, ignore_whitespace));
             old_pos += 1;
             new_pos += 1;
         }
         for idx in change.old.clone() {
-            lines.push(DiffLine {
+            lines.push(RawDiffLine {
                 kind: LineKind::Removed,
                 old_lineno: Some(idx as u32 + 1),
                 new_lineno: None,
-                content: old.lines[idx].content.to_string(),
+                content: old.lines[idx].content,
                 no_newline_at_eof: old.lines[idx].no_newline,
-                emphasis: Vec::new(),
             });
         }
         for idx in change.new.clone() {
-            lines.push(DiffLine {
+            lines.push(RawDiffLine {
                 kind: LineKind::Added,
                 old_lineno: None,
                 new_lineno: Some(idx as u32 + 1),
-                content: new.lines[idx].content.to_string(),
+                content: new.lines[idx].content,
                 no_newline_at_eof: new.lines[idx].no_newline,
-                emphasis: Vec::new(),
             });
         }
         old_pos = change.old.end;
         new_pos = change.new.end;
     }
     for _ in 0..ctx_after {
-        lines.push(context_line(old, old_pos, new, new_pos));
+        lines.push(context_line(old, old_pos, new, new_pos, ignore_whitespace));
         old_pos += 1;
         new_pos += 1;
     }
 
-    Hunk {
+    RawHunk {
         old_start: header_start(old_start, old_len),
         old_len: old_len as u32,
         new_start: header_start(new_start, new_len),
@@ -269,21 +341,25 @@ fn header_start(index: usize, len: usize) -> u32 {
     }
 }
 
-fn context_line(old: Side<'_>, old_pos: usize, new: Side<'_>, new_pos: usize) -> DiffLine {
+fn context_line<'s, 'a>(
+    old: Side<'s, 'a>,
+    old_pos: usize,
+    new: Side<'s, 'a>,
+    new_pos: usize,
+    ignore_whitespace: bool,
+) -> RawDiffLine<'a> {
     // Whitespace-insensitive comparison legalises context lines that differ in
-    // whitespace, so the check has to look at the compared text, not the raw
-    // lines the hunk carries.
-    debug_assert_eq!(
-        old.tokens[old_pos].raw, new.tokens[new_pos].raw,
+    // whitespace, so the check only holds for the exact comparison.
+    debug_assert!(
+        ignore_whitespace || old.lines[old_pos].raw == new.lines[new_pos].raw,
         "context must be identical on both sides"
     );
-    DiffLine {
+    RawDiffLine {
         kind: LineKind::Context,
         old_lineno: Some(old_pos as u32 + 1),
         new_lineno: Some(new_pos as u32 + 1),
-        content: old.lines[old_pos].content.to_string(),
+        content: old.lines[old_pos].content,
         no_newline_at_eof: old.lines[old_pos].no_newline || new.lines[new_pos].no_newline,
-        emphasis: Vec::new(),
     }
 }
 

@@ -1236,7 +1236,7 @@ fn request_blame_serves_large_file_through_git_cli() {
                 panic!("blame failed: {error}");
             }
             Ok(SessionEvent::CommandLogged(record))
-                if record.args.first().map(String::as_str) == Some("blame") =>
+                if record.args.iter().any(|arg| arg == "blame") =>
             {
                 saw_blame_command = true;
             }
@@ -1321,7 +1321,7 @@ fn cancelling_session_blame_kills_in_flight_git_process() {
                 panic!("cancelled blame ticket must not emit BlameReady or QueryFailed");
             }
             Ok(SessionEvent::CommandLogged(record))
-                if record.args.first().map(String::as_str) == Some("blame") =>
+                if record.args.iter().any(|arg| arg == "blame") =>
             {
                 assert_eq!(record.exit_code, None);
                 break;
@@ -1599,7 +1599,7 @@ fn cancelling_mid_stream_blame_stops_events() {
                 panic!("cancelled blame ticket must stop emitting events");
             }
             Ok(SessionEvent::CommandLogged(record))
-                if record.args.first().map(String::as_str) == Some("blame") =>
+                if record.args.iter().any(|arg| arg == "blame") =>
             {
                 assert_eq!(record.exit_code, None);
                 break;

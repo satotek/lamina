@@ -403,8 +403,8 @@ fn path_hint_in(path: &Path, home: Option<&Path>) -> String {
         Some(rest) => format!("~/{}", rest.display()),
         None => path.display().to_string(),
     };
-    const MAX_CHARS: usize = 48;
-    if folded.chars().count() <= MAX_CHARS {
+    const MAX_COLUMNS: usize = 48;
+    if strata_core::text::display_width(&folded) <= MAX_COLUMNS {
         return folded;
     }
     let tail = path
@@ -414,7 +414,7 @@ fn path_hint_in(path: &Path, home: Option<&Path>) -> String {
         .map(|part| part.as_os_str().to_string_lossy().into_owned())
         .collect::<Vec<_>>();
     let tail = tail.into_iter().rev().collect::<Vec<_>>().join("/");
-    format!("…/{tail}")
+    strata_core::text::truncate_width(&format!("…/{tail}"), MAX_COLUMNS)
 }
 
 #[cfg(test)]

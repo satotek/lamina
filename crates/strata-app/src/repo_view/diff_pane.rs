@@ -203,6 +203,14 @@ impl RepoView {
                         )
                     }),
             )
+            .when_some(
+                self.diff
+                    .view()
+                    .and_then(|view| style::encoding_label(view)),
+                |header, label| {
+                    header.child(ui::status_badge(label, ui::BadgeTone::Neutral, design))
+                },
+            )
             .child(
                 div()
                     .flex_none()
@@ -395,4 +403,51 @@ impl RepoView {
 
 fn message(text: &str, color: Hsla, design: &Design) -> AnyElement {
     crate::ui::message(text, color, design).into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use strata_core::diff::FileDiff;
+    use strata_core::encoding::TextEncoding;
+    use strata_core::session::{DiffRequest, DiffView};
+
+    use crate::style::encoding_label;
+
+    fn view(old: TextEncoding, new: TextEncoding) -> DiffView {
+        DiffView {
+            request: DiffRequest::Staged {
+                path: "設定.txt".into(),
+            },
+            diff: FileDiff::default(),
+            old_highlights: Arc::new(Vec::new()),
+            new_highlights: Arc::new(Vec::new()),
+            lfs: None,
+            old_text: Arc::from(""),
+            new_text: Arc::from(""),
+            old_encoding: old,
+            new_encoding: new,
+            gaps: Arc::from(Vec::new()),
+            image: None,
+        }
+    }
+
+    #[test]
+    fn the_encoding_label_appears_only_for_non_utf8_text() {
+        assert_eq!(
+            encoding_label(&view(TextEncoding::UTF_8, TextEncoding::UTF_8)),
+            None
+        );
+        let shift_jis = TextEncoding::from_label("Shift_JIS").unwrap();
+        assert_eq!(
+            encoding_label(&view(TextEncoding::UTF_8, shift_jis)),
+            Some("Shift_JIS")
+        );
+        assert_eq!(
+            encoding_label(&view(shift_jis, TextEncoding::UTF_8)),
+            Some("Shift_JIS"),
+            "a file converted from Shift_JIS still names the old encoding"
+        );
+    }
 }

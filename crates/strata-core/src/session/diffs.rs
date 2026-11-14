@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::Result;
 use crate::diff::{DiffOptions, FileDiff, diff_text, gaps, line_count};
+use crate::encoding::{TextEncoding, decode_for_display};
 use crate::highlight::{Highlighter, language_for_path};
 use crate::image::{self, ImageKind};
 use crate::lfs::{self, LfsDiff, LfsDiffSummary};
@@ -85,6 +86,8 @@ fn compute(shared: &Shared, job: &DiffJob, highlighter: &mut Highlighter) -> Res
             lfs: resolved.lfs,
             old_text: Arc::from(""),
             new_text: Arc::from(""),
+            old_encoding: TextEncoding::UTF_8,
+            new_encoding: TextEncoding::UTF_8,
             gaps: Arc::from(Vec::new()),
             image: Some(resolved.diff),
         });
@@ -95,11 +98,19 @@ fn compute(shared: &Shared, job: &DiffJob, highlighter: &mut Highlighter) -> Res
     let old_present = old.is_some();
     let new_present = new.is_some();
     let (old_bytes, new_bytes, lfs) = diff_inputs(&shared.repo, old, new);
+    // Decode for display only. The bytes stay available for images, and hunk
+    // staging re-reads them from the repository so a legacy encoding is never
+    // rewritten as UTF-8.
+    let path = path_of(&job.request);
+    let (old_decoded, old_encoding) =
+        decode_for_display(&old_bytes, || shared.repo.working_tree_encoding(path));
+    let (new_decoded, new_encoding) =
+        decode_for_display(&new_bytes, || shared.repo.working_tree_encoding(path));
     // The texts are decoded once and kept: the view slices them to reveal the
     // context the diff leaves out, and highlighting reads the same strings.
     // They come after the LFS swap so both show the object, not the pointer.
-    let old_text: Arc<str> = Arc::from(String::from_utf8_lossy(&old_bytes).into_owned());
-    let new_text: Arc<str> = Arc::from(String::from_utf8_lossy(&new_bytes).into_owned());
+    let old_text: Arc<str> = Arc::from(old_decoded.into_owned());
+    let new_text: Arc<str> = Arc::from(new_decoded.into_owned());
 
     let diff = diff_text(old_text.as_bytes(), new_text.as_bytes(), &job.options);
     let binary = diff.binary;
@@ -124,6 +135,8 @@ fn compute(shared: &Shared, job: &DiffJob, highlighter: &mut Highlighter) -> Res
         lfs,
         old_text: Arc::clone(&old_text),
         new_text: Arc::clone(&new_text),
+        old_encoding,
+        new_encoding,
         gaps,
         image,
     });
@@ -145,6 +158,8 @@ fn compute(shared: &Shared, job: &DiffJob, highlighter: &mut Highlighter) -> Res
         new_highlights: Arc::new(highlighter.highlight(language, &new_text)),
         old_text,
         new_text,
+        old_encoding,
+        new_encoding,
         gaps: Arc::clone(&view.gaps),
         lfs: view.lfs.clone(),
         image: view.image.clone(),

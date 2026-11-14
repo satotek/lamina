@@ -67,6 +67,7 @@ const MAX_EDITOR_BYTES: usize = 1024 * 1024;
 /// A conflict this fragmented is better resolved in the merge tool.
 const MAX_EDITOR_CONFLICTS: usize = 200;
 /// Same probe length core's binary detector uses.
+#[cfg(test)]
 const BINARY_PROBE: usize = 8000;
 /// Sides larger than this are not highlighted; the merge tool is the better
 /// place for a file that big, and parsing it would only slow the load down.
@@ -171,6 +172,9 @@ fn kind_from_presence(base: bool, ours: bool, theirs: bool) -> ConflictKind {
     }
 }
 
+/// Git calls a file binary when a NUL appears early. Only the tests need this
+/// now that the merge analysis decides from decoded text.
+#[cfg(test)]
 fn is_binary(bytes: &[u8]) -> bool {
     bytes[..bytes.len().min(BINARY_PROBE)].contains(&0)
 }
@@ -259,18 +263,9 @@ impl ConflictData {
         kind: Option<ConflictKind>,
         style: ConflictStyle,
     ) -> Self {
-        let binary = [
-            sides.base.as_deref(),
-            sides.ours.as_deref(),
-            sides.theirs.as_deref(),
-            worktree,
-        ]
-        .into_iter()
-        .flatten()
-        .any(is_binary);
-
         let mut analysis = MergeAnalysis::analyze(&sides, style);
-        let text = analysis.text && !binary;
+        let binary = analysis.binary;
+        let text = analysis.text;
         let kind = kind.unwrap_or_else(|| {
             kind_from_presence(
                 sides.base.is_some(),
@@ -305,7 +300,11 @@ impl ConflictData {
             (Arc::new(Vec::new()), Vec::new(), None)
         };
         let (ours_highlights, theirs_highlights) = if text {
-            highlight_sides(path, &sides)
+            highlight_sides(
+                path,
+                (&analysis.ours.lines, analysis.ours.trailing_newline),
+                (&analysis.theirs.lines, analysis.theirs.trailing_newline),
+            )
         } else {
             Default::default()
         };
@@ -345,21 +344,23 @@ impl ConflictData {
 /// spans by the line number it kept from the file.
 fn highlight_sides(
     path: &str,
-    sides: &ConflictSides,
+    ours: (&[String], bool),
+    theirs: (&[String], bool),
 ) -> (Vec<LineHighlights>, Vec<LineHighlights>) {
     let Some(language) = language_for_path(path) else {
         return Default::default();
     };
     let mut highlighter = Highlighter::new();
     let mut spans: (Vec<LineHighlights>, Vec<LineHighlights>) = Default::default();
-    for (spans, bytes) in [(&mut spans.0, &sides.ours), (&mut spans.1, &sides.theirs)] {
-        let Some(bytes) = bytes else {
-            continue;
-        };
-        if bytes.len() > MAX_HIGHLIGHT_BYTES {
+    for (spans, (lines, trailing)) in [(&mut spans.0, ours), (&mut spans.1, theirs)] {
+        let mut text = lines.join("\n");
+        if trailing && !lines.is_empty() {
+            text.push('\n');
+        }
+        if text.len() > MAX_HIGHLIGHT_BYTES {
             continue;
         }
-        *spans = highlighter.highlight(language, &String::from_utf8_lossy(bytes));
+        *spans = highlighter.highlight(language, &text);
     }
     spans
 }
@@ -1898,12 +1899,28 @@ mod tests {
     #[test]
     fn highlight_sides_covers_both_editable_sides_and_skips_unknown_languages() {
         let sides = sides("fn a() {}\n", "fn b() {}\n", "fn c() {}\n");
-        let (ours, theirs) = highlight_sides("src/lib.rs", &sides);
+        let ours_lines = sides.ours.as_deref().map(|bytes| {
+            String::from_utf8_lossy(bytes)
+                .lines()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        });
+        let theirs_lines = sides.theirs.as_deref().map(|bytes| {
+            String::from_utf8_lossy(bytes)
+                .lines()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        });
+        let (ours, theirs) = highlight_sides(
+            "src/lib.rs",
+            (ours_lines.as_deref().unwrap_or_default(), true),
+            (theirs_lines.as_deref().unwrap_or_default(), true),
+        );
         assert_eq!(ours.len(), 2, "one range per line, plus the empty tail");
         assert!(ours.iter().any(|spans| !spans.is_empty()));
         assert!(theirs.iter().any(|spans| !spans.is_empty()));
 
-        let (ours, theirs) = highlight_sides("notes.unknown", &sides);
+        let (ours, theirs) = highlight_sides("notes.unknown", (&[], true), (&[], true));
         assert!(ours.is_empty() && theirs.is_empty());
     }
 

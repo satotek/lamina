@@ -30,6 +30,7 @@ use gix::bstr::{BStr, ByteSlice};
 
 use super::Repo;
 use super::log::Shallow;
+use crate::encoding::{TextEncoding, decode_for_display};
 use crate::git_cli::Git;
 use crate::{Error, Oid, Result};
 
@@ -50,6 +51,8 @@ pub struct Blame {
     pub commits: HashMap<Oid, BlameCommit>,
     /// The blamed file's content, one entry per line, without terminators.
     pub lines: Vec<String>,
+    /// The encoding `lines` were decoded from, for the view's header.
+    pub encoding: TextEncoding,
 }
 
 /// One run of consecutive lines that share an origin.
@@ -160,7 +163,9 @@ impl Repo {
             return Ok(Some(Blame::default()));
         }
 
-        let lines = split_lines(&blob_data);
+        let (decoded, encoding) =
+            decode_for_display(&blob_data, || self.working_tree_encoding(path));
+        let lines = split_lines(&decoded);
         if lines.is_empty() {
             return Ok(Some(Blame::default()));
         }
@@ -208,6 +213,7 @@ impl Repo {
                 hunks: git_blame.hunks,
                 commits: git_blame.commits,
                 lines,
+                encoding,
             }));
         }
 
@@ -252,6 +258,7 @@ impl Repo {
             hunks,
             commits,
             lines,
+            encoding,
         }))
     }
 
@@ -312,20 +319,24 @@ fn first_line(message: &gix::bstr::BStr) -> String {
     String::from_utf8_lossy(line.strip_suffix(b"\r").unwrap_or(line)).into_owned()
 }
 
-/// Split file content the way the diff tokenizer does: one entry per line,
-/// including a final unterminated one, with the terminator removed.
-fn split_lines(blob: &[u8]) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut rest = blob;
-    while !rest.is_empty() {
-        let end = rest.find_byte(b'\n').map_or(rest.len(), |index| index + 1);
-        let (line, remaining) = rest.split_at(end);
-        rest = remaining;
-        let line = line.strip_suffix(b"\n").unwrap_or(line);
-        // A CRLF checkout should not show a stray carriage return at the end
-        // of every line in a blame view.
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
-        lines.push(String::from_utf8_lossy(line).into_owned());
+/// Split decoded file content the way the diff tokenizer does: one entry per
+/// line, including a final unterminated one, with the terminator removed.
+fn split_lines(text: &str) -> Vec<String> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let mut lines: Vec<String> = text.split('\n').map(str::to_owned).collect();
+    // `split` yields one empty trailing entry for a file ending in a newline;
+    // that entry is not a line of the file.
+    if text.ends_with('\n') {
+        lines.pop();
+    }
+    // A CRLF checkout should not show a stray carriage return at the end of
+    // every line in a blame view.
+    for line in &mut lines {
+        if line.ends_with('\r') {
+            line.pop();
+        }
     }
     lines
 }
@@ -505,7 +516,7 @@ mod tests {
         let opened = repo.open();
         let gix_blame = opened.blame(renamed, "new-name.txt").expect("gix blame");
         let git = repo.git_handle();
-        let blob_lines = split_lines(b"alpha\nBETA\ngamma\n");
+        let blob_lines = split_lines("alpha\nBETA\ngamma\n");
         let result = git
             .blame_incremental(renamed, "new-name.txt", &|| false)
             .expect("git blame")
@@ -514,6 +525,7 @@ mod tests {
             hunks: result.hunks,
             commits: result.commits,
             lines: blob_lines,
+            encoding: TextEncoding::UTF_8,
         };
 
         assert_hunks_cover(&git_blame);
@@ -545,6 +557,7 @@ mod tests {
                 hunks: result.hunks,
                 commits: result.commits,
                 lines: gix_blame.lines.clone(),
+                encoding: TextEncoding::UTF_8,
             };
             assert_eq!(git_blame.lines, expected_lines);
             assert_hunks_cover(&git_blame);
@@ -585,7 +598,7 @@ mod tests {
         assert_eq!(line_ids[0], first);
         assert_eq!(line_ids[10], second);
         assert_eq!(line_ids[11], first);
-        assert_eq!(git.log().last().expect("git blame logged").args[0], "blame");
+        assert_eq!(git.log().last().expect("git blame logged").args[2], "blame");
 
         // Deep history (> GIX_MAX_DEPTH) also triggers the git CLI path even on a tiny file.
         let deep = TestRepo::new();
@@ -627,7 +640,7 @@ mod tests {
         assert_hunks_cover(&deep_blame);
         assert_eq!(line_commits(&deep_blame), [commits[0], commits[total - 1]]);
         assert_eq!(
-            deep_git.log().last().expect("git blame logged").args[0],
+            deep_git.log().last().expect("git blame logged").args[2],
             "blame"
         );
     }

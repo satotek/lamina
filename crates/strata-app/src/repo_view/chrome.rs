@@ -27,7 +27,7 @@ use crate::pull_requests::{CheckoutPullRequest, RefreshPullRequests};
 use crate::remote::{Command, FetchRemotes, PullBranch, PushBranch};
 use crate::search::{FocusSearch, SearchDismiss, SearchNext, SearchPrevious, SearchSubmit};
 use crate::settings::Settings;
-use crate::style::Design;
+use crate::style::{self, Design};
 use crate::worktree_panel::MainMode;
 
 impl Render for RepoView {
@@ -143,7 +143,7 @@ impl Render for RepoView {
         if let Some(font) = &design.ui_font {
             root = root.font_family(font.clone());
         }
-
+        root.text_style().font_fallbacks = Some(style::font_fallbacks());
         root = root.child(self.header(&design, window));
         if let Some(workspace) = self.workspace.as_ref().and_then(|ws| ws.upgrade())
             && let Some(strip) = crate::workspace::Workspace::render_tab_strip(

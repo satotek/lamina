@@ -25,6 +25,7 @@ use gpui_component::menu::PopupMenuItem;
 use gpui_component::tooltip::Tooltip;
 use gpui_kit_assets::IconName;
 use strata_core::Oid;
+use strata_core::encoding::TextEncoding;
 use strata_core::highlight::{Highlighter, LineHighlights, language_for_path};
 use strata_core::session::{Blame, BlameCommit, BlameHunk, QueryTicket};
 
@@ -192,6 +193,7 @@ struct RowView<'a> {
 struct BlameData {
     rows: Vec<BlameRow>,
     commits: HashMap<Oid, CommitMeta>,
+    encoding: TextEncoding,
 }
 
 /// The blame pane's state: the target, the ticket that owns it and the rows
@@ -203,6 +205,7 @@ pub(super) struct BlameView {
     partial: Option<PartialBlame>,
     rows: Arc<Vec<BlameRow>>,
     commits: Arc<HashMap<Oid, CommitMeta>>,
+    encoding: TextEncoding,
     error: Option<String>,
     scroll: UniformListScrollHandle,
     /// Shared with every row build so a language's query is compiled once.
@@ -218,6 +221,7 @@ impl Default for BlameView {
             partial: None,
             rows: Arc::new(Vec::new()),
             commits: Arc::new(HashMap::new()),
+            encoding: TextEncoding::UTF_8,
             error: None,
             scroll: UniformListScrollHandle::default(),
             highlighter: Arc::new(Mutex::new(Highlighter::new())),
@@ -314,6 +318,7 @@ impl BlameView {
         self.partial = None;
         self.rows = Arc::new(data.rows);
         self.commits = Arc::new(data.commits);
+        self.encoding = data.encoding;
         self.state = BlameState::Ready;
         self.ticket = None;
         true
@@ -557,7 +562,11 @@ fn build_data(
         })
         .collect();
 
-    BlameData { rows, commits }
+    BlameData {
+        rows,
+        commits,
+        encoding: blame.encoding,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -838,6 +847,16 @@ impl RepoView {
                         .child(data::short_oid(commit)),
                 )
             })
+            .when_some(
+                (!self.blame.encoding.is_utf8()).then(|| self.blame.encoding.label()),
+                |header, label| {
+                    header.child(crate::ui::status_badge(
+                        label,
+                        crate::ui::BadgeTone::Neutral,
+                        design,
+                    ))
+                },
+            )
             .child(crate::ui::kbd("Esc", design))
             .when_some(progress, |header, pct| {
                 header.child(
@@ -1123,6 +1142,7 @@ mod tests {
             hunks,
             commits,
             lines: lines.iter().map(|line| (*line).to_owned()).collect(),
+            encoding: strata_core::encoding::TextEncoding::UTF_8,
         }
     }
 

@@ -65,6 +65,8 @@ pub use worktrees::WorktreeInfo;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use gix::bstr::ByteSlice as _;
+
 use stat::CommitDiffCache;
 
 use crate::{Error, Result};
@@ -100,6 +102,37 @@ impl Repo {
 
     pub fn git_dir(&self) -> &Path {
         self.inner.git_dir()
+    }
+
+    /// The `working-tree-encoding` attribute for `path`, when the repository
+    /// records one.
+    ///
+    /// Reading attributes needs the index, which a bare repository may not
+    /// have; an unreadable index simply means no attribute, and detection
+    /// falls back to the bytes.
+    pub fn working_tree_encoding(&self, path: &str) -> Option<String> {
+        let repo = self.local();
+        let index = repo.index_or_empty().ok()?;
+        let mut stack = repo
+            .attributes_only(
+                &index,
+                gix::worktree::stack::state::attributes::Source::IdMapping,
+            )
+            .ok()?;
+        let mut outcome = stack.selected_attribute_matches(["working-tree-encoding"]);
+        let platform = stack.at_path(path, None).ok()?;
+        platform.matching_attributes(&mut outcome);
+        outcome.iter().find_map(|matched| {
+            if matched.assignment.name.as_str() != "working-tree-encoding" {
+                return None;
+            }
+            match matched.assignment.state {
+                gix::attrs::StateRef::Value(value) => {
+                    Some(value.as_bstr().to_str_lossy().into_owned())
+                }
+                _ => None,
+            }
+        })
     }
 
     /// A thread-local handle for gix calls.

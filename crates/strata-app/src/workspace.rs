@@ -1017,6 +1017,7 @@ impl Render for Workspace {
             .on_action(
                 cx.listener(|this, _: &CloseTab, window, cx| this.close_active_tab(window, cx)),
             );
+        root.text_style().font_fallbacks = Some(crate::style::font_fallbacks());
         if tab_count >= 2 {
             root = root
                 .on_action(

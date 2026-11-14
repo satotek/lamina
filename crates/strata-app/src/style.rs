@@ -6,7 +6,8 @@
 //! come from here so a change lands in one place.
 
 use gpui::{
-    AnyElement, App, Hsla, IntoElement, ParentElement as _, SharedString, Styled as _, div, px, rgb,
+    AnyElement, App, FontFallbacks, Hsla, IntoElement, ParentElement as _, SharedString,
+    Styled as _, div, px, rgb,
 };
 use gpui::{Bounds, TitlebarOptions, canvas, fill, point};
 use gpui_component::{Colorize as _, Icon, Sizable as _, Theme};
@@ -709,6 +710,58 @@ pub fn window_titlebar(title: impl Into<SharedString>) -> TitlebarOptions {
     }
 }
 
+/// Families tried when the chosen UI or code font has no glyph for a character.
+///
+/// A repository can hold Japanese, Chinese or Korean text whatever font the
+/// user picked for the interface. GPUI asks the platform text system for the
+/// next family in this list, so the names are the CJK families each platform
+/// usually installs; a missing family is skipped.
+///
+/// macOS falls back through CoreText on its own, but passing the same list keeps
+/// the result identical when the chosen font is a bundled one.
+pub fn font_fallbacks() -> FontFallbacks {
+    let families: &[&str] = if cfg!(target_os = "macos") {
+        &[
+            "Hiragino Sans",
+            "Hiragino Kaku Gothic ProN",
+            "Hiragino Sans GB",
+            "Apple SD Gothic Neo",
+        ]
+    } else if cfg!(windows) {
+        &[
+            "Yu Gothic UI",
+            "Meiryo",
+            "Microsoft YaHei UI",
+            "Malgun Gothic",
+        ]
+    } else {
+        &[
+            "Noto Sans CJK JP",
+            "Noto Sans JP",
+            "IPAexGothic",
+            "Source Han Sans JP",
+            "Noto Sans CJK SC",
+            "Noto Sans SC",
+            "Noto Sans CJK KR",
+            "Noto Sans KR",
+        ]
+    };
+    FontFallbacks::from_fonts(families.iter().map(|family| (*family).to_owned()).collect())
+}
+
+/// The encoding to name in a diff header, or `None` for UTF-8.
+///
+/// A file decoded from a legacy encoding is worth labelling: the bytes on disk
+/// are not UTF-8, so editing them elsewhere has to use the same encoding.
+pub fn encoding_label(view: &strata_core::session::DiffView) -> Option<&'static str> {
+    let encoding = if view.new_encoding.is_utf8() {
+        view.old_encoding
+    } else {
+        view.new_encoding
+    };
+    (!encoding.is_utf8()).then(|| encoding.label())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -768,6 +821,25 @@ mod tests {
         assert_eq!(initials("山田 太郎"), "山太");
         assert_eq!(initials("éclair noir"), "ÉN");
         assert_eq!(initials(""), "?");
+    }
+
+    #[test]
+    fn the_fallback_chain_covers_cjk_even_when_the_ui_font_does_not() {
+        let families = font_fallbacks();
+        let list = families.fallback_list();
+        assert!(!list.is_empty());
+        assert!(
+            list.iter().any(|family| {
+                family.contains("CJK") || family.contains("Hiragino") || family.contains("Gothic")
+            }),
+            "a Japanese glyph needs a CJK family in the chain: {list:?}"
+        );
+        assert!(
+            list.iter().any(|family| family.contains("Noto")
+                || family.contains("Hiragino")
+                || family.contains("Yu Gothic")),
+            "each platform has its usual CJK families: {list:?}"
+        );
     }
 
     #[test]

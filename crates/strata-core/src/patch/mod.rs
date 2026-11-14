@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::diff::{DiffLine, FileDiff, LineKind};
+use crate::diff::{FileDiff, LineKind, RawFileDiff};
 
 /// Where a patch is applied. The same selection means different things
 /// depending on which pair of trees the diff came from.
@@ -164,26 +164,112 @@ pub fn build_patch(
     selection: &LineSelection,
     mode: PatchMode,
 ) -> Option<String> {
-    if file.diff.binary || file.diff.hunks.is_empty() || selection.is_empty() {
-        return None;
-    }
-    if file.is_deleted && !whole_file_selected(file.diff, selection) {
-        return None;
-    }
+    let hunks = file.diff.hunks.iter().map(|hunk| HunkView {
+        old_start: hunk.old_start,
+        old_len: hunk.old_len,
+        new_start: hunk.new_start,
+        lines: hunk
+            .lines
+            .iter()
+            .map(|line| LineView {
+                kind: line.kind,
+                content: line.content.as_bytes(),
+                no_newline_at_eof: line.no_newline_at_eof,
+            })
+            .collect(),
+    });
+    let meta = PatchMeta {
+        path: file.path,
+        old_path: file.old_path,
+        line_ending: file.line_ending,
+        is_deleted: file.is_deleted,
+    };
+    build_patch_inner(hunks, meta, selection, mode)
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+}
 
+/// The diff of a file whose lines still hold their original bytes.
+///
+/// Hunk staging uses this instead of [`PatchFile`]: decoding a legacy-encoded
+/// file for display must not change the bytes `git apply` writes back.
+pub(crate) struct BytePatchFile<'a> {
+    pub path: &'a str,
+    pub old_path: Option<&'a str>,
+    pub diff: &'a RawFileDiff<'a>,
+    pub line_ending: LineEnding,
+    pub is_deleted: bool,
+}
+
+/// [`build_patch`] for a diff built with [`crate::diff::diff_bytes`].
+pub(crate) fn build_patch_bytes(
+    file: &BytePatchFile<'_>,
+    selection: &LineSelection,
+    mode: PatchMode,
+) -> Option<Vec<u8>> {
+    let hunks = file.diff.hunks.iter().map(|hunk| HunkView {
+        old_start: hunk.old_start,
+        old_len: hunk.old_len,
+        new_start: hunk.new_start,
+        lines: hunk
+            .lines
+            .iter()
+            .map(|line| LineView {
+                kind: line.kind,
+                content: line.content,
+                no_newline_at_eof: line.no_newline_at_eof,
+            })
+            .collect(),
+    });
+    let meta = PatchMeta {
+        path: file.path,
+        old_path: file.old_path,
+        line_ending: file.line_ending,
+        is_deleted: file.is_deleted,
+    };
+    build_patch_inner(hunks, meta, selection, mode)
+}
+
+struct LineView<'a> {
+    kind: LineKind,
+    content: &'a [u8],
+    no_newline_at_eof: bool,
+}
+
+struct HunkView<'a> {
+    old_start: u32,
+    old_len: u32,
+    new_start: u32,
+    lines: Vec<LineView<'a>>,
+}
+
+struct PatchMeta<'a> {
+    path: &'a str,
+    old_path: Option<&'a str>,
+    line_ending: LineEnding,
+    is_deleted: bool,
+}
+
+fn build_patch_inner<'a>(
+    hunks: impl Iterator<Item = HunkView<'a>>,
+    meta: PatchMeta<'_>,
+    selection: &LineSelection,
+    mode: PatchMode,
+) -> Option<Vec<u8>> {
     let reverse = mode.is_reverse();
-    let eol = file.line_ending.as_str();
-    let mut hunks: Vec<OutHunk> = Vec::new();
+    let eol = meta.line_ending.as_str().as_bytes();
+    let mut out_hunks: Vec<OutHunk> = Vec::new();
     // How far a hunk's `+++` position moved against the original diff, summed
     // over the hunks emitted so far. Only forward patches need it: a staged
     // hunk that dropped additions makes the index shorter than the worktree,
     // so every later hunk moves up.
     let mut shift: i64 = 0;
+    let mut any_selected = false;
 
-    for (hunk_index, hunk) in file.diff.hunks.iter().enumerate() {
-        let mut lines: Vec<(u8, &DiffLine)> = Vec::new();
+    for (hunk_index, hunk) in hunks.enumerate() {
+        let mut lines: Vec<(u8, &LineView<'_>)> = Vec::new();
         for (line_index, line) in hunk.lines.iter().enumerate() {
             let selected = selection.contains(hunk_index, line_index);
+            any_selected |= selected;
             let prefix = match line.kind {
                 LineKind::Context => b' ',
                 LineKind::Added if selected => b'+',
@@ -228,23 +314,23 @@ pub fn build_patch(
             (hunk.old_start, new_start.max(0) as u32)
         };
 
-        let mut body = String::new();
+        let mut body = Vec::new();
         let last = lines.len() - 1;
         for (index, (prefix, line)) in lines.iter().enumerate() {
-            body.push(*prefix as char);
-            body.push_str(&line.content);
+            body.push(*prefix);
+            body.extend_from_slice(line.content);
             if line.no_newline_at_eof && index == last {
-                body.push('\n');
-                body.push_str("\\ No newline at end of file\n");
+                body.push(b'\n');
+                body.extend_from_slice(b"\\ No newline at end of file\n");
             } else {
-                body.push_str(eol);
+                body.extend_from_slice(eol);
             }
         }
 
         if !reverse {
             shift += i64::from(new_len) - i64::from(hunk.old_len);
         }
-        hunks.push(OutHunk {
+        out_hunks.push(OutHunk {
             old_start,
             old_len,
             new_start,
@@ -253,38 +339,48 @@ pub fn build_patch(
         });
     }
 
-    if hunks.is_empty() {
+    if out_hunks.is_empty() || !any_selected {
+        return None;
+    }
+    if meta.is_deleted
+        && !out_hunks
+            .iter()
+            .all(|hunk| hunk.old_len > 0 && hunk.new_len == 0)
+    {
         return None;
     }
 
     // A new file only keeps `/dev/null` on the old side while that side stays
     // empty; unstaging part of a new file needs the index content as context.
-    let old_is_dev_null = file.old_path.is_none() && hunks.iter().all(|h| h.old_len == 0);
-    let old_path = file.old_path.unwrap_or(file.path);
+    let old_is_dev_null = meta.old_path.is_none() && out_hunks.iter().all(|h| h.old_len == 0);
+    let old_path = meta.old_path.unwrap_or(meta.path);
 
-    let mut patch = String::new();
+    let mut patch = Vec::new();
     if old_is_dev_null && !reverse {
-        patch.push_str("new file mode 100644\n");
-    } else if file.is_deleted {
-        patch.push_str("deleted file mode 100644\n");
+        patch.extend_from_slice(b"new file mode 100644\n");
+    } else if meta.is_deleted {
+        patch.extend_from_slice(b"deleted file mode 100644\n");
     }
     if old_is_dev_null {
-        patch.push_str("--- /dev/null\n");
+        patch.extend_from_slice(b"--- /dev/null\n");
     } else {
-        patch.push_str(&format!("--- a/{old_path}\n"));
+        patch.extend_from_slice(format!("--- a/{old_path}\n").as_bytes());
     }
-    if file.is_deleted {
-        patch.push_str("+++ /dev/null\n");
+    if meta.is_deleted {
+        patch.extend_from_slice(b"+++ /dev/null\n");
     } else {
-        patch.push_str(&format!("+++ b/{}\n", file.path));
+        patch.extend_from_slice(format!("+++ b/{}\n", meta.path).as_bytes());
     }
-    for hunk in hunks {
-        patch.push_str(&format!(
-            "@@ -{} +{} @@\n",
-            range(hunk.old_start, hunk.old_len),
-            range(hunk.new_start, hunk.new_len)
-        ));
-        patch.push_str(&hunk.body);
+    for hunk in out_hunks {
+        patch.extend_from_slice(
+            format!(
+                "@@ -{} +{} @@\n",
+                range(hunk.old_start, hunk.old_len),
+                range(hunk.new_start, hunk.new_len)
+            )
+            .as_bytes(),
+        );
+        patch.extend_from_slice(&hunk.body);
     }
     Some(patch)
 }
@@ -303,22 +399,14 @@ struct OutHunk {
     old_len: u32,
     new_start: u32,
     new_len: u32,
-    body: String,
+    body: Vec<u8>,
 }
 
 /// Number of emitted lines on one side of the patch: every line except the
 /// ones that only exist on the opposite side.
-fn side_len(lines: &[(u8, &DiffLine)], opposite: u8) -> u32 {
+fn side_len<T>(lines: &[(u8, T)], opposite: u8) -> u32 {
     lines
         .iter()
         .filter(|(prefix, _)| *prefix != opposite)
         .count() as u32
-}
-
-fn whole_file_selected(diff: &FileDiff, selection: &LineSelection) -> bool {
-    diff.hunks.iter().enumerate().all(|(hunk_index, hunk)| {
-        hunk.lines.iter().enumerate().all(|(line_index, line)| {
-            line.kind == LineKind::Context || selection.contains(hunk_index, line_index)
-        })
-    })
 }

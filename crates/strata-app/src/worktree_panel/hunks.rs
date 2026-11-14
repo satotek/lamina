@@ -201,6 +201,16 @@ impl WorktreePanel {
         }
 
         if let Some(view) = self.diff.view()
+            && let Some(label) = style::encoding_label(view)
+        {
+            header = header.child(crate::ui::status_badge(
+                label,
+                crate::ui::BadgeTone::Neutral,
+                &colors.design,
+            ));
+        }
+
+        if let Some(view) = self.diff.view()
             && !view.diff.binary
         {
             let active = self.context.is_whole_file();

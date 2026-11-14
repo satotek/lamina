@@ -166,6 +166,12 @@ impl Git {
     /// Apply a diff read from stdin, so patches with any quoting or encoding
     /// reach git byte-for-byte without a temp file.
     pub fn apply_patch(&self, patch: &str, mode: ApplyMode) -> Result<()> {
+        self.apply_patch_bytes(patch.as_bytes(), mode)
+    }
+
+    /// [`apply_patch`](Self::apply_patch) for a patch whose lines carry the
+    /// file's original bytes, such as a Shift_JIS checkout.
+    pub fn apply_patch_bytes(&self, patch: &[u8], mode: ApplyMode) -> Result<()> {
         let mut args = vec!["apply".to_owned()];
         match mode {
             ApplyMode::Stage => args.push("--cached".to_owned()),
@@ -178,7 +184,7 @@ impl Git {
         args.push("--recount".to_owned());
         args.push("--whitespace=nowarn".to_owned());
         args.push("-".to_owned());
-        self.run_unit(&args, Some(patch.as_bytes().to_vec()))
+        self.run_unit(&args, Some(patch.to_vec()))
     }
 
     /// Commit with the message on stdin (`-F -`). This keeps multi-line

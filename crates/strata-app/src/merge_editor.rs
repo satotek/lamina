@@ -11,6 +11,7 @@
 //! Nothing here touches GPUI or a repository, so the app's tests can drive
 //! every choice and edit without a window.
 
+use strata_core::encoding::TextEncoding;
 use strata_core::merge::{LineEnding, MergeAnalysis, Segment, SegmentKind};
 
 /// One way to resolve the selected conflict.
@@ -114,6 +115,8 @@ pub(crate) struct MergeModel {
     selected: usize,
     conflicts: usize,
     line_ending: LineEnding,
+    /// The analysis's encoding; the result is written back in it.
+    encoding: TextEncoding,
     trailing_newline: bool,
     ours_trailing: bool,
     theirs_trailing: bool,
@@ -174,6 +177,7 @@ impl MergeModel {
             selected: 0,
             conflicts,
             line_ending: analysis.line_ending(),
+            encoding: analysis.encoding,
             trailing_newline,
             ours_trailing: analysis.ours.trailing_newline,
             theirs_trailing: analysis.theirs.trailing_newline,
@@ -308,7 +312,12 @@ impl MergeModel {
             .iter()
             .flat_map(|slot| slot.lines.iter().cloned())
             .collect();
-        self.line_ending.join(&lines, self.trailing_newline)
+        let bytes = self.line_ending.join(&lines, self.trailing_newline);
+        if self.encoding.is_utf8() {
+            bytes
+        } else {
+            self.encoding.encode(&String::from_utf8_lossy(&bytes))
+        }
     }
 
     /// Applies `choice` to the selected conflict. Returns whether the result
@@ -681,5 +690,33 @@ mod tests {
         assert_eq!(rows[1].theirs, Some(2));
         assert_eq!(rows[2].ours, Some(3), "our inserted line gets its own row");
         assert_eq!(rows[2].theirs, None, "theirs has no line there");
+    }
+
+    #[test]
+    fn a_legacy_encoded_merge_writes_the_same_encoding_back() {
+        let shift_jis =
+            strata_core::encoding::TextEncoding::from_label("Shift_JIS").expect("Shift_JIS");
+        let base = shift_jis.encode("設定\n");
+        let ours = shift_jis.encode("設定\n速度は速い\n");
+        let theirs = ours.clone();
+        let analysis = MergeAnalysis::analyze(
+            &ConflictSides {
+                base: Some(base),
+                ours: Some(ours.clone()),
+                theirs: Some(theirs),
+            },
+            ConflictStyle::Merge,
+        );
+        assert!(analysis.text, "legacy text is editable");
+        assert!(!analysis.binary);
+        assert_eq!(analysis.encoding.label(), "Shift_JIS");
+        assert_eq!(analysis.ours.lines, ["設定", "速度は速い"]);
+
+        let model = MergeModel::new(&analysis);
+        assert_eq!(
+            model.bytes(),
+            ours,
+            "the merge result must not turn into UTF-8"
+        );
     }
 }

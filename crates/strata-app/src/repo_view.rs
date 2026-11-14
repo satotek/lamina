@@ -2543,6 +2543,8 @@ mod tests {
             lfs: None,
             old_text: Arc::from(""),
             new_text: Arc::from(""),
+            old_encoding: strata_core::encoding::TextEncoding::UTF_8,
+            new_encoding: strata_core::encoding::TextEncoding::UTF_8,
             gaps: Arc::from(Vec::new()),
             image: None,
         })

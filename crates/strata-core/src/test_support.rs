@@ -78,6 +78,12 @@ impl TestRepo {
 
     /// Write a file relative to the worktree, creating parent directories.
     pub(crate) fn write(&self, path: &str, contents: &str) {
+        self.write_bytes(path, contents.as_bytes());
+    }
+
+    /// Write raw bytes relative to the worktree, for encodings other than
+    /// UTF-8 and for paths that are not text.
+    pub(crate) fn write_bytes(&self, path: impl AsRef<Path>, contents: &[u8]) {
         let path = self.path().join(path);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).expect("create parent directory");
@@ -105,6 +111,27 @@ impl TestRepo {
     pub(crate) fn commit(&self, message: &str) -> Oid {
         self.git(&["add", "-A"]);
         self.git(&["commit", "-q", "-m", message]);
+        self.head()
+    }
+
+    /// Stage everything and commit as `name <email>`, for a repository whose
+    /// history should carry a non-ASCII author.
+    pub(crate) fn commit_as(&self, name: &str, email: &str, message: &str) -> Oid {
+        self.git(&["add", "-A"]);
+        let output = self
+            .command("git")
+            .args(["commit", "-q", "-m", message])
+            .env("GIT_AUTHOR_NAME", name)
+            .env("GIT_AUTHOR_EMAIL", email)
+            .env("GIT_COMMITTER_NAME", name)
+            .env("GIT_COMMITTER_EMAIL", email)
+            .output()
+            .expect("run git commit");
+        assert!(
+            output.status.success(),
+            "git commit failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         self.head()
     }
 

@@ -65,7 +65,17 @@ impl Git {
         mut on_progress: impl FnMut(BlameProgressBatch),
     ) -> Result<Option<GitBlame>> {
         let commit_hex = commit.to_string();
-        let args = ["blame", "--incremental", &commit_hex, "--", path];
+        // `core.quotepath=false` keeps a Japanese path on the `filename` line
+        // as the bytes on disk instead of C-style octal escapes.
+        let args = [
+            "-c",
+            "core.quotepath=false",
+            "blame",
+            "--incremental",
+            &commit_hex,
+            "--",
+            path,
+        ];
 
         let mut hunks = Vec::new();
         let mut commits = HashMap::new();

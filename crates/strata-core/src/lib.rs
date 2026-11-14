@@ -5,6 +5,7 @@
 
 pub mod askpass;
 pub mod diff;
+pub mod encoding;
 pub mod error;
 pub mod forge;
 pub mod git_cli;
@@ -16,10 +17,13 @@ pub mod merge;
 pub mod patch;
 pub mod repo;
 pub mod session;
+pub mod text;
 pub mod tools;
 pub mod types;
 pub mod watch;
 
+#[cfg(test)]
+mod i18n_tests;
 #[cfg(test)]
 mod test_support;
 

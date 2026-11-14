@@ -13,6 +13,11 @@ impl RepoView {
             .last_command
             .clone()
             .unwrap_or_else(|| "no git commands yet".to_owned());
+        // The status line is one row; a command with hundreds of path
+        // arguments would otherwise build a string many screens wide. The
+        // truncation counts display columns, so a Japanese path is not cut
+        // into an invalid boundary.
+        let command = strata_core::text::truncate_width(&command, 160);
         let error = self.status_error.clone();
         let note = self.status_note.clone();
         let operation = self.remote_status(&remote::Colors {

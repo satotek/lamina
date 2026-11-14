@@ -81,6 +81,8 @@ impl LineEnding {
     }
 }
 
+use crate::encoding::{TextEncoding, decode_for_display};
+
 /// A text side split into lines, plus what rebuilding its bytes needs.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TextFile {
@@ -92,15 +94,19 @@ pub struct TextFile {
     pub line_ending: LineEnding,
     /// The file ends with a line terminator.
     pub trailing_newline: bool,
+    /// The encoding the bytes were decoded from. Rebuilding the result encodes
+    /// back to this, so a Shift_JIS conflict stays Shift_JIS.
+    pub encoding: TextEncoding,
 }
 
 impl TextFile {
-    /// Splits `bytes` into display lines.
+    /// Splits `bytes` into display lines, detecting the encoding.
     ///
-    /// Non-UTF-8 bytes become replacement characters; [`MergeAnalysis::text`]
-    /// is what tells callers not to offer editing for such a side.
+    /// The merge editor writes its result back in the same encoding, so a
+    /// legacy-encoded file can be edited without being turned into UTF-8.
     pub fn parse(bytes: &[u8]) -> Self {
-        let text = String::from_utf8_lossy(bytes);
+        let (decoded, encoding) = decode_for_display(bytes, || None);
+        let text = decoded.as_ref();
         let mut lines = Vec::new();
         let mut line_ending = LineEnding::Lf;
         let mut first = true;
@@ -131,6 +137,7 @@ impl TextFile {
             lines,
             line_ending,
             trailing_newline: text.ends_with('\n'),
+            encoding,
         }
     }
 
@@ -187,9 +194,15 @@ pub struct MergeAnalysis {
     /// From `merge.conflictStyle`; only the display of unresolved conflicts
     /// depends on it.
     pub style: ConflictStyle,
-    /// Every present stage is UTF-8 text. A side that is not cannot be edited
-    /// line by line without losing bytes, so the editor is not offered.
+    /// Every present stage is text that can be shown and edited. Bytes are
+    /// decoded for display and encoded back on write, so a legacy encoding is
+    /// editable without losing its bytes.
     pub text: bool,
+    /// A side is binary rather than text; the editor is not offered.
+    pub binary: bool,
+    /// The encoding the merged result is written in: the first non-UTF-8 side
+    /// that has content.
+    pub encoding: TextEncoding,
 }
 
 impl MergeAnalysis {
@@ -198,13 +211,27 @@ impl MergeAnalysis {
         let base_bytes = sides.base.as_deref().unwrap_or_default();
         let ours_bytes = sides.ours.as_deref().unwrap_or_default();
         let theirs_bytes = sides.theirs.as_deref().unwrap_or_default();
-        let text = [base_bytes, ours_bytes, theirs_bytes]
-            .into_iter()
-            .all(|bytes| std::str::from_utf8(bytes).is_ok());
 
         let base = TextFile::parse(base_bytes);
         let ours = TextFile::parse(ours_bytes);
         let theirs = TextFile::parse(theirs_bytes);
+        // UTF-16 text contains NUL bytes but is not binary. Every encoding the
+        // decoder recognises is a text encoding, so NUL only means binary when
+        // it is not part of UTF-16 code units.
+        let binary = [
+            (&base, base_bytes),
+            (&ours, ours_bytes),
+            (&theirs, theirs_bytes),
+        ]
+        .into_iter()
+        .any(|(file, bytes)| {
+            !bytes.is_empty() && crate::diff::is_binary(bytes) && !file.encoding.is_utf16()
+        });
+        let encoding = [ours.encoding, theirs.encoding, base.encoding]
+            .into_iter()
+            .find(|encoding| !encoding.is_utf8())
+            .unwrap_or(TextEncoding::UTF_8);
+        let text = !binary;
         let segments = if text {
             merge_lines(&base.lines, &ours.lines, &theirs.lines)
         } else {
@@ -217,6 +244,8 @@ impl MergeAnalysis {
             segments,
             style,
             text,
+            binary,
+            encoding,
         }
     }
 

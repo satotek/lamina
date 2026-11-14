@@ -5,6 +5,8 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+chardetng = "1"
+encoding_rs = "0.8"
 gix = "0.90.0"
 imara-diff = "0.2"
 memchr = "2"
@@ -29,6 +31,7 @@ tree-sitter-rust = "0.24.2"
 tree-sitter-toml-ng = "0.7.0"
 tree-sitter-typescript = "0.23.2"
 tree-sitter-yaml = "0.7.2"
+unicode-width = "0.2"
 
 [dev-dependencies]
 insta = "1.49.0"
