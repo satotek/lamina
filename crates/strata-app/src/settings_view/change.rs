@@ -21,16 +21,20 @@ pub enum Section {
     Behaviour,
     Tools,
     Privacy,
+    Keyboard,
+    Commands,
 }
 
 impl Section {
-    pub const ALL: [Section; 6] = [
+    pub const ALL: [Section; 8] = [
         Section::Appearance,
         Section::Diff,
         Section::History,
         Section::Behaviour,
         Section::Tools,
         Section::Privacy,
+        Section::Keyboard,
+        Section::Commands,
     ];
 
     pub fn title(self) -> &'static str {
@@ -41,6 +45,8 @@ impl Section {
             Section::Behaviour => "Behaviour",
             Section::Tools => "Tools",
             Section::Privacy => "Privacy",
+            Section::Keyboard => "Keyboard",
+            Section::Commands => "Commands",
         }
     }
 }
@@ -54,6 +60,9 @@ pub fn reset_section(settings: &mut Settings, section: Section) {
         Section::Behaviour => settings.behaviour = Behaviour::default(),
         Section::Tools => settings.tools = Tools::default(),
         Section::Privacy => settings.privacy = Privacy::default(),
+        // The keymap and the command list are files of their own; the page's
+        // buttons reset them where the user can see the result.
+        Section::Keyboard | Section::Commands => {}
     }
 }
 
@@ -352,7 +361,7 @@ mod tests {
 
     #[test]
     fn every_section_has_a_title() {
-        assert_eq!(Section::ALL.len(), 6);
+        assert_eq!(Section::ALL.len(), 8);
         for section in Section::ALL {
             assert!(!section.title().is_empty());
         }

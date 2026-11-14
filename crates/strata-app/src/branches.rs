@@ -21,10 +21,9 @@ use std::rc::Rc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Div, ElementId, Entity,
-    FocusHandle, Focusable as _, FontWeight, Hsla, InteractiveElement, IntoElement, KeyBinding,
-    ParentElement, Pixels, Size, Stateful, StatefulInteractiveElement as _, Styled,
-    UniformListScrollHandle, Window, actions, anchored, deferred, div, hsla, point, px,
-    uniform_list,
+    FocusHandle, Focusable as _, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement,
+    Pixels, Size, Stateful, StatefulInteractiveElement as _, Styled, UniformListScrollHandle,
+    Window, actions, anchored, deferred, div, hsla, point, px, uniform_list,
 };
 use gpui_component::{
     Icon,
@@ -37,7 +36,6 @@ use strata_core::repo::{SubmoduleInfo, SubmoduleStatus, WorktreeInfo};
 use strata_core::session::{HistoryScope, Operation, OperationId, RemoteBranch};
 use strata_core::{HeadInfo, RefInfo, RefKind, RemoteInfo, UpstreamInfo};
 
-use crate::actions::REPO_VIEW;
 use crate::data::{SidebarData, Source};
 use crate::repo_view::RepoView;
 use crate::repo_view::rebase_onto::rebase_menu_item;
@@ -63,20 +61,10 @@ actions!(
     ]
 );
 
-// `KeyBinding::new` parses without an OS, so `secondary-` is rejected there.
-#[cfg(target_os = "macos")]
-const CREATE_BRANCH_KEY: &str = "cmd-shift-b";
-#[cfg(not(target_os = "macos"))]
-const CREATE_BRANCH_KEY: &str = "ctrl-shift-b";
-
 /// Binds the branch commands. Their handlers live on `RepoView`'s root
 /// element, which is on the focus path whenever the history view has focus.
 pub fn bind(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new(CREATE_BRANCH_KEY, CreateBranchFromHead, Some(REPO_VIEW)),
-        KeyBinding::new("enter", ConfirmBranchDialog, Some(BRANCH_DIALOG)),
-        KeyBinding::new("escape", CancelBranchDialog, Some(BRANCH_DIALOG)),
-    ]);
+    crate::keymap::bind_group(cx, crate::keymap::Group::Branches);
 }
 
 /// The colours the sections and dialogs paint with, taken from the window
@@ -1916,8 +1904,12 @@ fn local_row(
         ("local-branch-menu", index),
         &colors.design,
         row,
-        move |menu, _window, cx| {
+        move |menu, window, cx| {
             // A disabled entry says why, the way the commit menu's entries do.
+            let mut variables = entity_menu.read(cx).custom_variables();
+            // `${branch}` is the branch this menu acts on, which need not be
+            // the checked-out one.
+            variables.branch = Some(branch.clone());
             let checkout_blocked = branch_blocked(active, "already checked out", busy);
             let merge_blocked = branch_blocked(active, "this is the current branch", busy);
             let create_blocked = busy.then_some("an operation is running");
@@ -1964,18 +1956,57 @@ fn local_row(
                     },
                 )
             };
-            menu.item(
-                PopupMenuItem::new(crate::ui::menu_label("Checkout", checkout_blocked))
-                    .disabled(checkout_blocked.is_some())
+            let menu = menu
+                .item(
+                    PopupMenuItem::new(crate::ui::menu_label("Checkout", checkout_blocked))
+                        .disabled(checkout_blocked.is_some())
+                        .on_click({
+                            let entity = entity_menu.clone();
+                            let branch = branch.clone();
+                            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                                let branch = branch.clone();
+                                entity.update(cx, |view, cx| {
+                                    let label = format!("check out {branch}");
+                                    view.run_operation(
+                                        Operation::Checkout { branch },
+                                        label,
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }
+                        }),
+                )
+                .item(PopupMenuItem::new("Show only this branch").on_click({
+                    let entity = entity_menu.clone();
+                    let branch = branch.clone();
+                    move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                        let branch = branch.clone();
+                        entity.update(cx, |view, cx| {
+                            view.show_only_ref(RefKind::LocalBranch, &branch, cx)
+                        });
+                    }
+                }))
+                .separator()
+                .item(compare)
+                .item(
+                    PopupMenuItem::new(crate::ui::menu_label(
+                        "Merge into current branch",
+                        merge_blocked,
+                    ))
+                    .disabled(merge_blocked.is_some())
                     .on_click({
                         let entity = entity_menu.clone();
                         let branch = branch.clone();
                         move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                             let branch = branch.clone();
                             entity.update(cx, |view, cx| {
-                                let label = format!("check out {branch}");
+                                let label = format!("merge {branch} into the current branch");
                                 view.run_operation(
-                                    Operation::Checkout { branch },
+                                    Operation::Merge {
+                                        branch,
+                                        no_ff: false,
+                                    },
                                     label,
                                     window,
                                     cx,
@@ -1983,131 +2014,101 @@ fn local_row(
                             });
                         }
                     }),
-            )
-            .item(PopupMenuItem::new("Show only this branch").on_click({
-                let entity = entity_menu.clone();
-                let branch = branch.clone();
-                move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
-                    let branch = branch.clone();
-                    entity.update(cx, |view, cx| {
-                        view.show_only_ref(RefKind::LocalBranch, &branch, cx)
-                    });
-                }
-            }))
-            .separator()
-            .item(compare)
-            .item(
-                PopupMenuItem::new(crate::ui::menu_label(
-                    "Merge into current branch",
-                    merge_blocked,
-                ))
-                .disabled(merge_blocked.is_some())
-                .on_click({
-                    let entity = entity_menu.clone();
-                    let branch = branch.clone();
-                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                        let branch = branch.clone();
-                        entity.update(cx, |view, cx| {
-                            let label = format!("merge {branch} into the current branch");
-                            view.run_operation(
-                                Operation::Merge {
-                                    branch,
-                                    no_ff: false,
-                                },
-                                label,
-                                window,
-                                cx,
-                            );
-                        });
-                    }
-                }),
-            )
-            // One entry rather than a submenu, so the actions around it stay
-            // in the same list.
-            .when_some(rebase, |menu, (current, target)| {
-                menu.item(rebase_menu_item(
-                    target,
-                    &current,
-                    &branch,
-                    entity_menu.clone(),
-                ))
-            })
-            .item(
-                PopupMenuItem::new(crate::ui::menu_label(
-                    "Create branch from here…",
-                    create_blocked,
-                ))
-                .disabled(create_blocked.is_some())
-                .on_click({
-                    let entity = entity_menu.clone();
-                    let point = branch.clone();
-                    let from = format!("from {branch}");
-                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                        let point = point.clone();
-                        let from = from.clone();
-                        entity.update(cx, |view, cx| {
-                            view.open_create_dialog(Some(point), from, window, cx);
-                        });
-                    }
-                }),
-            )
-            .separator()
-            .item(
-                PopupMenuItem::new(crate::ui::menu_label("Rename…", rename_blocked))
-                    .disabled(rename_blocked.is_some())
+                )
+                // One entry rather than a submenu, so the actions around it stay
+                // in the same list.
+                .when_some(rebase, |menu, (current, target)| {
+                    menu.item(rebase_menu_item(
+                        target,
+                        &current,
+                        &branch,
+                        entity_menu.clone(),
+                    ))
+                })
+                .item(
+                    PopupMenuItem::new(crate::ui::menu_label(
+                        "Create branch from here…",
+                        create_blocked,
+                    ))
+                    .disabled(create_blocked.is_some())
                     .on_click({
                         let entity = entity_menu.clone();
-                        let branch = branch.clone();
+                        let point = branch.clone();
+                        let from = format!("from {branch}");
                         move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                            let branch = branch.clone();
+                            let point = point.clone();
+                            let from = from.clone();
                             entity.update(cx, |view, cx| {
-                                view.open_rename_branch(branch, window, cx);
+                                view.open_create_dialog(Some(point), from, window, cx);
                             });
                         }
                     }),
-            )
-            .item(
-                PopupMenuItem::new(crate::ui::menu_label("Set Upstream…", set_blocked))
-                    .disabled(set_blocked.is_some())
-                    .on_click({
-                        let entity = entity_menu.clone();
-                        let branch = branch.clone();
-                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new(crate::ui::menu_label("Rename…", rename_blocked))
+                        .disabled(rename_blocked.is_some())
+                        .on_click({
+                            let entity = entity_menu.clone();
                             let branch = branch.clone();
-                            entity.update(cx, |view, cx| {
-                                view.open_set_upstream(branch, window, cx);
-                            });
-                        }
-                    }),
-            )
-            .item(
-                PopupMenuItem::new(crate::ui::menu_label("Unset Upstream", unset_blocked))
-                    .disabled(unset_blocked.is_some())
-                    .on_click({
-                        let entity = entity_menu.clone();
-                        let branch = branch.clone();
-                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                                let branch = branch.clone();
+                                entity.update(cx, |view, cx| {
+                                    view.open_rename_branch(branch, window, cx);
+                                });
+                            }
+                        }),
+                )
+                .item(
+                    PopupMenuItem::new(crate::ui::menu_label("Set Upstream…", set_blocked))
+                        .disabled(set_blocked.is_some())
+                        .on_click({
+                            let entity = entity_menu.clone();
                             let branch = branch.clone();
-                            entity.update(cx, |view, cx| {
-                                view.unset_branch_upstream(branch, window, cx);
-                            });
-                        }
-                    }),
-            )
-            .separator()
-            .item(
-                PopupMenuItem::new(crate::ui::menu_label("Delete…", delete_blocked))
-                    .disabled(delete_blocked.is_some())
-                    .on_click({
-                        let entity = entity_menu.clone();
-                        let branch = branch.clone();
-                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                                let branch = branch.clone();
+                                entity.update(cx, |view, cx| {
+                                    view.open_set_upstream(branch, window, cx);
+                                });
+                            }
+                        }),
+                )
+                .item(
+                    PopupMenuItem::new(crate::ui::menu_label("Unset Upstream", unset_blocked))
+                        .disabled(unset_blocked.is_some())
+                        .on_click({
+                            let entity = entity_menu.clone();
                             let branch = branch.clone();
-                            entity.update(cx, |view, cx| {
-                                view.confirm_delete_branch(branch, window, cx);
-                            });
-                        }
-                    }),
+                            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                                let branch = branch.clone();
+                                entity.update(cx, |view, cx| {
+                                    view.unset_branch_upstream(branch, window, cx);
+                                });
+                            }
+                        }),
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new(crate::ui::menu_label("Delete…", delete_blocked))
+                        .disabled(delete_blocked.is_some())
+                        .on_click({
+                            let entity = entity_menu.clone();
+                            let branch = branch.clone();
+                            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                                let branch = branch.clone();
+                                entity.update(cx, |view, cx| {
+                                    view.confirm_delete_branch(branch, window, cx);
+                                });
+                            }
+                        }),
+                )
+                .separator();
+            crate::commands::submenu(
+                menu,
+                crate::commands::Context::Branch,
+                &variables,
+                window,
+                cx,
             )
             .when_some(
                 crate::github::branch_items(&entity_menu, &branch, cx),

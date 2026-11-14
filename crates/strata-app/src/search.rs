@@ -14,13 +14,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{App, AppContext as _, Context, Entity, KeyBinding, Subscription, Window, actions};
+use gpui::{App, AppContext as _, Context, Entity, Subscription, Window, actions};
 use gpui_component::input::{InputEvent, InputState};
 use strata_core::Oid;
 use strata_core::repo::{ContentSearchEntry, ContentSearchMode, ContentSearchQuery};
 use strata_core::session::{CommitQuery, QueryTicket};
 
-use crate::actions::REPO_VIEW;
 use crate::file_history::SnapshotHeads;
 use crate::repo_view::RepoView;
 
@@ -42,33 +41,11 @@ actions!(
     ]
 );
 
-// `KeyBinding::new` parses without an OS, so the platform modifier is chosen at
-// compile time instead of using `secondary-`.
-#[cfg(target_os = "macos")]
-const SEARCH_KEY: &str = "cmd-f";
-#[cfg(not(target_os = "macos"))]
-const SEARCH_KEY: &str = "ctrl-f";
-
 /// Binds search. `actions::bind` runs first, so these registrations sit later
 /// in the keymap and win the tie against the list's own `up`/`down` bindings:
 /// while a filter is active the same keys walk the result set.
 pub fn bind(cx: &mut App) {
-    let list = Some(REPO_VIEW);
-    cx.bind_keys([
-        KeyBinding::new(SEARCH_KEY, FocusSearch, list),
-        KeyBinding::new("escape", SearchDismiss, list),
-        KeyBinding::new("down", SearchNext, list),
-        KeyBinding::new("up", SearchPrevious, list),
-        KeyBinding::new("enter", SearchSubmit, list),
-    ]);
-    // A focused input resolves its own `up`/`down` at a deeper context than
-    // any wrapper. Matching at the same depth and being registered later makes
-    // these run first; the input's single-line handlers are no-ops afterwards.
-    let field = Some("CommitSearch > Input");
-    cx.bind_keys([
-        KeyBinding::new("down", SearchNext, field),
-        KeyBinding::new("up", SearchPrevious, field),
-    ]);
+    crate::keymap::bind_group(cx, crate::keymap::Group::Search);
 }
 
 /// Which kind of history search runs.

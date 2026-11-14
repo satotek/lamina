@@ -13,6 +13,7 @@ mod commit_list;
 mod commit_selection;
 mod common;
 pub(crate) mod compare;
+mod custom_commands;
 mod details;
 mod diff_pane;
 mod edit_dialog;

@@ -15,8 +15,8 @@ use std::rc::Rc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, Context, Entity, FocusHandle, Focusable as _,
-    FontWeight, InteractiveElement, IntoElement, KeyBinding, ParentElement, PathPromptOptions,
-    Render, ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled, Subscription,
+    FontWeight, InteractiveElement, IntoElement, ParentElement, PathPromptOptions, Render,
+    ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled, Subscription,
     UniformListScrollHandle, Window, actions, div, px, uniform_list,
 };
 use gpui_component::WindowExt as _;
@@ -54,14 +54,6 @@ const GHQ_LIST_HEIGHT: f32 = 200.0;
 const MODIFIER: &str = "Cmd";
 #[cfg(not(target_os = "macos"))]
 const MODIFIER: &str = "Ctrl";
-#[cfg(target_os = "macos")]
-const PATH_KEY: &str = "cmd-l";
-#[cfg(not(target_os = "macos"))]
-const PATH_KEY: &str = "ctrl-l";
-#[cfg(target_os = "macos")]
-const NEW_TAB_ENTER_KEY: &str = "cmd-enter";
-#[cfg(not(target_os = "macos"))]
-const NEW_TAB_ENTER_KEY: &str = "ctrl-enter";
 
 actions!(
     strata,
@@ -84,21 +76,7 @@ actions!(
 /// Binds the picker's own commands. `Ctrl+O` itself is bound globally by
 /// `actions::bind` and handled by the workspace around both shapes.
 pub fn bind(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("up", PickerPrevious, Some(PICKER_PAGE)),
-        KeyBinding::new("k", PickerPrevious, Some("PickerPage && !Input")),
-        KeyBinding::new("down", PickerNext, Some(PICKER_PAGE)),
-        KeyBinding::new("j", PickerNext, Some("PickerPage && !Input")),
-        KeyBinding::new("enter", OpenSelectedRepository, Some(PICKER_PAGE)),
-        KeyBinding::new(NEW_TAB_ENTER_KEY, OpenSelectedInNewTab, Some(PICKER_PAGE)),
-        KeyBinding::new("escape", PickerEscape, Some(PICKER_PAGE)),
-        KeyBinding::new(PATH_KEY, TogglePathEntry, Some(PICKER_PAGE)),
-        KeyBinding::new("up", PickerPrevious, Some(PICKER_DIALOG)),
-        KeyBinding::new("k", PickerPrevious, Some("PickerDialog && !Input")),
-        KeyBinding::new("down", PickerNext, Some(PICKER_DIALOG)),
-        KeyBinding::new("j", PickerNext, Some("PickerDialog && !Input")),
-        KeyBinding::new(PATH_KEY, TogglePathEntry, Some(PICKER_DIALOG)),
-    ]);
+    crate::keymap::bind_group(cx, crate::keymap::Group::Picker);
 }
 
 /// Which shape the picker takes.

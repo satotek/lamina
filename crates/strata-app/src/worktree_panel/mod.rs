@@ -18,9 +18,8 @@ use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, FocusHandle, Hsla, InteractiveElement, KeyBinding,
-    ParentElement, SharedString, Styled, Subscription, UniformListScrollHandle, Window, actions,
-    div, px,
+    AnyElement, App, Context, Entity, FocusHandle, Hsla, InteractiveElement, ParentElement,
+    SharedString, Styled, Subscription, UniformListScrollHandle, Window, actions, div, px,
 };
 use gpui_component::input::{InputEvent, TextareaState};
 use gpui_component::{ActiveTheme as _, Theme};
@@ -51,9 +50,6 @@ use crate::style::Design;
 /// context, and a panel-wide `s`/`u` binding must not fire while the user writes
 /// a message.
 pub const WORKTREE_PANEL: &str = "WorktreePanel";
-/// [`WORKTREE_PANEL`] minus text fields, for bindings on unmodified letters:
-/// typing one there must reach the field, not the file list.
-pub const WORKTREE_PANEL_LIST: &str = "WorktreePanel && !Input";
 
 actions!(
     strata_worktree,
@@ -72,35 +68,8 @@ actions!(
     ]
 );
 
-// `KeyBinding::new` parses without an OS, so the platform modifier is chosen at
-// compile time instead of using `secondary-`.
-#[cfg(target_os = "macos")]
-const COMMIT_KEY: &str = "cmd-enter";
-#[cfg(not(target_os = "macos"))]
-const COMMIT_KEY: &str = "ctrl-enter";
-#[cfg(target_os = "macos")]
-const SELECT_ALL_KEY: &str = "cmd-a";
-#[cfg(not(target_os = "macos"))]
-const SELECT_ALL_KEY: &str = "ctrl-a";
-
 pub fn bind(cx: &mut App) {
-    let scope = Some(WORKTREE_PANEL);
-    // Single letters select or act on the focused file; a text field must be
-    // able to take them as text instead.
-    let letters = Some(WORKTREE_PANEL_LIST);
-    cx.bind_keys([
-        KeyBinding::new("s", StageSelected, letters),
-        KeyBinding::new("u", UnstageSelected, letters),
-        KeyBinding::new("d", DiscardSelected, letters),
-        KeyBinding::new("enter", ToggleSelected, scope),
-        KeyBinding::new(SELECT_ALL_KEY, SelectAllFiles, scope),
-        KeyBinding::new("up", SelectPreviousFile, scope),
-        KeyBinding::new("down", SelectNextFile, scope),
-        KeyBinding::new("shift-up", ExtendPreviousFile, scope),
-        KeyBinding::new("shift-down", ExtendNextFile, scope),
-        KeyBinding::new(COMMIT_KEY, CommitMessage, scope),
-        KeyBinding::new("escape", ShowHistory, scope),
-    ]);
+    crate::keymap::bind_group(cx, crate::keymap::Group::Worktree);
 }
 
 /// Which side of the index a row belongs to.

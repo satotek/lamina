@@ -12,6 +12,8 @@ gpui_kit_assets::icon_assets!(
     ExtraIcons,
     [
         ClockArrowDown,
+        Keyboard,
+        ListChecks,
         Shield,
         ShieldAlert,
         ShieldCheck,

@@ -18,9 +18,8 @@ use std::path::Path;
 
 use gpui::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, FocusHandle, FontWeight, Global,
-    InteractiveElement as _, IntoElement, KeyBinding, ParentElement, Render, StyleRefinement,
-    Styled, Subscription, Window, WindowBounds, WindowDecorations, WindowOptions, actions, div, px,
-    size,
+    InteractiveElement as _, IntoElement, ParentElement, Render, StyleRefinement, Styled,
+    Subscription, Window, WindowBounds, WindowDecorations, WindowOptions, actions, div, px, size,
 };
 use gpui_component::group_box::GroupBoxVariant;
 use gpui_component::setting::Settings as SettingsPages;
@@ -35,13 +34,6 @@ use crate::style::{self, Design};
 const SETTINGS_VIEW: &str = "SettingsView";
 
 actions!(strata, [CloseSettings]);
-
-// `KeyBinding::new` parses without an OS, so the `secondary-` modifier is
-// rejected there; pick the platform's modifier at compile time instead.
-#[cfg(target_os = "macos")]
-const PLATFORM_CLOSE: &str = "cmd-w";
-#[cfg(not(target_os = "macos"))]
-const PLATFORM_CLOSE: &str = "ctrl-w";
 
 /// Size the window opens at, and the smallest it can be dragged to.
 const WIDTH: f32 = 900.0;
@@ -58,10 +50,7 @@ const SIDEBAR_MAX: f32 = 280.0;
 pub fn bind(cx: &mut App) {
     cx.set_global(OpenSettingsWindow::default());
     cx.on_action(|_: &OpenSettings, cx: &mut App| open(cx));
-    cx.bind_keys([
-        KeyBinding::new("escape", CloseSettings, Some(SETTINGS_VIEW)),
-        KeyBinding::new(PLATFORM_CLOSE, CloseSettings, Some(SETTINGS_VIEW)),
-    ]);
+    crate::keymap::bind_group(cx, crate::keymap::Group::Settings);
 }
 
 /// Which window is showing the settings, so the shortcut raises it instead of

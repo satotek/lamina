@@ -19,6 +19,7 @@ mod autofetch;
 mod branch_switcher;
 mod branches;
 mod clone_dialog;
+mod commands;
 mod component_theme;
 mod conflicts;
 mod data;
@@ -30,6 +31,7 @@ mod file_history;
 mod git_config_view;
 mod github;
 mod graph_canvas;
+mod keymap;
 mod merge_editor;
 mod metrics;
 mod palette;
@@ -98,6 +100,8 @@ fn main() {
         gpui_component::init(cx);
         settings::init(cx);
         tools::init(cx);
+        keymap::init(cx);
+        commands::init(cx);
         workspace::init(cx);
         actions::bind(cx);
         settings_view::bind(cx);
@@ -111,9 +115,19 @@ fn main() {
         picker::bind(cx);
         palette::bind(cx);
 
-        open_start(start, debug, cx);
+        // User bindings go on top of every default, so a keymap entry wins a
+        // tied keystroke and a null entry can unbind a default.
+        commands::bind_keys(cx);
+        keymap::apply_user(cx);
+        keymap::watch(cx);
+        commands::watch(cx);
 
+        open_start(start, debug, cx);
         cx.activate(true);
+        // A file that could not be parsed leaves the app running: the window
+        // says which line it was, and the settings page keeps the message.
+        keymap::report_to_window(cx);
+        commands::report_to_window(cx);
     });
 }
 

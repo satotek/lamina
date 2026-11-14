@@ -459,7 +459,8 @@ impl RepoView {
                         ("changed-file-menu", index),
                         &list_design,
                         trigger,
-                        move |menu, _window, cx| {
+                        move |menu, window, cx| {
+                            let variables = menu_entity.read(cx).custom_variables();
                             let entity = menu_entity.clone();
                             let path = menu_path.clone();
                             let present = in_working_tree(menu_work_dir.as_deref(), &path);
@@ -507,7 +508,13 @@ impl RepoView {
                                     menu = menu.item(item);
                                 }
                             }
-                            menu
+                            crate::commands::submenu(
+                                menu.separator(),
+                                crate::commands::Context::File,
+                                &variables,
+                                window,
+                                cx,
+                            )
                         },
                     )
                     .into_any_element()

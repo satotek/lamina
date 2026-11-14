@@ -15,7 +15,7 @@ use std::rc::Rc;
 
 use gpui::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, FocusHandle, FontWeight,
-    Global, InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Render,
+    Global, InteractiveElement as _, IntoElement, ParentElement as _, Render,
     StatefulInteractiveElement as _, Styled, Subscription, WeakEntity, Window, WindowBounds,
     WindowDecorations, WindowOptions, actions, div, px, size,
 };
@@ -34,11 +34,6 @@ use crate::ui::{BadgeTone, RowState, list_row};
 const VIEW: &str = "GitConfigView";
 
 actions!(strata_git_config, [CloseGitConfig]);
-
-#[cfg(target_os = "macos")]
-const PLATFORM_CLOSE: &str = "cmd-w";
-#[cfg(not(target_os = "macos"))]
-const PLATFORM_CLOSE: &str = "ctrl-w";
 
 const WIDTH: f32 = 920.0;
 const HEIGHT: f32 = 680.0;
@@ -68,10 +63,7 @@ pub fn bind(cx: &mut App) {
     cx.set_global(CurrentRepository::default());
     cx.set_global(OpenConfigWindow::default());
     cx.on_action(|_: &OpenGitConfig, cx: &mut App| open(cx));
-    cx.bind_keys([
-        KeyBinding::new("escape", CloseGitConfig, Some(VIEW)),
-        KeyBinding::new(PLATFORM_CLOSE, CloseGitConfig, Some(VIEW)),
-    ]);
+    crate::keymap::bind_group(cx, crate::keymap::Group::GitConfig);
 }
 
 /// Records the repository the next config command should open.

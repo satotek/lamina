@@ -27,29 +27,16 @@ use gpui_component::WindowExt as _;
 use gpui_component::dialog::DialogEntrance;
 use gpui_component::input::{Input, InputEvent, InputState};
 
-use crate::actions::{
-    CloneRepository, CloseTab, NavigateBack, NewRepository, NewTab, NextTab, OpenGitConfig,
-    OpenInEditor, OpenRepository, OpenSettings, OpenTerminalHere, PreviousTab, Quit, SelectTab1,
-    SelectTab2, SelectTab3, SelectTab4, SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9,
-    StashChanges, SwitchBranch, ToggleDetailsMaximized, ToggleFrameStats, TogglePalette,
-    ToggleWholeFile, UndoLastAction,
-};
-use crate::branches::CreateBranchFromHead;
-use crate::remote::{FetchRemotes, PullBranch, PushBranch};
-use crate::search::FocusSearch;
+use crate::actions::{StashChanges, TogglePalette};
+use crate::commands::{CommandState, RunCustomCommand};
+use crate::keymap::{self, ActionSpec};
 use crate::settings::Settings;
 use crate::style::Design;
 use crate::ui;
-use crate::worktree_panel::ShowHistory;
 
 /// Key context of the palette's card. Keystrokes bound with it do not reach
 /// the view underneath while the palette is open.
 const PALETTE: &str = "Palette";
-/// The same context where the text field sits. A binding here is at the
-/// field's own depth and, registered after the field's, runs before it, so the
-/// list keeps the arrow keys while the input keeps the characters.
-const PALETTE_FIELD: &str = "Palette > Input";
-
 /// The card's width; the list is as tall as its entries.
 const WIDTH: f32 = 560.0;
 /// How many commands the empty list remembers running.
@@ -70,11 +57,7 @@ actions!(
 /// Registers the palette's own keys and the action that opens it.
 pub fn bind(cx: &mut App) {
     cx.set_global(RecentCommands::default());
-    cx.bind_keys([
-        KeyBinding::new("up", PalettePrevious, Some(PALETTE_FIELD)),
-        KeyBinding::new("down", PaletteNext, Some(PALETTE_FIELD)),
-        KeyBinding::new("escape", PaletteDismiss, Some(PALETTE_FIELD)),
-    ]);
+    crate::keymap::bind_group(cx, crate::keymap::Group::Palette);
     cx.on_action(|_: &TogglePalette, cx: &mut App| {
         let Some(handle) = cx.active_window() else {
             return;
@@ -90,219 +73,101 @@ pub fn bind(cx: &mut App) {
 
 /// One command the palette can offer.
 struct Command {
+    source: Source,
     /// What the user searches and reads.
-    label: &'static str,
-    /// Builds the action to dispatch, so every entry is an action the views
-    /// already handle.
-    action: fn() -> Box<dyn Action>,
+    label: String,
+    /// Stable identity across reloads of `commands.json`, for the recent list.
+    identity: String,
     /// Commands about a repository are left out of the welcome screen's list.
     needs_repo: bool,
+    /// The user's optional key for a custom command.
+    key: Option<String>,
 }
 
-/// Every command the palette knows, in the order unrelated commands are shown.
-const COMMANDS: &[Command] = &[
-    Command {
-        label: "Open repository…",
-        action: || Box::new(OpenRepository),
-        needs_repo: false,
-    },
-    Command {
-        label: "Open in new tab…",
-        action: || Box::new(NewTab),
-        needs_repo: false,
-    },
-    Command {
-        label: "Clone Repository…",
-        action: || Box::new(CloneRepository),
-        needs_repo: false,
-    },
-    Command {
-        label: "New Repository…",
-        action: || Box::new(NewRepository),
-        needs_repo: false,
-    },
-    Command {
-        label: "Close tab",
-        action: || Box::new(CloseTab),
-        needs_repo: false,
-    },
-    Command {
-        label: "Next tab",
-        action: || Box::new(NextTab),
-        needs_repo: true,
-    },
-    Command {
-        label: "Previous tab",
-        action: || Box::new(PreviousTab),
-        needs_repo: true,
-    },
-    Command {
-        label: "Switch to tab 1",
-        action: || Box::new(SelectTab1),
-        needs_repo: true,
-    },
-    Command {
-        label: "Switch to tab 2",
-        action: || Box::new(SelectTab2),
-        needs_repo: true,
-    },
-    Command {
-        label: "Switch to tab 3",
-        action: || Box::new(SelectTab3),
-        needs_repo: true,
-    },
-    Command {
-        label: "Switch to tab 4",
-        action: || Box::new(SelectTab4),
-        needs_repo: true,
-    },
-    Command {
-        label: "Switch to tab 5",
-        action: || Box::new(SelectTab5),
-        needs_repo: true,
-    },
-    Command {
-        label: "Switch to tab 6",
-        action: || Box::new(SelectTab6),
-        needs_repo: true,
-    },
-    Command {
-        label: "Switch to tab 7",
-        action: || Box::new(SelectTab7),
-        needs_repo: true,
-    },
-    Command {
-        label: "Switch to tab 8",
-        action: || Box::new(SelectTab8),
-        needs_repo: true,
-    },
-    Command {
-        label: "Switch to tab 9",
-        action: || Box::new(SelectTab9),
-        needs_repo: true,
-    },
-    Command {
-        label: "Back to parent repository",
-        action: || Box::new(NavigateBack),
-        needs_repo: true,
-    },
-    Command {
-        label: "Open settings",
-        action: || Box::new(OpenSettings),
-        needs_repo: false,
-    },
-    Command {
-        label: "Show Git Config",
-        action: || Box::new(OpenGitConfig),
-        needs_repo: true,
-    },
-    Command {
-        label: "Search commits",
-        action: || Box::new(FocusSearch),
-        needs_repo: true,
-    },
-    Command {
-        label: "Fetch remotes",
-        action: || Box::new(FetchRemotes),
-        needs_repo: true,
-    },
-    Command {
-        label: "Pull branch",
-        action: || Box::new(PullBranch),
-        needs_repo: true,
-    },
-    Command {
-        label: "Push branch",
-        action: || Box::new(PushBranch),
-        needs_repo: true,
-    },
-    Command {
-        label: "Stash changes",
-        action: || Box::new(StashChanges),
-        needs_repo: true,
-    },
-    Command {
-        label: "Undo Last Action",
-        action: || Box::new(UndoLastAction),
-        needs_repo: true,
-    },
-    Command {
-        label: "Open terminal here",
-        action: || Box::new(OpenTerminalHere),
-        needs_repo: true,
-    },
-    Command {
-        label: "Open in Editor",
-        action: || Box::new(OpenInEditor),
-        needs_repo: true,
-    },
-    Command {
-        label: "Create branch from HEAD",
-        action: || Box::new(CreateBranchFromHead),
-        needs_repo: true,
-    },
-    Command {
-        label: "Switch Branch…",
-        action: || Box::new(SwitchBranch),
-        needs_repo: true,
-    },
-    Command {
-        label: "Show history",
-        action: || Box::new(ShowHistory),
-        needs_repo: true,
-    },
-    Command {
-        label: "Toggle details maximized",
-        action: || Box::new(ToggleDetailsMaximized),
-        needs_repo: true,
-    },
-    Command {
-        label: "Toggle whole file",
-        action: || Box::new(ToggleWholeFile),
-        needs_repo: true,
-    },
-    Command {
-        label: "Toggle frame stats",
-        action: || Box::new(ToggleFrameStats),
-        needs_repo: true,
-    },
-    Command {
-        label: "Quit Strata",
-        action: || Box::new(Quit),
-        needs_repo: false,
-    },
-];
+#[derive(Clone, Copy)]
+enum Source {
+    /// Built in: the registry owns the title and the action.
+    Builtin(&'static ActionSpec),
+    /// A command from `commands.json`, by index into the loaded list.
+    Custom(usize),
+}
+
+impl Command {
+    fn builtin(spec: &'static ActionSpec) -> Self {
+        let slot = spec.palette.expect("palette commands carry a slot");
+        Self {
+            source: Source::Builtin(spec),
+            label: spec.title.to_owned(),
+            identity: keymap::short_name(spec.name).to_owned(),
+            needs_repo: slot.needs_repo,
+            key: None,
+        }
+    }
+
+    fn custom(index: usize, command: &crate::commands::CustomCommand) -> Self {
+        Self {
+            source: Source::Custom(index),
+            label: command.spec.title.clone(),
+            identity: format!("custom:{}", command.spec.title),
+            needs_repo: true,
+            key: command.spec.key.clone(),
+        }
+    }
+
+    fn action(&self) -> Box<dyn Action> {
+        match self.source {
+            Source::Builtin(spec) => (spec.build)(),
+            Source::Custom(index) => Box::new(RunCustomCommand { index }),
+        }
+    }
+
+    fn key(&self) -> Option<&str> {
+        self.key.as_deref()
+    }
+}
+
+/// Every command the palette can offer: the registry's palette entries in
+/// their chosen order, then the user's commands in file order.
+fn commands(cx: &App) -> Vec<Command> {
+    let mut builtins: Vec<&'static ActionSpec> = keymap::ACTIONS
+        .iter()
+        .filter(|spec| spec.palette.is_some())
+        .collect();
+    builtins.sort_by_key(|spec| spec.palette.map(|slot| slot.order));
+    let mut commands: Vec<Command> = builtins.into_iter().map(Command::builtin).collect();
+    for (index, command) in CommandState::get(cx).commands.iter().enumerate() {
+        commands.push(Command::custom(index, command));
+    }
+    commands
+}
 
 /// Commands run from the palette this session, most recent first. It is a
 /// convenience, not a preference, so it is not written to disk.
 #[derive(Default)]
-struct RecentCommands(Vec<usize>);
+struct RecentCommands(Vec<String>);
 
 impl Global for RecentCommands {}
 
 impl RecentCommands {
-    fn remember(&mut self, command: usize) {
-        self.0.retain(|&seen| seen != command);
-        self.0.insert(0, command);
+    fn remember(&mut self, command: &str) {
+        self.0.retain(|seen| seen != command);
+        self.0.insert(0, command.to_owned());
         self.0.truncate(MAX_RECENT);
+    }
+
+    fn position(&self, command: &str) -> Option<usize> {
+        self.0.iter().position(|seen| seen == command)
     }
 }
 
 /// What the palette knows about one command in one window.
 struct Entry {
-    /// Index into [`COMMANDS`].
+    /// Index into the palette's command list.
     command: usize,
     /// The focused view listens for the action, so running it does something.
     handled: bool,
     /// The key that runs it, spelled for the platform.
     binding: Option<SharedString>,
-}
-
-impl Entry {
-    /// Whether this opening of the palette may show the entry.
-    fn visible(&self, repo_open: bool) -> bool {
-        self.handled && (repo_open || !COMMANDS[self.command].needs_repo)
-    }
 }
 
 struct Palette {
@@ -314,6 +179,7 @@ struct Palette {
     /// when it closes, and the command is dispatched on that view's own node.
     return_focus: Option<FocusHandle>,
     input: Entity<InputState>,
+    commands: Vec<Command>,
     entries: Vec<Entry>,
     /// A repository view was on screen when the palette opened.
     repo_open: bool,
@@ -324,7 +190,8 @@ struct Palette {
 
 impl Palette {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let (entries, repo_open) = snapshot(window, cx);
+        let commands = commands(cx);
+        let (entries, repo_open) = snapshot(&commands, window, cx);
         let return_focus = window.focused(cx);
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Type a command"));
         let focus = input.focus_handle(cx);
@@ -357,6 +224,7 @@ impl Palette {
             focus,
             return_focus,
             input,
+            commands,
             entries,
             repo_open,
             selected: 0,
@@ -366,14 +234,17 @@ impl Palette {
 
     /// Indices into `entries` for the current query, best match first.
     fn filtered(&self, cx: &App) -> Vec<usize> {
-        let recents = &cx.global::<RecentCommands>().0;
+        let recents = cx.global::<RecentCommands>();
         let candidates: Vec<Candidate<'_>> = self
             .entries
             .iter()
-            .map(|entry| Candidate {
-                label: COMMANDS[entry.command].label,
-                visible: entry.visible(self.repo_open),
-                recent: recents.iter().position(|&used| used == entry.command),
+            .map(|entry| {
+                let command = &self.commands[entry.command];
+                Candidate {
+                    label: &command.label,
+                    visible: entry.handled && (self.repo_open || !command.needs_repo),
+                    recent: recents.position(&command.identity),
+                }
             })
             .collect();
         let query = self.input.read(cx).value().to_string();
@@ -395,9 +266,11 @@ impl Palette {
         let Some(&entry) = self.filtered(cx).get(position) else {
             return;
         };
-        let command = self.entries[entry].command;
-        let action = (COMMANDS[command].action)();
-        cx.global_mut::<RecentCommands>().remember(command);
+        let command_index = self.entries[entry].command;
+        let command = &self.commands[command_index];
+        let action = command.action();
+        cx.global_mut::<RecentCommands>()
+            .remember(&command.identity);
         // The dialog owns the keyboard while it is open, so the action has to
         // reach the view the palette opened from rather than whatever holds the
         // focus afterwards. Closing gives the keyboard back; the command then
@@ -424,7 +297,7 @@ impl Palette {
     }
 
     fn row(&self, position: usize, entry: usize, design: &Design) -> AnyElement {
-        let command = &COMMANDS[self.entries[entry].command];
+        let command = &self.commands[self.entries[entry].command];
         let entity = self.entity.clone();
         let mut row = ui::list_row(
             ("palette-command", position),
@@ -435,7 +308,13 @@ impl Palette {
         .on_click(move |_, window, cx| {
             entity.update(cx, |palette, cx| palette.run(position, window, cx));
         })
-        .child(div().flex_1().min_w_0().truncate().child(command.label));
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .child(command.label.clone()),
+        );
         if let Some(binding) = &self.entries[entry].binding {
             row = row.child(ui::kbd(binding.clone(), design));
         }
@@ -517,28 +396,35 @@ fn open(window: &mut Window, cx: &mut App) {
 }
 
 /// Reads what the window can run and which key runs it.
-fn snapshot(window: &Window, cx: &App) -> (Vec<Entry>, bool) {
+fn snapshot(commands: &[Command], window: &Window, cx: &App) -> (Vec<Entry>, bool) {
     let available = window.available_actions(cx);
     let focus = window.focused(cx);
     let os = cx.platform_info().os;
     // Stashing is a repository command and every repository view handles it, so
     // its presence is what tells the palette a repository is on screen.
     let repo_open = holds(&available, &StashChanges);
-    let entries = COMMANDS
+    let entries = commands
         .iter()
         .enumerate()
         .map(|(command, spec)| {
-            let action = (spec.action)();
-            let handled = holds(&available, &*action);
+            let action = spec.action();
+            let handled = match spec.source {
+                Source::Builtin(_) => holds(&available, &*action),
+                // The action a custom command dispatches is handled by the
+                // repository view, which is also what makes it runnable.
+                Source::Custom(_) => repo_open,
+            };
             // `bindings_for_action` reads the context stack the last render
             // left behind; asking for the focused handle's own stack is what
             // finds the view's bindings while the palette's dialog does not
             // exist yet.
-            let binding = focus.as_ref().and_then(|handle| {
-                window
-                    .bindings_for_action_in(&*action, handle)
-                    .last()
-                    .map(|binding| SharedString::from(shortcut(binding, os)))
+            let binding = spec.key().map(|key| keymap::shortcut(key, os)).or_else(|| {
+                focus.as_ref().and_then(|handle| {
+                    window
+                        .bindings_for_action_in(&*action, handle)
+                        .last()
+                        .map(|binding| SharedString::from(shortcut(binding, os)))
+                })
             });
             Entry {
                 command,
@@ -777,15 +663,16 @@ mod tests {
     #[test]
     fn remembering_a_command_moves_it_to_the_front_and_caps_the_list() {
         let mut recents = RecentCommands::default();
-        recents.remember(3);
-        recents.remember(1);
-        recents.remember(3);
-        assert_eq!(recents.0, vec![3, 1]);
+        recents.remember("SwitchBranch");
+        recents.remember("Quit");
+        recents.remember("SwitchBranch");
+        assert_eq!(recents.0, vec!["SwitchBranch", "Quit"]);
         for command in 0..MAX_RECENT + 2 {
-            recents.remember(command);
+            recents.remember(&format!("command-{command}"));
         }
         assert_eq!(recents.0.len(), MAX_RECENT);
-        assert_eq!(recents.0[0], MAX_RECENT + 1);
+        assert_eq!(recents.0[0], format!("command-{}", MAX_RECENT + 1));
+        assert_eq!(recents.position("SwitchBranch"), None);
     }
 
     #[test]
@@ -799,32 +686,26 @@ mod tests {
     }
 
     #[test]
-    fn every_command_is_reachable_and_handled_somewhere() {
-        // Two commands with the same label would make the list read as a
-        // duplicate, and an action that no view binds would show no key.
-        for (index, command) in COMMANDS.iter().enumerate() {
+    fn every_palette_command_has_one_title_and_one_action() {
+        let specs: Vec<&ActionSpec> = keymap::ACTIONS
+            .iter()
+            .filter(|spec| spec.palette.is_some())
+            .collect();
+        assert_eq!(specs.len(), 34);
+        for (index, spec) in specs.iter().enumerate() {
             assert!(
-                COMMANDS
-                    .iter()
-                    .skip(index + 1)
-                    .all(|other| other.label != command.label),
-                "duplicate label {}",
-                command.label
-            );
-            assert!(
-                !command.label.is_empty() && command.label.len() <= 40,
+                !spec.title.is_empty() && spec.title.len() <= 40,
                 "labels stay readable: {}",
-                command.label
+                spec.title
             );
-            // Building the action must not panic and must yield a distinct type.
-            let action = (command.action)();
+            let action = (spec.build)();
             assert!(
-                COMMANDS
+                specs
                     .iter()
                     .skip(index + 1)
-                    .all(|other| (other.action)().as_any().type_id() != action.as_any().type_id()),
+                    .all(|other| (other.build)().as_any().type_id() != action.as_any().type_id()),
                 "duplicate action for {}",
-                command.label
+                spec.title
             );
         }
     }

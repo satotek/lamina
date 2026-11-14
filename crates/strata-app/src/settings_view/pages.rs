@@ -67,6 +67,8 @@ fn icon(section: Section) -> IconName {
         Section::Behaviour => IconName::Settings2,
         Section::Tools => IconName::SquareTerminal,
         Section::Privacy => IconName::EyeOff,
+        Section::Keyboard => IconName::Keyboard,
+        Section::Commands => IconName::ListChecks,
     }
 }
 
@@ -103,6 +105,8 @@ fn page(section: Section, control: f32, design: &Design) -> SettingPage {
         Section::Behaviour => behaviour(control, design),
         Section::Tools => tools(control, design),
         Section::Privacy => privacy(control, design),
+        Section::Keyboard => keyboard(design),
+        Section::Commands => commands_page(design),
     }
 }
 
@@ -538,6 +542,359 @@ fn privacy(_control: f32, design: &Design) -> SettingPage {
         ))
 }
 
+fn keyboard(design: &Design) -> SettingPage {
+    shell_no_reset(
+        Section::Keyboard,
+        "Every action the app can bind, the keys it answers to today, and where its entry lives. Edit records the next keystroke you press.",
+        design,
+    )
+    .groups(card("Bindings").item(SettingItem::render(keyboard_table)))
+}
+
+fn commands_page(design: &Design) -> SettingPage {
+    shell_no_reset(
+        Section::Commands,
+        "Commands from commands.json, next to settings.json. They appear in the command palette and in the context menu they name.",
+        design,
+    )
+    .groups(
+        card("File").item(SettingItem::render(|_, _, cx| {
+            let design = Design::new(cx.theme(), Settings::get(cx));
+            let state = crate::commands::CommandState::get(cx);
+            let path = state
+                .path
+                .as_ref()
+                .map_or_else(|| "No configuration directory".to_owned(), |path| path.display().to_string());
+            v_flex()
+                .gap_2()
+                .w_full()
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            crate::ui::button("open-commands-json", "Open commands.json")
+                                .size(crate::ui::ButtonSize::Small)
+                                .on_click(|_, _, cx| {
+                                    match crate::commands::ensure_file() {
+                                        Ok(path) => cx.open_with_system(&path),
+                                        Err(error) => log::warn!("{error}"),
+                                    }
+                                }),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(design.tiny()))
+                                .text_color(design.muted)
+                                .child(path),
+                        ),
+                )
+                .when(!state.errors.is_empty() || !state.warnings.is_empty(), |this| {
+                    this.child(
+                        crate::ui::banner(
+                            crate::ui::BannerKind::Danger,
+                            state
+                                .errors
+                                .iter()
+                                .chain(state.warnings.iter())
+                                .cloned()
+                                .collect::<Vec<_>>()
+                                .join(" · "),
+                            &design,
+                        ),
+                    )
+                })
+                .into_any_element()
+        })),
+    )
+    .groups(card("Loaded commands").item(SettingItem::render(|_, _, cx| {
+        let design = Design::new(cx.theme(), Settings::get(cx));
+        let state = crate::commands::CommandState::get(cx);
+        let rows = crate::commands::rows(state);
+        if rows.is_empty() {
+            return crate::ui::empty_state(
+                "No commands yet. Add one to commands.json and it appears here.",
+                &design,
+            )
+            .into_any_element();
+        }
+        v_flex()
+            .w_full()
+            .children(rows.into_iter().enumerate().map(|(index, row)| {
+                crate::ui::list_row(
+                    ("custom-command", index),
+                    crate::ui::RowState::NORMAL,
+                    &design,
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(180.0))
+                        .truncate()
+                        .child(row.title.to_owned()),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(74.0))
+                        .text_size(px(design.tiny()))
+                        .text_color(design.muted)
+                        .child(row.context.to_owned()),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .font_family(design.mono.clone())
+                        .text_size(px(design.tiny()))
+                        .text_color(design.muted)
+                        .child(row.line),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_size(px(design.tiny()))
+                        .text_color(design.muted)
+                        .child(if row.confirm { "asks" } else { "" }),
+                )
+                .when_some(row.key.map(str::to_owned), |this, key| {
+                    this.child(crate::ui::kbd(key, &design))
+                })
+                .into_any_element()
+            }))
+            .into_any_element()
+    })))
+}
+
+/// The keyboard page is a table over the action registry; the search field
+/// and the Edit buttons live in one element so the pending capture can be
+/// shown above the rows.
+fn keyboard_table(
+    options: &gpui_component::setting::RenderOptions,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let design = Design::new(cx.theme(), Settings::get(cx));
+    let key = field_key(options, "keyboard-filter");
+    let filter = keyboard_filter(key, window, cx);
+    let query = filter.read(cx).input.read(cx).value().to_string();
+    let os = cx.platform_info().os;
+    let state = crate::keymap::KeymapState::get(cx);
+    let rows = crate::keymap::rows(os, state);
+    let pending = state.pending_edit;
+    let problems = state.problems();
+
+    let mut body = v_flex().w_full().gap_2();
+    if let Some(spec) = pending {
+        body = body.child(crate::ui::banner(
+            crate::ui::BannerKind::Info,
+            format!("Press the new key for {} — Esc cancels.", spec.title),
+            &design,
+        ));
+    }
+    if !problems.is_empty() {
+        body = body.child(crate::ui::banner(
+            crate::ui::BannerKind::Warning,
+            problems.join(" · "),
+            &design,
+        ));
+    }
+    body = body
+        .child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(
+                    Input::new(&filter.read(cx).input)
+                        .with_size(options.size())
+                        .flex_1()
+                        .min_w_0(),
+                )
+                .child(
+                    crate::ui::button("open-keymap-json", "Open keymap.json")
+                        .size(crate::ui::ButtonSize::Small)
+                        .on_click(|_, _, cx| match crate::keymap::ensure_file() {
+                            Ok(path) => cx.open_with_system(&path),
+                            Err(error) => log::warn!("{error}"),
+                        }),
+                ),
+        )
+        .child(table_header(&design));
+
+    let mut visible = 0usize;
+    for row in rows {
+        if !query.trim().is_empty()
+            && crate::palette::score(&query, row.title).is_none()
+            && crate::palette::score(&query, row.name).is_none()
+        {
+            continue;
+        }
+        visible += 1;
+        body = body.child(action_row(row, &design));
+    }
+    if visible == 0 {
+        body = body.child(crate::ui::empty_state("No action matches.", &design));
+    }
+    body.into_any_element()
+}
+
+struct KeyboardFilter {
+    input: Entity<InputState>,
+    _subscription: Subscription,
+}
+
+fn keyboard_filter(key: SharedString, window: &mut Window, cx: &mut App) -> Entity<KeyboardFilter> {
+    window.use_keyed_state(key, cx, |window, cx| {
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter actions"));
+        let subscription = cx.subscribe(&input, |_: &mut KeyboardFilter, _, event, cx| {
+            if matches!(event, gpui_component::input::InputEvent::Change) {
+                cx.refresh_windows();
+            }
+        });
+        KeyboardFilter {
+            input,
+            _subscription: subscription,
+        }
+    })
+}
+
+fn table_header(design: &Design) -> AnyElement {
+    h_flex()
+        .gap_2()
+        .px_2()
+        .pb_1()
+        .border_b_1()
+        .border_color(design.border)
+        .text_size(px(design.tiny()))
+        .text_color(design.muted)
+        .w_full()
+        .child(div().flex_1().min_w_0().child("Action"))
+        .child(div().flex_none().w(px(130.0)).child("Keys"))
+        .child(div().flex_none().w(px(100.0)).child("Context"))
+        .child(div().flex_none().w(px(84.0)).child("Source"))
+        .child(div().flex_none().w(px(84.0)).child(""))
+        .into_any_element()
+}
+
+fn action_row(row: crate::keymap::ActionRow, design: &Design) -> AnyElement {
+    let spec = row.spec;
+    let changed = row.changed;
+    let conflict = row.conflict;
+    let element = crate::ui::list_row(
+        SharedString::from(format!("binding-{}", row.name)),
+        crate::ui::RowState::NORMAL,
+        design,
+    )
+    .gap_2()
+    // Three lines: the title, the action name and the conflict warning.
+    .when(conflict.is_some(), |row| row.h(px(46.0)))
+    .child(
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .gap(px(1.0))
+            .child(div().truncate().child(row.title.to_owned()))
+            .child(
+                div()
+                    .truncate()
+                    .font_family(design.mono.clone())
+                    .text_size(px(design.tiny()))
+                    .text_color(design.muted)
+                    .child(row.name.to_owned()),
+            )
+            .when_some(row.conflict, |this, other| {
+                this.child(
+                    div()
+                        .truncate()
+                        .text_size(px(design.tiny()))
+                        .text_color(design.remove_text)
+                        .child(format!("⚠ {other} uses this key")),
+                )
+            }),
+    )
+    .child(
+        v_flex()
+            .flex_none()
+            .w(px(130.0))
+            .gap(px(2.0))
+            .child(crate::ui::kbd(row.effective, design))
+            .when(changed && !row.unbound, |this| {
+                this.child(
+                    div()
+                        .truncate()
+                        .text_size(px(design.tiny()))
+                        .text_color(design.muted)
+                        .child(format!("default {}", row.defaults)),
+                )
+            }),
+    )
+    .child(
+        div()
+            .flex_none()
+            .w(px(100.0))
+            .truncate()
+            .text_size(px(design.tiny()))
+            .text_color(design.muted)
+            .child(row.context.clone()),
+    )
+    .child(
+        v_flex()
+            .flex_none()
+            .w(px(84.0))
+            .gap(px(2.0))
+            .text_size(px(design.tiny()))
+            .text_color(if changed {
+                design.accent_text
+            } else {
+                design.muted
+            })
+            .child(if row.unbound {
+                "User: unbound"
+            } else if changed {
+                "User"
+            } else {
+                "Default"
+            })
+            .when(changed, |this| {
+                this.child(
+                    div()
+                        .truncate()
+                        .text_size(px(design.tiny()))
+                        .text_color(design.muted)
+                        .child(row.user.clone()),
+                )
+            }),
+    )
+    .child(
+        h_flex()
+            .flex_none()
+            .w(px(84.0))
+            .gap_1()
+            .child(
+                crate::ui::button(SharedString::from(format!("edit-{}", row.name)), "Edit")
+                    .size(crate::ui::ButtonSize::Tiny)
+                    .ghost()
+                    .on_click(move |_, _, cx| crate::keymap::begin_capture(cx, spec)),
+            )
+            .child(
+                crate::ui::button(SharedString::from(format!("reset-{}", row.name)), "Reset")
+                    .size(crate::ui::ButtonSize::Tiny)
+                    .ghost()
+                    .disabled(!changed)
+                    .on_click(move |_, _, cx| {
+                        if let Err(error) = crate::keymap::reset_binding(cx, spec) {
+                            crate::keymap::KeymapState::get_mut(cx).errors.push(error);
+                            cx.refresh_windows();
+                        }
+                    }),
+            ),
+    );
+    element.into_any_element()
+}
+
 /// A card under construction: a label and the outlined group of rows below it.
 ///
 /// The label is a group of its own rather than the outlined group's title. The
@@ -684,6 +1041,42 @@ fn shell(section: Section, description: &'static str, design: &Design) -> Settin
         // title's weight and the reset button's edge.
         .header_style(&StyleRefinement::default().hidden())
         .group(heading(section, description, design))
+}
+
+/// A page whose content is a file the page itself edits, so the settings
+/// "Reset section" button has nothing to restore.
+fn shell_no_reset(section: Section, description: &'static str, design: &Design) -> SettingPage {
+    SettingPage::new(section.title())
+        .icon(icon(section))
+        .resettable(false)
+        .header_style(&StyleRefinement::default().hidden())
+        .group(heading_no_reset(section, description, design))
+}
+
+fn heading_no_reset(section: Section, description: &'static str, design: &Design) -> SettingGroup {
+    let design = design.clone();
+    SettingGroup::new()
+        .variant(GroupBoxVariant::Normal)
+        .item(SettingItem::render(move |_, _, _cx| {
+            v_flex()
+                .gap(px(8.0))
+                .pt(px(8.0))
+                .px(px(CARD_PADDING))
+                .child(
+                    div()
+                        .text_size(px(design.ui + 5.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(design.text)
+                        .child(section.title()),
+                )
+                .child(
+                    div()
+                        .text_size(px(design.ui))
+                        .text_color(design.muted)
+                        .child(description),
+                )
+                .into_any_element()
+        }))
 }
 
 fn theme_field(control: f32) -> SettingField<SharedString> {

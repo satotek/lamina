@@ -18,7 +18,7 @@ use std::collections::HashMap;
 
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, Context, Entity, Focusable as _,
-    InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, ScrollHandle,
+    InteractiveElement as _, IntoElement, ParentElement as _, ScrollHandle,
     StatefulInteractiveElement as _, Styled as _, Subscription, Window, actions, div, px,
 };
 use gpui_component::Sizable as _;
@@ -37,11 +37,6 @@ use crate::ui::{BadgeTone, RowState, RowTipExt as _, list_row, status_badge};
 /// Key context of the popover's card. The text field sits inside it, with the
 /// field's own `Input` context, so the card's keys only run while it is up.
 const SWITCHER: &str = "BranchSwitcher";
-/// The same context at the field's depth. A binding here is registered after
-/// the field's own, so the list keeps the arrows, `Enter` and `Escape` while
-/// the field keeps the characters.
-const SWITCHER_FIELD: &str = "BranchSwitcher > Input";
-
 /// The card's width: wide enough for `origin/feature/long-name` and its
 /// ahead/behind label, narrow enough to sit under the chip.
 const WIDTH: f32 = 360.0;
@@ -67,12 +62,7 @@ actions!(
 /// Binds the switcher's own keys. `Ctrl+B` itself is bound in `actions::bind`
 /// and handled by `RepoView`, so the palette and the chip take the same path.
 pub fn bind(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("up", BranchSwitcherPrevious, Some(SWITCHER_FIELD)),
-        KeyBinding::new("down", BranchSwitcherNext, Some(SWITCHER_FIELD)),
-        KeyBinding::new("enter", BranchSwitcherConfirm, Some(SWITCHER_FIELD)),
-        KeyBinding::new("escape", BranchSwitcherDismiss, Some(SWITCHER_FIELD)),
-    ]);
+    crate::keymap::bind_group(cx, crate::keymap::Group::BranchSwitcher);
 }
 
 /// A branch the switcher can check out, as the sidebar sees it.

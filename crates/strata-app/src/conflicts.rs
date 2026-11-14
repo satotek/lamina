@@ -17,7 +17,7 @@ use std::sync::Arc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, Hsla, InteractiveElement, IntoElement,
-    KeyBinding, ParentElement, ScrollStrategy, StatefulInteractiveElement, Styled, Subscription,
+    ParentElement, ScrollStrategy, StatefulInteractiveElement, Styled, Subscription,
     UniformListScrollHandle, Window, actions, div, px, relative, uniform_list,
 };
 use gpui_component::ActiveTheme as _;
@@ -34,7 +34,6 @@ use crate::repo_view::RepoView;
 use crate::scrollbar::WithScrollbar as _;
 use crate::settings::Settings;
 use crate::style::{self, Design};
-use crate::worktree_panel::{WORKTREE_PANEL, WORKTREE_PANEL_LIST};
 
 actions!(
     strata_conflicts,
@@ -53,28 +52,8 @@ actions!(
     ]
 );
 
-// `KeyBinding::new` parses without an OS, so a platform modifier is chosen at
-// compile time instead of using `secondary-`. Bare letters only reach the
-// panel while no text field has focus; the alt bindings keep the merge editor
-// usable while the result pane is focused, which is where the user edits.
 pub fn bind(cx: &mut App) {
-    let letters = Some(WORKTREE_PANEL_LIST);
-    let panel = Some(WORKTREE_PANEL);
-    cx.bind_keys([
-        KeyBinding::new("o", UseOurs, letters),
-        KeyBinding::new("t", UseTheirs, letters),
-        KeyBinding::new("m", MarkFileResolved, letters),
-        KeyBinding::new("n", NextConflict, letters),
-        KeyBinding::new("p", PreviousConflict, letters),
-        KeyBinding::new("alt-n", NextConflict, panel),
-        KeyBinding::new("alt-p", PreviousConflict, panel),
-        KeyBinding::new("alt-1", TakeOurs, panel),
-        KeyBinding::new("alt-2", TakeTheirs, panel),
-        KeyBinding::new("alt-3", TakeBothOursFirst, panel),
-        KeyBinding::new("alt-4", TakeBothTheirsFirst, panel),
-        KeyBinding::new("alt-5", TakeBase, panel),
-        KeyBinding::new("alt-0", ResetConflict, panel),
-    ]);
+    crate::keymap::bind_group(cx, crate::keymap::Group::Conflicts);
 }
 
 /// Height of one conflicts-list row, matching the other file lists.

@@ -21,6 +21,7 @@ use crate::actions::{
     ToggleWholeFile, UndoLastAction,
 };
 use crate::branches::CreateBranchFromHead;
+use crate::commands::RunCustomCommand;
 use crate::data::Source;
 use crate::remote::{Command, FetchRemotes, PullBranch, PushBranch};
 use crate::search::{FocusSearch, SearchDismiss, SearchNext, SearchPrevious, SearchSubmit};
@@ -120,6 +121,9 @@ impl Render for RepoView {
             }))
             .on_action(cx.listener(|this, _: &PushBranch, window, cx| {
                 this.remote_command(Command::Push, window, cx)
+            }))
+            .on_action(cx.listener(|this, action: &RunCustomCommand, window, cx| {
+                this.run_custom_command(action.index, window, cx)
             }));
         if self.parent_name.is_some() {
             root = root.on_action(cx.listener(|this, _: &NavigateBack, window, cx| {

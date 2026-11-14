@@ -17,8 +17,8 @@ use std::collections::BTreeSet;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, FontWeight, Hsla, IntoElement, KeyBinding, Window, actions,
-    div, px, relative,
+    AnyElement, App, Context, Entity, FontWeight, Hsla, IntoElement, Window, actions, div, px,
+    relative,
 };
 use gpui_component::dialog::DialogFooter;
 use gpui_component::notification::Notification;
@@ -27,7 +27,6 @@ use gpui_kit_assets::IconName;
 use strata_core::session::{Operation, OperationId, RepoSnapshot};
 use strata_core::{HeadInfo, RefInfo, RefKind, UpstreamInfo};
 
-use crate::actions::REPO_VIEW;
 use crate::data::Source;
 use crate::repo_view::RepoView;
 
@@ -56,20 +55,6 @@ const AUTH_HINT: &str = concat!(
 
 actions!(strata, [FetchRemotes, PullBranch, PushBranch]);
 
-// `KeyBinding::new` parses without an OS, so `secondary-` is rejected there.
-#[cfg(target_os = "macos")]
-const FETCH_KEY: &str = "cmd-alt-f";
-#[cfg(not(target_os = "macos"))]
-const FETCH_KEY: &str = "ctrl-alt-f";
-#[cfg(target_os = "macos")]
-const PULL_KEY: &str = "cmd-alt-l";
-#[cfg(not(target_os = "macos"))]
-const PULL_KEY: &str = "ctrl-alt-l";
-#[cfg(target_os = "macos")]
-const PUSH_KEY: &str = "cmd-alt-p";
-#[cfg(not(target_os = "macos"))]
-const PUSH_KEY: &str = "ctrl-alt-p";
-
 /// The platform's primary modifier, spelled the way its menus spell it.
 #[cfg(target_os = "macos")]
 const MODIFIER: &str = "Cmd";
@@ -79,12 +64,7 @@ const MODIFIER: &str = "Ctrl";
 /// Binds the remote commands to the view's key context. `RepoView`'s root
 /// element handles them, like every other view command.
 pub fn bind(cx: &mut App) {
-    let scope = Some(REPO_VIEW);
-    cx.bind_keys([
-        KeyBinding::new(FETCH_KEY, FetchRemotes, scope),
-        KeyBinding::new(PULL_KEY, PullBranch, scope),
-        KeyBinding::new(PUSH_KEY, PushBranch, scope),
-    ]);
+    crate::keymap::bind_group(cx, crate::keymap::Group::Remote);
 }
 
 /// What a title-bar button, its key binding or the force offer asked for.

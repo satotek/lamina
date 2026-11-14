@@ -392,12 +392,18 @@ pub fn config_dir() -> Option<PathBuf> {
     }
 }
 
-/// `STRATA_CONFIG_DIR` overrides the location, for tests and portable setups.
-fn settings_path() -> Option<PathBuf> {
+/// A file in the configuration directory. `STRATA_CONFIG_DIR` overrides the
+/// directory, for tests and portable setups.
+pub fn config_file(name: &str) -> Option<PathBuf> {
     std::env::var_os("STRATA_CONFIG_DIR")
         .map(PathBuf::from)
         .or_else(config_dir)
-        .map(|dir| dir.join("settings.json"))
+        .map(|dir| dir.join(name))
+}
+
+/// `STRATA_CONFIG_DIR` overrides the location, for tests and portable setups.
+fn settings_path() -> Option<PathBuf> {
+    config_file("settings.json")
 }
 
 /// The file the settings are saved to, for the settings window to show.

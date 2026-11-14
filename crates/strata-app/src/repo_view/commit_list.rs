@@ -254,12 +254,20 @@ impl RepoView {
                             element,
                             move |menu, window, cx| {
                                 let multi = menu_entity.read(cx).multi_pick_context();
-                                history_ops::commit_menu(
+                                let variables = menu_entity.read(cx).custom_variables();
+                                let menu = history_ops::commit_menu(
                                     menu,
                                     target.clone(),
                                     menu_state.clone(),
                                     multi,
                                     menu_entity.clone(),
+                                    window,
+                                    cx,
+                                );
+                                crate::commands::submenu(
+                                    menu,
+                                    crate::commands::Context::Commit,
+                                    &variables,
                                     window,
                                     cx,
                                 )
