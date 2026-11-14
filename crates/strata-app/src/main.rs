@@ -14,6 +14,7 @@
 //! A path that is not a repository keeps the error screen instead of exiting.
 
 mod actions;
+mod assets;
 mod autofetch;
 mod branch_switcher;
 mod branches;
@@ -76,7 +77,7 @@ fn main() {
     let start = parsed.start;
     let debug = parsed.debug;
 
-    let app = application().with_assets(gpui_kit_assets::Assets);
+    let app = application().with_assets(assets::AppAssets);
 
     // macOS keeps the app alive after the last window closes; the dock icon is
     // how the user asks for a window again. The handler belongs to the
