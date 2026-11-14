@@ -52,6 +52,7 @@ use gpui_platform::application;
 
 use debug_launch::{DebugLaunch, StartMode};
 use repo_view::Launch;
+use style::MIN_WINDOW_SIZE;
 use workspace::Workspace;
 
 fn main() {
@@ -168,20 +169,20 @@ fn open_window(launch: Option<Launch>, gallery: bool, mut debug: DebugLaunch, cx
             .map_or_else(|| "Strata".to_owned(), Launch::title)
     };
 
-    let (window_size, min_size) = if let Some(requested) = debug.window_size {
+    let window_size = if let Some(requested) = debug.window_size {
         eprintln!(
             "debug-launch: applied --window-size {}x{}",
             requested.width, requested.height
         );
-        let width = requested.width as f32;
-        let height = requested.height as f32;
-        (
-            size(px(width), px(height)),
-            size(px(width.min(720.0)), px(height.min(480.0))),
-        )
+        size(px(requested.width as f32), px(requested.height as f32))
     } else {
-        (size(px(1360.0), px(860.0)), size(px(720.0), px(480.0)))
+        size(px(1360.0), px(860.0))
     };
+    // The same minimum in a debug launch as in a release one. Letting
+    // `--window-size` lower it hid the layouts that break below it; a check
+    // that needs a smaller window can still request one, because X11 treats
+    // the minimum as a hint for the window manager.
+    let min_size = size(px(MIN_WINDOW_SIZE.0), px(MIN_WINDOW_SIZE.1));
 
     let bounds = Bounds::centered(None, window_size, cx);
     let options = WindowOptions {

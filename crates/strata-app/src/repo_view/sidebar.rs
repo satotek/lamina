@@ -14,14 +14,37 @@ use crate::data::Source;
 use crate::style::{self, Design};
 use crate::worktree_panel::MainMode;
 
+/// The sidebar's width on a window with room to spare.
 const SIDEBAR_WIDTH: f32 = 248.0;
+/// The narrowest the sidebar goes before it starts taking room the History
+/// view needs.
+const SIDEBAR_MIN_WIDTH: f32 = 168.0;
+/// The share of the window the sidebar aims for between those two.
+const SIDEBAR_SHARE: f32 = 0.22;
+
+/// The sidebar's width at `viewport` width.
+///
+/// The main area has to keep the details' two minimum columns (a 200 px file
+/// list beside a 240 px diff) even at the app's minimum window size, and the
+/// commit list wants room for its description. A proportional sidebar gives
+/// that room back as the window narrows instead of pushing the panes below
+/// their minimums. It also grows smoothly with the window, so the main area
+/// never shrinks as the window gets wider.
+pub(super) fn width_for(viewport: f32) -> f32 {
+    (viewport * SIDEBAR_SHARE).clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH)
+}
 
 impl RepoView {
-    pub(super) fn sidebar(&self, cx: &mut Context<Self>, design: &Design) -> AnyElement {
+    pub(super) fn sidebar(
+        &self,
+        cx: &mut Context<Self>,
+        design: &Design,
+        width: f32,
+    ) -> AnyElement {
         let mut sidebar = div()
             .flex()
             .flex_col()
-            .w(px(SIDEBAR_WIDTH))
+            .w(px(width))
             .h_full()
             .flex_none()
             .gap(px(14.0))
@@ -236,5 +259,59 @@ impl RepoView {
             &colors,
             entity,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::style;
+
+    #[test]
+    fn the_sidebar_stays_between_its_bounds_and_leaves_the_main_area_room() {
+        // The details' file list and diff minimums; the main area holds them
+        // side by side.
+        const MAIN_MIN_WIDTH: f32 = 440.0;
+        for width in 640..=2_000 {
+            let width = width as f32;
+            let sidebar = width_for(width);
+            assert!(
+                (SIDEBAR_MIN_WIDTH..=SIDEBAR_WIDTH).contains(&sidebar),
+                "the sidebar is {sidebar} px at a {width} px window"
+            );
+            assert!(
+                width - sidebar >= MAIN_MIN_WIDTH,
+                "a {width} px window leaves the main area {} px, below its {} px minimum",
+                width - sidebar,
+                MAIN_MIN_WIDTH
+            );
+        }
+        assert_eq!(width_for(3_200.0), SIDEBAR_WIDTH);
+    }
+
+    #[test]
+    fn the_main_area_grows_with_the_window() {
+        let mut previous = 0.0;
+        for width in 640..=2_000 {
+            let main = width as f32 - width_for(width as f32);
+            assert!(
+                main >= previous,
+                "the main area shrinks from {previous} to {main} px when the window grows to {width} px"
+            );
+            previous = main;
+        }
+    }
+
+    #[test]
+    fn the_app_minimum_window_keeps_the_history_view_inside_its_minimums() {
+        let width = style::MIN_WINDOW_SIZE.0;
+        let sidebar = width_for(width);
+        assert!(
+            width - sidebar >= 440.0,
+            "the History view needs a 200 px file column beside a 240 px diff"
+        );
+        // The commit list also keeps its fixed columns next to a readable
+        // description at the minimum, which the commit list's own test covers.
+        assert!(sidebar <= SIDEBAR_WIDTH);
     }
 }

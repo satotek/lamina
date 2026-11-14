@@ -351,9 +351,11 @@ impl LaneWidth {
     }
 
     /// At least one lane so an empty (or still loading) list still scans a
-    /// lane. Only the tests read it now that rows size their own graph.
-    #[cfg(test)]
-    pub fn max(&self) -> u16 {
+    /// lane.
+    ///
+    /// Rows size their own graph, but the commit list lays out its columns
+    /// from the widest graph it will draw, so this is read once per frame.
+    pub fn widest(&self) -> u16 {
         self.max.max(1)
     }
 
@@ -499,13 +501,13 @@ mod tests {
     fn lane_width_only_scans_new_rows_and_never_shrinks_in_one_history() {
         let mut lanes = LaneWidth::default();
         lanes.observe(&commit_list(0..3, &[1, 4, 2]));
-        assert_eq!(lanes.max(), 4);
+        assert_eq!(lanes.widest(), 4);
         assert_eq!(lanes.scanned(), 3);
 
         let mut grown = commit_list(0..3, &[1, 4, 2]);
         grown.extend(commit_info_range(3..6), rows_with_widths(&[2, 7, 3]));
         lanes.observe(&grown);
-        assert_eq!(lanes.max(), 7);
+        assert_eq!(lanes.widest(), 7);
         assert_eq!(lanes.scanned(), 6, "the first chunk is not revisited");
     }
 
@@ -513,7 +515,7 @@ mod tests {
     fn lane_width_restarts_for_a_replaced_history() {
         let mut lanes = LaneWidth::default();
         lanes.observe(&commit_list(0..4, &[6, 6, 6, 6]));
-        assert_eq!(lanes.max(), 6);
+        assert_eq!(lanes.widest(), 6);
 
         // A reload publishes a shorter list whose first commit is different.
         let mut replaced = CommitList::default();
@@ -525,7 +527,7 @@ mod tests {
             rows_with_widths(&[2]),
         );
         lanes.observe(&replaced);
-        assert_eq!(lanes.max(), 2, "a fresh history starts a fresh maximum");
+        assert_eq!(lanes.widest(), 2, "a fresh history starts a fresh maximum");
         assert_eq!(lanes.scanned(), 1);
     }
 

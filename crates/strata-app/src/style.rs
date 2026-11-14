@@ -683,6 +683,15 @@ pub fn app_mark(size: f32) -> AnyElement {
 /// Height of the title bar every Strata window draws.
 pub const TITLE_BAR_HEIGHT: f32 = 44.0;
 
+/// The smallest window the layout is designed for, in pixels.
+///
+/// Every pane degrades down to this size: the sidebar narrows, the commit list
+/// drops its date and then its author column, and the title bar sheds details
+/// until the search field is down to its usable minimum. Below it the window
+/// manager is expected to refuse the resize; a window forced smaller still
+/// draws, but the title bar may run out of room for the actions.
+pub const MIN_WINDOW_SIZE: (f32, f32) = (720.0, 480.0);
+
 /// Title bar options for a Strata window.
 ///
 /// gpui-component places the macOS window buttons for its own 34 px bar, so in

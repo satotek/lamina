@@ -144,14 +144,19 @@ impl RepoView {
                     .flex()
                     .items_center()
                     .gap(px(6.0))
+                    // The details column can be as narrow as its split's
+                    // minimum; the id and the parent list truncate there
+                    // instead of running into the diff.
+                    .min_w_0()
                     .font_family(design.mono.clone())
                     .text_size(px(design.code))
                     .text_color(design.muted)
-                    .child(id)
+                    .child(div().flex_none().child(id))
                     .child(
                         div()
                             .id("copy-commit-id")
                             .flex()
+                            .flex_none()
                             .items_center()
                             .justify_center()
                             .w(px(22.0))
@@ -165,7 +170,12 @@ impl RepoView {
                             .child(icon(IconName::Copy, 13.0, design.muted)),
                     )
                     .when(!parents.is_empty(), |row| {
-                        row.child(div().child(format!("parent {}", parents.join(" · "))))
+                        row.child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .child(format!("parent {}", parents.join(" · "))),
+                        )
                     }),
             );
 

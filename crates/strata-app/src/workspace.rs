@@ -38,7 +38,6 @@ use crate::style::Design;
 use crate::tabs::{CloseOutcome, SavedSession, SavedWindow, TabDeck};
 
 const DEFAULT_WINDOW_SIZE: (f32, f32) = (1360.0, 860.0);
-const DEFAULT_MIN_WINDOW_SIZE: (f32, f32) = (720.0, 480.0);
 
 /// Tracks open workspace windows so multi-window sessions survive quitting and
 /// closing one secondary window updates `session.json` cleanly.
@@ -1170,8 +1169,8 @@ pub(crate) fn open_tabs_window(
         .map_or_else(|| "Strata".to_owned(), Launch::title);
     let bounds = Bounds::centered(None, size(px(window_size.0), px(window_size.1)), cx);
     let min_size = size(
-        px(window_size.0.min(DEFAULT_MIN_WINDOW_SIZE.0)),
-        px(window_size.1.min(DEFAULT_MIN_WINDOW_SIZE.1)),
+        px(crate::style::MIN_WINDOW_SIZE.0),
+        px(crate::style::MIN_WINDOW_SIZE.1),
     );
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),

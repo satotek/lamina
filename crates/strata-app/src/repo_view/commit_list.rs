@@ -25,9 +25,77 @@ const AUTHOR_WIDTH: f32 = 150.0;
 const DATE_WIDTH: f32 = 96.0;
 const COMMIT_WIDTH: f32 = 64.0;
 
+/// A row's own left and right padding.
+const ROW_PADDING: f32 = 24.0;
+/// The gap between two of a row's cells.
+const CELL_GAP: f32 = 12.0;
+/// The narrowest the summary column gets before a fixed column drops instead.
+/// A summary narrower than this cannot show the start of a commit message.
+const DESCRIPTION_MIN_WIDTH: f32 = 110.0;
+
 /// Height of the column headings above the commit list. The splitter uses it
 /// to keep three rows visible under them.
 pub(super) const COMMIT_HEADER_HEIGHT: f32 = 28.0;
+
+/// Which of the commit list's fixed columns fit in the width it was given.
+///
+/// The summary column is the flexible one, so when a narrow window cannot hold
+/// every column the list gives up the date first and then the author, rather
+/// than squeezing the summary to nothing or letting the row run past the edge.
+/// The decision is made once per frame for the whole list, so rows do not
+/// change shape from one row to the next.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct CommitColumns {
+    author: bool,
+    date: bool,
+}
+
+impl CommitColumns {
+    /// The widest column set that leaves the summary its minimum, given the
+    /// widest graph column in the list.
+    pub(super) fn for_width(width: f32, graph_width: f32) -> Self {
+        [
+            Self {
+                author: true,
+                date: true,
+            },
+            Self {
+                author: true,
+                date: false,
+            },
+            Self {
+                author: false,
+                date: false,
+            },
+        ]
+        .into_iter()
+        .find(|columns| columns.fits(width, graph_width))
+        .unwrap_or(Self {
+            author: false,
+            date: false,
+        })
+    }
+
+    /// The cells a row has: the graph, the summary, the optional columns and
+    /// the short commit id.
+    fn cells(self) -> f32 {
+        3.0 + f32::from(self.author) + f32::from(self.date)
+    }
+
+    /// What the row reserves before the summary gets a share.
+    fn fixed_width(self, graph_width: f32) -> f32 {
+        ROW_PADDING
+            + graph_width
+            + COMMIT_WIDTH
+            + if self.author { AUTHOR_WIDTH } else { 0.0 }
+            + if self.date { DATE_WIDTH } else { 0.0 }
+            + CELL_GAP * (self.cells() - 1.0)
+    }
+
+    fn fits(self, width: f32, graph_width: f32) -> bool {
+        self.fixed_width(graph_width) + DESCRIPTION_MIN_WIDTH <= width
+    }
+}
 
 impl RepoView {
     /// Commit of the ref the sidebar last revealed. The field lives on
@@ -36,7 +104,12 @@ impl RepoView {
         self.revealed_commit
     }
 
-    pub(super) fn commit_pane(&self, entity: gpui::Entity<Self>, design: &Design) -> AnyElement {
+    pub(super) fn commit_pane(
+        &self,
+        entity: gpui::Entity<Self>,
+        design: &Design,
+        width: f32,
+    ) -> AnyElement {
         let Some(source) = self.source() else {
             return empty_pane("No repository", design);
         };
@@ -45,6 +118,9 @@ impl RepoView {
             return empty_pane("No commits yet", design);
         }
 
+        // The decision uses the widest graph in the list, not the row's own:
+        // columns that came and went between rows would read as noise.
+        let columns = CommitColumns::for_width(width, graph_canvas::indent(self.lanes.widest()));
         let now = style::now_epoch();
         let selection = self.selection.clone();
         let revealed = self.revealed_commit();
@@ -113,9 +189,17 @@ impl RepoView {
                     let element = if filtered {
                         // The graph is hidden while filtered: spaced-out rows
                         // would draw lanes that never existed between them.
-                        filtered_commit_row(id, &row, selected, revealed, &date, &row_design)
+                        filtered_commit_row(
+                            id,
+                            &row,
+                            selected,
+                            revealed,
+                            &date,
+                            &row_design,
+                            columns,
+                        )
                     } else {
-                        commit_row(id, &row, selected, revealed, &date, &row_design)
+                        commit_row(id, &row, selected, revealed, &date, &row_design, columns)
                     }
                     .cursor_pointer()
                     .on_click(move |event, window, cx| {
@@ -168,7 +252,7 @@ impl RepoView {
         };
 
         let mut column = div().flex().flex_col().flex_1().min_h_0().min_w_0();
-        column = column.child(commit_header(design));
+        column = column.child(commit_header(design, columns));
         if self.search.is_active() {
             column = column.child(self.search_bar(entity, design));
         }
@@ -255,7 +339,7 @@ impl RepoView {
 ///
 /// The graph has no heading of its own: every row indents its text by its own
 /// graph width, so there is no single left edge a "Graph" label could mark.
-fn commit_header(design: &Design) -> AnyElement {
+fn commit_header(design: &Design, columns: CommitColumns) -> AnyElement {
     div()
         .flex()
         .items_center()
@@ -270,8 +354,12 @@ fn commit_header(design: &Design) -> AnyElement {
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(design.muted)
         .child(div().flex_1().min_w_0().child("Description"))
-        .child(div().w(px(AUTHOR_WIDTH)).flex_none().child("Author"))
-        .child(div().w(px(DATE_WIDTH)).flex_none().child("Date"))
+        .when(columns.author, |header| {
+            header.child(div().w(px(AUTHOR_WIDTH)).flex_none().child("Author"))
+        })
+        .when(columns.date, |header| {
+            header.child(div().w(px(DATE_WIDTH)).flex_none().child("Date"))
+        })
         .child(div().w(px(COMMIT_WIDTH)).flex_none().child("Commit"))
         .into_any_element()
 }
@@ -292,6 +380,7 @@ fn commit_row(
     revealed: bool,
     date: &str,
     design: &Design,
+    columns: CommitColumns,
 ) -> gpui::Stateful<Div> {
     let avatar_color = design.avatar_color(&data.email);
     let initials = style::initials(&data.author);
@@ -352,33 +441,37 @@ fn commit_row(
                     )
                 }),
         )
-        .child(
-            div()
-                .w(px(AUTHOR_WIDTH))
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(7.0))
-                .overflow_hidden()
-                .child(crate::ui::avatar(initials.clone(), avatar_color, 18.0))
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(design.small()))
-                        .text_color(design.muted)
-                        .child(data.author.to_string()),
-                ),
-        )
-        .child(
-            div()
-                .w(px(DATE_WIDTH))
-                .flex_none()
-                .truncate()
-                .text_size(px(design.tiny()))
-                .text_color(design.muted)
-                .child(date.to_owned()),
-        )
+        .when(columns.author, |row| {
+            row.child(
+                div()
+                    .w(px(AUTHOR_WIDTH))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(7.0))
+                    .overflow_hidden()
+                    .child(crate::ui::avatar(initials.clone(), avatar_color, 18.0))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(design.small()))
+                            .text_color(design.muted)
+                            .child(data.author.to_string()),
+                    ),
+            )
+        })
+        .when(columns.date, |row| {
+            row.child(
+                div()
+                    .w(px(DATE_WIDTH))
+                    .flex_none()
+                    .truncate()
+                    .text_size(px(design.tiny()))
+                    .text_color(design.muted)
+                    .child(date.to_owned()),
+            )
+        })
         .child(
             div()
                 .w(px(COMMIT_WIDTH))
@@ -400,6 +493,7 @@ fn filtered_commit_row(
     revealed: bool,
     date: &str,
     design: &Design,
+    columns: CommitColumns,
 ) -> gpui::Stateful<Div> {
     let avatar_color = design.avatar_color(&data.email);
     let initials = style::initials(&data.author);
@@ -447,33 +541,37 @@ fn filtered_commit_row(
                     )
                 }),
         )
-        .child(
-            div()
-                .w(px(AUTHOR_WIDTH))
-                .flex_none()
-                .flex()
-                .items_center()
-                .gap(px(7.0))
-                .overflow_hidden()
-                .child(crate::ui::avatar(initials.clone(), avatar_color, 18.0))
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(design.small()))
-                        .text_color(design.muted)
-                        .child(data.author.to_string()),
-                ),
-        )
-        .child(
-            div()
-                .w(px(DATE_WIDTH))
-                .flex_none()
-                .truncate()
-                .text_size(px(design.tiny()))
-                .text_color(design.muted)
-                .child(date.to_owned()),
-        )
+        .when(columns.author, |row| {
+            row.child(
+                div()
+                    .w(px(AUTHOR_WIDTH))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .gap(px(7.0))
+                    .overflow_hidden()
+                    .child(crate::ui::avatar(initials.clone(), avatar_color, 18.0))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(design.small()))
+                            .text_color(design.muted)
+                            .child(data.author.to_string()),
+                    ),
+            )
+        })
+        .when(columns.date, |row| {
+            row.child(
+                div()
+                    .w(px(DATE_WIDTH))
+                    .flex_none()
+                    .truncate()
+                    .text_size(px(design.tiny()))
+                    .text_color(design.muted)
+                    .child(date.to_owned()),
+            )
+        })
         .child(
             div()
                 .w(px(COMMIT_WIDTH))
@@ -513,4 +611,79 @@ fn badge_chip(badge: &Badge<'_>, design: &Design) -> AnyElement {
 
 fn empty_pane(text: &str, design: &Design) -> AnyElement {
     crate::ui::empty_state(text, design).into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_date_goes_before_the_author() {
+        let graph = graph_canvas::indent(1);
+
+        let wide = CommitColumns::for_width(900.0, graph);
+        assert!(wide.author && wide.date, "a wide list keeps both columns");
+
+        let narrow = CommitColumns::for_width(500.0, graph);
+        assert!(
+            narrow.author && !narrow.date,
+            "a narrow list drops the date first"
+        );
+
+        let narrowest = CommitColumns::for_width(300.0, graph);
+        assert!(
+            !narrowest.author && !narrowest.date,
+            "the narrowest list keeps only the summary and the id"
+        );
+    }
+
+    #[test]
+    fn the_widest_column_set_that_leaves_the_summary_readable_wins() {
+        // A width no real window gives the list (the main area is at least
+        // 440 px at the app minimum) through to a maximised one, with a graph
+        // as narrow as one lane and as wide as the cap.
+        for width in (400..=1600).map(|width| width as f32) {
+            for lanes in [1, 4, graph_canvas::MAX_LANES] {
+                let graph = graph_canvas::indent(lanes);
+                let columns = CommitColumns::for_width(width, graph);
+                assert!(
+                    columns.fits(width, graph),
+                    "{} px with a {lanes} lane graph leaves the summary {} px",
+                    width,
+                    width - columns.fixed_width(graph)
+                );
+                let full = CommitColumns {
+                    author: true,
+                    date: true,
+                };
+                let no_date = CommitColumns {
+                    author: true,
+                    date: false,
+                };
+                if !columns.author {
+                    assert!(
+                        !no_date.fits(width, graph),
+                        "the author still fits at {width} px with {lanes} lanes"
+                    );
+                } else if !columns.date {
+                    assert!(
+                        !full.fits(width, graph),
+                        "the date still fits at {width} px with {lanes} lanes"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_app_minimum_window_keeps_the_author_but_drops_the_date() {
+        // The sidebar's share at the minimum leaves the list this width.
+        let width = crate::style::MIN_WINDOW_SIZE.0
+            - crate::repo_view::sidebar::width_for(crate::style::MIN_WINDOW_SIZE.0);
+        let graph = graph_canvas::indent(6);
+        let columns = CommitColumns::for_width(width, graph);
+        assert!(columns.author, "a 720 px window still names the author");
+        assert!(!columns.date, "the date is the first column to give way");
+        assert!(columns.fits(width, graph));
+    }
 }

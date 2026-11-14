@@ -183,7 +183,13 @@ impl RepoView {
                     .min_w_0()
                     .flex()
                     .items_center()
-                    .child(div().font_weight(FontWeight::MEDIUM).child(name.to_owned()))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .font_weight(FontWeight::MEDIUM)
+                            .child(name.to_owned()),
+                    )
                     .when_some(dir, |row, dir| {
                         row.child(
                             div()

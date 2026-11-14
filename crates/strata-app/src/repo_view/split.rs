@@ -87,6 +87,7 @@ impl RepoView {
         &self,
         entity: Entity<Self>,
         design: &Design,
+        width: f32,
         cx: &mut App,
     ) -> AnyElement {
         if self.details_maximized(cx) {
@@ -103,7 +104,7 @@ impl RepoView {
             .min_w_0()
             .min_h_0()
             .flex_none()
-            .child(self.commit_pane(entity.clone(), design));
+            .child(self.commit_pane(entity.clone(), design, width));
         list_pane = match measured {
             Some(area) => list_pane.h(px(ui::split_pixels(
                 fraction,
@@ -326,6 +327,43 @@ mod tests {
         gpui_component::init(cx);
         cx.set_global(Settings::default());
         bind(cx);
+    }
+
+    #[test]
+    fn the_details_split_keeps_both_minimums_at_the_minimum_window() {
+        let window = crate::style::MIN_WINDOW_SIZE.0;
+        let content = window - crate::repo_view::sidebar::width_for(window);
+        assert!(
+            content >= FILES_MIN_WIDTH + DIFF_MIN_WIDTH,
+            "a {window} px window leaves the details {content} px, less than its two minimum columns"
+        );
+
+        let files = ui::split_pixels(
+            DEFAULT_HISTORY_FILES_FRACTION,
+            content,
+            FILES_MIN_WIDTH,
+            DIFF_MIN_WIDTH,
+        );
+        assert!(
+            files >= FILES_MIN_WIDTH,
+            "the saved fraction must clamp up to the file column's minimum"
+        );
+        assert!(
+            content - files >= DIFF_MIN_WIDTH,
+            "the diff keeps its minimum beside the file column"
+        );
+    }
+
+    #[test]
+    fn a_details_area_below_both_minimums_still_fills_only_its_own_width() {
+        let area = 320.0;
+        let files = ui::split_pixels(0.9, area, FILES_MIN_WIDTH, DIFF_MIN_WIDTH);
+        let expected = area * FILES_MIN_WIDTH / (FILES_MIN_WIDTH + DIFF_MIN_WIDTH);
+        assert!(
+            (files - expected).abs() < 1e-3,
+            "the panes divide in the minimums' own proportion rather than overflowing"
+        );
+        assert!(files > 0.0 && files < area);
     }
 
     /// Maximizing must not rebuild the list: the same scroll handle and the

@@ -233,9 +233,10 @@ impl RepoView {
                     }),
             );
 
-        // Below the app's own minimum window size the search is the one part
-        // with nowhere left to go; a field too narrow to use is worse than
-        // losing it, and keeping it would push the actions off screen.
+        // The search field is dropped only when even the barest name row
+        // leaves no usable width for it, which is below the app's own minimum
+        // window size. A field too narrow to use is worse than losing it, and
+        // keeping it would push the actions off screen.
         let search_pane = fit.search.then(|| {
             div()
                 .flex()
@@ -350,19 +351,34 @@ const MIN_SEARCH_WIDTH: f32 = 120.0;
 /// The widest the search field grows; the design's width for it.
 const MAX_SEARCH_WIDTH: f32 = 420.0;
 
+/// The search field keeps the `Ctrl F` hint only while there is room for both
+/// the hint and a readable amount of query text beside it.
+const KEY_HINT_BELOW: f32 = 1500.0;
+const KEY_HINT_MIN_SEARCH_WIDTH: f32 = 240.0;
+
+/// The narrowest the back button gets: its arrow alone, with the parent name
+/// left to the tooltip.
+const MIN_BACK_WIDTH: f32 = 20.0;
+
+/// The narrowest the name chips get before the search field is given up.
+const MIN_REPOSITORY_WIDTH: f32 = 70.0;
+const MIN_BRANCH_WIDTH: f32 = 60.0;
+
 /// What the title bar shows at a given window width.
 ///
 /// The actions on the right always stay in the window, down to the 720 px
-/// minimum size, so everything between them and the app mark gives way in
-/// steps as the window narrows: the search hint, then the wordmark, the
-/// upstream tracking label, and finally the branch chip. In the narrowest
-/// tier the remote buttons themselves become icons, which keeps the search
-/// and the back button in the bar. The name caps are what the row reserves; a
-/// longer name truncates inside its cap.
+/// minimum size. Everything between them and the app mark gives way in one
+/// order as the window narrows: the search hint, the wordmark, the upstream
+/// tracking label, the remote buttons' labels, the repository and branch caps,
+/// the back button's label, and finally the branch chip. The search field is
+/// the last thing to go: it is the only part with no icon-only form, so it is
+/// narrowed to [`MIN_SEARCH_WIDTH`] before it disappears. The name caps are
+/// what the row reserves; a longer name truncates inside its cap.
 #[derive(Clone, Copy, Debug)]
 struct TitleBarFit {
-    /// The search column. It is dropped only below the app's minimum window
-    /// size, where keeping it would push the actions off screen.
+    /// The search column. It is dropped only when even the barest name row
+    /// leaves no usable width for it, which is below the app's minimum window
+    /// size.
     search: bool,
     /// The "STRATA" wordmark next to the app mark.
     wordmark: bool,
@@ -385,93 +401,101 @@ struct TitleBarFit {
 
 impl TitleBarFit {
     fn new(width: f32, has_back: bool) -> Self {
-        // The caps and the details that only fit on wide windows. Each step
-        // down frees roughly the width the step above it adds.
         let (repository_width, branch_width, branch, track, wordmark, back_label, back_width) =
-            if !has_back {
-                if width >= 1500.0 {
-                    (220.0, 240.0, true, true, true, false, 0.0)
-                } else if width >= 1300.0 {
-                    (180.0, 200.0, true, true, false, false, 0.0)
-                } else if width >= 1100.0 {
-                    (160.0, 160.0, true, false, false, false, 0.0)
-                } else if width >= 900.0 {
-                    (100.0, 80.0, true, false, false, false, 0.0)
-                } else if width >= REMOTE_ICONS_BELOW {
-                    (100.0, 0.0, false, false, false, false, 0.0)
-                } else {
-                    (70.0, 0.0, false, false, false, false, 0.0)
-                }
-            } else if width >= 1500.0 {
-                (180.0, 200.0, true, true, true, true, 140.0)
-            } else if width >= 1300.0 {
-                (150.0, 170.0, true, true, false, true, 120.0)
-            } else if width >= 1100.0 {
-                (130.0, 130.0, true, false, false, true, 100.0)
-            } else if width >= 1000.0 {
-                (90.0, 60.0, true, false, false, true, 80.0)
-            } else if width >= REMOTE_ICONS_BELOW {
-                (90.0, 0.0, false, false, false, true, 80.0)
-            } else {
-                (70.0, 0.0, false, false, false, false, 20.0)
-            };
-        let stash_label = width >= 1300.0;
-        let remote_compact = width < REMOTE_ICONS_BELOW;
-        let actions = if stash_label {
-            ACTIONS_WIDTH
-        } else if remote_compact {
-            NARROW_ACTIONS_WIDTH
-        } else {
-            COMPACT_ACTIONS_WIDTH
-        };
-        let names = Self::names_width(
+            Self::tier(width, has_back);
+        let mut fit = Self {
+            search: false,
             wordmark,
-            has_back,
-            back_width,
-            repository_width,
-            branch,
-            branch_width,
-            track,
-        );
-        let available = width - TITLE_BAR_CHROME - actions - names;
-        let search = available >= MIN_SEARCH_WIDTH;
-        let search_width = if search {
-            available.min(MAX_SEARCH_WIDTH)
-        } else {
-            0.0
-        };
-        Self {
-            search,
-            wordmark,
-            key_hint: width >= 1500.0,
+            key_hint: false,
             branch,
             track,
-            stash_label,
-            remote_compact,
+            stash_label: width >= 1300.0,
+            remote_compact: width < REMOTE_ICONS_BELOW,
             back_label,
             back_width,
             repository_width,
             branch_width,
-            search_width,
+            search_width: 0.0,
+        };
+        // The search field is the last part to go. Everything cheaper gives
+        // way first, so a window with a back button keeps a field it can
+        // actually type into instead of losing it whole.
+        while fit.available(width) < MIN_SEARCH_WIDTH && fit.shed() {}
+        let available = fit.available(width);
+        fit.search = available >= MIN_SEARCH_WIDTH;
+        fit.search_width = if fit.search {
+            available.min(MAX_SEARCH_WIDTH)
+        } else {
+            0.0
+        };
+        fit.key_hint = width >= KEY_HINT_BELOW && fit.search_width >= KEY_HINT_MIN_SEARCH_WIDTH;
+        fit
+    }
+
+    /// The detail tier the window is wide enough for, before the search field
+    /// has had its say. Each step down frees roughly the width the step above
+    /// it adds.
+    fn tier(width: f32, has_back: bool) -> (f32, f32, bool, bool, bool, bool, f32) {
+        if !has_back {
+            if width >= 1500.0 {
+                (220.0, 240.0, true, true, true, false, 0.0)
+            } else if width >= 1300.0 {
+                (180.0, 200.0, true, true, false, false, 0.0)
+            } else if width >= 1100.0 {
+                (160.0, 160.0, true, false, false, false, 0.0)
+            } else if width >= 900.0 {
+                (100.0, 80.0, true, false, false, false, 0.0)
+            } else if width >= REMOTE_ICONS_BELOW {
+                (100.0, 0.0, false, false, false, false, 0.0)
+            } else {
+                (70.0, 0.0, false, false, false, false, 0.0)
+            }
+        } else if width >= 1500.0 {
+            (180.0, 200.0, true, true, true, true, 140.0)
+        } else if width >= 1300.0 {
+            (150.0, 170.0, true, true, false, true, 120.0)
+        } else if width >= 1100.0 {
+            (130.0, 130.0, true, false, false, true, 100.0)
+        } else if width >= 1000.0 {
+            (90.0, 60.0, true, false, false, true, 80.0)
+        } else if width >= REMOTE_ICONS_BELOW {
+            (90.0, 0.0, false, false, false, true, 80.0)
+        } else {
+            (70.0, 0.0, false, false, false, false, MIN_BACK_WIDTH)
         }
+    }
+
+    /// The width the actions row reserves for the details it currently shows.
+    ///
+    /// The middle case is only reached while `shed` is still deciding: the
+    /// stash label is the last of the wide-window details to go, and once the
+    /// search has room, the loop stops with it still in place.
+    fn actions_width(&self) -> f32 {
+        match (self.stash_label, self.remote_compact) {
+            (true, false) => ACTIONS_WIDTH,
+            (false, false) => COMPACT_ACTIONS_WIDTH,
+            (false, true) => NARROW_ACTIONS_WIDTH,
+            (true, true) => actions_width(COMPACT_REMOTE_ACTIONS_WIDTH, 52.0),
+        }
+    }
+
+    /// What is left for the search field once the name row and the actions
+    /// have taken their share of `width`.
+    fn available(&self, width: f32) -> f32 {
+        width - TITLE_BAR_CHROME - self.actions_width() - self.reserved_names()
     }
 
     /// The widest the name chips get: the app mark and optional wordmark, the
     /// gaps and the divider, then the chips with their padding, icons and
     /// chevrons, and the tracking label when it is shown.
-    fn names_width(
-        wordmark: bool,
-        has_back: bool,
-        back_width: f32,
-        repository_width: f32,
-        branch: bool,
-        branch_width: f32,
-        track: bool,
-    ) -> f32 {
+    ///
+    /// This is a reservation, not a measurement: a long repository or branch
+    /// name truncates inside its cap instead of widening the row.
+    fn reserved_names(&self) -> f32 {
         // App mark, the wordmark and its gap, three 8 px row gaps, the divider
         // with its margins, and the repository chip's own padding and icons.
         let mut width = style::BRAND_MARK
-            + if wordmark {
+            + if self.wordmark {
                 style::wordmark_width(style::BRAND_WORDMARK) + 7.0
             } else {
                 0.0
@@ -479,20 +503,47 @@ impl TitleBarFit {
             + 24.0
             + 9.0
             + 59.0
-            + repository_width;
-        if has_back {
+            + self.repository_width;
+        if self.back_label || self.back_width > 0.0 {
             // The row gap and the small ghost button's horizontal padding.
-            width += 8.0 + 16.0 + back_width;
+            width += 8.0 + 16.0 + self.back_width;
         }
-        if branch {
+        if self.branch {
             // The row gap, the branch chip's padding, glyph and chevron, then
             // the upstream label and its gap.
-            width += 8.0 + 58.0 + branch_width;
-            if track {
+            width += 8.0 + 58.0 + self.branch_width;
+            if self.track {
                 width += 76.0;
             }
         }
         width
+    }
+
+    /// Gives up one detail, the least costly first, to make room for the
+    /// search field. Returns false once nothing else may give way.
+    fn shed(&mut self) -> bool {
+        if self.track {
+            self.track = false;
+        } else if self.wordmark {
+            self.wordmark = false;
+        } else if !self.remote_compact {
+            // Icons keep Fetch, Pull and Push reachable through their tooltips.
+            self.remote_compact = true;
+        } else if self.stash_label {
+            self.stash_label = false;
+        } else if self.repository_width > MIN_REPOSITORY_WIDTH {
+            self.repository_width = MIN_REPOSITORY_WIDTH;
+        } else if self.back_label {
+            self.back_label = false;
+            self.back_width = MIN_BACK_WIDTH;
+        } else if self.branch && self.branch_width > MIN_BRANCH_WIDTH {
+            self.branch_width = MIN_BRANCH_WIDTH;
+        } else if self.branch {
+            self.branch = false;
+        } else {
+            return false;
+        }
+        true
     }
 }
 
@@ -636,56 +687,80 @@ mod tests {
     use super::*;
 
     fn used(fit: &TitleBarFit) -> f32 {
-        let names = TitleBarFit::names_width(
-            fit.wordmark,
-            fit.back_width > 0.0,
-            fit.back_width,
-            fit.repository_width,
-            fit.branch,
-            fit.branch_width,
-            fit.track,
-        );
-        let actions = if fit.stash_label {
-            ACTIONS_WIDTH
-        } else if fit.remote_compact {
-            NARROW_ACTIONS_WIDTH
-        } else {
-            COMPACT_ACTIONS_WIDTH
-        };
-        names + actions + TITLE_BAR_CHROME + fit.search_width
+        fit.reserved_names() + fit.actions_width() + TITLE_BAR_CHROME + fit.search_width
+    }
+
+    /// Every width from the app's minimum to a maximised window, at 1 px
+    /// steps, which covers the widths a hand check runs at.
+    fn widths() -> impl Iterator<Item = f32> {
+        (style::MIN_WINDOW_SIZE.0 as u32..=1920).map(|width| width as f32)
     }
 
     #[test]
     fn the_actions_stay_inside_the_window_at_every_width() {
-        // The app's 720 px minimum up to a maximised window, which includes
-        // the 800, 1000, 1100, 1300 and 1600 px widths the title bar is
-        // checked at by hand.
-        for width in (720..=1920).map(|width| width as f32) {
-            let fit = TitleBarFit::new(width, false);
-            assert!(
-                used(&fit) <= width,
-                "the title bar needs {} px of a {width} px window, which pushes the actions off screen",
-                used(&fit)
-            );
-            assert!(
-                !fit.search || fit.search_width >= MIN_SEARCH_WIDTH,
-                "the search field collapses below a usable width at {width} px"
-            );
-            assert!(
-                fit.search || width < 720.0,
-                "the search stays in the bar at the app's minimum window size"
-            );
+        for width in widths() {
+            for has_back in [false, true] {
+                let fit = TitleBarFit::new(width, has_back);
+                let label = if has_back {
+                    "with back button"
+                } else {
+                    "without"
+                };
+                assert!(
+                    used(&fit) <= width,
+                    "{label}, the title bar needs {} px of a {width} px window, which pushes the actions off screen",
+                    used(&fit)
+                );
+                assert!(
+                    fit.search,
+                    "{label}, the search field must survive at the {width} px app minimum"
+                );
+                assert!(
+                    fit.search_width >= MIN_SEARCH_WIDTH,
+                    "{label}, the search field collapses below a usable width at {width} px"
+                );
+            }
+        }
+    }
 
-            let fit_with_back = TitleBarFit::new(width, true);
+    #[test]
+    fn a_back_button_never_costs_the_search_field_in_the_760_to_850_range() {
+        // The regression: the tier that keeps the back button's label used to
+        // reserve so much that the search was dropped whole, leaving a gap
+        // even though a narrower field still fits.
+        for width in 760..=850 {
+            let fit = TitleBarFit::new(width as f32, true);
             assert!(
-                used(&fit_with_back) <= width,
-                "with back button, title bar needs {} px of a {width} px window",
-                used(&fit_with_back)
+                fit.search && fit.search_width >= MIN_SEARCH_WIDTH,
+                "the search field vanishes at {width} px with a back button"
             );
-            assert!(
-                !fit_with_back.search || fit_with_back.search_width >= MIN_SEARCH_WIDTH,
-                "with back button, search field collapses below a usable width at {width} px"
-            );
+            assert!(used(&fit) <= width as f32, "{width} px");
+        }
+    }
+
+    #[test]
+    fn a_long_repository_or_branch_name_cannot_widen_the_bar() {
+        // The chips truncate their text inside the cap the fit reserved, so a
+        // long name takes the same width as a short one. What has to hold is
+        // that the reservation stays within the caps and the row, both with
+        // and without the back button.
+        for width in widths() {
+            for has_back in [false, true] {
+                let fit = TitleBarFit::new(width, has_back);
+                assert!(
+                    (MIN_REPOSITORY_WIDTH..=220.0).contains(&fit.repository_width),
+                    "repository cap {} at {width} px",
+                    fit.repository_width
+                );
+                if fit.branch {
+                    assert!(
+                        (MIN_BRANCH_WIDTH..=240.0).contains(&fit.branch_width),
+                        "branch cap {} at {width} px",
+                        fit.branch_width
+                    );
+                }
+                assert!(used(&fit) <= width, "{has_back} at {width} px");
+            }
         }
     }
 
@@ -721,16 +796,21 @@ mod tests {
     #[test]
     fn the_remote_buttons_drop_their_labels_in_the_narrowest_tier() {
         assert!(!TitleBarFit::new(REMOTE_ICONS_BELOW, false).remote_compact);
-        assert!(!TitleBarFit::new(REMOTE_ICONS_BELOW, true).remote_compact);
         assert!(TitleBarFit::new(REMOTE_ICONS_BELOW - 1.0, false).remote_compact);
         assert!(TitleBarFit::new(REMOTE_ICONS_BELOW - 1.0, true).remote_compact);
 
+        // Next to the back button's label the actions are the cheapest thing
+        // to shrink, so the icons come one tier earlier than the window does.
+        let at_tier = TitleBarFit::new(REMOTE_ICONS_BELOW, true);
+        assert!(at_tier.remote_compact);
+        assert!(at_tier.search && at_tier.search_width >= MIN_SEARCH_WIDTH);
+
         // The width the icons free is what keeps a usable search field next to
         // the back button at the app's minimum window size.
-        let fit = TitleBarFit::new(720.0, true);
+        let fit = TitleBarFit::new(style::MIN_WINDOW_SIZE.0, true);
         assert!(fit.remote_compact);
         assert!(fit.search && fit.search_width >= MIN_SEARCH_WIDTH);
-        assert!(used(&fit) <= 720.0);
+        assert!(used(&fit) <= style::MIN_WINDOW_SIZE.0);
     }
 
     #[test]
@@ -762,8 +842,11 @@ mod tests {
         assert!(default_fit.branch && default_fit.track);
         assert!(default_fit.search && default_fit.search_width >= MIN_SEARCH_WIDTH);
 
-        let narrow_fit = TitleBarFit::new(720.0, true);
-        assert!(!narrow_fit.back_label, "label drops to icon-only at 720 px");
+        let narrow_fit = TitleBarFit::new(style::MIN_WINDOW_SIZE.0, true);
+        assert!(
+            !narrow_fit.back_label,
+            "the label drops to icon-only at the app minimum"
+        );
         assert!(
             narrow_fit.remote_compact,
             "the remote labels give way before the search does"
@@ -772,6 +855,6 @@ mod tests {
             narrow_fit.search && narrow_fit.search_width >= MIN_SEARCH_WIDTH,
             "the compact remote row leaves the search its usable width"
         );
-        assert!(used(&narrow_fit) <= 720.0);
+        assert!(used(&narrow_fit) <= style::MIN_WINDOW_SIZE.0);
     }
 }

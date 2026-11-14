@@ -144,7 +144,13 @@ impl Render for RepoView {
         if let Some((path, error)) = &self.error {
             root = root.child(self.error_screen(path, error, &design));
         } else {
-            let sidebar = self.sidebar(cx, &design);
+            // The body is laid out from the window width rather than from
+            // measured bounds: the sidebar, the commit list's columns and the
+            // title bar all decide what they show in the same frame.
+            let viewport_width = window.viewport_size().width.as_f32();
+            let sidebar_width = super::sidebar::width_for(viewport_width);
+            let content_width = (viewport_width - sidebar_width).max(0.0);
+            let sidebar = self.sidebar(cx, &design, sidebar_width);
             // The worktree view owns the main area while it is open; a file
             // history belongs to the history view, so it is dropped instead of
             // coming back stale.
@@ -158,7 +164,9 @@ impl Render for RepoView {
                 self.compare_view(entity.clone(), cx)
             } else {
                 match self.mode {
-                    MainMode::History => self.history_split(entity.clone(), &design, cx),
+                    MainMode::History => {
+                        self.history_split(entity.clone(), &design, content_width, cx)
+                    }
                     MainMode::Worktree => self.worktree_view(entity.clone(), window, cx),
                     MainMode::Reflog => self.reflog_view(entity.clone(), &design, cx),
                 }
