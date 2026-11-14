@@ -643,6 +643,9 @@ impl RepoView {
                 view.session = Some(*session);
                 view.search.init_input(window, cx);
                 view.sync_autofetch(cx);
+                if view.active {
+                    view.publish_repository(cx);
+                }
             }
             Launch::Error { path, error } => view.error = Some((path, error)),
         }
@@ -712,6 +715,19 @@ impl RepoView {
         }
     }
 
+    /// Tells the config viewer which repository the next command opens.
+    fn publish_repository(&self, cx: &mut App) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let repo = session.repo();
+        let path = repo
+            .workdir()
+            .unwrap_or_else(|| repo.git_dir())
+            .to_path_buf();
+        crate::git_config_view::set_repository(path, cx);
+    }
+
     pub(crate) fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
         if self.active == active {
             return;
@@ -719,6 +735,7 @@ impl RepoView {
         self.active = active;
         self.sync_autofetch(cx);
         if active {
+            self.publish_repository(cx);
             if std::mem::take(&mut self.pending_sync) {
                 self.sync_after_snapshot(cx);
             }

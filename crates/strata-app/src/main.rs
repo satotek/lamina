@@ -26,6 +26,7 @@ mod diff_view;
 mod external_tools;
 mod fake;
 mod file_history;
+mod git_config_view;
 mod graph_canvas;
 mod metrics;
 mod palette;
@@ -95,6 +96,7 @@ fn main() {
         workspace::init(cx);
         actions::bind(cx);
         settings_view::bind(cx);
+        git_config_view::bind(cx);
         worktree_panel::bind(cx);
         branches::bind(cx);
         branch_switcher::bind(cx);

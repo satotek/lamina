@@ -25,6 +25,7 @@ use gpui_kit_assets::IconName;
 
 use super::SIDEBAR_MAX;
 use super::change::{self, Section};
+use crate::actions::OpenGitConfig;
 use crate::settings::{self, DateFormat, DiffLayout, Settings, ThemeMode};
 use crate::style::Design;
 
@@ -402,6 +403,36 @@ fn tools(control: f32, design: &Design) -> SettingPage {
                 ),
             ),
         )
+        .groups(card("Repository").item(SettingItem::render(|_, _, cx| {
+            let design = Design::new(cx.theme(), Settings::get(cx));
+            let available = crate::git_config_view::has_repository(cx);
+            v_flex()
+                .gap_1()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            crate::ui::button("open-git-config", "Show Git config")
+                                .size(crate::ui::ButtonSize::Small)
+                                .disabled(!available)
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(Box::new(OpenGitConfig), cx);
+                                }),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(design.tiny()))
+                                .text_color(design.muted)
+                                .child(if available {
+                                    "Every effective value and the file that set it."
+                                } else {
+                                    "Open a repository to inspect its configuration."
+                                }),
+                        ),
+                )
+                .into_any_element()
+        })))
         .groups(
             card("Editor and terminal").items([
                 SettingItem::new(

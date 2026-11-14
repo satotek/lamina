@@ -28,9 +28,9 @@ use gpui_component::dialog::DialogEntrance;
 use gpui_component::input::{Input, InputEvent, InputState};
 
 use crate::actions::{
-    CloneRepository, CloseTab, NavigateBack, NewRepository, NewTab, NextTab, OpenInEditor,
-    OpenRepository, OpenSettings, OpenTerminalHere, PreviousTab, Quit, SelectTab1, SelectTab2,
-    SelectTab3, SelectTab4, SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9,
+    CloneRepository, CloseTab, NavigateBack, NewRepository, NewTab, NextTab, OpenGitConfig,
+    OpenInEditor, OpenRepository, OpenSettings, OpenTerminalHere, PreviousTab, Quit, SelectTab1,
+    SelectTab2, SelectTab3, SelectTab4, SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9,
     StashChanges, SwitchBranch, ToggleDetailsMaximized, ToggleFrameStats, TogglePalette,
     UndoLastAction,
 };
@@ -190,6 +190,11 @@ const COMMANDS: &[Command] = &[
         label: "Open settings",
         action: || Box::new(OpenSettings),
         needs_repo: false,
+    },
+    Command {
+        label: "Show Git Config",
+        action: || Box::new(OpenGitConfig),
+        needs_repo: true,
     },
     Command {
         label: "Search commits",

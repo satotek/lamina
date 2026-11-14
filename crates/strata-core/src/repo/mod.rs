@@ -9,12 +9,14 @@
 //! and `worktrees.rs` list the checkouts a repository owns beyond its own
 //! working tree. `blame.rs` attributes each line of a file to a commit.
 //! `in_progress.rs` reads details of an unfinished merge, rebase, cherry-pick,
-//! revert, bisect or `am`.
+//! revert, bisect or `am`. `config.rs` reports every effective configuration
+//! value with the file and line that set it, without writing anything.
 
 mod blame;
 mod bloom;
 mod commit_graph;
 mod compare;
+mod config;
 mod conflicts;
 mod history;
 mod in_progress;
@@ -36,6 +38,11 @@ pub use commit_graph::{
     DEFAULT_MIN_WALK,
 };
 pub use compare::{CompareFile, CompareMode, Comparison};
+pub use config::{
+    ConfigEntry, ConfigIdentity, ConfigInclude, ConfigLayer, ConfigOrigin, ConfigSources,
+    ConfigValue, GitConfig, IncludeConditionKind, ValueRule, WELL_KNOWN_KEYS, WellKnownKey,
+    well_known_key,
+};
 pub use history::{PathHistory, PathHistoryEntries, PathHistoryEntry};
 pub use in_progress::{InProgressCommit, InProgressDetails, RebaseOnto};
 pub use log::CommitWalk;

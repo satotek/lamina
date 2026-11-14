@@ -39,6 +39,9 @@ actions!(
         Quit,
         /// Opens the settings window. Handled globally by `settings_view`.
         OpenSettings,
+        /// Opens the read-only git config viewer for the active repository.
+        /// Handled globally by `git_config_view`.
+        OpenGitConfig,
         /// Opens another repository (picker, recent list). Handled by the
         /// workspace.
         OpenRepository,
