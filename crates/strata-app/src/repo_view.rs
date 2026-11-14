@@ -22,6 +22,7 @@ mod rebase_dialog;
 pub(crate) mod rebase_onto;
 mod rebase_plan;
 mod sidebar;
+mod split;
 mod status_bar;
 mod title_bar;
 mod tree_view;
@@ -61,8 +62,6 @@ use commit_selection::CommitSelection;
 
 use in_progress::{FinishedOperation, InProgress};
 
-/// Height of the diff pane below the commit list.
-const DIFF_HEIGHT: f32 = 360.0;
 /// How many rows a `PageUp`/`PageDown` moves.
 const PAGE: isize = 15;
 /// The smoke run scrolls this far every frame.
@@ -387,6 +386,9 @@ pub struct RepoView {
     commit_scroll: UniformListScrollHandle,
     diff_scroll: UniformListScrollHandle,
     file_scroll: UniformListScrollHandle,
+    /// Measured extents of the two draggable History boundaries, refreshed
+    /// after every layout pass.
+    splits: split::SplitExtents,
     focus: FocusHandle,
 
     files: Option<Vec<FileChange>>,
@@ -545,6 +547,7 @@ impl RepoView {
             commit_scroll: UniformListScrollHandle::default(),
             diff_scroll: UniformListScrollHandle::default(),
             file_scroll: UniformListScrollHandle::default(),
+            splits: split::SplitExtents::default(),
             focus,
             files: None,
             files_epoch: 0,

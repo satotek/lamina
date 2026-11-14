@@ -31,7 +31,7 @@ use crate::actions::{
     CloneRepository, CloseTab, NavigateBack, NewRepository, NewTab, NextTab, OpenInEditor,
     OpenRepository, OpenSettings, OpenTerminalHere, PreviousTab, Quit, SelectTab1, SelectTab2,
     SelectTab3, SelectTab4, SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9,
-    StashChanges, ToggleFrameStats, TogglePalette,
+    StashChanges, ToggleDetailsMaximized, ToggleFrameStats, TogglePalette,
 };
 use crate::branches::CreateBranchFromHead;
 use crate::remote::{FetchRemotes, PullBranch, PushBranch};
@@ -233,6 +233,11 @@ const COMMANDS: &[Command] = &[
     Command {
         label: "Show history",
         action: || Box::new(ShowHistory),
+        needs_repo: true,
+    },
+    Command {
+        label: "Toggle details maximized",
+        action: || Box::new(ToggleDetailsMaximized),
         needs_repo: true,
     },
     Command {

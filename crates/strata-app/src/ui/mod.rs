@@ -19,6 +19,7 @@ mod focus;
 pub(crate) mod gallery;
 mod menu;
 mod row;
+mod split;
 mod tab;
 mod text;
 
@@ -29,5 +30,6 @@ pub use confirm::{Confirm, confirm, confirm_with};
 pub(crate) use focus::focus_input;
 pub use menu::{context_menu, menu_label};
 pub use row::{RowState, RowTipExt, list_row, row_surface};
+pub use split::{SplitExtent, clamp_fraction, split_handle, split_pixels};
 pub use tab::{tab, tab_strip};
 pub use text::{empty_state, message, section_header};

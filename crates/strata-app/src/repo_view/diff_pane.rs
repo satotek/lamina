@@ -4,16 +4,17 @@
 use std::rc::Rc;
 
 use gpui::prelude::*;
-use gpui::{AnyElement, App, FontWeight, Hsla, IntoElement, ParentElement, Styled, div, px};
+use gpui::{
+    AnyElement, App, Axis, FontWeight, Hsla, IntoElement, ParentElement, Styled, div, px, relative,
+};
 use gpui_component::ActiveTheme as _;
+use gpui_kit_assets::IconName;
 use strata_core::session::DiffView;
 
-use super::{DIFF_HEIGHT, RepoView};
+use super::RepoView;
 use crate::diff_view::{self, DiffColors, Row as DiffRow};
 use crate::style::{self, Design};
-
-/// Width of the commit metadata column, matching the design's details pane.
-const DETAILS_WIDTH: f32 = 320.0;
+use crate::ui::{self, ButtonSize, split_handle};
 
 impl RepoView {
     pub(super) fn diff_pane(&self, design: &Design, cx: &mut App) -> AnyElement {
@@ -31,35 +32,55 @@ impl RepoView {
             Rc::clone(&self.diff_rows)
         };
 
-        let left = if self.selection.is_multi() {
-            div()
-                .flex()
-                .flex_col()
-                .w(px(DETAILS_WIDTH))
-                .flex_none()
-                .min_h_0()
-                .border_r_1()
-                .border_color(design.border)
-                .bg(design.panel)
-                .child(self.commit_selection_summary(design))
+        // The column keeps its share of the area as the window changes; the
+        // splitter only rewrites the share.
+        let mut left = div()
+            .relative()
+            .flex()
+            .flex_col()
+            .flex_none()
+            .min_h_0()
+            .min_w_0()
+            .border_r_1()
+            .border_color(design.border)
+            .bg(design.panel);
+        left = match self.details_column_width(cx) {
+            Some(width) => left.w(px(width)),
+            // Nothing has been laid out yet: the basis is the same share, so
+            // the first frame uses the same proportions as the measured ones.
+            None => left.flex_basis(relative(super::split::files_fraction(cx))),
+        };
+        left = if self.selection.is_multi() {
+            left.child(self.commit_selection_summary(design))
         } else {
             let source = self.source();
             let commit = self
                 .selected
                 .and_then(|index| source.as_ref().and_then(|source| source.commit(index)));
-            div()
-                .flex()
-                .flex_col()
-                .w(px(DETAILS_WIDTH))
-                .flex_none()
-                .min_h_0()
-                .border_r_1()
-                .border_color(design.border)
-                .bg(design.panel)
-                .child(self.commit_details(commit, design))
+            left.child(self.commit_details(commit, design))
                 .child(self.files_summary(design))
                 .child(self.file_list(design))
         };
+
+        let drag_entity = self.entity();
+        let reset_entity = drag_entity.clone();
+        let extent = self.splits.details.clone();
+        left = left.child(split_handle(
+            "details-split-handle",
+            Axis::Horizontal,
+            move |event, _window, cx| {
+                let Some(area) = extent.get() else {
+                    return;
+                };
+                let fraction = area.fraction_at(event.event.position.x);
+                drag_entity.update(cx, |this, cx| {
+                    this.set_files_fraction(fraction, area.size(), cx);
+                });
+            },
+            move |_event, _window, cx| {
+                reset_entity.update(cx, |this, cx| this.reset_files_fraction(cx));
+            },
+        ));
 
         let right =
             div()
@@ -76,7 +97,7 @@ impl RepoView {
                         .flex_col()
                         .flex_1()
                         .min_h_0()
-                        .child(self.diff_header(design, rows.len()))
+                        .child(self.diff_header(design, rows.len(), cx))
                         .child(if self.fake.is_some() {
                             self.diff_rows_list(rows, None, design, cx)
                         } else {
@@ -85,29 +106,38 @@ impl RepoView {
                         .into_any_element()
                 });
 
+        let measured_cell = self.splits.details.clone();
         div()
             .flex()
             .flex_col()
             .w_full()
-            .h(px(DIFF_HEIGHT))
-            .flex_none()
+            .h_full()
             .min_h_0()
+            .min_w_0()
             .bg(design.background)
-            .border_t_1()
-            .border_color(design.border)
+            .when(!self.details_maximized(cx), |pane| {
+                // The strip above and the list's own border already separate
+                // the details when they fill the view.
+                pane.border_t_1().border_color(design.border)
+            })
             .child(
                 div()
                     .flex()
                     .flex_1()
                     .min_h_0()
                     .min_w_0()
+                    .on_children_prepainted(move |bounds: Vec<gpui::Bounds<gpui::Pixels>>, _, _| {
+                        if let Some(area) = super::split::measure(&bounds, Axis::Horizontal) {
+                            measured_cell.set(Some(area));
+                        }
+                    })
                     .child(left)
                     .child(right),
             )
             .into_any_element()
     }
 
-    fn diff_header(&self, design: &Design, row_count: usize) -> AnyElement {
+    fn diff_header(&self, design: &Design, row_count: usize, cx: &App) -> AnyElement {
         let (path, kind) = match (&self.fake, &self.files, self.selected_file) {
             _ if self.fake.is_some() => ("synthetic diff".to_owned(), None),
             (_, Some(files), Some(index)) => match files.get(index) {
@@ -166,6 +196,28 @@ impl RepoView {
                     .text_color(design.muted)
                     .child(right),
             )
+            .child({
+                let maximized = self.details_maximized(cx);
+                let entity = self.entity();
+                ui::icon_button(
+                    "toggle-details-maximized",
+                    if maximized {
+                        IconName::Minimize
+                    } else {
+                        IconName::Maximize
+                    },
+                )
+                .size(ButtonSize::Tiny)
+                .ghost()
+                .tooltip(if maximized {
+                    "Restore the commit list"
+                } else {
+                    "Maximize details"
+                })
+                .on_click(move |_event, _window, cx| {
+                    entity.update(cx, |this, cx| this.toggle_details_maximized(cx));
+                })
+            })
             .into_any_element()
     }
 

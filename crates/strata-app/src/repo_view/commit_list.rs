@@ -25,6 +25,10 @@ const AUTHOR_WIDTH: f32 = 150.0;
 const DATE_WIDTH: f32 = 96.0;
 const COMMIT_WIDTH: f32 = 64.0;
 
+/// Height of the column headings above the commit list. The splitter uses it
+/// to keep three rows visible under them.
+pub(super) const COMMIT_HEADER_HEIGHT: f32 = 28.0;
+
 impl RepoView {
     /// Commit of the ref the sidebar last revealed. The field lives on
     /// [`RepoView`] because `reveal_ref` and `reveal_stash` set it there.
@@ -256,7 +260,7 @@ fn commit_header(design: &Design) -> AnyElement {
         .flex()
         .items_center()
         .gap_3()
-        .h(px(28.0))
+        .h(px(COMMIT_HEADER_HEIGHT))
         .flex_none()
         .pl(px(20.0))
         .pr(px(13.0))

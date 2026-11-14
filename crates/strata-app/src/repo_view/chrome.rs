@@ -17,7 +17,7 @@ use super::{PAGE, RepoView};
 use crate::actions::{
     self, ExtendSelectionNext, ExtendSelectionPrevious, NavigateBack, OpenInEditor,
     OpenTerminalHere, SelectFirst, SelectLast, SelectNext, SelectPageDown, SelectPageUp,
-    SelectPrevious, StashChanges, ToggleFrameStats,
+    SelectPrevious, StashChanges, ToggleDetailsMaximized, ToggleFrameStats,
 };
 use crate::branches::CreateBranchFromHead;
 use crate::data::Source;
@@ -79,6 +79,9 @@ impl Render for RepoView {
             .on_action(cx.listener(|this, _: &SelectFirst, _, cx| this.jump(0, cx)))
             .on_action(cx.listener(|this, _: &SelectLast, _, cx| this.select_last(cx)))
             .on_action(cx.listener(|this, _: &ToggleFrameStats, _, cx| this.toggle_frame_stats(cx)))
+            .on_action(cx.listener(|this, _: &ToggleDetailsMaximized, _, cx| {
+                this.toggle_details_maximized(cx)
+            }))
             .on_action(
                 cx.listener(|this, _: &FocusSearch, window, cx| this.focus_search(window, cx)),
             )
@@ -140,15 +143,7 @@ impl Render for RepoView {
                 self.file_history_view(entity.clone(), cx)
             } else {
                 match self.mode {
-                    MainMode::History => div()
-                        .flex()
-                        .flex_col()
-                        .flex_1()
-                        .min_w_0()
-                        .min_h_0()
-                        .child(self.commit_pane(entity.clone(), &design))
-                        .child(self.diff_pane(&design, cx))
-                        .into_any_element(),
+                    MainMode::History => self.history_split(entity.clone(), &design, cx),
                     MainMode::Worktree => self.worktree_view(entity.clone(), window, cx),
                 }
             };

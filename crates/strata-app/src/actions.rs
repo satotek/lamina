@@ -33,6 +33,9 @@ actions!(
         SelectFirst,
         SelectLast,
         ToggleFrameStats,
+        /// Gives the details area the whole history view, or restores the
+        /// split. Handled on `RepoView` by `repo_view::split`.
+        ToggleDetailsMaximized,
         Quit,
         /// Opens the settings window. Handled globally by `settings_view`.
         OpenSettings,
@@ -130,6 +133,9 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("k", SelectPrevious, navigation),
         KeyBinding::new("down", SelectNext, scope),
         KeyBinding::new("j", SelectNext, navigation),
+        // `z` is a letter, so it is text while a field has focus: the details
+        // toggle must not swallow it there.
+        KeyBinding::new("z", ToggleDetailsMaximized, navigation),
         KeyBinding::new("shift-up", ExtendSelectionPrevious, scope),
         KeyBinding::new("shift-down", ExtendSelectionNext, scope),
         KeyBinding::new("pageup", SelectPageUp, scope),

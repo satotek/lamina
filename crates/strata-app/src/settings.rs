@@ -25,6 +25,7 @@ pub struct Settings {
     pub appearance: Appearance,
     pub diff: DiffSettings,
     pub history: HistorySettings,
+    pub layout: LayoutSettings,
     pub behaviour: Behaviour,
     pub tools: Tools,
     pub privacy: Privacy,
@@ -128,6 +129,43 @@ impl Default for HistorySettings {
             show_tags: true,
             show_stashes: true,
             date_format: DateFormat::Relative,
+        }
+    }
+}
+
+/// Fraction of the History area's height the commit list takes when the user
+/// has not dragged the boundary.
+pub const DEFAULT_HISTORY_LIST_FRACTION: f32 = 0.55;
+/// Fraction of the details area's width the file list column takes by default.
+pub const DEFAULT_HISTORY_FILES_FRACTION: f32 = 0.28;
+
+/// The History view's draggable layout.
+///
+/// The fractions are the user's intent, not the pixels that happen to be on
+/// screen: a smaller window keeps the same proportions. The splitters clamp
+/// them to each side's minimum as they are applied, so a window too small for
+/// both minimums never makes one side disappear.
+///
+/// One value each for the whole app rather than one per tab: a boundary dragged
+/// in one repository is where the user expects it in the next.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LayoutSettings {
+    /// Share of the history area's height taken by the commit list.
+    pub history_list_fraction: f32,
+    /// Share of the details area's width taken by the file list column.
+    pub history_files_fraction: f32,
+    /// Whether the details area fills the history view and the commit list
+    /// collapses to a one-row strip.
+    pub history_details_maximized: bool,
+}
+
+impl Default for LayoutSettings {
+    fn default() -> Self {
+        Self {
+            history_list_fraction: DEFAULT_HISTORY_LIST_FRACTION,
+            history_files_fraction: DEFAULT_HISTORY_FILES_FRACTION,
+            history_details_maximized: false,
         }
     }
 }
@@ -480,6 +518,38 @@ mod tests {
         assert!(coalescer.take(third));
         assert!(!coalescer.take(third));
         assert!(!coalescer.pending());
+    }
+
+    #[test]
+    fn the_history_layout_survives_a_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+
+        let mut settings = Settings::default();
+        assert_eq!(
+            settings.layout.history_list_fraction,
+            DEFAULT_HISTORY_LIST_FRACTION
+        );
+        settings.layout.history_list_fraction = 0.42;
+        settings.layout.history_files_fraction = 0.31;
+        settings.layout.history_details_maximized = true;
+        settings.save(&path).unwrap();
+
+        let loaded = Settings::load(&path);
+        assert_eq!(loaded.layout, settings.layout);
+        assert!(loaded.layout.history_details_maximized);
+        assert!(
+            (loaded.layout.history_list_fraction - 0.42).abs() < f32::EPSILON,
+            "fractions are stored as fractions, not as the pixels of one window"
+        );
+    }
+
+    #[test]
+    fn a_file_without_the_layout_takes_the_default_split() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"appearance":{"theme":"dark"}}"#).unwrap();
+        assert_eq!(Settings::load(&path).layout, LayoutSettings::default());
     }
 
     #[test]
