@@ -11,6 +11,7 @@
 //! toolkit or an async runtime.
 
 mod blame;
+mod content_search;
 mod diffs;
 mod history;
 mod operations;
@@ -40,11 +41,13 @@ use crate::{
 
 pub use crate::diff::DiffOptions;
 pub use crate::repo::{
-    Blame, BlameCommit, BlameHunk, CompareFile, CompareMode, Comparison, InProgressCommit,
+    Blame, BlameCommit, BlameHunk, CompareFile, CompareMode, Comparison, ContentSearchEntry,
+    ContentSearchMode, ContentSearchProgress, ContentSearchQuery, InProgressCommit,
     InProgressDetails, RebaseOnto,
 };
 
 use blame::BlameJob;
+use content_search::ContentSearchJob;
 
 use diffs::DiffJob;
 use history::LoadCommand;
@@ -668,6 +671,26 @@ pub enum SessionEvent {
     PathHistoryDone {
         ticket: QueryTicket,
     },
+    /// One batch of a streaming content search (`-S` / `-G`), in `--date-order`,
+    /// paired with overall scan progress.
+    ContentSearchBatch {
+        ticket: QueryTicket,
+        matches: Arc<Vec<ContentSearchEntry>>,
+        scanned: usize,
+        total: usize,
+    },
+    /// Periodic progress update while scanning history without new matches.
+    ContentSearchProgress {
+        ticket: QueryTicket,
+        scanned: usize,
+        total: usize,
+    },
+    /// The streaming content search finished; every match has already arrived.
+    ContentSearchDone {
+        ticket: QueryTicket,
+        scanned: usize,
+        total: usize,
+    },
     /// Submodules and worktrees for a ticket from
     /// [`Session::request_submodules_and_worktrees`].
     SubmodulesAndWorktreesReady {
@@ -720,6 +743,7 @@ struct Senders {
     diffs: Sender<DiffJob>,
     queries: Sender<QueryJob>,
     blame: Sender<BlameJob>,
+    content_search: Sender<ContentSearchJob>,
     /// Ticket counter and cancellation set shared with the query workers.
     query_state: Arc<queries::QueryState>,
 }
@@ -772,6 +796,7 @@ impl Session {
         let diff_rx = Arc::new(Mutex::new(diff_rx));
         let (query_tx, query_rx) = mpsc::channel();
         let (blame_tx, blame_rx) = mpsc::channel();
+        let (content_search_tx, content_search_rx) = mpsc::channel();
         let query_state = Arc::new(queries::QueryState::new());
 
         let shared = Arc::new(Shared::new(repo, git, events, empty_snapshot()));
@@ -790,7 +815,7 @@ impl Session {
             },
         )?;
 
-        let mut threads = Vec::with_capacity(5 + DIFF_WORKERS);
+        let mut threads = Vec::with_capacity(6 + DIFF_WORKERS);
         threads.push(spawn("strata-session-history", {
             let shared = Arc::clone(&shared);
             move || history::run(shared, load_rx)
@@ -826,6 +851,13 @@ impl Session {
             let state = Arc::clone(&query_state);
             move || blame::run(shared, state, blame_rx)
         })?);
+        // Content search diffs trees across history, so it also gets its own
+        // worker thread and never delays commit stats or snapshot searches.
+        threads.push(spawn("strata-session-content-search", {
+            let shared = Arc::clone(&shared);
+            let state = Arc::clone(&query_state);
+            move || content_search::run(shared, state, content_search_rx)
+        })?);
 
         let session = Self {
             shared,
@@ -836,6 +868,7 @@ impl Session {
                 diffs: diff_tx,
                 queries: query_tx,
                 blame: blame_tx,
+                content_search: content_search_tx,
                 query_state,
             }),
             watcher: Some(watcher),
@@ -989,6 +1022,26 @@ impl Session {
             commit,
             path: path.into(),
         });
+        ticket
+    }
+
+    /// Streams commits whose first-parent diff matches `query` (`-S` or `-G`,
+    /// with optional path limit), in `--date-order`, respecting the session's
+    /// current [`HistoryScope`].
+    ///
+    /// Delivers [`SessionEvent::ContentSearchBatch`] and
+    /// [`SessionEvent::ContentSearchProgress`] events while scanning, followed
+    /// by [`SessionEvent::ContentSearchDone`], or
+    /// [`SessionEvent::QueryFailed`] on error. Cancelling the ticket stops the
+    /// walk and suppresses further events.
+    pub fn content_search_streaming(&self, query: ContentSearchQuery) -> QueryTicket {
+        let Some(senders) = &self.senders else {
+            return QueryTicket(0);
+        };
+        let ticket = senders.query_state.next_ticket();
+        let _ = senders
+            .content_search
+            .send(ContentSearchJob { ticket, query });
         ticket
     }
 

@@ -970,6 +970,28 @@ impl RepoView {
             SessionEvent::PathHistoryDone { ticket } => {
                 self.file_history_done(ticket, cx);
             }
+            SessionEvent::ContentSearchBatch {
+                ticket,
+                matches,
+                scanned,
+                total,
+            } => {
+                self.content_search_batch(ticket, &matches, scanned, total, cx);
+            }
+            SessionEvent::ContentSearchProgress {
+                ticket,
+                scanned,
+                total,
+            } => {
+                self.content_search_progress(ticket, scanned, total, cx);
+            }
+            SessionEvent::ContentSearchDone {
+                ticket,
+                scanned,
+                total,
+            } => {
+                self.content_search_done(ticket, scanned, total, cx);
+            }
             SessionEvent::BlameProgress {
                 ticket,
                 lines,
@@ -1559,16 +1581,20 @@ impl RepoView {
                 match result {
                     Ok((files, lfs)) => {
                         let empty = files.is_empty();
+                        let preferred = this
+                            .search
+                            .matched_path_for(commit)
+                            .and_then(|path| files.iter().position(|file| file.path == path))
+                            .unwrap_or(0);
                         this.files = Some(files);
                         this.files_lfs = Arc::new(lfs);
                         this.files_error = None;
                         if empty {
                             this.notify_if_active(cx);
                         } else {
-                            // The first file is what the diff pane shows by
-                            // default, so it is requested as soon as the list
-                            // arrives.
-                            this.select_file(0, cx);
+                            // Prefer the file that matched an active content
+                            // search; otherwise show the first file.
+                            this.select_file(preferred, cx);
                         }
                     }
                     Err(error) => {

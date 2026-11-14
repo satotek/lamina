@@ -11,6 +11,8 @@ use gpui::{
     AnyElement, Div, FontWeight, InteractiveElement, IntoElement, MouseButton, ParentElement,
     Styled, div, px, uniform_list,
 };
+use gpui_component::Sizable as _;
+use gpui_component::input::Input;
 use strata_core::{Oid, RefKind};
 
 use super::history_ops::{self, CommitTarget};
@@ -18,7 +20,7 @@ use super::{RepoView, one_line};
 use crate::data::{Badge, RowData};
 use crate::graph_canvas;
 use crate::scrollbar::WithScrollbar as _;
-use crate::search::{Field, SEARCH_BAR};
+use crate::search::{Field, SEARCH_BAR, SearchMode};
 use crate::style::{self, Design};
 
 const AUTHOR_WIDTH: f32 = 150.0;
@@ -246,14 +248,18 @@ impl RepoView {
         .flex_1();
 
         let body: AnyElement = if count == 0 {
-            empty_pane("No commits match the search", design)
+            if self.search.is_scanning() {
+                empty_pane("Searching commit contents…", design)
+            } else {
+                empty_pane("No commits match the search", design)
+            }
         } else {
             list.into_any_element()
         };
 
         let mut column = div().flex().flex_col().flex_1().min_h_0().min_w_0();
         column = column.child(commit_header(design, columns));
-        if self.search.is_active() {
+        if self.search.is_active() || self.search.mode().is_content() {
             column = column.child(self.search_bar(entity, design));
         }
         column = column.child(body);
@@ -274,9 +280,11 @@ impl RepoView {
     }
 
     /// Match toggles and the match count, shown only while a search filters
-    /// the list. The text field itself is in the title bar.
+    /// the list or a content search mode is selected. The text field itself is
+    /// in the title bar.
     fn search_bar(&self, entity: gpui::Entity<Self>, design: &Design) -> AnyElement {
-        let bar = div()
+        let mode = self.search.mode();
+        let mut bar = div()
             .flex()
             .items_center()
             .gap_2()
@@ -297,22 +305,62 @@ impl RepoView {
             .child(search_chip(
                 "summary",
                 Field::Summary,
+                mode,
                 self.search.fields(),
                 entity.clone(),
             ))
             .child(search_chip(
                 "author",
                 Field::Author,
+                mode,
                 self.search.fields(),
                 entity.clone(),
             ))
             .child(search_chip(
                 "hash",
                 Field::Hash,
+                mode,
                 self.search.fields(),
-                entity,
+                entity.clone(),
             ))
-            .child(div().flex_1());
+            .child(div().w(px(1.0)).h(px(14.0)).mx_0p5().bg(design.border))
+            .child(search_mode_chip(
+                "Content",
+                SearchMode::Content,
+                mode,
+                "Match commits changing substring count (-S)",
+                entity.clone(),
+            ))
+            .child(search_mode_chip(
+                "Content (regex)",
+                SearchMode::ContentRegex,
+                mode,
+                "Match commits whose diff adds or removes a regex-matching line (-G)",
+                entity,
+            ));
+
+        if mode.is_content()
+            && let Some(path_input) = self.search.path_input()
+        {
+            bar = bar.child(
+                div()
+                    .w(px(180.0))
+                    .h(px(22.0))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .rounded(px(5.0))
+                    .bg(design.field)
+                    .child(
+                        Input::new(path_input)
+                            .appearance(false)
+                            .bordered(false)
+                            .small(),
+                    ),
+            );
+        }
+
+        bar = bar.child(div().flex_1());
 
         let label = match self.search.error() {
             Some(error) => one_line(error),
@@ -321,7 +369,7 @@ impl RepoView {
         bar.child(
             div()
                 .flex_none()
-                .max_w(px(220.0))
+                .max_w(px(340.0))
                 .truncate()
                 .text_size(px(10.5))
                 .text_color(if self.search.error().is_some() {
@@ -587,10 +635,11 @@ fn filtered_commit_row(
 fn search_chip(
     label: &'static str,
     field: Field,
+    mode: SearchMode,
     fields: crate::search::Fields,
     entity: gpui::Entity<RepoView>,
 ) -> AnyElement {
-    let on = fields.enabled(field);
+    let on = !mode.is_content() && fields.enabled(field);
     crate::ui::button(format!("search-chip-{label}"), label)
         .size(crate::ui::ButtonSize::Tiny)
         .kind(if on {
@@ -601,6 +650,29 @@ fn search_chip(
         .tooltip(format!("Match {label}"))
         .on_click(move |_event, _window, cx| {
             entity.update(cx, |this, cx| this.toggle_search_field(field, cx));
+        })
+        .into_any_element()
+}
+
+/// Content / regex-content search mode toggle above the commit list.
+fn search_mode_chip(
+    label: &'static str,
+    target: SearchMode,
+    current: SearchMode,
+    tooltip: &'static str,
+    entity: gpui::Entity<RepoView>,
+) -> AnyElement {
+    let on = current == target;
+    crate::ui::button(format!("search-mode-{label}"), label)
+        .size(crate::ui::ButtonSize::Tiny)
+        .kind(if on {
+            crate::ui::ButtonKind::Primary
+        } else {
+            crate::ui::ButtonKind::Ghost
+        })
+        .tooltip(tooltip)
+        .on_click(move |_event, _window, cx| {
+            entity.update(cx, |this, cx| this.toggle_search_mode(target, cx));
         })
         .into_any_element()
 }

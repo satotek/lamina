@@ -353,6 +353,41 @@ impl Repo {
         )?;
         Ok((walk, shallow, bloom))
     }
+
+    /// A commit walk for history filtered to `specs` (refs or revisions).
+    pub(crate) fn path_walk_from_refs_with(
+        &self,
+        specs: &[String],
+        cancelled: Option<CancelCheck>,
+    ) -> Result<(PathWalk, Shallow, Option<super::bloom::CommitGraphBloom>)> {
+        let repo = self.local();
+        let graph = repo.commit_graph_if_enabled().ok().flatten();
+        let mut seen = HashSet::new();
+        let mut tips = Vec::new();
+        for spec in specs {
+            let id = repo
+                .rev_parse_single(spec.as_str())
+                .map_err(Error::gix)?
+                .detach();
+            if let Some(commit) = resolve_commit(&repo, graph.as_ref(), id, None)?
+                && seen.insert(commit)
+            {
+                tips.push(commit);
+            }
+        }
+        let shallow = Shallow::load(&repo)?;
+        let bloom = graph
+            .as_ref()
+            .and_then(|graph| super::bloom::CommitGraphBloom::load(&repo, graph));
+        let walk = PathWalk::new(
+            repo.objects.clone(),
+            graph,
+            &tips,
+            shallow.clone(),
+            cancelled,
+        )?;
+        Ok((walk, shallow, bloom))
+    }
 }
 
 /// The branch a stash message names: git writes `WIP on <branch>: ...` for a

@@ -26,12 +26,14 @@ use crate::{Error, Oid, Result};
 
 /// One row: the commit, its first parent, and graph-resolved tree/position
 /// hints so callers do not repeat binary searches or commit object reads.
+#[derive(Clone, Copy)]
 pub(crate) struct PathCommit {
     pub(crate) id: Oid,
     pub(crate) parent: Option<Oid>,
     pub(crate) tree: Option<Oid>,
     pub(crate) parent_tree: Option<Oid>,
     pub(crate) graph_pos: Option<u32>,
+    pub(crate) is_merge: bool,
 }
 
 /// A commit whose children have all been emitted. Stored compactly without
@@ -99,6 +101,7 @@ pub(crate) struct PathWalk {
     /// `None` for the public, uncancellable walk.
     cancelled: Option<CancelCheck>,
     finished: bool,
+    total_commits: usize,
 }
 
 impl PathWalk {
@@ -131,9 +134,14 @@ impl PathWalk {
             oid_parents_buf: Vec::with_capacity(4),
             cancelled,
             finished: false,
+            total_commits: 0,
         };
         walk.count_children(tips)?;
         Ok(walk)
+    }
+
+    pub(crate) fn total_commits(&self) -> usize {
+        self.total_commits
     }
 
     fn count_children(&mut self, tips: &[Oid]) -> Result<()> {
@@ -146,6 +154,7 @@ impl PathWalk {
             tip_nodes.push(node);
             if self.pending[node as usize] == 0 {
                 self.pending[node as usize] = 1;
+                self.total_commits += 1;
                 visit.push(node);
             }
         }
@@ -164,6 +173,7 @@ impl PathWalk {
                 let newly_seen = *slot == 0;
                 if newly_seen {
                     *slot = 2;
+                    self.total_commits += 1;
                     visit.push(parent);
                 } else {
                     *slot += 1;
@@ -209,6 +219,7 @@ impl PathWalk {
             }
         };
 
+        let is_merge = self.parents_buf.len() > 1;
         let first_parent = self.parents_buf.first().copied();
         let (parent, parent_tree) = match first_parent {
             Some(p0) => self.parent_summary(p0),
@@ -243,6 +254,7 @@ impl PathWalk {
             tree,
             parent_tree,
             graph_pos,
+            is_merge,
         }))
     }
 

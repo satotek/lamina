@@ -574,15 +574,7 @@ fn worker_loop(
             path_gen = guard.path_generation;
 
             let mut slice = Vec::with_capacity(chunk_end - chunk_start);
-            for c in &guard.commits[chunk_start..chunk_end] {
-                slice.push(PathCommit {
-                    id: c.id,
-                    parent: c.parent,
-                    tree: c.tree,
-                    parent_tree: c.parent_tree,
-                    graph_pos: c.graph_pos,
-                });
-            }
+            slice.extend_from_slice(&guard.commits[chunk_start..chunk_end]);
             drop(guard);
 
             result = eval_chunk(
@@ -736,13 +728,7 @@ impl Iterator for PathHistoryEntries {
                         path: self.display_path.clone(),
                     };
                     if let CommitChange::ChangedAdded(dest_mode) = change {
-                        let commit = PathCommit {
-                            id: self.batch_commits[idx].id,
-                            parent: self.batch_commits[idx].parent,
-                            tree: self.batch_commits[idx].tree,
-                            parent_tree: self.batch_commits[idx].parent_tree,
-                            graph_pos: self.batch_commits[idx].graph_pos,
-                        };
+                        let commit = self.batch_commits[idx];
                         match self.follow_rename(&commit, dest_mode) {
                             Ok(true) => {
                                 // Path switched to the rename source: discard

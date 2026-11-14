@@ -18,6 +18,7 @@ mod commit_graph;
 mod compare;
 mod config;
 mod conflicts;
+mod content_search;
 mod history;
 mod in_progress;
 mod lfs;
@@ -43,6 +44,10 @@ pub use config::{
     ConfigEntry, ConfigIdentity, ConfigInclude, ConfigLayer, ConfigOrigin, ConfigSources,
     ConfigValue, GitConfig, IncludeConditionKind, ValueRule, WELL_KNOWN_KEYS, WellKnownKey,
     well_known_key,
+};
+pub use content_search::{
+    ContentSearchEntries, ContentSearchEntry, ContentSearchMode, ContentSearchProgress,
+    ContentSearchQuery,
 };
 pub use history::{PathHistory, PathHistoryEntries, PathHistoryEntry};
 pub use in_progress::{InProgressCommit, InProgressDetails, RebaseOnto};

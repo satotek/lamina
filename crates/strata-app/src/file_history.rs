@@ -34,14 +34,14 @@ const LIST_WIDTH: f32 = 520.0;
 /// Head and ref pointers observed when a file-history walk started, used to
 /// decide whether a `SnapshotUpdated` event reflects moved refs rather than an
 /// append-only chunk from the initial history walk.
-struct SnapshotHeads {
+pub(crate) struct SnapshotHeads {
     head: Option<HeadInfo>,
     refs: Arc<Vec<RefInfo>>,
     stashes: Arc<Vec<StashInfo>>,
 }
 
 impl SnapshotHeads {
-    fn from_snapshot(snapshot: &RepoSnapshot) -> Self {
+    pub(crate) fn from_snapshot(snapshot: &RepoSnapshot) -> Self {
         Self {
             head: snapshot.head.clone(),
             refs: Arc::clone(&snapshot.refs),
@@ -49,7 +49,7 @@ impl SnapshotHeads {
         }
     }
 
-    fn changed(&self, snapshot: &RepoSnapshot) -> bool {
+    pub(crate) fn changed(&self, snapshot: &RepoSnapshot) -> bool {
         if self.head != snapshot.head {
             return true;
         }

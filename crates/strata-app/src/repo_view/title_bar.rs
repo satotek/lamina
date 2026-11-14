@@ -169,12 +169,14 @@ impl RepoView {
                 .child("Search commits, authors, hashes")
                 .into_any_element(),
         };
+        let mode = self.search.mode();
+        let show_mode_toggles = fit.search_width >= 260.0 && self.session.is_some();
         let search = div()
             .id("commit-search-field")
             .occlude()
             .flex()
             .items_center()
-            .gap(px(8.0))
+            .gap(px(6.0))
             .w(px(fit.search_width))
             .min_w(px(MIN_SEARCH_WIDTH))
             .max_w_full()
@@ -186,6 +188,27 @@ impl RepoView {
             .cursor_text()
             .child(icon(IconName::Search, 14.0, design.muted))
             .child(search_field)
+            .when(show_mode_toggles, |search| {
+                let entity = self.entity.clone();
+                let entity_regex = self.entity.clone();
+                search
+                    .child(search_mode_button(
+                        "title-search-content",
+                        "Content",
+                        "Search file contents (-S)",
+                        crate::search::SearchMode::Content,
+                        mode == crate::search::SearchMode::Content,
+                        entity,
+                    ))
+                    .child(search_mode_button(
+                        "title-search-content-regex",
+                        "Regex",
+                        "Search file contents with regex (-G)",
+                        crate::search::SearchMode::ContentRegex,
+                        mode == crate::search::SearchMode::ContentRegex,
+                        entity_regex,
+                    ))
+            })
             .when(fit.key_hint, |search| {
                 search.child(kbd(search_key_label(), design))
             });
@@ -654,6 +677,30 @@ fn stash_button(design: &Design, label: bool) -> AnyElement {
                 .child(glyph(style::glyph::ARCHIVE, 16.0, design.text))
                 .when(label, |content| content.child("Stash")),
         )
+        .into_any_element()
+}
+
+fn search_mode_button(
+    id: &'static str,
+    label: &'static str,
+    tooltip: &'static str,
+    mode: crate::search::SearchMode,
+    active: bool,
+    entity: gpui::WeakEntity<RepoView>,
+) -> AnyElement {
+    crate::ui::button(id, label)
+        .size(crate::ui::ButtonSize::Tiny)
+        .kind(if active {
+            crate::ui::ButtonKind::Primary
+        } else {
+            crate::ui::ButtonKind::Ghost
+        })
+        .tooltip(tooltip)
+        .on_click(move |_event, _window, cx| {
+            if let Some(entity) = entity.upgrade() {
+                entity.update(cx, |this, cx| this.toggle_search_mode(mode, cx));
+            }
+        })
         .into_any_element()
 }
 

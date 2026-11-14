@@ -10,14 +10,18 @@
 //! `--fake` has no session, so the search field is shown disabled rather than
 //! filtering 200k synthetic rows on the draw path.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{App, AppContext as _, Context, Entity, KeyBinding, Subscription, Window, actions};
 use gpui_component::input::{InputEvent, InputState};
+use strata_core::Oid;
+use strata_core::repo::{ContentSearchEntry, ContentSearchMode, ContentSearchQuery};
 use strata_core::session::{CommitQuery, QueryTicket};
 
 use crate::actions::REPO_VIEW;
+use crate::file_history::SnapshotHeads;
 use crate::repo_view::RepoView;
 
 /// Context of the search bar, so a focused text field can be recognised while
@@ -65,6 +69,43 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("down", SearchNext, field),
         KeyBinding::new("up", SearchPrevious, field),
     ]);
+}
+
+/// Which kind of history search runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum SearchMode {
+    /// Filter commits by summary, author, or commit id.
+    #[default]
+    Fields,
+    /// `git log -S`: commits changing the number of substring occurrences.
+    Content,
+    /// `git log -G`: commits whose diff adds or removes a regex-matching line.
+    ContentRegex,
+}
+
+impl SearchMode {
+    pub(crate) fn is_content(self) -> bool {
+        matches!(self, Self::Content | Self::ContentRegex)
+    }
+
+    pub(crate) fn toggle(self, target: Self) -> Self {
+        if self == target { Self::Fields } else { target }
+    }
+
+    pub(crate) fn content_query(self, text: &str, path: &str) -> Option<ContentSearchQuery> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let path = path.trim();
+        let path = (!path.is_empty()).then(|| path.to_owned());
+        let mode = match self {
+            Self::Fields => return None,
+            Self::Content => ContentSearchMode::Substring(trimmed.to_owned()),
+            Self::ContentRegex => ContentSearchMode::Regex(trimmed.to_owned()),
+        };
+        Some(ContentSearchQuery { mode, path })
+    }
 }
 
 /// Which commit fields the search text is compared against.
@@ -174,6 +215,19 @@ impl QuerySlot {
         self.ticket.replace(ticket)
     }
 
+    pub(crate) fn matches(&self, ticket: QueryTicket) -> bool {
+        self.ticket == Some(ticket)
+    }
+
+    pub(crate) fn finish(&mut self, ticket: QueryTicket) -> bool {
+        if self.ticket != Some(ticket) {
+            return false;
+        }
+        self.pending = false;
+        self.ticket = None;
+        true
+    }
+
     pub(crate) fn accept(
         &mut self,
         ticket: QueryTicket,
@@ -224,40 +278,78 @@ impl QuerySlot {
 pub(crate) struct SearchState {
     input: Option<Entity<InputState>>,
     _events: Option<Subscription>,
+    path_input: Option<Entity<InputState>>,
+    _path_events: Option<Subscription>,
     /// Trimmed text the current results belong to; empty means no filter.
     text: String,
+    /// Optional trimmed path limit for content search.
+    path: String,
+    mode: SearchMode,
     fields: Fields,
     debounce: Debounce,
     slot: QuerySlot,
     /// Row indices into the snapshot's commits, in display order.
     filter: Option<Arc<Vec<usize>>>,
+    /// Matching commit ids streamed from the active content search.
+    content_matches: Vec<Oid>,
+    /// First matching path per commit id, for selecting the right file on open.
+    matched_paths: HashMap<Oid, String>,
+    content_scanned: usize,
+    content_total: usize,
+    content_heads: Option<SnapshotHeads>,
     error: Option<String>,
 }
 
 impl SearchState {
-    /// Creates the text field once, the first time a repository view is built.
+    /// Creates the text fields once, the first time a repository view is built.
     pub(crate) fn init_input(&mut self, window: &mut Window, cx: &mut Context<RepoView>) {
-        if self.input.is_some() {
-            return;
+        if self.input.is_none() {
+            let input = cx.new(|cx| {
+                InputState::new(window, cx).placeholder("Search commits, authors, hashes")
+            });
+            self._events = Some(
+                cx.subscribe(&input, |view, _input, event: &InputEvent, cx| {
+                    if let InputEvent::Change = event {
+                        view.search_changed(cx);
+                    }
+                }),
+            );
+            self.input = Some(input);
         }
-        let input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Search commits, authors, hashes"));
-        self._events = Some(
-            cx.subscribe(&input, |view, _input, event: &InputEvent, cx| {
-                if let InputEvent::Change = event {
-                    view.search_changed(cx);
-                }
-            }),
-        );
-        self.input = Some(input);
+        if self.path_input.is_none() {
+            let path_input =
+                cx.new(|cx| InputState::new(window, cx).placeholder("Path filter (optional)"));
+            self._path_events = Some(cx.subscribe(
+                &path_input,
+                |view, _input, event: &InputEvent, cx| {
+                    if let InputEvent::Change = event {
+                        view.search_path_changed(cx);
+                    }
+                },
+            ));
+            self.path_input = Some(path_input);
+        }
     }
 
     pub(crate) fn input(&self) -> Option<&Entity<InputState>> {
         self.input.as_ref()
     }
 
+    pub(crate) fn path_input(&self) -> Option<&Entity<InputState>> {
+        self.path_input.as_ref()
+    }
+
     pub(crate) fn text(&self) -> &str {
         &self.text
+    }
+
+    #[cfg(test)]
+    pub(crate) fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub(crate) fn mode(&self) -> SearchMode {
+        self.mode
     }
 
     pub(crate) fn fields(&self) -> Fields {
@@ -277,6 +369,26 @@ impl SearchState {
         !self.text.is_empty()
     }
 
+    /// True while a streaming content search is actively scanning commits.
+    pub(crate) fn is_scanning(&self) -> bool {
+        self.mode.is_content() && self.is_active() && self.slot.is_pending()
+    }
+
+    pub(crate) fn content_query(&self) -> Option<ContentSearchQuery> {
+        self.mode.content_query(&self.text, &self.path)
+    }
+
+    pub(crate) fn matched_path_for(&self, commit: Oid) -> Option<&str> {
+        if !self.mode.is_content() {
+            return None;
+        }
+        self.matched_paths.get(&commit).map(String::as_str)
+    }
+
+    pub(crate) fn content_heads(&self) -> Option<&SnapshotHeads> {
+        self.content_heads.as_ref()
+    }
+
     /// Trims the text, remembers it and returns the debounce epoch the caller
     /// must wait for. An empty box ends the filter without a round trip.
     pub(crate) fn edit(&mut self, text: &str) -> Option<u64> {
@@ -284,10 +396,53 @@ impl SearchState {
         self.error = None;
         if self.text.is_empty() {
             self.filter = None;
+            self.clear_content_results();
             self.debounce.invalidate();
             return None;
         }
         Some(self.debounce.schedule())
+    }
+
+    /// Trims the path filter, remembers it and returns a debounce epoch when a
+    /// content search should re-run.
+    pub(crate) fn edit_path(&mut self, path: &str) -> Option<u64> {
+        let trimmed = path.trim();
+        if trimmed == self.path {
+            return None;
+        }
+        self.path = trimmed.to_owned();
+        self.error = None;
+        if self.mode.is_content() && self.is_active() {
+            Some(self.debounce.schedule())
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn toggle_mode(&mut self, target: SearchMode) -> Option<QueryTicket> {
+        self.mode = self.mode.toggle(target);
+        self.debounce.invalidate();
+        self.clear_content_results();
+        self.filter = None;
+        self.error = None;
+        self.slot.cancel()
+    }
+
+    pub(crate) fn toggle_field(&mut self, field: Field) -> Option<QueryTicket> {
+        if self.mode.is_content() {
+            self.mode = SearchMode::Fields;
+            if !self.fields.enabled(field) {
+                self.fields.toggle(field);
+            }
+            self.debounce.invalidate();
+            self.clear_content_results();
+            self.filter = None;
+            self.error = None;
+            return self.slot.cancel();
+        }
+        self.fields.toggle(field);
+        self.debounce.invalidate();
+        None
     }
 
     pub(crate) fn should_query(&self, epoch: u64) -> bool {
@@ -297,7 +452,85 @@ impl SearchState {
     pub(crate) fn begin(&mut self, ticket: QueryTicket) -> Option<QueryTicket> {
         self.debounce.invalidate();
         self.error = None;
+        self.clear_content_results();
         self.slot.begin(ticket)
+    }
+
+    pub(crate) fn begin_content(
+        &mut self,
+        ticket: QueryTicket,
+        heads: SnapshotHeads,
+    ) -> Option<QueryTicket> {
+        self.debounce.invalidate();
+        self.error = None;
+        self.clear_content_results();
+        self.content_heads = Some(heads);
+        self.filter = Some(Arc::new(Vec::new()));
+        self.slot.begin(ticket)
+    }
+
+    pub(crate) fn accept_content_batch(
+        &mut self,
+        ticket: QueryTicket,
+        matches: &[ContentSearchEntry],
+        scanned: usize,
+        total: usize,
+        commit_index: &HashMap<Oid, usize>,
+    ) -> bool {
+        if !self.slot.matches(ticket) {
+            return false;
+        }
+        for entry in matches {
+            self.content_matches.push(entry.commit);
+            if let Some(path) = &entry.matched_path {
+                self.matched_paths
+                    .entry(entry.commit)
+                    .or_insert_with(|| path.clone());
+            }
+        }
+        self.content_scanned = scanned;
+        self.content_total = total;
+        self.remap_content_matches(commit_index);
+        true
+    }
+
+    pub(crate) fn accept_content_progress(
+        &mut self,
+        ticket: QueryTicket,
+        scanned: usize,
+        total: usize,
+    ) -> bool {
+        if !self.slot.matches(ticket) {
+            return false;
+        }
+        self.content_scanned = scanned;
+        self.content_total = total;
+        true
+    }
+
+    pub(crate) fn accept_content_done(
+        &mut self,
+        ticket: QueryTicket,
+        scanned: usize,
+        total: usize,
+    ) -> bool {
+        if !self.slot.finish(ticket) {
+            return false;
+        }
+        self.content_scanned = scanned;
+        self.content_total = total;
+        true
+    }
+
+    pub(crate) fn remap_content_matches(&mut self, commit_index: &HashMap<Oid, usize>) {
+        let mut rows: Vec<usize> = self
+            .content_matches
+            .iter()
+            .filter_map(|oid| commit_index.get(oid).copied())
+            .collect();
+        rows.sort_unstable();
+        rows.dedup();
+        self.filter = Some(Arc::new(rows));
     }
 
     pub(crate) fn apply(&mut self, rows: &Arc<Vec<usize>>) {
@@ -314,10 +547,21 @@ impl SearchState {
     /// the session should cancel.
     pub(crate) fn reset(&mut self) -> Option<QueryTicket> {
         self.text.clear();
+        self.path.clear();
+        self.mode = SearchMode::Fields;
         self.filter = None;
         self.error = None;
+        self.clear_content_results();
         self.debounce.invalidate();
         self.slot.cancel()
+    }
+
+    fn clear_content_results(&mut self) {
+        self.content_matches.clear();
+        self.matched_paths.clear();
+        self.content_scanned = 0;
+        self.content_total = 0;
+        self.content_heads = None;
     }
 
     /// The commit to keep selected after `rows` arrived: the current one when
@@ -359,6 +603,31 @@ impl SearchState {
         if !self.is_active() {
             return String::new();
         }
+        if self.mode.is_content() {
+            let matches = self
+                .filter
+                .as_ref()
+                .map_or(self.content_matches.len(), |rows| rows.len());
+            if self.slot.is_pending() {
+                if self.content_total == 0 {
+                    return "scanning commits…".to_owned();
+                }
+                if matches == 0 {
+                    return format!(
+                        "{} of {} commits scanned",
+                        self.content_scanned, self.content_total
+                    );
+                }
+                return format!(
+                    "{matches} · {} of {} commits scanned",
+                    self.content_scanned, self.content_total
+                );
+            }
+            if self.content_total > 0 {
+                return format!("{matches} of {} commits scanned", self.content_total);
+            }
+            return format!("{matches} of {total}");
+        }
         if self.slot.is_pending() {
             return "searching…".to_owned();
         }
@@ -391,6 +660,24 @@ impl RepoView {
             return;
         };
 
+        self.schedule_search_debounce(epoch, cx);
+        cx.notify();
+    }
+
+    /// Reads the optional path filter and restarts the debounce when content
+    /// search is active.
+    pub(crate) fn search_path_changed(&mut self, cx: &mut Context<Self>) {
+        let Some(input) = self.search.path_input().cloned() else {
+            return;
+        };
+        let path = input.read(cx).value().to_string();
+        if let Some(epoch) = self.search.edit_path(&path) {
+            self.schedule_search_debounce(epoch, cx);
+            cx.notify();
+        }
+    }
+
+    fn schedule_search_debounce(&self, epoch: u64, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             cx.background_executor().timer(DEBOUNCE).await;
             this.update(cx, |this, cx| {
@@ -401,7 +688,6 @@ impl RepoView {
             .ok();
         })
         .detach();
-        cx.notify();
     }
 
     /// Asks the session worker to rescan the loaded history with the current
@@ -410,13 +696,25 @@ impl RepoView {
         if !self.search.is_active() {
             return;
         }
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        if self.search.mode().is_content() {
+            let Some(query) = self.search.content_query() else {
+                return;
+            };
+            let heads = SnapshotHeads::from_snapshot(&session.snapshot());
+            let ticket = session.content_search_streaming(query);
+            if let Some(previous) = self.search.begin_content(ticket, heads) {
+                session.cancel_query(previous);
+            }
+            self.notify_if_active(cx);
+            return;
+        }
         let query = self.search.fields().query(self.search.text());
         if query.text.is_empty() {
             return;
         }
-        let Some(session) = self.session.as_ref() else {
-            return;
-        };
         let ticket = session.search_commits(query);
         if let Some(previous) = self.search.begin(ticket) {
             session.cancel_query(previous);
@@ -445,19 +743,80 @@ impl RepoView {
             }
             Ready::Applied => {
                 self.search.apply(rows);
-                let index = self.search.selection(rows, self.selected);
-                if let Some(index) = index {
-                    // Keep the selected commit in view as the result set moves
-                    // under it while history keeps loading.
-                    if let Some(position) = self.search.position(index) {
-                        self.scroll_to_position(position);
-                    }
-                    if Some(index) != self.selected {
-                        self.select(Some(index), cx);
-                    }
-                }
+                self.sync_filtered_selection(cx);
                 self.notify_if_active(cx);
                 true
+            }
+        }
+    }
+
+    pub(crate) fn content_search_batch(
+        &mut self,
+        ticket: QueryTicket,
+        matches: &[ContentSearchEntry],
+        scanned: usize,
+        total: usize,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(session) = self.session.as_ref() else {
+            return false;
+        };
+        let snapshot = session.snapshot();
+        if !self.search.accept_content_batch(
+            ticket,
+            matches,
+            scanned,
+            total,
+            &snapshot.commit_index,
+        ) {
+            return false;
+        }
+        self.sync_filtered_selection(cx);
+        self.notify_if_active(cx);
+        true
+    }
+
+    pub(crate) fn content_search_progress(
+        &mut self,
+        ticket: QueryTicket,
+        scanned: usize,
+        total: usize,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.search.accept_content_progress(ticket, scanned, total) {
+            return false;
+        }
+        self.notify_if_active(cx);
+        true
+    }
+
+    pub(crate) fn content_search_done(
+        &mut self,
+        ticket: QueryTicket,
+        scanned: usize,
+        total: usize,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.search.accept_content_done(ticket, scanned, total) {
+            return false;
+        }
+        self.notify_if_active(cx);
+        true
+    }
+
+    fn sync_filtered_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(rows) = self.search.filter().cloned() else {
+            return;
+        };
+        let index = self.search.selection(&rows, self.selected);
+        if let Some(index) = index {
+            // Keep the selected commit in view as the result set moves
+            // under it while history keeps loading.
+            if let Some(position) = self.search.position(index) {
+                self.scroll_to_position(position);
+            }
+            if Some(index) != self.selected {
+                self.select(Some(index), cx);
             }
         }
     }
@@ -482,11 +841,25 @@ impl RepoView {
         if !self.search.is_active() {
             return;
         }
-        let current = self
-            .session
-            .as_ref()
-            .map_or(0, |session| session.snapshot().generation);
-        if self.search.slot.needs_refresh(current) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let snapshot = session.snapshot();
+        if self.search.mode().is_content() {
+            if self
+                .search
+                .content_heads()
+                .is_some_and(|heads| heads.changed(&snapshot))
+            {
+                self.start_search(cx);
+            } else {
+                self.search.remap_content_matches(&snapshot.commit_index);
+                self.sync_filtered_selection(cx);
+                self.notify_if_active(cx);
+            }
+            return;
+        }
+        if self.search.slot.needs_refresh(snapshot.generation) {
             self.start_search(cx);
         }
     }
@@ -512,7 +885,7 @@ impl RepoView {
     /// Escapes the search: filter cleared, full list back, the selected commit
     /// kept and scrolled into view.
     pub(crate) fn clear_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.search.is_active() {
+        if !self.search.is_active() && !self.search.mode().is_content() {
             // An empty field is still a place the keys can be stuck in.
             self.focus_root(window, cx);
             return;
@@ -523,6 +896,11 @@ impl RepoView {
         }
         if let Some(input) = self.search.input().cloned() {
             input.update(cx, |state, cx| {
+                state.set_value("", window, cx);
+            });
+        }
+        if let Some(path_input) = self.search.path_input().cloned() {
+            path_input.update(cx, |state, cx| {
                 state.set_value("", window, cx);
             });
         }
@@ -540,17 +918,32 @@ impl RepoView {
         }
         // Escape peels one layer at a time: an active filter first, then the
         // compare view that sits beside the list.
-        if !self.search.is_active() && self.compare.is_some() {
+        if !self.search.is_active() && !self.search.mode().is_content() && self.compare.is_some() {
             self.close_compare(window, cx);
             return;
         }
         self.clear_search(window, cx);
     }
 
+    /// Switches between field search, `-S` content search, and `-G` regex search.
+    pub(crate) fn toggle_search_mode(&mut self, mode: SearchMode, cx: &mut Context<Self>) {
+        let previous = self.search.toggle_mode(mode);
+        if let (Some(session), Some(ticket)) = (self.session.as_ref(), previous) {
+            session.cancel_query(ticket);
+        }
+        if self.search.is_active() {
+            self.start_search(cx);
+        } else {
+            cx.notify();
+        }
+    }
+
     /// Turns a search toggle on or off and re-runs the query immediately.
     pub(crate) fn toggle_search_field(&mut self, field: Field, cx: &mut Context<Self>) {
-        self.search.fields.toggle(field);
-        self.search.debounce.invalidate();
+        let previous = self.search.toggle_field(field);
+        if let (Some(session), Some(ticket)) = (self.session.as_ref(), previous) {
+            session.cancel_query(ticket);
+        }
         if self.search.is_active() {
             self.start_search(cx);
         } else {
@@ -751,5 +1144,152 @@ mod tests {
         assert_eq!(state.count_label(100), "2 of 100");
         state.begin(QueryTicket(1));
         assert_eq!(state.count_label(100), "searching…");
+    }
+
+    #[test]
+    fn mode_toggles_switch_between_fields_content_and_regex() {
+        let mut state = SearchState::default();
+        assert_eq!(state.mode(), SearchMode::Fields);
+
+        // Switching to Content (-S) and ContentRegex (-G).
+        state.toggle_mode(SearchMode::Content);
+        assert_eq!(state.mode(), SearchMode::Content);
+        state.toggle_mode(SearchMode::ContentRegex);
+        assert_eq!(state.mode(), SearchMode::ContentRegex);
+        // Clicking the active content mode toggles back to field search.
+        state.toggle_mode(SearchMode::ContentRegex);
+        assert_eq!(state.mode(), SearchMode::Fields);
+
+        // Clicking a field chip while in Content mode returns to Fields mode
+        // and guarantees that field is enabled, cancelling any in-flight scan.
+        state.fields = Fields {
+            summary: false,
+            author: true,
+            hash: false,
+        };
+        state.toggle_mode(SearchMode::Content);
+        state.slot.begin(QueryTicket(11));
+        assert_eq!(
+            state.toggle_field(Field::Summary),
+            Some(QueryTicket(11)),
+            "switching back from content mode cancels the active content ticket"
+        );
+        assert_eq!(state.mode(), SearchMode::Fields);
+        assert!(state.fields().enabled(Field::Summary));
+    }
+
+    #[test]
+    fn content_query_builds_from_trimmed_text_and_optional_path() {
+        assert_eq!(SearchMode::Fields.content_query("foo", "src"), None);
+        assert_eq!(SearchMode::Content.content_query("   ", "src"), None);
+        assert_eq!(
+            SearchMode::Content.content_query("  needle  ", "   "),
+            Some(ContentSearchQuery {
+                mode: ContentSearchMode::Substring("needle".into()),
+                path: None,
+            })
+        );
+        assert_eq!(
+            SearchMode::ContentRegex.content_query("fn\\s+main", " crates/strata-core/src "),
+            Some(ContentSearchQuery {
+                mode: ContentSearchMode::Regex("fn\\s+main".into()),
+                path: Some("crates/strata-core/src".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn editing_path_debounces_only_when_content_search_is_active() {
+        let mut state = SearchState::default();
+        state.edit("needle");
+        assert_eq!(
+            state.edit_path("src/lib.rs"),
+            None,
+            "fields mode ignores path filter changes"
+        );
+        state.toggle_mode(SearchMode::Content);
+        assert_eq!(state.path(), "src/lib.rs");
+        assert_eq!(
+            state.edit_path("  src/lib.rs "),
+            None,
+            "whitespace-only edits do not restart search"
+        );
+        assert!(
+            state.edit_path("src/main.rs").is_some(),
+            "path change restarts active content search"
+        );
+        assert_eq!(state.path(), "src/main.rs");
+    }
+
+    #[test]
+    fn streaming_content_batches_map_to_sorted_rows_and_track_matched_paths() {
+        let mut state = SearchState::default();
+        state.edit("needle");
+        state.toggle_mode(SearchMode::Content);
+        state.slot.begin(QueryTicket(7));
+
+        let oid_a = Oid::from_bytes_or_panic(&[1; 20]);
+        let oid_b = Oid::from_bytes_or_panic(&[2; 20]);
+        let oid_c = Oid::from_bytes_or_panic(&[3; 20]);
+        let mut commit_index = HashMap::new();
+        commit_index.insert(oid_a, 12);
+        commit_index.insert(oid_b, 3);
+
+        // Stale ticket is ignored.
+        assert!(!state.accept_content_batch(
+            QueryTicket(6),
+            &[ContentSearchEntry {
+                commit: oid_a,
+                matched_path: Some("a.rs".into()),
+            }],
+            10,
+            100,
+            &commit_index,
+        ));
+
+        assert!(state.accept_content_progress(QueryTicket(7), 20, 100));
+        assert_eq!(state.count_label(100), "20 of 100 commits scanned");
+
+        assert!(state.accept_content_batch(
+            QueryTicket(7),
+            &[
+                ContentSearchEntry {
+                    commit: oid_a,
+                    matched_path: Some("src/a.rs".into()),
+                },
+                ContentSearchEntry {
+                    commit: oid_b,
+                    matched_path: Some("src/b.rs".into()),
+                },
+                ContentSearchEntry {
+                    commit: oid_c,
+                    matched_path: Some("src/c.rs".into()),
+                },
+            ],
+            50,
+            100,
+            &commit_index,
+        ));
+
+        // Mapped filter rows must be sorted for binary_search helpers.
+        assert_eq!(
+            state.filter().map(|rows| rows.as_slice()),
+            Some(&[3, 12][..])
+        );
+        assert_eq!(state.matched_path_for(oid_a), Some("src/a.rs"));
+        assert_eq!(state.matched_path_for(oid_b), Some("src/b.rs"));
+        assert_eq!(state.count_label(100), "2 · 50 of 100 commits scanned");
+
+        // Later history chunk reveals oid_c at row 7 without restarting search.
+        commit_index.insert(oid_c, 7);
+        state.remap_content_matches(&commit_index);
+        assert_eq!(
+            state.filter().map(|rows| rows.as_slice()),
+            Some(&[3, 7, 12][..])
+        );
+
+        assert!(state.accept_content_done(QueryTicket(7), 100, 100));
+        assert!(!state.is_scanning());
+        assert_eq!(state.count_label(100), "3 of 100 commits scanned");
     }
 }
