@@ -92,6 +92,9 @@ actions!(
         /// Closes the compare view. Handled on `RepoView` by
         /// `repo_view::compare`; a no-op while no comparison is open.
         CloseCompare,
+        /// Shows every line of the diff on screen, or only the changes again.
+        /// Handled on `RepoView` by the diff panes.
+        ToggleWholeFile,
     ]
 );
 
@@ -156,6 +159,9 @@ pub fn bind(cx: &mut App) {
         // `z` is a letter, so it is text while a field has focus: the details
         // toggle must not swallow it there.
         KeyBinding::new("z", ToggleDetailsMaximized, navigation),
+        // `w` shows the whole file in the diff panes. It is a letter too, and
+        // free of the list navigation keys.
+        KeyBinding::new("w", ToggleWholeFile, navigation),
         KeyBinding::new("shift-up", ExtendSelectionPrevious, scope),
         KeyBinding::new("shift-down", ExtendSelectionNext, scope),
         KeyBinding::new("pageup", SelectPageUp, scope),

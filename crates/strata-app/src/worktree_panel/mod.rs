@@ -24,6 +24,7 @@ use gpui::{
 };
 use gpui_component::input::{InputEvent, TextareaState};
 use gpui_component::{ActiveTheme as _, Theme};
+use strata_core::diff::{Expansion, GapAction};
 use strata_core::lfs::{LfsInfo, LfsLock};
 use strata_core::patch::LineSelection;
 use strata_core::session::{
@@ -32,13 +33,13 @@ use strata_core::session::{
 use strata_core::{ChangeKind, FileChange, RepoState, WorktreeStatus};
 
 use commit_box::{commit_enabled, previous_message, trim_message};
-use hunks::{panel_rows, picked_in_range, picked_selection};
+use hunks::{panel_rows_expanded, picked_in_range, picked_selection};
 
 use crate::conflicts::{
     Conflicts, MarkFileResolved, NextConflict, PreviousConflict, ResetConflict, TakeBase,
     TakeBothOursFirst, TakeBothTheirsFirst, TakeOurs, TakeTheirs, UseOurs, UseTheirs,
 };
-use crate::diff_view::Row as DiffRow;
+use crate::diff_view::{DiffContext, Row as DiffRow};
 use crate::merge_editor::Choice as MergeChoice;
 use crate::repo_view::RepoView;
 use crate::settings::Settings;
@@ -352,7 +353,7 @@ pub enum MainMode {
 /// One row of the flattened diff, plus where it points in the [`FileDiff`].
 ///
 /// [`FileDiff`]: strata_core::diff::FileDiff
-struct PanelRow {
+pub(crate) struct PanelRow {
     row: DiffRow,
     position: RowPosition,
 }
@@ -451,6 +452,9 @@ pub struct WorktreePanel {
     pub(crate) conflicts: Conflicts,
     diff: DiffSlot,
     rows: Rc<Vec<PanelRow>>,
+    /// Which hidden lines of the selected file's diff are revealed. Display
+    /// only: the staging selection stays on the real hunks.
+    context: DiffContext,
     diff_error: Option<String>,
     /// Changed lines picked for a line-level operation.
     picked: BTreeSet<(usize, usize)>,
@@ -621,6 +625,7 @@ impl WorktreePanel {
     /// Drops the diff rows and line picks; the next request fills them again.
     fn reset_diff(&mut self) {
         self.rows = Rc::new(Vec::new());
+        self.context.reset();
         self.diff_error = None;
         self.picked.clear();
         self.line_anchor = None;
@@ -709,12 +714,48 @@ impl WorktreePanel {
         if !self.diff.accept(ticket, Arc::clone(view)) {
             return false;
         }
-        self.rows = Rc::new(panel_rows(&view.diff));
+        self.context.reset();
+        self.rows = Rc::new(panel_rows_expanded(
+            &view.diff,
+            &view.old_text,
+            &view.new_text,
+            &view.gaps,
+            self.context.expansion(),
+        ));
         self.diff_error = None;
         self.picked.clear();
         self.line_anchor = None;
         self.dirty = false;
         true
+    }
+
+    /// Applies one press on a hidden-lines bar. Returns the view to rebuild
+    /// from when the press changed what is shown.
+    pub(crate) fn expand_gap(&mut self, gap: usize, action: GapAction) -> Option<Arc<DiffView>> {
+        let view = self.diff.view().cloned()?;
+        self.context.expand(gap, action, &view).then_some(view)
+    }
+
+    /// The staging pane's "Whole file" toggle.
+    pub(crate) fn toggle_whole_file(&mut self) -> Option<Arc<DiffView>> {
+        let view = self.diff.view().cloned()?;
+        self.context.toggle_whole_file(&view).then_some(view)
+    }
+
+    pub(crate) fn set_rows(&mut self, rows: Vec<PanelRow>) {
+        self.rows = Rc::new(rows);
+    }
+
+    /// The staging rows a view has under `expansion`, without touching the
+    /// panel; the caller builds them off the UI thread.
+    pub(crate) fn rows_for(view: &DiffView, expansion: &Expansion) -> Vec<PanelRow> {
+        panel_rows_expanded(
+            &view.diff,
+            &view.old_text,
+            &view.new_text,
+            &view.gaps,
+            expansion,
+        )
     }
 
     pub(crate) fn on_diff_failed(&mut self, ticket: DiffTicket, error: &str) -> bool {
@@ -723,6 +764,7 @@ impl WorktreePanel {
         }
         self.diff.ticket = None;
         self.rows = Rc::new(Vec::new());
+        self.context.reset();
         self.diff_error = Some(error.to_owned());
         true
     }
@@ -1393,6 +1435,53 @@ impl RepoView {
             self.worktree.line_anchor = Some(row);
         }
         cx.notify();
+    }
+
+    /// Applies one press on a hidden-lines bar of the staging diff.
+    ///
+    /// The bar only changes what is drawn: the pick set stays keyed by hunk
+    /// and line indices, so the next stage/unstage builds the same patch.
+    pub(crate) fn expand_worktree_gap(
+        &mut self,
+        gap: usize,
+        action: GapAction,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = self.worktree.expand_gap(gap, action) else {
+            return;
+        };
+        self.rebuild_worktree_rows(view, cx);
+    }
+
+    /// The staging pane's "Whole file" toggle.
+    pub(crate) fn toggle_worktree_whole_file(&mut self, cx: &mut Context<Self>) {
+        let Some(view) = self.worktree.toggle_whole_file() else {
+            // A refused toggle still has a notice to show.
+            self.notify_if_active(cx);
+            return;
+        };
+        self.rebuild_worktree_rows(view, cx);
+    }
+
+    /// Rebuilds the staging rows off the UI thread; revealing context can add
+    /// one row per line of the file.
+    fn rebuild_worktree_rows(&mut self, view: Arc<DiffView>, cx: &mut Context<Self>) {
+        let context = self.worktree.context.clone();
+        let revision = context.revision();
+        cx.spawn(async move |this, cx| {
+            let rows = cx
+                .background_executor()
+                .spawn(async move { WorktreePanel::rows_for(&view, context.expansion()) })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.worktree.context.revision() == revision {
+                    this.worktree.set_rows(rows);
+                    this.notify_if_active(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
     }
 
     pub(crate) fn toggle_amend(&mut self, window: &mut Window, cx: &mut Context<Self>) {

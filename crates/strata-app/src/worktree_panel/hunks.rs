@@ -10,23 +10,50 @@ use gpui::prelude::*;
 use gpui::{
     AnyElement, Entity, FontWeight, IntoElement, ParentElement, Styled, div, px, uniform_list,
 };
+use gpui_component::Selectable as _;
 use gpui_component::Theme;
 use strata_core::ChangeKind;
-use strata_core::diff::{FileDiff, LineKind};
+use strata_core::diff::{Expansion, FileDiff, Gap, LineKind};
 use strata_core::highlight::LineHighlights;
 use strata_core::patch::LineSelection;
 use strata_core::session::{DiffView, Operation, RepoSnapshot};
 
 use super::{Colors, HunkAction, LineAction, PanelRow, RowPosition, Selected, Side, WorktreePanel};
-use crate::diff_view::{self, DiffColors, Row as DiffRow, RowOptions};
+use crate::diff_view::{self, DiffColors, GapHandler, Row as DiffRow, RowOptions};
 use crate::repo_view::RepoView;
 use crate::scrollbar::WithScrollbar as _;
 use crate::style;
 
 /// Flattens a diff, keeping the hunk/line coordinates the patch builder needs.
+///
+/// The staging pane builds its rows with [`panel_rows_expanded`]; this is the
+/// collapsed view the tests compare it against.
+#[cfg(test)]
 pub(super) fn panel_rows(diff: &FileDiff) -> Vec<PanelRow> {
+    panel_rows_expanded(diff, "", "", &[], &Expansion::default())
+}
+
+/// Flattens a diff with the context the user revealed.
+///
+/// Revealed context lines carry no pick position: the staging selection is
+/// built from the real hunks, so showing more lines cannot move it.
+pub(super) fn panel_rows_expanded(
+    diff: &FileDiff,
+    old: &str,
+    new: &str,
+    gaps: &[Gap],
+    expansion: &Expansion,
+) -> Vec<PanelRow> {
     let mut rows = Vec::with_capacity(diff.hunks.iter().map(|hunk| hunk.lines.len() + 1).sum());
     for (hunk_index, hunk) in diff.hunks.iter().enumerate() {
+        push_gap_rows(
+            &mut rows,
+            old,
+            new,
+            gaps.get(hunk_index),
+            hunk_index,
+            expansion,
+        );
         rows.push(PanelRow {
             row: DiffRow::HunkHeader {
                 old_start: hunk.old_start,
@@ -45,7 +72,32 @@ pub(super) fn panel_rows(diff: &FileDiff) -> Vec<PanelRow> {
             });
         }
     }
+    push_gap_rows(
+        &mut rows,
+        old,
+        new,
+        gaps.get(diff.hunks.len()),
+        diff.hunks.len(),
+        expansion,
+    );
     rows
+}
+
+fn push_gap_rows(
+    rows: &mut Vec<PanelRow>,
+    old: &str,
+    new: &str,
+    gap: Option<&Gap>,
+    index: usize,
+    expansion: &Expansion,
+) {
+    for row in diff_view::gap_rows(old, new, gap, index, expansion) {
+        rows.push(PanelRow {
+            row,
+            // Revealed context is not part of the hunk it sits beside.
+            position: RowPosition::Line(None),
+        });
+    }
 }
 
 pub(super) fn picked_selection(picked: &BTreeSet<(usize, usize)>) -> LineSelection {
@@ -147,6 +199,27 @@ impl WorktreePanel {
             header = header.child(self.line_actions(entity.clone(), selected, colors));
         }
 
+        if let Some(view) = self.diff.view()
+            && !view.diff.binary
+        {
+            let active = self.context.is_whole_file();
+            let toggle_entity = entity.clone();
+            header = header.child(
+                crate::ui::button("worktree-toggle-whole-file", "Whole file")
+                    .size(crate::ui::ButtonSize::Tiny)
+                    .ghost()
+                    .selected(active)
+                    .tooltip(if active {
+                        "Show only the changes"
+                    } else {
+                        "Show every line of the file"
+                    })
+                    .on_click(move |_event, _window, cx| {
+                        toggle_entity.update(cx, |this, cx| this.toggle_worktree_whole_file(cx));
+                    }),
+            );
+        }
+
         let body = match (&self.diff_error, self.diff.view()) {
             (Some(error), _) => {
                 crate::ui::message(error, colors.danger, &colors.design).into_any_element()
@@ -218,7 +291,24 @@ impl WorktreePanel {
                 &colors.design,
             )
             .into_any_element(),
-            (None, Some(view)) => self.diff_list(entity, view, theme, colors),
+            (None, Some(view)) => {
+                let list = self.diff_list(entity, view, theme, colors);
+                match self.context.notice() {
+                    Some(notice) => div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_h_0()
+                        .child(crate::ui::banner(
+                            crate::ui::BannerKind::Warning,
+                            notice,
+                            &colors.design,
+                        ))
+                        .child(list)
+                        .into_any_element(),
+                    None => list,
+                }
+            }
         };
 
         div()
@@ -314,7 +404,16 @@ impl WorktreePanel {
                             &diff_colors,
                             &list_colors,
                         ),
-                        DiffRow::Line(_) => {
+                        DiffRow::Gap { gap, hidden } => {
+                            let entity = entity.clone();
+                            let on_gap: GapHandler = Rc::new(move |gap, action, _window, cx| {
+                                entity.update(cx, |this, cx| {
+                                    this.expand_worktree_gap(gap, action, cx)
+                                });
+                            });
+                            diff_view::gap_bar(*gap, *hidden, &diff_colors, &style, Some(&on_gap))
+                        }
+                        DiffRow::Line(_) | DiffRow::Context(_) => {
                             let pick = row.pickable().map(|key| picked.contains(&key));
                             let entity = entity.clone();
                             div()
@@ -331,7 +430,7 @@ impl WorktreePanel {
                                     &diff_colors,
                                     &style,
                                     highlights,
-                                    RowOptions { pick },
+                                    RowOptions { pick, inset: false },
                                 ))
                                 .into_any_element()
                         }
@@ -441,7 +540,7 @@ fn hunk_header_row(
 /// The highlights for the side of the line that is drawn, as in the history
 /// diff: context lines exist on both sides, so the new side is preferred.
 fn line_highlights<'a>(row: &DiffRow, view: &'a DiffView) -> Option<&'a LineHighlights> {
-    let DiffRow::Line(line) = row else {
+    let (DiffRow::Line(line) | DiffRow::Context(line)) = row else {
         return None;
     };
     let (highlights, number) = match line.kind {
@@ -535,5 +634,77 @@ mod tests {
         lines.sort_unstable();
         assert_eq!(lines, [(0, 4), (1, 2)]);
         assert!(!selection.is_empty());
+    }
+
+    /// Revealed context is drawn beside the real hunks, so it must not become
+    /// part of a pick: line and hunk staging keep building the same patch.
+    #[test]
+    fn expanded_context_keeps_staging_picks_and_patches_unchanged() {
+        use strata_core::diff::{DiffOptions, diff_text, gaps, line_count};
+        use strata_core::patch::{PatchFile, PatchMode, build_patch};
+
+        let old: String = (1..=60).map(|line| format!("line {line}\n")).collect();
+        let new = old
+            .replace("line 10\n", "TEN\n")
+            .replace("line 50\n", "FIFTY\n");
+        let diff = diff_text(old.as_bytes(), new.as_bytes(), &DiffOptions::default());
+        let gaps = gaps(&diff, line_count(&old), line_count(&new));
+
+        let collapsed = panel_rows(&diff);
+        let mut expansion = Expansion::default();
+        expansion.set_whole_file(true);
+        let expanded = panel_rows_expanded(&diff, &old, &new, &gaps, &expansion);
+        assert!(
+            expanded.len() > collapsed.len(),
+            "the whole-file view must add the hidden lines"
+        );
+        assert!(
+            !expanded
+                .iter()
+                .any(|row| matches!(row.row, DiffRow::Gap { .. })),
+            "nothing is left hidden in whole-file mode"
+        );
+
+        // A range that spans everything picks the changed lines and only them.
+        let all = picked_in_range(&collapsed, 0, collapsed.len() - 1);
+        let expanded_all = picked_in_range(&expanded, 0, expanded.len() - 1);
+        assert!(!all.is_empty());
+        assert_eq!(expanded_all, all);
+
+        let patch = |picks: &BTreeSet<(usize, usize)>| {
+            build_patch(
+                &PatchFile::new("src/lib.rs", &diff),
+                &picked_selection(picks),
+                PatchMode::Stage,
+            )
+        };
+        assert!(patch(&all).is_some());
+        assert_eq!(patch(&expanded_all), patch(&all));
+
+        // A range wholly inside revealed context picks nothing, and a range
+        // over one hunk header is that hunk's selection.
+        let bar_rows = panel_rows_expanded(&diff, &old, &new, &gaps, &Expansion::default());
+        let bar = bar_rows
+            .iter()
+            .position(|row| matches!(row.row, DiffRow::Gap { .. }))
+            .expect("a collapsed diff has hidden-lines bars");
+        assert!(
+            picked_in_range(&bar_rows, bar.saturating_sub(1), bar + 1).is_empty(),
+            "revealed lines and the bar are not pickable"
+        );
+
+        let header = expanded
+            .iter()
+            .position(|row| matches!(row.position, RowPosition::Hunk(1)))
+            .expect("the second hunk still has its header");
+        let next = expanded[header + 1..]
+            .iter()
+            .position(|row| matches!(row.position, RowPosition::Hunk(_)))
+            .map_or(expanded.len(), |offset| header + 1 + offset);
+        let hunk_picks = picked_in_range(&expanded, header, next - 1);
+        let expected = LineSelection::all_of_hunk(&diff, 1);
+        let expected_picks: BTreeSet<(usize, usize)> = expected.iter().collect();
+        assert_eq!(picked_selection(&hunk_picks), expected);
+        assert_eq!(patch(&hunk_picks), patch(&expected_picks));
     }
 }

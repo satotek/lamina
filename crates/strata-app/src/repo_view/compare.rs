@@ -28,11 +28,11 @@ use strata_core::session::{
 };
 use strata_core::{HeadInfo, Oid};
 
-use super::RepoView;
 use super::details::file_stat_label;
 use super::split::{self, files_fraction};
+use super::{RepoView, RowsTarget};
 use crate::data;
-use crate::diff_view::{self, DiffColors, Row as DiffRow};
+use crate::diff_view::{self, DiffColors, DiffContext, Row as DiffRow};
 use crate::repo_view::history_diff_options;
 use crate::scrollbar::WithScrollbar as _;
 use crate::style::{self, Design};
@@ -84,7 +84,9 @@ pub(crate) struct Compare {
     selected: Option<usize>,
     diff_ticket: Option<DiffTicket>,
     view: Option<Arc<DiffView>>,
-    diff_rows: Rc<Vec<DiffRow>>,
+    pub(crate) diff_rows: Rc<Vec<DiffRow>>,
+    /// Which hidden lines of the selected file's diff are revealed.
+    pub(crate) context: DiffContext,
     diff_error: Option<String>,
     file_scroll: UniformListScrollHandle,
     diff_scroll: UniformListScrollHandle,
@@ -104,6 +106,7 @@ impl Compare {
             diff_ticket: None,
             view: None,
             diff_rows: Rc::new(Vec::new()),
+            context: DiffContext::default(),
             diff_error: None,
             file_scroll: UniformListScrollHandle::default(),
             diff_scroll: UniformListScrollHandle::default(),
@@ -403,6 +406,7 @@ impl RepoView {
             compare.selected = (!comparison.files.is_empty()).then_some(0);
             compare.view = None;
             compare.diff_rows = Rc::new(Vec::new());
+            compare.context.reset();
             compare.diff_error = None;
             compare.selected
         };
@@ -445,7 +449,8 @@ impl RepoView {
         if compare.diff_ticket != Some(ticket) {
             return false;
         }
-        compare.diff_rows = Rc::new(diff_view::flatten(&view.diff));
+        compare.context.reset();
+        compare.diff_rows = Rc::new(compare.context.rows(view));
         compare.view = Some(Arc::clone(view));
         compare.diff_error = None;
         self.notify_if_active(cx);
@@ -485,8 +490,66 @@ impl RepoView {
         compare.selected = Some(index);
         compare.view = None;
         compare.diff_rows = Rc::new(Vec::new());
+        compare.context.reset();
         compare.diff_error = None;
         self.request_compare_diff(cx);
+    }
+
+    /// Applies one press on a hidden-lines bar of the compare diff.
+    pub(crate) fn expand_compare_gap(
+        &mut self,
+        gap: usize,
+        action: strata_core::diff::GapAction,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = self
+            .compare
+            .as_ref()
+            .and_then(|compare| compare.view.clone())
+        else {
+            return;
+        };
+        let Some(context) = self.compare.as_mut().and_then(|compare| {
+            compare
+                .context
+                .expand(gap, action, &view)
+                .then(|| compare.context.clone())
+        }) else {
+            return;
+        };
+        let revision = context.revision();
+        let build_view = Arc::clone(&view);
+        self.rebuild_rows_in_background(RowsTarget::Compare, revision, cx, move || {
+            context.rows(&build_view)
+        });
+        self.notify_if_active(cx);
+    }
+
+    /// The compare view's "Whole file" toggle.
+    pub(crate) fn toggle_compare_whole_file(&mut self, cx: &mut Context<Self>) {
+        let Some(view) = self
+            .compare
+            .as_ref()
+            .and_then(|compare| compare.view.clone())
+        else {
+            return;
+        };
+        let Some(context) = self.compare.as_mut().and_then(|compare| {
+            compare
+                .context
+                .toggle_whole_file(&view)
+                .then(|| compare.context.clone())
+        }) else {
+            // A refused toggle still has a notice to show.
+            self.notify_if_active(cx);
+            return;
+        };
+        let revision = context.revision();
+        let build_view = Arc::clone(&view);
+        self.rebuild_rows_in_background(RowsTarget::Compare, revision, cx, move || {
+            context.rows(&build_view)
+        });
+        self.notify_if_active(cx);
     }
 
     /// Up/Down in the compare view: moves between the changed files.
@@ -860,7 +923,32 @@ impl RepoView {
                     .font_family(design.mono.clone())
                     .child(path),
             )
-            .child(div().flex_none().text_color(design.muted).child(totals));
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_none().text_color(design.muted).child(totals))
+                    .child(if compare.view.is_some() {
+                        let active = compare.context.is_whole_file();
+                        let entity = self.entity();
+                        ui::button("compare-toggle-whole-file", "Whole file")
+                            .size(ButtonSize::Tiny)
+                            .ghost()
+                            .selected(active)
+                            .tooltip(if active {
+                                "Show only the changes"
+                            } else {
+                                "Show every line of the file"
+                            })
+                            .on_click(move |_event, _window, cx| {
+                                entity.update(cx, |this, cx| this.toggle_compare_whole_file(cx));
+                            })
+                            .into_any_element()
+                    } else {
+                        div().into_any_element()
+                    }),
+            );
 
         let body = if let Some(error) = &compare.diff_error {
             ui::message(error, design.remove_text, design).into_any_element()
@@ -872,15 +960,29 @@ impl RepoView {
             } else if compare.diff_rows.is_empty() {
                 ui::message("No textual changes", design.muted, design).into_any_element()
             } else {
-                diff_view::diff_list(
-                    "compare-diff",
-                    Rc::clone(&compare.diff_rows),
-                    compare.view.clone(),
-                    *diff_colors,
-                    design.mono.clone(),
-                    &compare.diff_scroll,
+                let list = diff_view::diff_list(
+                    diff_view::DiffList {
+                        id: "compare-diff",
+                        rows: Rc::clone(&compare.diff_rows),
+                        view: compare.view.clone(),
+                        colors: *diff_colors,
+                        mono: design.mono.clone(),
+                        scroll: &compare.diff_scroll,
+                        on_gap: self.gap_handler(),
+                    },
                     cx,
-                )
+                );
+                match compare.context.notice() {
+                    Some(notice) => div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_h_0()
+                        .child(ui::banner(ui::BannerKind::Warning, notice, design))
+                        .child(list)
+                        .into_any_element(),
+                    None => list,
+                }
             }
         } else {
             ui::message("computing diff…", design.muted, design).into_any_element()

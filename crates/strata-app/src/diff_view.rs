@@ -23,11 +23,14 @@ use std::sync::Arc;
 use gpui::{
     AnyElement, App, BorrowAppContext as _, Div, Global, HighlightStyle, Hsla, IntoElement,
     ListAlignment, ListOffset, ListState, ParentElement, SharedString, Styled, StyledText,
-    UniformListScrollHandle, div, list, prelude::FluentBuilder as _, px, uniform_list,
+    UniformListScrollHandle, Window, div, list, prelude::FluentBuilder as _, px, uniform_list,
 };
 use gpui_component::scroll::Scrollbar;
 use gpui_component::theme::Theme;
-use strata_core::diff::{DiffLine, FileDiff, LineKind};
+use strata_core::diff::{
+    DiffLine, Expansion, FileDiff, Gap, GapAction, LineKind, REVEAL_STEP, gap_view,
+    within_expand_cap,
+};
 use strata_core::highlight::{HighlightKind, LineHighlights};
 use strata_core::session::DiffView;
 
@@ -65,6 +68,9 @@ enum RowRole {
 fn row_role(rows: &[Row], index: usize) -> Option<RowRole> {
     match rows.get(index)? {
         Row::HunkHeader { .. } => Some(RowRole::Header),
+        // A gap bar and the lines revealed around it are outside the cards,
+        // like the gap above a header.
+        Row::Gap { .. } | Row::Context(_) => None,
         Row::Line(_) => Some(if matches!(rows.get(index + 1), Some(Row::Line(_))) {
             RowRole::Middle
         } else {
@@ -78,6 +84,7 @@ fn row_role(rows: &[Row], index: usize) -> Option<RowRole> {
 fn split_role(pairs: &[SplitRow], index: usize) -> Option<RowRole> {
     match pairs.get(index)? {
         SplitRow::Header { .. } => Some(RowRole::Header),
+        SplitRow::Gap { .. } => None,
         SplitRow::Lines { .. } => Some(
             if matches!(pairs.get(index + 1), Some(SplitRow::Lines { .. })) {
                 RowRole::Middle
@@ -105,11 +112,136 @@ pub enum Row {
         new_len: u32,
     },
     Line(DiffLine),
+    /// A context line revealed out of a gap. It is not part of a hunk card, so
+    /// it is drawn without the card's edges.
+    Context(DiffLine),
+    /// The still-hidden part of a gap, drawn as a slim bar that offers to show
+    /// more of it. `gap` indexes [`DiffView::gaps`].
+    Gap {
+        gap: usize,
+        hidden: u32,
+    },
+}
+
+/// What a gap bar's buttons do for one diff.
+pub type GapHandler = Rc<dyn Fn(usize, GapAction, &mut Window, &mut App)>;
+
+/// How much of a diff's hidden context is on screen, for one file of one diff.
+///
+/// A pane owns one and resets it when the selection changes, so every file
+/// starts collapsed again. The rows are rebuilt from the diff the view already
+/// holds: revealing context never runs the diff a second time.
+#[derive(Clone, Default)]
+pub struct DiffContext {
+    expansion: Expansion,
+    notice: Option<&'static str>,
+    /// Bumped whenever the rows the context describes change, so a rebuild
+    /// that finishes late cannot replace a newer one.
+    revision: u64,
+}
+
+/// Shown when a file is past the cap instead of building rows for all of it.
+const TOO_LARGE: &str = "This file is too large to show in full (1 MiB limit).";
+
+impl DiffContext {
+    /// Back to no revealed gap and no whole-file view.
+    pub fn reset(&mut self) {
+        let revision = self.next_revision();
+        *self = Self {
+            revision,
+            ..Self::default()
+        };
+    }
+
+    fn next_revision(&self) -> u64 {
+        self.revision.wrapping_add(1)
+    }
+
+    /// Identifies the expansion a rebuild was started for.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    pub fn is_whole_file(&self) -> bool {
+        self.expansion.is_whole_file()
+    }
+
+    /// The raw reveals, for a pane that builds its own rows.
+    pub fn expansion(&self) -> &Expansion {
+        &self.expansion
+    }
+
+    /// Why the last whole-file or reveal-all request was refused, if it was.
+    pub fn notice(&self) -> Option<&'static str> {
+        self.notice
+    }
+
+    /// Applies one press on a gap bar; true when the rows must be rebuilt.
+    pub fn expand(&mut self, gap: usize, action: GapAction, view: &DiffView) -> bool {
+        let Some(run) = view.gaps.get(gap).filter(|gap| gap.len > 0) else {
+            return false;
+        };
+        if action == GapAction::All && !within_expand_cap(&view.old_text, &view.new_text) {
+            self.notice = Some(TOO_LARGE);
+            return false;
+        }
+        self.notice = None;
+        self.expansion.expand(gap, action, run.len);
+        self.revision = self.next_revision();
+        true
+    }
+
+    /// Switches the whole-file view; true when the rows must be rebuilt.
+    ///
+    /// A file past the cap keeps its diff and shows [`Self::notice`] instead:
+    /// building every row of a multi-megabyte file would stall a frame.
+    pub fn toggle_whole_file(&mut self, view: &DiffView) -> bool {
+        if self.expansion.is_whole_file() {
+            self.expansion.set_whole_file(false);
+            self.notice = None;
+            self.revision = self.next_revision();
+            return true;
+        }
+        if !within_expand_cap(&view.old_text, &view.new_text) {
+            self.notice = Some(TOO_LARGE);
+            return false;
+        }
+        self.expansion.set_whole_file(true);
+        self.notice = None;
+        self.revision = self.next_revision();
+        true
+    }
+
+    /// The rows this expansion shows for `view`.
+    pub fn rows(&self, view: &DiffView) -> Vec<Row> {
+        flatten_expanded(
+            &view.diff,
+            &view.old_text,
+            &view.new_text,
+            &view.gaps,
+            &self.expansion,
+        )
+    }
 }
 
 pub fn flatten(diff: &FileDiff) -> Vec<Row> {
+    flatten_expanded(diff, "", "", &[], &Expansion::default())
+}
+
+/// The diff's rows with the expanded context of `expansion` filled in.
+///
+/// `gaps` is [`DiffView::gaps`]: one entry before each hunk and one after the
+/// last one.
+pub fn flatten_expanded(
+    diff: &FileDiff,
+    old: &str,
+    new: &str,
+    gaps: &[Gap],
+    expansion: &Expansion,
+) -> Vec<Row> {
     let mut rows = Vec::with_capacity(diff.hunks.iter().map(|h| h.lines.len() + 1).sum());
-    for hunk in &diff.hunks {
+    for (index, hunk) in diff.hunks.iter().enumerate() {
+        rows.extend(gap_rows(old, new, gaps.get(index), index, expansion));
         rows.push(Row::HunkHeader {
             old_start: hunk.old_start,
             old_len: hunk.old_len,
@@ -118,6 +250,38 @@ pub fn flatten(diff: &FileDiff) -> Vec<Row> {
         });
         rows.extend(hunk.lines.iter().cloned().map(Row::Line));
     }
+    rows.extend(gap_rows(
+        old,
+        new,
+        gaps.get(diff.hunks.len()),
+        diff.hunks.len(),
+        expansion,
+    ));
+    rows
+}
+
+/// The rows one gap contributes: the lines revealed above the bar, the bar
+/// itself when lines remain hidden, then the lines revealed below it.
+pub fn gap_rows(
+    old: &str,
+    new: &str,
+    gap: Option<&Gap>,
+    index: usize,
+    expansion: &Expansion,
+) -> Vec<Row> {
+    let Some(gap) = gap.filter(|gap| gap.len > 0) else {
+        return Vec::new();
+    };
+    let view = gap_view(old, new, gap, expansion.reveal(index, gap.len));
+    let mut rows = Vec::with_capacity(view.above.len() + view.below.len() + 1);
+    rows.extend(view.above.into_iter().map(Row::Context));
+    if view.hidden > 0 {
+        rows.push(Row::Gap {
+            gap: index,
+            hidden: view.hidden,
+        });
+    }
+    rows.extend(view.below.into_iter().map(Row::Context));
     rows
 }
 
@@ -134,6 +298,10 @@ enum SplitRow {
     Lines {
         old: Option<usize>,
         new: Option<usize>,
+    },
+    /// A gap bar, which spans both columns.
+    Gap {
+        row: usize,
     },
 }
 
@@ -153,6 +321,10 @@ fn split_rows(rows: &[Row]) -> Vec<SplitRow> {
                 flush_block(&mut removed, &mut added, &mut out);
                 out.push(SplitRow::Header { row: index });
             }
+            Row::Gap { .. } => {
+                flush_block(&mut removed, &mut added, &mut out);
+                out.push(SplitRow::Gap { row: index });
+            }
             Row::Line(line) => match line.kind {
                 LineKind::Removed => removed.push(index),
                 LineKind::Added => added.push(index),
@@ -164,6 +336,13 @@ fn split_rows(rows: &[Row]) -> Vec<SplitRow> {
                     });
                 }
             },
+            Row::Context(_) => {
+                flush_block(&mut removed, &mut added, &mut out);
+                out.push(SplitRow::Lines {
+                    old: Some(index),
+                    new: Some(index),
+                });
+            }
         }
     }
     flush_block(&mut removed, &mut added, &mut out);
@@ -264,6 +443,9 @@ pub struct RowOptions {
     /// `Some(picked)` for a changed line the user can select, `None` for
     /// context lines and hunk headers.
     pub pick: Option<bool>,
+    /// Keeps context revealed out of a gap aligned with the hunk cards around
+    /// it. The staging pane draws its rows flush and leaves this off.
+    pub inset: bool,
 }
 
 /// The code font and diff display preferences, read once per frame.
@@ -384,15 +566,28 @@ pub fn render_row_with(
 /// caller's `uniform_list`. A wrapped row is as tall as its text needs, which
 /// only gpui's general [`list`] can measure; that list keeps its own state per
 /// pane here and remeasures when the rows, the width or the font change.
-pub fn diff_list(
-    id: &'static str,
-    rows: Rc<Vec<Row>>,
-    view: Option<Arc<DiffView>>,
-    colors: DiffColors,
-    mono: SharedString,
-    scroll: &UniformListScrollHandle,
-    cx: &mut App,
-) -> AnyElement {
+pub struct DiffList<'a> {
+    pub id: &'static str,
+    pub rows: Rc<Vec<Row>>,
+    pub view: Option<Arc<DiffView>>,
+    pub colors: DiffColors,
+    pub mono: SharedString,
+    pub scroll: &'a UniformListScrollHandle,
+    /// Handles the buttons of the hidden-lines bars; a pane that has no
+    /// expansion state (the synthetic benchmark) leaves it out.
+    pub on_gap: Option<GapHandler>,
+}
+
+pub fn diff_list(list: DiffList<'_>, cx: &mut App) -> AnyElement {
+    let DiffList {
+        id,
+        rows,
+        view,
+        colors,
+        mono,
+        scroll,
+        on_gap,
+    } = list;
     let style = DiffStyle::from_settings(cx, &mono);
     let (count, pairs) = list_items(&rows, style.split);
     let source = Rows {
@@ -401,6 +596,7 @@ pub fn diff_list(
         view,
         colors,
         style,
+        on_gap,
     };
 
     if source.style.wrap {
@@ -427,6 +623,7 @@ struct Rows {
     view: Option<Arc<DiffView>>,
     colors: DiffColors,
     style: DiffStyle,
+    on_gap: Option<GapHandler>,
 }
 
 impl Rows {
@@ -437,6 +634,7 @@ impl Rows {
             view,
             colors,
             style,
+            on_gap,
         } = self;
         if let Some(pairs) = pairs.as_deref() {
             return match pairs.get(index) {
@@ -448,6 +646,7 @@ impl Rows {
                     view.as_deref(),
                     wrap,
                     split_role(pairs, index),
+                    on_gap.as_ref(),
                 ),
                 // The item count is the pairing's length, so this only happens
                 // for an index from a stale count.
@@ -458,13 +657,19 @@ impl Rows {
         let Some(row) = rows.get(index) else {
             return div().into_any_element();
         };
+        if let Row::Gap { gap, hidden } = row {
+            return gap_bar(*gap, *hidden, colors, style, on_gap.as_ref());
+        }
         let highlights = line_highlights(row, view.as_deref(), style.syntax);
         unified_row(
             row,
             colors,
             style,
             highlights,
-            RowOptions::default(),
+            RowOptions {
+                inset: true,
+                ..RowOptions::default()
+            },
             wrap,
             row_role(rows, index),
         )
@@ -627,13 +832,17 @@ fn hash_row(hash: &mut u64, row: &Row) {
                 hash_bytes(hash, &number.to_le_bytes());
             }
         }
-        Row::Line(line) => {
+        Row::Line(line) | Row::Context(line) => {
             hash_bytes(hash, &[row_kind(line.kind)]);
             hash_bytes(hash, &(line.content.len() as u64).to_le_bytes());
             // A long line's tail rarely decides whether two diffs differ, and
             // hashing it in full would make the fingerprint scale with the file.
             let bytes = line.content.as_bytes();
             hash_bytes(hash, &bytes[..bytes.len().min(48)]);
+        }
+        Row::Gap { gap, hidden } => {
+            hash_bytes(hash, &(*gap as u64).to_le_bytes());
+            hash_bytes(hash, &hidden.to_le_bytes());
         }
     }
 }
@@ -653,7 +862,7 @@ fn line_highlights<'a>(
     syntax: bool,
 ) -> Option<&'a LineHighlights> {
     let view = view.filter(|_| syntax)?;
-    let Row::Line(line) = row else {
+    let (Row::Line(line) | Row::Context(line)) = row else {
         return None;
     };
     let (highlights, number) = match line.kind {
@@ -694,7 +903,8 @@ fn unified_row(
             new_start,
             new_len,
         } => hunk_header((*old_start, *old_len, *new_start, *new_len), colors, style),
-        Row::Line(line) => {
+        Row::Gap { gap, hidden } => gap_bar(*gap, *hidden, colors, style, None),
+        Row::Line(line) | Row::Context(line) => {
             let picked = options.pick == Some(true);
             let mut outer = div()
                 .flex()
@@ -703,7 +913,9 @@ fn unified_row(
                 .font_family(style.mono.clone())
                 .text_size(px(style.font_size))
                 .text_color(colors.text);
-            if role.is_some() {
+            // Context revealed out of a gap has no card, but it sits among the
+            // cards and must keep their gutter alignment.
+            if role.is_some() || (options.inset && matches!(row, Row::Context(_))) {
                 outer = outer.pl(px(CARD_INSET)).pr(px(CARD_INSET));
             }
             outer = if wrap {
@@ -776,6 +988,10 @@ fn unified_row(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one call per side-by-side item; a struct would only rename the fields"
+)]
 fn split_row(
     pair: SplitRow,
     rows: &[Row],
@@ -784,6 +1000,7 @@ fn split_row(
     view: Option<&DiffView>,
     wrap: bool,
     role: Option<RowRole>,
+    on_gap: Option<&GapHandler>,
 ) -> AnyElement {
     match pair {
         SplitRow::Header { row } => match rows.get(row) {
@@ -795,6 +1012,10 @@ fn split_row(
             }) => hunk_header((*old_start, *old_len, *new_start, *new_len), colors, style),
             _ => div().into_any_element(),
         },
+        SplitRow::Gap { row } => match rows.get(row) {
+            Some(Row::Gap { gap, hidden }) => gap_bar(*gap, *hidden, colors, style, on_gap),
+            _ => div().into_any_element(),
+        },
         SplitRow::Lines { old, new } => {
             let old_line = old.and_then(|index| line_at(rows, index));
             let new_line = new.and_then(|index| line_at(rows, index));
@@ -803,6 +1024,9 @@ fn split_row(
             let new_highlights =
                 new_line.and_then(|line| side_highlights(view, Side::New, line, style.syntax));
             let tail = role == Some(RowRole::Tail);
+            // Lines revealed out of a gap are not in a hunk card: they keep
+            // the gutter and divider but none of the card's outline.
+            let loose = old.is_some_and(|index| matches!(rows.get(index), Some(Row::Context(_))));
 
             let mut outer = div()
                 .flex()
@@ -819,14 +1043,10 @@ fn split_row(
                 outer.items_center().h(px(style.row_height()))
             };
 
-            let mut card = div()
-                .flex()
-                .flex_1()
-                .min_w_0()
-                .w_full()
-                .border_l_1()
-                .border_r_1()
-                .border_color(colors.border);
+            let mut card = div().flex().flex_1().min_w_0().w_full();
+            if !loose {
+                card = card.border_l_1().border_r_1().border_color(colors.border);
+            }
             if tail {
                 card = card.border_b_1().rounded_b_sm();
             }
@@ -864,7 +1084,7 @@ fn split_row(
 
 fn line_at(rows: &[Row], index: usize) -> Option<&DiffLine> {
     match rows.get(index) {
-        Some(Row::Line(line)) => Some(line),
+        Some(Row::Line(line) | Row::Context(line)) => Some(line),
         _ => None,
     }
 }
@@ -929,6 +1149,69 @@ fn side_cell(
         .when_some(line, |cell, line| {
             cell.child(line_content(line, colors, style, highlights, wrap))
         })
+}
+
+/// The slim bar that stands in for the lines a gap still hides.
+///
+/// It sits between two hunk cards (or at a file edge), so it is drawn on the
+/// pane's background rather than in a card.
+pub(crate) fn gap_bar(
+    gap: usize,
+    hidden: u32,
+    colors: &DiffColors,
+    style: &DiffStyle,
+    on_gap: Option<&GapHandler>,
+) -> AnyElement {
+    let mut row = div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(8.0))
+        .h(px(style.row_height()))
+        .w_full()
+        .bg(colors.header)
+        .border_t_1()
+        .border_b_1()
+        .border_color(colors.border)
+        .font_family(style.mono.clone())
+        .text_size(px((style.font_size - 1.0).max(9.0)))
+        .text_color(colors.muted)
+        .child(format!(
+            "⋯ {hidden} hidden line{}",
+            if hidden == 1 { "" } else { "s" }
+        ));
+    if let Some(on_gap) = on_gap {
+        for (id, label, action, tooltip) in [
+            (
+                "gap-above",
+                format!("↑ {REVEAL_STEP}"),
+                GapAction::Above,
+                "Reveal more lines above",
+            ),
+            (
+                "gap-below",
+                format!("↓ {REVEAL_STEP}"),
+                GapAction::Below,
+                "Reveal more lines below",
+            ),
+            (
+                "gap-all",
+                "All".to_owned(),
+                GapAction::All,
+                "Reveal the gap",
+            ),
+        ] {
+            let on_gap = Rc::clone(on_gap);
+            row = row.child(
+                crate::ui::button((id, gap), label)
+                    .size(crate::ui::ButtonSize::Tiny)
+                    .ghost()
+                    .tooltip(tooltip)
+                    .on_click(move |_event, window, cx| on_gap(gap, action, window, cx)),
+            );
+        }
+    }
+    row.into_any_element()
 }
 
 fn hunk_header(
@@ -1839,5 +2122,193 @@ mod tests {
             light.syntax(HighlightKind::String),
             dark.syntax(HighlightKind::String)
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Context expansion and the whole-file view.
+    // -----------------------------------------------------------------------
+
+    use strata_core::diff::{DiffOptions, gaps, line_count, within_expand_cap};
+    use strata_core::session::DiffRequest;
+
+    fn diff_between(old: &str, new: &str, context_lines: u32) -> FileDiff {
+        strata_core::diff::diff_text(
+            old.as_bytes(),
+            new.as_bytes(),
+            &DiffOptions {
+                context_lines,
+                ..DiffOptions::default()
+            },
+        )
+    }
+
+    fn numbered(lines: usize) -> String {
+        (1..=lines).map(|line| format!("line {line}\n")).collect()
+    }
+
+    fn view_of(old: &str, new: &str) -> DiffView {
+        let diff = diff_between(old, new, 3);
+        let gaps = gaps(&diff, line_count(old), line_count(new));
+        DiffView {
+            request: DiffRequest::Staged {
+                path: "a.txt".into(),
+            },
+            diff,
+            old_highlights: Arc::new(Vec::new()),
+            new_highlights: Arc::new(Vec::new()),
+            old_text: Arc::from(old),
+            new_text: Arc::from(new),
+            gaps: Arc::from(gaps),
+            lfs: None,
+        }
+    }
+
+    fn drawn_lines(rows: &[Row]) -> Vec<&DiffLine> {
+        rows.iter()
+            .filter_map(|row| match row {
+                Row::Line(line) | Row::Context(line) => Some(line),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_gap_bar_sits_between_the_revealed_lines() {
+        let old = numbered(60);
+        let new = old
+            .replace("line 1\n", "FIRST\n")
+            .replace("line 60\n", "LAST\n");
+        let view = view_of(&old, &new);
+        let mut context = DiffContext::default();
+        assert!(context.expand(1, GapAction::Above, &view));
+
+        let rows = context.rows(&view);
+        let bars: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter_map(|(index, row)| matches!(row, Row::Gap { .. }).then_some(index))
+            .collect();
+        assert_eq!(bars.len(), 1, "one bar for the one gap with much to show");
+
+        let bar = bars[0];
+        assert!(
+            matches!(rows.get(bar), Some(Row::Gap { gap: 1, hidden: 32 })),
+            "52 lines sit between the two hunks, 20 of them now above the bar"
+        );
+        let above = drawn_lines(&rows[..bar]);
+        let revealed = &above[above.len() - REVEAL_STEP as usize..];
+        assert_eq!(revealed.first().and_then(|line| line.new_lineno), Some(5));
+        assert_eq!(revealed.last().and_then(|line| line.old_lineno), Some(24));
+        assert!(revealed.iter().all(|line| line.kind == LineKind::Context));
+        assert_eq!(
+            drawn_lines(&rows[bar + 1..])
+                .first()
+                .and_then(|line| line.new_lineno),
+            Some(57),
+            "nothing is revealed below the bar yet, so the next hunk follows it"
+        );
+    }
+
+    #[test]
+    fn whole_file_is_the_same_as_a_huge_context_diff() {
+        let old = numbered(40);
+        let new = old
+            .replace("line 9\n", "NINE\n")
+            .replace("line 30\n", "THIRTY\n");
+        let view = view_of(&old, &new);
+
+        let mut context = DiffContext::default();
+        assert!(context.toggle_whole_file(&view));
+        assert!(context.is_whole_file());
+        let rows = context.rows(&view);
+        let expanded = drawn_lines(&rows);
+
+        // The same file compared with more context than it has lines: one hunk
+        // carrying every line, in the same order.
+        let huge = diff_between(&old, &new, u32::MAX);
+        let expected: Vec<&DiffLine> = huge.hunks.iter().flat_map(|hunk| &hunk.lines).collect();
+        assert_eq!(expanded, expected);
+
+        // The unified rows are a header followed by that stream; the list can
+        // switch to side-by-side without losing a line.
+        let (count, pairs) = list_items(&rows, true);
+        assert!(count > 0);
+        assert_eq!(pairs.expect("side-by-side pairs").len(), count);
+    }
+
+    #[test]
+    fn expanding_below_reveals_the_end_of_the_gap() {
+        let old = numbered(60);
+        let new = old
+            .replace("line 1\n", "FIRST\n")
+            .replace("line 60\n", "LAST\n");
+        let view = view_of(&old, &new);
+        let mut context = DiffContext::default();
+        context.expand(1, GapAction::Below, &view);
+
+        let rows = context.rows(&view);
+        let bar = rows
+            .iter()
+            .position(|row| matches!(row, Row::Gap { .. }))
+            .expect("most of the gap is still hidden");
+        let below: Vec<Option<u32>> = drawn_lines(&rows[bar + 1..])
+            .into_iter()
+            .map(|line| line.new_lineno)
+            .collect();
+        assert_eq!(below.first().copied().flatten(), Some(37));
+        assert_eq!(
+            below.get(REVEAL_STEP as usize - 1).copied().flatten(),
+            Some(56),
+            "twenty lines are revealed just before the next hunk"
+        );
+
+        // Revealing all of it drops the bar and keeps both ends.
+        assert!(context.expand(1, GapAction::All, &view));
+        let rows = context.rows(&view);
+        assert!(!rows.iter().any(|row| matches!(row, Row::Gap { .. })));
+        let numbers: Vec<Option<u32>> = drawn_lines(&rows)
+            .into_iter()
+            .filter(|line| line.kind == LineKind::Context)
+            .map(|line| line.new_lineno)
+            .collect();
+        assert!(numbers.contains(&Some(5)));
+        assert!(numbers.contains(&Some(56)));
+    }
+
+    #[test]
+    fn toggle_whole_file_leaves_a_too_large_file_alone() {
+        let big = "x".repeat(strata_core::diff::MAX_EXPAND_BYTES + 1);
+        let view = DiffView {
+            request: DiffRequest::Staged {
+                path: "a.txt".into(),
+            },
+            diff: FileDiff::default(),
+            old_highlights: Arc::new(Vec::new()),
+            new_highlights: Arc::new(Vec::new()),
+            lfs: None,
+            old_text: Arc::from(big.clone()),
+            new_text: Arc::from("a\n"),
+            gaps: Arc::from(vec![strata_core::diff::Gap {
+                old_start: 1,
+                new_start: 1,
+                len: 1,
+            }]),
+        };
+        assert!(!within_expand_cap(&view.old_text, &view.new_text));
+
+        let mut context = DiffContext::default();
+        assert!(
+            !context.toggle_whole_file(&view),
+            "the rows must not be rebuilt for a file past the cap"
+        );
+        assert!(!context.is_whole_file());
+        assert!(context.notice().is_some());
+
+        assert!(!context.expand(0, GapAction::All, &view));
+        assert!(context.notice().is_some());
+
+        // Twenty lines at a time stays cheap whatever the file size.
+        assert!(context.expand(0, GapAction::Above, &view));
+        assert!(context.notice().is_none());
     }
 }

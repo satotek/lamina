@@ -32,7 +32,7 @@ use crate::actions::{
     OpenInEditor, OpenRepository, OpenSettings, OpenTerminalHere, PreviousTab, Quit, SelectTab1,
     SelectTab2, SelectTab3, SelectTab4, SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9,
     StashChanges, SwitchBranch, ToggleDetailsMaximized, ToggleFrameStats, TogglePalette,
-    UndoLastAction,
+    ToggleWholeFile, UndoLastAction,
 };
 use crate::branches::CreateBranchFromHead;
 use crate::remote::{FetchRemotes, PullBranch, PushBranch};
@@ -254,6 +254,11 @@ const COMMANDS: &[Command] = &[
     Command {
         label: "Toggle details maximized",
         action: || Box::new(ToggleDetailsMaximized),
+        needs_repo: true,
+    },
+    Command {
+        label: "Toggle whole file",
+        action: || Box::new(ToggleWholeFile),
         needs_repo: true,
     },
     Command {

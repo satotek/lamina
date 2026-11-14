@@ -18,7 +18,7 @@ use crate::actions::{
     self, CloseCompare, ExtendSelectionNext, ExtendSelectionPrevious, NavigateBack, OpenInEditor,
     OpenTerminalHere, SelectFirst, SelectLast, SelectNext, SelectPageDown, SelectPageUp,
     SelectPrevious, StashChanges, SwitchBranch, ToggleDetailsMaximized, ToggleFrameStats,
-    UndoLastAction,
+    ToggleWholeFile, UndoLastAction,
 };
 use crate::branches::CreateBranchFromHead;
 use crate::data::Source;
@@ -83,6 +83,7 @@ impl Render for RepoView {
             .on_action(cx.listener(|this, _: &ToggleDetailsMaximized, _, cx| {
                 this.toggle_details_maximized(cx)
             }))
+            .on_action(cx.listener(|this, _: &ToggleWholeFile, _, cx| this.toggle_whole_file(cx)))
             .on_action(
                 cx.listener(|this, _: &CloseCompare, window, cx| this.close_compare(window, cx)),
             )

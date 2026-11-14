@@ -43,6 +43,7 @@ use gpui::{
     ScrollStrategy, Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
 };
 use gpui_component::input::InputState;
+use strata_core::diff::GapAction;
 use strata_core::git_cli::CommandRecord;
 use strata_core::lfs::{LfsInfo, LfsLock};
 use strata_core::repo::{SubmoduleInfo, WorktreeInfo};
@@ -56,7 +57,7 @@ use crate::branch_switcher::BranchSwitcher;
 use crate::branches::{BranchStart, Branches};
 use crate::data::{self, LaneWidth, Source};
 use crate::debug_launch::{self, DebugDialog, DebugLaunch, SnapshotRevMatch, TreeTarget};
-use crate::diff_view::{self, Row as DiffRow};
+use crate::diff_view::{self, DiffContext, Row as DiffRow};
 use crate::fake::{self, FakeRepo};
 use crate::file_history::FileHistory;
 use crate::metrics::FrameMetrics;
@@ -205,6 +206,20 @@ fn display_path(path: &Path) -> String {
 /// A ticket only becomes the current one when its request is the latest, so a
 /// worker that finishes after the user moved on cannot replace the diff with
 /// something else. The session is told to cancel the ticket it replaced.
+/// Which pane's rows a background rebuild belongs to.
+///
+/// Expansion rebuilds rows off the UI thread; the pane the user clicked can
+/// have moved on by the time the rows are ready, so the result names its pane
+/// and its revision instead of a captured field.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RowsTarget {
+    History,
+    Compare,
+    FileHistory,
+}
+
+/// The same "only the latest ticket wins" slot as the history diff, so a stale
+/// worker cannot replace the diff after the user moved on.
 #[derive(Default)]
 struct DiffSlot {
     ticket: Option<DiffTicket>,
@@ -435,6 +450,8 @@ pub struct RepoView {
     /// not touch them does not re-request the same diff.
     diff_options: DiffOptions,
     diff_rows: Rc<Vec<DiffRow>>,
+    /// Which hidden lines of the diff on screen are revealed.
+    diff_context: DiffContext,
     diff_error: Option<String>,
     /// Pre-flattened synthetic diffs so `--fake` does not rebuild one per frame.
     fake_diffs: Rc<Vec<Rc<Vec<DiffRow>>>>,
@@ -596,6 +613,7 @@ impl RepoView {
             diff: DiffSlot::default(),
             diff_options,
             diff_rows: Rc::new(Vec::new()),
+            diff_context: DiffContext::default(),
             diff_error: None,
             fake_diffs: Rc::new(Vec::new()),
             last_command: None,
@@ -806,6 +824,21 @@ impl RepoView {
             .expect("the view renders only while it is alive")
     }
 
+    /// The handler behind every hidden-lines bar of the diff panes.
+    ///
+    /// One handler serves the history, file-history and compare panes: only
+    /// one of them is on screen, and [`Self::expand_diff_gap`] picks the one
+    /// whose rows it should rebuild.
+    pub(crate) fn gap_handler(&self) -> Option<diff_view::GapHandler> {
+        if self.fake.is_some() {
+            return None;
+        }
+        let entity = self.entity();
+        Some(Rc::new(move |gap, action, _window, cx| {
+            entity.update(cx, |this, cx| this.expand_diff_gap(gap, action, cx));
+        }))
+    }
+
     /// Takes the session and stops forwarding its events to this view.
     ///
     /// The workspace calls this when it replaces the view: a late event from
@@ -878,8 +911,9 @@ impl RepoView {
                     return;
                 }
                 // Flattening copies the line text once per version instead of
-                // rebuilding it on every frame.
-                self.diff_rows = Rc::new(diff_view::flatten(&view.diff));
+                // rebuilding it on every frame. Another file starts collapsed.
+                self.diff_context.reset();
+                self.diff_rows = Rc::new(self.diff_context.rows(&view));
                 self.diff_error = None;
                 self.notify_if_active(cx);
             }
@@ -1678,6 +1712,7 @@ impl RepoView {
         self.selected_file = Some(index);
         self.diff_error = None;
         self.diff_rows = Rc::new(Vec::new());
+        self.diff_context.reset();
         let options = history_diff_options(cx);
         let ticket = session.request_diff_with(DiffRequest::Commit { commit, path }, options);
         self.diff_options = options;
@@ -1710,10 +1745,124 @@ impl RepoView {
 
     fn cancel_diff(&mut self) {
         self.diff_rows = Rc::new(Vec::new());
+        self.diff_context.reset();
         self.diff_error = None;
         let ticket = self.diff.cancel();
         if let (Some(session), Some(ticket)) = (self.session.as_ref(), ticket) {
             session.cancel_diff(ticket);
+        }
+    }
+
+    /// Applies one press on a hidden-lines bar of the diff on screen.
+    pub(crate) fn expand_diff_gap(
+        &mut self,
+        gap: usize,
+        action: GapAction,
+        cx: &mut Context<Self>,
+    ) {
+        if self.file_history.is_some() {
+            self.expand_file_history_gap(gap, action, cx);
+            return;
+        }
+        if self.compare.is_some() {
+            self.expand_compare_gap(gap, action, cx);
+            return;
+        }
+        let Some(view) = self.diff.view().cloned() else {
+            return;
+        };
+        if self.diff_context.expand(gap, action, &view) {
+            let context = self.diff_context.clone();
+            let revision = context.revision();
+            let build_view = Arc::clone(&view);
+            self.rebuild_rows_in_background(RowsTarget::History, revision, cx, move || {
+                context.rows(&build_view)
+            });
+        }
+        self.notify_if_active(cx);
+    }
+
+    /// The "Whole file" toggle, for whichever diff is on screen.
+    pub(crate) fn toggle_whole_file(&mut self, cx: &mut Context<Self>) {
+        if self.file_history.is_some() {
+            self.toggle_file_history_whole_file(cx);
+            return;
+        }
+        if self.compare.is_some() {
+            self.toggle_compare_whole_file(cx);
+            return;
+        }
+        if self.mode == MainMode::Worktree {
+            self.toggle_worktree_whole_file(cx);
+            return;
+        }
+        let Some(view) = self.diff.view().cloned() else {
+            return;
+        };
+        if self.diff_context.toggle_whole_file(&view) {
+            let context = self.diff_context.clone();
+            let revision = context.revision();
+            let build_view = Arc::clone(&view);
+            self.rebuild_rows_in_background(RowsTarget::History, revision, cx, move || {
+                context.rows(&build_view)
+            });
+        }
+        self.notify_if_active(cx);
+    }
+
+    /// Rebuilds a pane's rows off the UI thread.
+    ///
+    /// Revealing context turns into one row per shown line, and the whole-file
+    /// view can be a whole file, so the allocation does not belong in a frame.
+    pub(crate) fn rebuild_rows_in_background(
+        &mut self,
+        target: RowsTarget,
+        revision: u64,
+        cx: &mut Context<Self>,
+        build: impl FnOnce() -> Vec<DiffRow> + Send + 'static,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let rows = cx.background_executor().spawn(async move { build() }).await;
+            this.update(cx, |this, cx| {
+                if this.accept_rows(target, revision, rows) {
+                    this.notify_if_active(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Installs a rebuild unless the pane moved on while it ran.
+    fn accept_rows(&mut self, target: RowsTarget, revision: u64, rows: Vec<DiffRow>) -> bool {
+        match target {
+            RowsTarget::History => {
+                if self.diff_context.revision() != revision {
+                    return false;
+                }
+                self.diff_rows = Rc::new(rows);
+                true
+            }
+            RowsTarget::Compare => {
+                let Some(compare) = self.compare.as_mut() else {
+                    return false;
+                };
+                if compare.context.revision() != revision {
+                    return false;
+                }
+                compare.diff_rows = Rc::new(rows);
+                true
+            }
+            RowsTarget::FileHistory => {
+                let Some(history) = self.file_history.as_mut() else {
+                    return false;
+                };
+                if history.context.revision() != revision {
+                    return false;
+                }
+                history.diff_rows = Rc::new(rows);
+                true
+            }
         }
     }
 
@@ -2322,6 +2471,9 @@ mod tests {
             old_highlights: Arc::new(Vec::new()),
             new_highlights: Arc::new(Vec::new()),
             lfs: None,
+            old_text: Arc::from(""),
+            new_text: Arc::from(""),
+            gaps: Arc::from(Vec::new()),
         })
     }
 

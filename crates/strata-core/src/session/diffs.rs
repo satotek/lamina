@@ -5,7 +5,7 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::Result;
-use crate::diff::{DiffOptions, diff_text};
+use crate::diff::{DiffOptions, diff_text, gaps, line_count};
 use crate::highlight::{Highlighter, language_for_path};
 use crate::lfs::{self, LfsDiff, LfsDiffSummary};
 use crate::repo::Repo;
@@ -62,15 +62,24 @@ pub(crate) fn run(shared: Arc<Shared>, jobs: Arc<Mutex<Receiver<DiffJob>>>) {
 fn compute(shared: &Shared, job: &DiffJob, highlighter: &mut Highlighter) -> Result<()> {
     let (old, new) = read_sides(&shared.repo, &job.request)?;
     let (old_bytes, new_bytes, lfs) = diff_inputs(&shared.repo, old, new);
+    // The texts are decoded once and kept: the view slices them to reveal the
+    // context the diff leaves out, and highlighting reads the same strings.
+    // They come after the LFS swap so both show the object, not the pointer.
+    let old_text: Arc<str> = Arc::from(String::from_utf8_lossy(&old_bytes).into_owned());
+    let new_text: Arc<str> = Arc::from(String::from_utf8_lossy(&new_bytes).into_owned());
 
-    let diff = diff_text(&old_bytes, &new_bytes, &job.options);
+    let diff = diff_text(old_text.as_bytes(), new_text.as_bytes(), &job.options);
     let binary = diff.binary;
+    let gaps = Arc::from(gaps(&diff, line_count(&old_text), line_count(&new_text)));
     let view = Arc::new(DiffView {
         request: job.request.clone(),
         diff,
         old_highlights: Arc::new(Vec::new()),
         new_highlights: Arc::new(Vec::new()),
         lfs,
+        old_text: Arc::clone(&old_text),
+        new_text: Arc::clone(&new_text),
+        gaps,
     });
     if !emit(shared, job.ticket, Arc::clone(&view)) || binary {
         return Ok(());
@@ -79,19 +88,18 @@ fn compute(shared: &Shared, job: &DiffJob, highlighter: &mut Highlighter) -> Res
     let Some(language) = language_for_path(path_of(&job.request)) else {
         return Ok(());
     };
-    if old_bytes.len() > MAX_HIGHLIGHT_BYTES || new_bytes.len() > MAX_HIGHLIGHT_BYTES {
+    if old_text.len() > MAX_HIGHLIGHT_BYTES || new_text.len() > MAX_HIGHLIGHT_BYTES {
         return Ok(());
     }
 
     let highlighted = Arc::new(DiffView {
         request: view.request.clone(),
         diff: view.diff.clone(),
-        old_highlights: Arc::new(
-            highlighter.highlight(language, &String::from_utf8_lossy(&old_bytes)),
-        ),
-        new_highlights: Arc::new(
-            highlighter.highlight(language, &String::from_utf8_lossy(&new_bytes)),
-        ),
+        old_highlights: Arc::new(highlighter.highlight(language, &old_text)),
+        new_highlights: Arc::new(highlighter.highlight(language, &new_text)),
+        old_text,
+        new_text,
+        gaps: Arc::clone(&view.gaps),
         lfs: view.lfs.clone(),
     });
     emit(shared, job.ticket, highlighted);

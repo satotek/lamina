@@ -1,10 +1,16 @@
 //! Text diff (imara-diff) with intra-line emphasis. Owned by the diff task.
 
 mod emphasis;
+mod expand;
 mod lines;
 
 #[cfg(test)]
 mod tests;
+
+pub use expand::{
+    Expansion, Gap, GapAction, GapView, MAX_EXPAND_BYTES, REVEAL_STEP, Reveal, gap_view, gaps,
+    line_count, within_expand_cap,
+};
 
 use std::borrow::Cow;
 use std::fmt::Write as _;

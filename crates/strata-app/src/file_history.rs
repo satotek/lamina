@@ -16,15 +16,15 @@ use gpui::{
     AnyElement, App, Context, Entity, FontWeight, Hsla, IntoElement, ParentElement, SharedString,
     Styled, UniformListScrollHandle, Window, div, px, uniform_list,
 };
-use gpui_component::{ActiveTheme as _, Theme, spinner::Spinner};
+use gpui_component::{ActiveTheme as _, Selectable as _, Theme, spinner::Spinner};
 use strata_core::session::{
     DiffRequest, DiffTicket, DiffView, PathHistoryCommit, QueryTicket, RepoSnapshot,
 };
 use strata_core::{HeadInfo, Oid, RefInfo, StashInfo};
 
 use crate::data;
-use crate::diff_view::{self, DiffColors, Row as DiffRow};
-use crate::repo_view::{RepoView, history_diff_options};
+use crate::diff_view::{self, DiffColors, DiffContext, Row as DiffRow};
+use crate::repo_view::{RepoView, RowsTarget, history_diff_options};
 use crate::scrollbar::WithScrollbar as _;
 use crate::settings::Settings;
 use crate::style::{self, Design};
@@ -78,7 +78,9 @@ pub(crate) struct FileHistory {
 
     diff_ticket: Option<DiffTicket>,
     view: Option<Arc<DiffView>>,
-    diff_rows: Rc<Vec<DiffRow>>,
+    pub(crate) diff_rows: Rc<Vec<DiffRow>>,
+    /// Which hidden lines of the selected commit's diff are revealed.
+    pub(crate) context: DiffContext,
     diff_error: Option<String>,
 
     error: Option<String>,
@@ -96,6 +98,7 @@ impl FileHistory {
             diff_ticket: None,
             view: None,
             diff_rows: Rc::new(Vec::new()),
+            context: DiffContext::default(),
             diff_error: None,
             error: None,
         }
@@ -339,6 +342,7 @@ impl RepoView {
             if moved {
                 history.view = None;
                 history.diff_rows = Rc::new(Vec::new());
+                history.context.reset();
                 history.diff_error = None;
             }
             moved
@@ -379,7 +383,8 @@ impl RepoView {
         if history.diff_ticket != Some(ticket) {
             return false;
         }
-        history.diff_rows = Rc::new(diff_view::flatten(&view.diff));
+        history.context.reset();
+        history.diff_rows = Rc::new(history.context.rows(view));
         history.view = Some(Arc::clone(view));
         history.diff_error = None;
         self.notify_if_active(cx);
@@ -446,9 +451,66 @@ impl RepoView {
             history.selected = Some(commit);
             history.view = None;
             history.diff_rows = Rc::new(Vec::new());
+            history.context.reset();
             history.diff_error = None;
         }
         self.request_history_diff(cx);
+    }
+
+    /// Applies one press on a hidden-lines bar of the file-history diff.
+    pub(crate) fn expand_file_history_gap(
+        &mut self,
+        gap: usize,
+        action: strata_core::diff::GapAction,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(view) = self
+            .file_history
+            .as_ref()
+            .and_then(|history| history.view.clone())
+        else {
+            return;
+        };
+        let Some(context) = self.file_history.as_mut().and_then(|history| {
+            history
+                .context
+                .expand(gap, action, &view)
+                .then(|| history.context.clone())
+        }) else {
+            return;
+        };
+        let revision = context.revision();
+        let build_view = Arc::clone(&view);
+        self.rebuild_rows_in_background(RowsTarget::FileHistory, revision, cx, move || {
+            context.rows(&build_view)
+        });
+        self.notify_if_active(cx);
+    }
+
+    /// The file-history view's "Whole file" toggle.
+    pub(crate) fn toggle_file_history_whole_file(&mut self, cx: &mut Context<Self>) {
+        let Some(view) = self
+            .file_history
+            .as_ref()
+            .and_then(|history| history.view.clone())
+        else {
+            return;
+        };
+        let Some(context) = self.file_history.as_mut().and_then(|history| {
+            history
+                .context
+                .toggle_whole_file(&view)
+                .then(|| history.context.clone())
+        }) else {
+            self.notify_if_active(cx);
+            return;
+        };
+        let revision = context.revision();
+        let build_view = Arc::clone(&view);
+        self.rebuild_rows_in_background(RowsTarget::FileHistory, revision, cx, move || {
+            context.rows(&build_view)
+        });
+        self.notify_if_active(cx);
     }
 
     pub(crate) fn step_file_history(&mut self, delta: isize, cx: &mut Context<Self>) {
@@ -494,6 +556,7 @@ impl RepoView {
         }
         history.view = None;
         history.diff_rows = Rc::new(Vec::new());
+        history.context.reset();
         history.diff_error = None;
         self.notify_if_active(cx);
     }
@@ -769,15 +832,38 @@ impl RepoView {
             )
             .child(
                 div()
-                    .flex_none()
-                    .text_color(colors.muted_foreground)
-                    .child(match commit {
-                        Some(commit) => format!(
-                            "{} · {} rows",
-                            data::short_oid(commit),
-                            history.diff_rows.len()
-                        ),
-                        None => "no commit selected".to_owned(),
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(div().flex_none().text_color(colors.muted_foreground).child(
+                        match commit {
+                            Some(commit) => format!(
+                                "{} · {} rows",
+                                data::short_oid(commit),
+                                history.diff_rows.len()
+                            ),
+                            None => "no commit selected".to_owned(),
+                        },
+                    ))
+                    .child(if history.view.is_some() {
+                        let active = history.context.is_whole_file();
+                        let entity = self.entity();
+                        crate::ui::button("history-toggle-whole-file", "Whole file")
+                            .size(crate::ui::ButtonSize::Tiny)
+                            .ghost()
+                            .selected(active)
+                            .tooltip(if active {
+                                "Show only the changes"
+                            } else {
+                                "Show every line of the file"
+                            })
+                            .on_click(move |_event, _window, cx| {
+                                entity
+                                    .update(cx, |this, cx| this.toggle_file_history_whole_file(cx));
+                            })
+                            .into_any_element()
+                    } else {
+                        div().into_any_element()
                     }),
             );
 
@@ -791,7 +877,22 @@ impl RepoView {
             } else if history.diff_rows.is_empty() {
                 message("No textual changes", colors.muted_foreground, colors)
             } else {
-                self.history_diff_rows(colors, diff_colors, cx)
+                let list = self.history_diff_rows(colors, diff_colors, cx);
+                match history.context.notice() {
+                    Some(notice) => div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .min_h_0()
+                        .child(crate::ui::banner(
+                            crate::ui::BannerKind::Warning,
+                            notice,
+                            &colors.design,
+                        ))
+                        .child(list)
+                        .into_any_element(),
+                    None => list,
+                }
             }
         } else {
             message("computing diff…", colors.muted_foreground, colors)
@@ -818,12 +919,15 @@ impl RepoView {
             return div().into_any_element();
         };
         diff_view::diff_list(
-            "file-history-diff",
-            Rc::clone(&history.diff_rows),
-            history.view.clone(),
-            *diff_colors,
-            colors.mono.clone(),
-            &history.diff_scroll,
+            diff_view::DiffList {
+                id: "file-history-diff",
+                rows: Rc::clone(&history.diff_rows),
+                view: history.view.clone(),
+                colors: *diff_colors,
+                mono: colors.mono.clone(),
+                scroll: &history.diff_scroll,
+                on_gap: self.gap_handler(),
+            },
             cx,
         )
     }

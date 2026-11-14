@@ -547,6 +547,11 @@ pub enum DiffRequest {
 
 /// A diff ready to render. Highlights are per line of the full old/new text,
 /// indexed by `DiffLine::old_lineno` / `new_lineno` minus one.
+///
+/// The two texts are kept so a view can reveal the lines the diff leaves out
+/// without reading the blobs again or running the diff a second time;
+/// [`DiffView::gaps`] names those runs. A view that only renders the hunks can
+/// ignore both.
 #[derive(Debug, Clone)]
 pub struct DiffView {
     pub request: DiffRequest,
@@ -557,6 +562,14 @@ pub struct DiffView {
     /// LFS metadata when either side is a pointer. `diff` then holds the real
     /// content when both objects are local, or no hunks when they are not.
     pub lfs: Option<crate::lfs::LfsDiffSummary>,
+    /// The old side of the diff, lossily decoded as the diff reads it.
+    pub old_text: Arc<str>,
+    /// The new side of the diff, lossily decoded as the diff reads it.
+    pub new_text: Arc<str>,
+    /// Runs of unchanged lines the diff left out, indexed by the hunk they
+    /// precede; the last entry follows the last hunk. Empty gaps sit where two
+    /// hunks or a hunk and a file edge meet directly.
+    pub gaps: Arc<[crate::diff::Gap]>,
 }
 
 #[derive(Debug, Clone)]

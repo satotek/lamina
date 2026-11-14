@@ -8,6 +8,7 @@ use gpui::{
     AnyElement, App, Axis, FontWeight, Hsla, IntoElement, ParentElement, Styled, div, px, relative,
 };
 use gpui_component::ActiveTheme as _;
+use gpui_component::Selectable as _;
 use gpui_kit_assets::IconName;
 use strata_core::session::{DiffView, Operation};
 
@@ -209,6 +210,25 @@ impl RepoView {
                     .text_color(design.muted)
                     .child(right),
             )
+            .child(if self.fake.is_none() && self.diff.view().is_some() {
+                let active = self.diff_context.is_whole_file();
+                let entity = self.entity();
+                ui::button("toggle-whole-file", "Whole file")
+                    .size(ButtonSize::Tiny)
+                    .ghost()
+                    .selected(active)
+                    .tooltip(if active {
+                        "Show only the changes"
+                    } else {
+                        "Show every line of the file"
+                    })
+                    .on_click(move |_event, _window, cx| {
+                        entity.update(cx, |this, cx| this.toggle_whole_file(cx));
+                    })
+                    .into_any_element()
+            } else {
+                div().into_any_element()
+            })
             .child({
                 let maximized = self.details_maximized(cx);
                 let entity = self.entity();
@@ -263,7 +283,22 @@ impl RepoView {
         if self.diff_rows.is_empty() {
             return message("No textual changes", design.muted, design);
         }
-        self.diff_rows_list(Rc::clone(&self.diff_rows), Some(view), design, cx)
+        let list = self.diff_rows_list(Rc::clone(&self.diff_rows), Some(view), design, cx);
+        match self.diff_context.notice() {
+            Some(notice) => div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_h_0()
+                .child(crate::ui::banner(
+                    crate::ui::BannerKind::Warning,
+                    notice,
+                    design,
+                ))
+                .child(list)
+                .into_any_element(),
+            None => list,
+        }
     }
 
     /// The LFS card above the real-content diff, or above a notice that the
@@ -329,12 +364,15 @@ impl RepoView {
         cx: &mut App,
     ) -> AnyElement {
         diff_view::diff_list(
-            "diff",
-            rows,
-            view,
-            DiffColors::from_theme(cx.theme()),
-            design.mono.clone(),
-            &self.diff_scroll,
+            diff_view::DiffList {
+                id: "diff",
+                rows,
+                view,
+                colors: DiffColors::from_theme(cx.theme()),
+                mono: design.mono.clone(),
+                scroll: &self.diff_scroll,
+                on_gap: self.gap_handler(),
+            },
             cx,
         )
     }
