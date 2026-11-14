@@ -840,7 +840,7 @@ impl Render for Picker {
                     // The same 44 px chrome strip as the main window, so the
                     // welcome screen is the same app with no repository open.
                     TitleBar::new()
-                        .h(px(44.0))
+                        .h(px(crate::style::TITLE_BAR_HEIGHT))
                         .bg(design.chrome)
                         .border_color(design.border)
                         .child(

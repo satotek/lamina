@@ -17,9 +17,8 @@ use std::path::{Path, PathBuf};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, BorrowAppContext as _, Bounds, Context, Entity, Global,
-    InteractiveElement as _, IntoElement, ParentElement, Render, Styled, Subscription,
-    TitlebarOptions, Window, WindowBounds, WindowDecorations, WindowId, WindowOptions, div, px,
-    size,
+    InteractiveElement as _, IntoElement, ParentElement, Render, Styled, Subscription, Window,
+    WindowBounds, WindowDecorations, WindowId, WindowOptions, div, px, size,
 };
 use gpui_component::dialog::DialogFooter;
 use gpui_component::{Root, TitleBar, WindowExt as _};
@@ -1176,10 +1175,7 @@ pub(crate) fn open_tabs_window(
     );
     let options = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        titlebar: Some(TitlebarOptions {
-            title: Some(title.into()),
-            ..TitleBar::title_bar_options()
-        }),
+        titlebar: Some(crate::style::window_titlebar(title)),
         window_decorations: Some(WindowDecorations::Client),
         window_min_size: Some(min_size),
         focus: true,

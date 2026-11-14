@@ -40,8 +40,7 @@ mod workspace;
 mod worktree_panel;
 
 use gpui::{
-    App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowDecorations, WindowOptions,
-    px, size,
+    App, AppContext as _, Bounds, WindowBounds, WindowDecorations, WindowOptions, px, size,
 };
 use gpui_component::{Root, TitleBar};
 use gpui_platform::application;
@@ -178,10 +177,7 @@ fn open_window(launch: Option<Launch>, gallery: bool, mut debug: DebugLaunch, cx
         // The app draws its own title bar (with the repository and branch in
         // it) so the window reads as one surface on every platform. The
         // title is still set for the taskbar and window switcher.
-        titlebar: Some(TitlebarOptions {
-            title: Some(title.into()),
-            ..TitleBar::title_bar_options()
-        }),
+        titlebar: Some(crate::style::window_titlebar(title)),
         window_decorations: Some(WindowDecorations::Client),
         window_min_size: Some(min_size),
         focus: true,

@@ -230,7 +230,7 @@ impl RepoView {
         });
 
         TitleBar::new()
-            .h(px(44.0))
+            .h(px(style::TITLE_BAR_HEIGHT))
             .bg(design.chrome)
             .border_color(design.border)
             .child(

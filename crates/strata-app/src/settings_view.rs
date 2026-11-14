@@ -19,8 +19,8 @@ use std::path::Path;
 use gpui::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, FocusHandle, FontWeight, Global,
     InteractiveElement as _, IntoElement, KeyBinding, ParentElement, Render, StyleRefinement,
-    Styled, Subscription, TitlebarOptions, Window, WindowBounds, WindowDecorations, WindowOptions,
-    actions, div, px, size,
+    Styled, Subscription, Window, WindowBounds, WindowDecorations, WindowOptions, actions, div, px,
+    size,
 };
 use gpui_component::group_box::GroupBoxVariant;
 use gpui_component::setting::Settings as SettingsPages;
@@ -87,10 +87,7 @@ fn open(cx: &mut App) {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             // The same client-side title bar as the main window, so both read
             // as one app on every platform.
-            titlebar: Some(TitlebarOptions {
-                title: Some("Strata Settings".into()),
-                ..TitleBar::title_bar_options()
-            }),
+            titlebar: Some(crate::style::window_titlebar("Strata Settings")),
             window_decorations: Some(WindowDecorations::Client),
             window_min_size: Some(size(px(MIN_WIDTH), px(MIN_HEIGHT))),
             focus: true,
@@ -137,7 +134,7 @@ impl SettingsView {
     /// wordmark, a divider, then the name of the window.
     fn title_bar(&self, design: &Design) -> impl IntoElement {
         TitleBar::new()
-            .h(px(44.0))
+            .h(px(crate::style::TITLE_BAR_HEIGHT))
             .bg(design.chrome)
             .border_color(design.border)
             .child(

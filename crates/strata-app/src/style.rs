@@ -8,7 +8,7 @@
 use gpui::{
     AnyElement, App, Hsla, IntoElement, ParentElement as _, SharedString, Styled as _, div, px, rgb,
 };
-use gpui::{Bounds, canvas, fill, point};
+use gpui::{Bounds, TitlebarOptions, canvas, fill, point};
 use gpui_component::{Colorize as _, Icon, Sizable as _, Theme};
 use strata_core::ChangeKind;
 use strata_core::highlight::HighlightKind;
@@ -669,6 +669,23 @@ pub fn app_mark(size: f32) -> AnyElement {
             .size_full(),
         )
         .into_any_element()
+}
+
+/// Height of the title bar every Strata window draws.
+pub const TITLE_BAR_HEIGHT: f32 = 44.0;
+
+/// Title bar options for a Strata window.
+///
+/// gpui-component places the macOS window buttons for its own 34 px bar, so in
+/// our taller bar they sat above the centre line of the wordmark and controls.
+/// The button frames are 14 px high: a top of `(height - 14) / 2` centres them.
+/// The left inset keeps them clear of the bar's 80 px leading padding.
+pub fn window_titlebar(title: impl Into<SharedString>) -> TitlebarOptions {
+    TitlebarOptions {
+        title: Some(title.into()),
+        traffic_light_position: Some(point(px(14.0), px((TITLE_BAR_HEIGHT - 14.0) / 2.0))),
+        ..gpui_component::TitleBar::title_bar_options()
+    }
 }
 
 #[cfg(test)]
