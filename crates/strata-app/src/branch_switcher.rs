@@ -29,6 +29,7 @@ use strata_core::UpstreamInfo;
 use strata_core::session::Operation;
 
 use crate::data::{SidebarData, Source};
+use crate::pull_requests::BranchPullRequests;
 use crate::repo_view::RepoView;
 use crate::style::{self, Design};
 use crate::ui;
@@ -238,6 +239,8 @@ pub(crate) struct BranchSwitcher {
     /// binding control.
     open: bool,
     choices: BranchChoices,
+    /// The branch badges' pull-request cache, copied when the popover opens.
+    pull_requests: BranchPullRequests,
     query: String,
     /// Position in the selectable entries, not in `rows`.
     selected: usize,
@@ -337,6 +340,7 @@ impl RepoView {
             return;
         }
         let choices = self.branch_choices();
+        self.branch_switcher.pull_requests = self.pull_requests.branches();
         self.branch_switcher.open(choices, window, cx);
         cx.notify();
     }
@@ -366,6 +370,7 @@ impl RepoView {
                 return;
             }
             let choices = self.branch_choices();
+            self.branch_switcher.pull_requests = self.pull_requests.branches();
             self.branch_switcher.open(choices, window, cx);
         } else {
             self.branch_switcher.close();
@@ -459,6 +464,7 @@ pub(crate) fn chip(view: &RepoView, chip: crate::ui::UiButton, design: &Design) 
 
     let input = view.branch_switcher.input.clone();
     let choices = view.branch_switcher.choices.clone();
+    let pull_requests = view.branch_switcher.pull_requests.clone();
     let query = view.branch_switcher.query.clone();
     let selected = view.branch_switcher.selected;
     let scroll = view.branch_switcher.scroll.clone();
@@ -489,6 +495,7 @@ pub(crate) fn chip(view: &RepoView, chip: crate::ui::UiButton, design: &Design) 
             card(
                 &input,
                 &choices,
+                &pull_requests,
                 &query,
                 selected,
                 &scroll,
@@ -506,6 +513,7 @@ pub(crate) fn chip(view: &RepoView, chip: crate::ui::UiButton, design: &Design) 
 fn card(
     input: &Entity<InputState>,
     choices: &BranchChoices,
+    pull_requests: &BranchPullRequests,
     query: &str,
     selected: usize,
     scroll: &ScrollHandle,
@@ -554,7 +562,15 @@ fn card(
                     "↑/↓ choose · Enter switch · Esc close"
                 }),
         )
-        .child(list(&rows, choices, selected, scroll, design, entity));
+        .child(list(
+            &rows,
+            choices,
+            pull_requests,
+            selected,
+            scroll,
+            design,
+            entity,
+        ));
 
     card.into_any_element()
 }
@@ -563,6 +579,7 @@ fn card(
 fn list(
     rows: &[Row],
     choices: &BranchChoices,
+    pull_requests: &BranchPullRequests,
     selected: usize,
     scroll: &ScrollHandle,
     design: &Design,
@@ -605,6 +622,7 @@ fn list(
                 column = column.child(local_row(
                     index,
                     &choices.local[index],
+                    pull_requests,
                     highlight,
                     design,
                     entity,
@@ -635,6 +653,7 @@ fn list(
 fn local_row(
     index: usize,
     branch: &LocalBranch,
+    pull_requests: &BranchPullRequests,
     highlight: bool,
     design: &Design,
     entity: &Entity<RepoView>,
@@ -680,6 +699,13 @@ fn local_row(
     }
     if branch.current {
         row = row.child(status_badge("current", BadgeTone::Accent, design));
+    }
+    if let Some(pull_request) = pull_requests.get(&branch.name) {
+        row = row.child(crate::pull_requests::badge(
+            pull_request,
+            pull_requests.note(),
+            design,
+        ));
     }
     row.into_any_element()
 }

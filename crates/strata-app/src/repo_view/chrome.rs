@@ -23,6 +23,7 @@ use crate::actions::{
 use crate::branches::CreateBranchFromHead;
 use crate::commands::RunCustomCommand;
 use crate::data::Source;
+use crate::pull_requests::{CheckoutPullRequest, RefreshPullRequests};
 use crate::remote::{Command, FetchRemotes, PullBranch, PushBranch};
 use crate::search::{FocusSearch, SearchDismiss, SearchNext, SearchPrevious, SearchSubmit};
 use crate::settings::Settings;
@@ -34,6 +35,9 @@ impl Render for RepoView {
         let started = self.metrics.begin_frame();
         self.target_frame_ms = RepoView::target_frame_ms(window, cx);
         self.sync_title(window);
+        // The first frame of a repository asks for its pull requests, waiting
+        // for tool detection when that is still running.
+        self.start_pull_request_refresh(cx);
 
         // Snapshot publishes arrive in chunks; only the rows after the last
         // observed one are scanned for the graph column's width.
@@ -121,6 +125,12 @@ impl Render for RepoView {
             }))
             .on_action(cx.listener(|this, _: &PushBranch, window, cx| {
                 this.remote_command(Command::Push, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &RefreshPullRequests, _, cx| {
+                this.refresh_pull_requests_command(cx)
+            }))
+            .on_action(cx.listener(|this, _: &CheckoutPullRequest, window, cx| {
+                this.open_checkout_dialog(window, cx)
             }))
             .on_action(cx.listener(|this, action: &RunCustomCommand, window, cx| {
                 this.run_custom_command(action.index, window, cx)

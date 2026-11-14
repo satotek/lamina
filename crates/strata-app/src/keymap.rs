@@ -179,6 +179,7 @@ use crate::picker::{
     OpenSelectedInNewTab, OpenSelectedRepository, PickerEscape, PickerNext, PickerPrevious,
     TogglePathEntry,
 };
+use crate::pull_requests::{CheckoutPullRequest, RefreshPullRequests};
 use crate::remote::{FetchRemotes, PullBranch, PushBranch};
 use crate::search::{FocusSearch, SearchDismiss, SearchNext, SearchPrevious, SearchSubmit};
 use crate::settings_view::CloseSettings;
@@ -877,6 +878,26 @@ pub static ACTIONS: &[ActionSpec] = &[
         PushBranch,
         [binding("secondary-alt-p", Some(REPO_VIEW))],
         22,
+        true
+    ),
+    action!(
+        "strata::RefreshPullRequests",
+        "Refresh Pull Requests",
+        Remote,
+        Some(REPO_VIEW),
+        RefreshPullRequests,
+        [],
+        34,
+        true
+    ),
+    action!(
+        "strata::CheckoutPullRequest",
+        "Check out Pull Request…",
+        Remote,
+        Some(REPO_VIEW),
+        CheckoutPullRequest,
+        [],
+        35,
         true
     ),
     // --- search::bind ----------------------------------------------------
@@ -1871,13 +1892,22 @@ mod tests {
         // Registration order, which is what a keystroke tie is settled by:
         // each group's ordinary bindings first, then the deferred ones.
         let mut dump: Vec<(String, String, String)> = Vec::new();
+        // The snapshot is spelled the way the Linux tests spawn shortcuts, but
+        // whether a macOS-only default is registered depends on the host: a
+        // test run on macOS has `secondary-[` in its map and one on Linux does
+        // not, exactly as the app builds it.
+        let platform = if cfg!(target_os = "macos") {
+            OperatingSystem::Mac
+        } else {
+            os()
+        };
         for group in GROUP_ORDER {
             for deferred in [false, true] {
                 for spec in ACTIONS.iter().filter(|spec| spec.group == group) {
                     for binding in spec
                         .defaults
                         .iter()
-                        .filter(|b| applies(b, os()) && b.deferred == deferred)
+                        .filter(|b| applies(b, platform) && b.deferred == deferred)
                     {
                         dump.push((
                             binding.key.to_owned(),
@@ -1932,7 +1962,7 @@ mod tests {
             }
         }
         // Every built-in palette entry has a registry row.
-        assert_eq!(orders.len(), 34);
+        assert_eq!(orders.len(), 36);
     }
 
     #[test]

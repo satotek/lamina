@@ -28,7 +28,9 @@ mod text;
 mod askpass;
 
 pub use askpass::askpass_prompt;
-pub use badge::{BadgeTone, avatar, change_badge, count_pill, kbd, ref_badge, status_badge};
+pub use badge::{
+    BadgeTone, avatar, change_badge, check_dot, count_pill, kbd, ref_badge, status_badge,
+};
 pub use banner::{BannerKind, banner};
 pub use button::{ButtonKind, ButtonSize, UiButton, button, content_button, icon_button};
 pub use confirm::{Confirm, confirm, confirm_with};

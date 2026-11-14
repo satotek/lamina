@@ -64,6 +64,7 @@ use crate::fake::{self, FakeRepo};
 use crate::file_history::FileHistory;
 use crate::image_diff;
 use crate::metrics::FrameMetrics;
+use crate::pull_requests::PullRequests;
 use crate::remote::Remote;
 use crate::search::SearchState;
 use crate::worktree_panel::{MainMode, WorktreePanel};
@@ -374,6 +375,8 @@ pub struct RepoView {
     extra_lists: ExtraLists,
     /// Fetch/pull/push state, progress and the dialogs that decide them.
     pub(crate) remote: Remote,
+    /// The branch badges' pull-request cache and the checkout dialog.
+    pub(crate) pull_requests: PullRequests,
     /// Commit search over the loaded history, with its text field.
     pub(crate) search: SearchState,
     /// The file-history view while it is open.
@@ -464,12 +467,12 @@ pub struct RepoView {
     fake_diffs: Rc<Vec<Rc<Vec<DiffRow>>>>,
 
     last_command: Option<String>,
-    status_error: Option<String>,
+    pub(crate) status_error: Option<String>,
     /// The multi-pick in flight, kept to report the commits core skipped.
     multi_pick: Option<PendingMultiPick>,
     /// A transient message that is not a failure, such as which copy of a file
     /// the editor opened. Shown in the status bar while no error is.
-    status_note: Option<String>,
+    pub(crate) status_note: Option<String>,
 
     title: String,
     target_frame_ms: f32,
@@ -582,6 +585,7 @@ impl RepoView {
             branch_switcher: BranchSwitcher::default(),
             extra_lists: ExtraLists::default(),
             remote: Remote::default(),
+            pull_requests: PullRequests::default(),
             search: SearchState::default(),
             file_history: None,
             compare: None,
@@ -814,6 +818,10 @@ impl RepoView {
         self.search_on_snapshot(cx);
         self.file_history_on_snapshot(cx);
         self.reflog_on_snapshot(cx);
+        // Branches and their upstreams move with the snapshot, so the pull
+        // requests matched to them have to be recomputed even when the gh
+        // cache itself did not change.
+        self.recompute_pull_request_map(cx);
         // The submodule and worktree lists sit outside the snapshot, so
         // every publish — including a watcher refresh — re-reads them.
         self.refresh_extra_lists();
@@ -1069,8 +1077,12 @@ impl RepoView {
                     }
                 }
                 self.worktree.on_operation_finished(id, error.as_deref());
-                self.remote
-                    .on_finished(id, error.as_deref(), cx, self.active);
+                let refresh_pull_requests =
+                    self.remote
+                        .on_finished(id, error.as_deref(), cx, self.active);
+                if refresh_pull_requests {
+                    self.refresh_pull_requests(cx);
+                }
                 // The label records which operation failed, so the status bar
                 // names it instead of showing a bare git message.
                 let label = self.branches.finish(id, error.as_deref());
@@ -1776,6 +1788,7 @@ impl RepoView {
     /// changed, so a new context size or ignore-whitespace shows at once.
     fn settings_changed(&mut self, cx: &mut Context<Self>) {
         self.sync_autofetch(cx);
+        self.pull_requests_setting_changed(crate::settings::Settings::get(cx).tools.gh.enabled, cx);
         let show_signatures = crate::settings::Settings::get(cx)
             .history
             .show_commit_signatures;

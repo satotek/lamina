@@ -37,6 +37,7 @@ mod merge_editor;
 mod metrics;
 mod palette;
 mod picker;
+mod pull_requests;
 mod recent;
 mod remote;
 mod repo_view;

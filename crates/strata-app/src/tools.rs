@@ -43,6 +43,11 @@ impl Tooling {
         self.gh.as_ref()
     }
 
+    /// Whether the last detection pass is still running.
+    pub fn detecting(&self) -> bool {
+        self.detecting
+    }
+
     /// Why ghq cannot be used right now, for a settings row or a menu label.
     pub fn ghq_reason(&self) -> String {
         match (&self.ghq_error, self.detecting) {

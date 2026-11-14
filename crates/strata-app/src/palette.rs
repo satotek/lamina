@@ -691,7 +691,7 @@ mod tests {
             .iter()
             .filter(|spec| spec.palette.is_some())
             .collect();
-        assert_eq!(specs.len(), 34);
+        assert_eq!(specs.len(), 36);
         for (index, spec) in specs.iter().enumerate() {
             assert!(
                 !spec.title.is_empty() && spec.title.len() <= 40,

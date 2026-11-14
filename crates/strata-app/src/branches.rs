@@ -37,6 +37,7 @@ use strata_core::session::{HistoryScope, Operation, OperationId, RemoteBranch};
 use strata_core::{HeadInfo, RefInfo, RefKind, RemoteInfo, UpstreamInfo};
 
 use crate::data::{SidebarData, Source};
+use crate::pull_requests::BranchPullRequests;
 use crate::repo_view::RepoView;
 use crate::repo_view::rebase_onto::rebase_menu_item;
 use crate::scrollbar::WithScrollbar as _;
@@ -718,6 +719,7 @@ impl Branches {
         upstreams: &HashMap<String, UpstreamInfo>,
         remotes: &[RemoteInfo],
         extras: &SidebarExtras<'_>,
+        pull_requests: &BranchPullRequests,
         enabled: bool,
         busy: bool,
         colors: &Colors,
@@ -731,6 +733,7 @@ impl Branches {
         let selected_extra = self.selected_extra.clone();
         let list_colors = colors.clone();
         let list_entity = entity.clone();
+        let list_pull_requests = pull_requests.clone();
         let list = uniform_list("sidebar-refs", items.len(), move |range, _window, _cx| {
             range
                 .map(|index| {
@@ -739,6 +742,7 @@ impl Branches {
                         head.as_deref(),
                         &reveal,
                         selected_extra.as_ref(),
+                        &list_pull_requests,
                         enabled,
                         busy,
                         &list_colors,
@@ -1457,6 +1461,7 @@ fn item_element(
     head: Option<&str>,
     reveal: &RevealState,
     selected_extra: Option<&ExtraSelection>,
+    pull_requests: &BranchPullRequests,
     enabled: bool,
     busy: bool,
     colors: &Colors,
@@ -1493,6 +1498,8 @@ fn item_element(
             head == Some(name.as_str()),
             upstream.as_deref(),
             *upstream_note,
+            pull_requests.get(name),
+            pull_requests.note(),
             reveal.is_ref(RefKind::LocalBranch, name),
             enabled,
             busy,
@@ -1852,6 +1859,8 @@ fn local_row(
     active: bool,
     upstream: Option<&str>,
     upstream_note: Option<&'static str>,
+    pull_request: Option<&strata_core::forge::PullRequestSummary>,
+    pull_request_note: Option<&str>,
     revealed: bool,
     enabled: bool,
     busy: bool,
@@ -1877,6 +1886,14 @@ fn local_row(
             label = label.row_tooltip(move |window, cx| Tooltip::new(note).build(window, cx));
         }
         row = row.child(label);
+    }
+
+    if let Some(pull_request) = pull_request {
+        row = row.child(crate::pull_requests::badge(
+            pull_request,
+            pull_request_note,
+            &colors.design,
+        ));
     }
 
     if !enabled {
@@ -2112,7 +2129,13 @@ fn local_row(
             )
             .when_some(
                 crate::github::branch_items(&entity_menu, &branch, cx),
-                |menu, items| menu.separator().item(items.open).item(items.create_pr),
+                |menu, items| {
+                    menu.separator()
+                        .item(items.open)
+                        .item(items.create_pr)
+                        .when_some(items.open_pr, |menu, item| menu.item(item))
+                        .item(items.checkout_pr)
+                },
             )
         },
     )

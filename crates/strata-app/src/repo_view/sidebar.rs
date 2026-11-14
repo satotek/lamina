@@ -254,6 +254,7 @@ impl RepoView {
             &upstreams,
             remotes,
             &extras,
+            &self.pull_requests.branches(),
             self.session.is_some(),
             self.is_busy(),
             &colors,

@@ -8,6 +8,7 @@ use gpui::{
     AnyElement, FontWeight, Hsla, IntoElement, ParentElement as _, SharedString, Styled as _, div,
     px,
 };
+use strata_core::forge::ChecksState;
 use strata_core::{ChangeKind, RefKind};
 
 use crate::style::{self, Design};
@@ -113,6 +114,28 @@ pub fn status_badge(
         .text_color(foreground)
         .child(label.into())
         .into_any_element()
+}
+
+/// A small dot that says what a pull request's checks are doing.
+///
+/// `None` returns nothing: a pull request with no checks shows only its
+/// number badge, the way a branch with no upstream shows only its name.
+pub fn check_dot(state: ChecksState, design: &Design) -> Option<AnyElement> {
+    let color = match state {
+        ChecksState::Passing => design.add_text,
+        ChecksState::Failing => design.remove_text,
+        ChecksState::Pending => design.tag_text,
+        ChecksState::None => return None,
+    };
+    Some(
+        div()
+            .flex_none()
+            .w(px(6.0))
+            .h(px(6.0))
+            .rounded_full()
+            .bg(color)
+            .into_any_element(),
+    )
 }
 
 /// A small count, for a header or a title-bar badge.

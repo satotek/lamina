@@ -24,10 +24,14 @@ use crate::repo_view::RepoView;
 use crate::settings::Settings;
 use crate::tools::Tooling;
 
-/// The two branch-menu entries GitHub integration adds.
+/// The two branch-menu entries GitHub integration adds, plus the pull-request
+/// entries that need the branch's own pull request.
 pub(crate) struct BranchItems {
     pub(crate) open: PopupMenuItem,
     pub(crate) create_pr: PopupMenuItem,
+    /// Set when the branch has a pull request in the cache.
+    pub(crate) open_pr: Option<PopupMenuItem>,
+    pub(crate) checkout_pr: PopupMenuItem,
 }
 
 /// The GitHub remote this repository pushes to, if any.
@@ -89,16 +93,29 @@ pub(crate) fn file_item(
     Some(open_item(remote.blob_url(&commit.to_string(), path, lines)))
 }
 
-/// Branch-menu entries: the tree link and the pull-request form.
+/// Branch-menu entries: the tree link, the pull-request form, and the branch's
+/// pull request when the cache has one.
 pub(crate) fn branch_items(
     entity: &Entity<RepoView>,
     branch: &str,
     cx: &App,
 ) -> Option<BranchItems> {
     let remote = remote_for(entity.read(cx), cx)?;
+    let pull_request = entity.read(cx).pull_request_for_branch(branch);
+    let open_pr = pull_request.as_ref().map(|pull_request| {
+        let url = pull_request.url.clone();
+        let label = format!("Open Pull Request #{} on GitHub", pull_request.number);
+        PopupMenuItem::new(label).on_click(
+            move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
+                cx.open_with_system(std::path::Path::new(&url));
+            },
+        )
+    });
     Some(BranchItems {
         open: open_item(remote.tree_url(branch)),
         create_pr: create_pr_item(entity, branch, cx),
+        open_pr,
+        checkout_pr: checkout_pr_item(entity, &remote, cx),
     })
 }
 
@@ -195,17 +212,59 @@ fn create_pr_item(entity: &Entity<RepoView>, branch: &str, cx: &App) -> PopupMen
     item
 }
 
+fn checkout_pr_item(entity: &Entity<RepoView>, remote: &GitHubRemote, cx: &App) -> PopupMenuItem {
+    let blocked = gh_for(&remote.host, cx).err().or_else(|| {
+        entity
+            .read(cx)
+            .pull_requests
+            .is_checking_out()
+            .then(|| "a checkout is running".to_owned())
+    });
+    let label = match &blocked {
+        Some(reason) => format!("Check out Pull Request… ({reason})"),
+        None => "Check out Pull Request…".to_owned(),
+    };
+    let mut item = PopupMenuItem::new(label).disabled(blocked.is_some());
+    if blocked.is_some() {
+        return item;
+    }
+    let entity = entity.clone();
+    item = item.on_click(
+        move |_: &gpui::ClickEvent, window: &mut Window, cx: &mut App| {
+            entity.update(cx, |view, cx| view.open_checkout_dialog(window, cx));
+        },
+    );
+    item
+}
+
 fn gh_blocked(cx: &App) -> Option<String> {
+    gh_for(strata_core::tools::GITHUB_HOST, cx).err()
+}
+
+/// The `gh` binary when it is installed and logged in to `host`.
+///
+/// The host check matters: a repository on an enterprise host whose account is
+/// not logged in would otherwise get a list call that always fails.
+pub(crate) fn gh_for(host: &str, cx: &App) -> Result<PathBuf, String> {
     if !Settings::get(cx).tools.gh.enabled {
-        return Some("GitHub CLI integration is off".to_owned());
+        return Err("GitHub CLI integration is off".to_owned());
     }
     let Some(tooling) = Tooling::get(cx) else {
-        return Some("gh is not installed.".to_owned());
+        return Err("gh is not installed.".to_owned());
     };
     match tooling.gh() {
-        Some(gh) if gh.logged_in => None,
-        Some(_) => Some("gh is not logged in: run gh auth login".to_owned()),
-        None => Some(tooling.gh_reason()),
+        Some(gh)
+            if gh.logged_in
+                && gh
+                    .hosts
+                    .iter()
+                    .any(|known| known.eq_ignore_ascii_case(host)) =>
+        {
+            Ok(gh.binary.clone())
+        }
+        Some(gh) if !gh.logged_in => Err("gh is not logged in: run gh auth login".to_owned()),
+        Some(_) => Err(format!("gh is not logged in to {host}")),
+        None => Err(tooling.gh_reason()),
     }
 }
 

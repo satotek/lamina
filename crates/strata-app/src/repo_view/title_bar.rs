@@ -62,6 +62,12 @@ impl RepoView {
             .and_then(crate::branches::upstream_label)
             .unwrap_or_default();
         let track_note = upstream.as_ref().and_then(crate::branches::upstream_note);
+        // The chip carries the current branch's pull request the same way the
+        // sidebar row does, so the window's most prominent branch and the list
+        // never disagree.
+        let branch_prs = self.pull_requests.branches();
+        let branch_pr = branch_prs.get(&branch).cloned();
+        let branch_pr_note = branch_prs.note().map(str::to_owned);
         let back_button = self.parent_name.as_deref().map(|parent| {
             let tooltip = format!("Back to {parent} ({})", back_key_label());
             crate::ui::content_button("back-to-parent")
@@ -139,6 +145,13 @@ impl RepoView {
                                     .text_color(design.muted)
                                     .child(track),
                             )
+                        })
+                        .when_some(branch_pr, |content, pull_request| {
+                            content.child(crate::pull_requests::badge(
+                                &pull_request,
+                                branch_pr_note.as_deref(),
+                                design,
+                            ))
                         })
                         .child(icon(IconName::ChevronDown, 12.0, design.muted)),
                 );

@@ -6,6 +6,7 @@
 pub mod askpass;
 pub mod diff;
 pub mod error;
+pub mod forge;
 pub mod git_cli;
 pub mod graph;
 pub mod highlight;

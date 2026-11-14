@@ -377,22 +377,27 @@ impl Remote {
 
     /// Records the end of an operation this module started and tells the user
     /// about it. Operations from other modules are ignored.
+    /// Returns true when the finished command changes the remote state the
+    /// pull-request badges describe (a successful fetch or push).
     pub(crate) fn on_finished(
         &mut self,
         id: OperationId,
         error: Option<&str>,
         cx: &mut Context<RepoView>,
         active: bool,
-    ) {
+    ) -> bool {
         let Some(running) = self.running.take() else {
-            return;
+            return false;
         };
         if running.id != id {
             self.running = Some(running);
-            return;
+            return false;
         }
 
         let failure = error.map(|error| (classify(error), first_error_line(error)));
+        // A fetch or push changes the upstreams and pull requests the badges
+        // describe. A failed one leaves them as they were.
+        let refresh = failure.is_none() && matches!(running.kind, Kind::Fetch | Kind::Push);
         let note = match &failure {
             Some((failure, line)) => {
                 Notification::error(failure_message(*failure, line)).title(running.kind.failed())
@@ -420,7 +425,7 @@ impl Remote {
             cx.notify();
         }
         let Some(window) = window_handle(cx) else {
-            return;
+            return refresh;
         };
         let _ = window.update(cx, |_, window, cx| {
             window.push_notification(note, cx);
@@ -428,6 +433,7 @@ impl Remote {
                 open_force_dialog(entity, offer, window, cx);
             }
         });
+        refresh
     }
 
     /// The status bar's operation segment, and nothing while idle.
