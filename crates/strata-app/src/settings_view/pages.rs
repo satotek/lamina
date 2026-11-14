@@ -9,12 +9,14 @@
 
 use std::path::Path;
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, Entity, FontWeight, IntoElement, ParentElement, PathPromptOptions,
-    SharedString, StyleRefinement, Styled, Subscription, Window, div, px,
+    SharedString, StyleRefinement, Styled, Subscription, Window, div, px, relative,
 };
 use gpui_component::group_box::GroupBoxVariant;
 use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::label::Label;
 use gpui_component::setting::{
     NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage,
 };
@@ -38,6 +40,10 @@ const CARD_PADDING: f32 = 16.0;
 
 /// The gap between a row's label column and its control (`SettingItem`'s).
 const ROW_GAP: f32 = 12.0;
+
+/// The gap between a card's label and the card's surface, the space a group
+/// title used to sit over its group.
+const CARD_LABEL_GAP: f32 = 8.0;
 
 /// The share of a row the label column may take. `SettingItem` caps it there
 /// and stops shrinking it at that cap, so a control wider than the rest of the
@@ -103,12 +109,12 @@ fn appearance(control: f32, design: &Design) -> SettingPage {
         "Preferences for Strata itself. Nothing here writes git config.",
         design,
     )
-    .group(card("Theme").item(
+    .groups(card("Theme").item(
         SettingItem::new("Theme", theme_field(control)).description(
             "Follow the system, or pin light or dark. Every window follows immediately.",
         ),
     ))
-    .group(
+    .groups(
         card("Fonts").items([
             SettingItem::new(
                 "Interface font",
@@ -175,7 +181,7 @@ fn diff(control: f32, design: &Design) -> SettingPage {
         "How a diff is drawn, in every pane that shows one.",
         design,
     )
-        .group(
+        .groups(
             card("Layout").items([
                 SettingItem::new(
                     "Layout",
@@ -205,7 +211,7 @@ fn diff(control: f32, design: &Design) -> SettingPage {
                 .description("Long lines wrap onto the next line instead of running off the pane."),
             ]),
         )
-        .group(
+        .groups(
             card("Text").items([
                 SettingItem::new(
                     "Syntax highlighting",
@@ -227,7 +233,7 @@ fn diff(control: f32, design: &Design) -> SettingPage {
                 .description("Spaces as · and tabs as →, drawn dimmed."),
             ]),
         )
-        .group(
+        .groups(
             card("Comparison")
                 .description("Applied to every history diff. The staging diff keeps git's default context and whitespace, because staging picks real file lines.")
                 .items([
@@ -260,7 +266,7 @@ fn history(control: f32, design: &Design) -> SettingPage {
         "What the commit list and the sidebar show.",
         design,
     )
-    .group(
+    .groups(
         card("Refs").items([
             SettingItem::new(
                 "Remote branches",
@@ -285,7 +291,7 @@ fn history(control: f32, design: &Design) -> SettingPage {
             .description("List the stash in the sidebar."),
         ]),
     )
-    .group(
+    .groups(
         card("Dates").item(
             SettingItem::new(
                 "Date format",
@@ -316,7 +322,7 @@ fn behaviour(control: f32, design: &Design) -> SettingPage {
         "Background work and the questions Strata asks before it acts.",
         design,
     )
-        .group(
+        .groups(
             card("Fetching").items([
                 SettingItem::new(
                     "Auto-fetch",
@@ -350,7 +356,7 @@ fn behaviour(control: f32, design: &Design) -> SettingPage {
                 .description("Delete remote-tracking branches that no longer exist on the remote."),
             ]),
         )
-        .group(
+        .groups(
             card("Safety").items([
                 SettingItem::new(
                     "Confirm destructive actions",
@@ -389,14 +395,14 @@ fn tools(control: f32, design: &Design) -> SettingPage {
         "Programs Strata runs on your behalf.",
         design,
     )
-        .group(
+        .groups(
             card("Git").item(
                 SettingItem::new("Git executable", git_field(control)).description(
                     "Leave empty to use git from PATH. A changed path applies to repositories opened afterwards; a repository already open keeps the binary it started with.",
                 ),
             ),
         )
-        .group(
+        .groups(
             card("Editor and terminal").items([
                 SettingItem::new(
                     "Editor command",
@@ -429,7 +435,8 @@ fn tools(control: f32, design: &Design) -> SettingPage {
 }
 
 fn privacy(_control: f32, design: &Design) -> SettingPage {
-    shell(Section::Privacy, "Only what leaves this machine.", design).group(card("Network").item(
+    shell(Section::Privacy, "Only what leaves this machine.", design).groups(
+        card("Network").item(
             SettingItem::new(
                 "Author pictures",
                 toggle(
@@ -441,13 +448,86 @@ fn privacy(_control: f32, design: &Design) -> SettingPage {
         ))
 }
 
+/// A card under construction: a label and the outlined group of rows below it.
+///
+/// The label is a group of its own rather than the outlined group's title. The
+/// settings page list turns every titled group into an expandable sub-item, so
+/// a titled card would give the sidebar a chevron with the card's name inside;
+/// untitled groups leave it a flat list of page names. The two groups are
+/// yielded together so a page lists its cards with `page.groups(card(..))`.
+struct Card {
+    title: &'static str,
+    description: Option<&'static str>,
+    group: SettingGroup,
+}
+
+impl Card {
+    fn item(mut self, item: SettingItem) -> Self {
+        self.group = self.group.item(item);
+        self
+    }
+
+    fn items(mut self, items: impl IntoIterator<Item = SettingItem>) -> Self {
+        self.group = self.group.items(items);
+        self
+    }
+
+    /// Supporting text under the card's label, above its surface.
+    fn description(mut self, description: &'static str) -> Self {
+        self.description = Some(description);
+        self
+    }
+}
+
+impl IntoIterator for Card {
+    type Item = SettingGroup;
+    type IntoIter = std::array::IntoIter<SettingGroup, 2>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        [card_label(self.title, self.description), self.group].into_iter()
+    }
+}
+
 /// A card: a section label above an outlined group, on the 8 px grid.
 ///
-/// The label sits 8 px over its card. The page list gives every card 16 px
-/// above and below it, so the gap between two cards is the same 32 px on every
-/// page.
-fn card(title: &'static str) -> SettingGroup {
-    SettingGroup::new().title(title).gap(px(8.0))
+/// The page list gives every group [`PAGE_GUTTER`] above and below it, so the
+/// label takes back the space below itself and the card takes back half the
+/// space above it. The label then sits the same [`CARD_LABEL_GAP`] over its
+/// surface, and two cards keep the same 32 px between them, as when the label
+/// was the group's title.
+fn card(title: &'static str) -> Card {
+    Card {
+        title,
+        description: None,
+        group: SettingGroup::new().mt(px(-CARD_LABEL_GAP)),
+    }
+}
+
+/// The label above a card, as its own untitled group.
+///
+/// It draws the same element a group title does: muted text on a 1.25 line
+/// height, with the description as small muted text under it.
+fn card_label(title: &'static str, description: Option<&'static str>) -> SettingGroup {
+    SettingGroup::new()
+        .variant(GroupBoxVariant::Normal)
+        .mb(px(-PAGE_GUTTER))
+        .item(SettingItem::render(move |_, _, cx| {
+            div()
+                .text_color(cx.theme().muted_foreground)
+                .line_height(relative(1.25))
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(title)
+                        .when_some(description, |this, description| {
+                            this.child(
+                                Label::new(description)
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground),
+                            )
+                        }),
+                )
+        }))
 }
 
 /// The page heading: the page title, its description and the reset action.
