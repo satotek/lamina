@@ -12,6 +12,7 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
+use crate::session::CompareMode;
 use crate::session::publish::Shared;
 use crate::session::{
     CommitList, CommitQuery, PathHistoryCommit, QueryTicket, RepoSnapshot, SessionEvent,
@@ -43,6 +44,12 @@ pub(crate) enum QueryKind {
     StreamingPath(String),
     /// Line counts of a commit against its first parent.
     CommitStat(Oid),
+    /// Two commits compared: changed files, their stats and their divergence.
+    Compare {
+        a: Oid,
+        b: Oid,
+        mode: CompareMode,
+    },
     /// Submodules and linked worktrees, read directly from the repository.
     SubmodulesAndWorktrees,
     /// Details of an unfinished merge/rebase/cherry-pick/revert/bisect/am.
@@ -122,6 +129,16 @@ fn answer(shared: Arc<Shared>, state: Arc<QueryState>, job: &QueryJob) -> Result
             shared.emit(SessionEvent::CommitStatReady {
                 ticket: job.ticket,
                 stat: Arc::new(stat),
+            });
+        }
+        QueryKind::Compare { a, b, mode } => {
+            let comparison = shared.repo.comparison(*a, *b, *mode)?;
+            if state.is_cancelled(job.ticket) || shared.is_shutdown() {
+                return Ok(());
+            }
+            shared.emit(SessionEvent::CompareReady {
+                ticket: job.ticket,
+                comparison: Arc::new(comparison),
             });
         }
         QueryKind::SubmodulesAndWorktrees => {

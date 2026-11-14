@@ -489,7 +489,7 @@ fn editor_entry_label(at_head: bool, in_working_tree: bool) -> &'static str {
 }
 
 /// The counts one changed file shows, or "bin" when git reports it as binary.
-fn file_stat_label(file: &FileStat, design: &Design) -> AnyElement {
+pub(super) fn file_stat_label(file: &FileStat, design: &Design) -> AnyElement {
     if file.binary {
         return div()
             .flex_none()

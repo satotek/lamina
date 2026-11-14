@@ -86,6 +86,9 @@ actions!(
         /// Returns to the parent repository this one was opened from. Handled
         /// on `RepoView` when a parent exists on the navigation stack.
         NavigateBack,
+        /// Closes the compare view. Handled on `RepoView` by
+        /// `repo_view::compare`; a no-op while no comparison is open.
+        CloseCompare,
     ]
 );
 
@@ -150,6 +153,9 @@ pub fn bind(cx: &mut App) {
         // `z` is a letter, so it is text while a field has focus: the details
         // toggle must not swallow it there.
         KeyBinding::new("z", ToggleDetailsMaximized, navigation),
+        // Escape leaves the compare view; every dialog and popover sets its
+        // own deeper context, so it keeps its own binding.
+        KeyBinding::new("escape", CloseCompare, scope),
         KeyBinding::new("shift-up", ExtendSelectionPrevious, scope),
         KeyBinding::new("shift-down", ExtendSelectionNext, scope),
         KeyBinding::new("pageup", SelectPageUp, scope),

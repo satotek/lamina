@@ -12,6 +12,7 @@ mod commit_graph;
 mod commit_list;
 mod commit_selection;
 mod common;
+pub(crate) mod compare;
 mod details;
 mod diff_pane;
 mod edit_dialog;
@@ -357,6 +358,8 @@ pub struct RepoView {
     pub(crate) search: SearchState,
     /// The file-history view while it is open.
     pub(crate) file_history: Option<FileHistory>,
+    /// The comparison of two commits while it is open.
+    pub(crate) compare: Option<compare::Compare>,
     /// The job in flight and the banner for what git left in progress.
     in_progress: InProgress,
     /// The reflog rows and the undo this view is waiting for.
@@ -540,6 +543,7 @@ impl RepoView {
             remote: Remote::default(),
             search: SearchState::default(),
             file_history: None,
+            compare: None,
             in_progress: InProgress::default(),
             reflog: reflog::ReflogState::default(),
             commit_graph_offer: false,
@@ -816,6 +820,9 @@ impl RepoView {
                 if self.file_history_diff_ready(ticket, &view, cx) {
                     return;
                 }
+                if self.compare_diff_ready(ticket, &view, cx) {
+                    return;
+                }
                 if self.worktree.on_diff_ready(ticket, &view) {
                     self.notify_if_active(cx);
                     return;
@@ -831,6 +838,9 @@ impl RepoView {
             }
             SessionEvent::DiffFailed { ticket, error } => {
                 if self.file_history_diff_failed(ticket, &error, cx) {
+                    return;
+                }
+                if self.compare_diff_failed(ticket, &error, cx) {
                     return;
                 }
                 if self.worktree.on_diff_failed(ticket, &error) {
@@ -860,9 +870,13 @@ impl RepoView {
                 if !self.search_failed(ticket, &error, cx)
                     && !self.file_history_failed(ticket, &error, cx)
                     && !self.reflog_failed(ticket, &error, cx)
+                    && !self.compare_failed(ticket, &error, cx)
                 {
                     self.blame_failed(ticket, &error, cx);
                 }
+            }
+            SessionEvent::CompareReady { ticket, comparison } => {
+                self.compare_ready(ticket, &comparison, cx);
             }
             SessionEvent::CommitStatReady { ticket, stat } => {
                 if self.stat.accept(ticket, stat) {
@@ -1517,6 +1531,8 @@ impl RepoView {
         self.diff_options = options;
         if self.file_history.is_some() {
             self.request_history_diff(cx);
+        } else if self.compare.is_some() {
+            self.request_compare_diff(cx);
         } else if let Some(index) = self.selected_file {
             self.select_file(index, cx);
         }
@@ -1542,6 +1558,11 @@ impl RepoView {
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
+        // The compare view has no commit rows; the same keys walk its files.
+        if self.compare.is_some() {
+            self.step_compare_file(delta, cx);
+            return;
+        }
         let len = self.commit_count();
         if len == 0 {
             return;

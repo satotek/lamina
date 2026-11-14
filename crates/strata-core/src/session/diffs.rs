@@ -121,6 +121,22 @@ fn read_sides(repo: &Repo, request: &DiffRequest) -> Result<Sides> {
         DiffRequest::Unstaged { path } => {
             Ok((repo.file_in_index(path)?, worktree_as_git(repo, path)?))
         }
+        DiffRequest::Compare {
+            base,
+            head,
+            old_path,
+            path,
+        } => {
+            let old = match base {
+                Some(base) => {
+                    let old_path = old_path.as_deref().unwrap_or(path);
+                    repo.file_at_commit(*base, old_path)?
+                }
+                // Unrelated histories compare against nothing.
+                None => None,
+            };
+            Ok((old, repo.file_at_commit(*head, path)?))
+        }
     }
 }
 
@@ -128,6 +144,7 @@ fn path_of(request: &DiffRequest) -> &str {
     match request {
         DiffRequest::Commit { path, .. }
         | DiffRequest::Staged { path }
-        | DiffRequest::Unstaged { path } => path,
+        | DiffRequest::Unstaged { path }
+        | DiffRequest::Compare { path, .. } => path,
     }
 }

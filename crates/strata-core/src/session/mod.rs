@@ -39,7 +39,8 @@ use crate::{
 
 pub use crate::diff::DiffOptions;
 pub use crate::repo::{
-    Blame, BlameCommit, BlameHunk, InProgressCommit, InProgressDetails, RebaseOnto,
+    Blame, BlameCommit, BlameHunk, CompareFile, CompareMode, Comparison, InProgressCommit,
+    InProgressDetails, RebaseOnto,
 };
 
 use blame::BlameJob;
@@ -506,6 +507,17 @@ pub enum DiffRequest {
     Staged { path: String },
     /// Index vs worktree (worktree converted to git form, see `Repo::file_in_worktree_as_git`).
     Unstaged { path: String },
+    /// `path` in the `head` tree vs the same file in the `base` tree, for the
+    /// per-file diff of a comparison of two commits (see
+    /// [`Session::request_compare`]). `base` is `None` when the two commits
+    /// share no history, so the left side is empty. `old_path` names the file
+    /// on the left side when a rename moved it.
+    Compare {
+        base: Option<Oid>,
+        head: Oid,
+        old_path: Option<String>,
+        path: String,
+    },
 }
 
 /// A diff ready to render. Highlights are per line of the full old/new text,
@@ -577,6 +589,11 @@ pub enum SessionEvent {
     CommitStatReady {
         ticket: QueryTicket,
         stat: Arc<CommitStat>,
+    },
+    /// Two commits compared, for a ticket from [`Session::request_compare`].
+    CompareReady {
+        ticket: QueryTicket,
+        comparison: Arc<Comparison>,
     },
     /// Partial line attribution from an in-flight `git blame --incremental`
     /// run for [`Session::request_blame`]. `lines` is populated once when the
@@ -865,6 +882,18 @@ impl Session {
     /// ticket when the commit cannot be read.
     pub fn request_commit_stat(&self, commit: Oid) -> QueryTicket {
         self.queue_query(queries::QueryKind::CommitStat(commit))
+    }
+
+    /// Compares two commits off the UI thread: the files that differ between
+    /// their trees (with renames and line counts), and how many commits each
+    /// side has that the other does not. Answers with
+    /// [`SessionEvent::CompareReady`], or `QueryFailed` with the same ticket
+    /// when a commit or its offset cannot be read.
+    ///
+    /// In [`CompareMode::ThreeDot`] the left tree is the merge base of the two
+    /// commits, so the files are what `b` added since they diverged.
+    pub fn request_compare(&self, a: Oid, b: Oid, mode: CompareMode) -> QueryTicket {
+        self.queue_query(queries::QueryKind::Compare { a, b, mode })
     }
 
     /// Lists submodules and linked worktrees off the UI thread; answers with

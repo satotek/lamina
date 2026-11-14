@@ -5,13 +5,15 @@
 //! `upstream.rs` (tracking branches), `history.rs` (path-limited history),
 //! `message.rs` (commit and merge messages) and `remotes.rs` (configured
 //! remotes) are owned by separate tasks. `stat.rs` counts the lines a commit
-//! added and removed. `submodules.rs` and `worktrees.rs` list the checkouts a
-//! repository owns beyond its own working tree. `blame.rs` attributes each line
-//! of a file to a commit. `in_progress.rs` reads details of an unfinished
-//! merge, rebase, cherry-pick, revert, bisect or `am`.
+//! added and removed. `compare.rs` compares two arbitrary commits. `submodules.rs`
+//! and `worktrees.rs` list the checkouts a repository owns beyond its own
+//! working tree. `blame.rs` attributes each line of a file to a commit.
+//! `in_progress.rs` reads details of an unfinished merge, rebase, cherry-pick,
+//! revert, bisect or `am`.
 
 mod blame;
 mod commit_graph;
+mod compare;
 mod conflicts;
 mod history;
 mod in_progress;
@@ -32,6 +34,7 @@ pub use commit_graph::{
     CommitGraphAdvice, CommitGraphFacts, CommitGraphThresholds, DEFAULT_MIN_COMMITS,
     DEFAULT_MIN_WALK,
 };
+pub use compare::{CompareFile, CompareMode, Comparison};
 pub use history::{PathHistory, PathHistoryEntries, PathHistoryEntry};
 pub use in_progress::{InProgressCommit, InProgressDetails, RebaseOnto};
 pub use log::CommitWalk;

@@ -15,7 +15,7 @@ use gpui_component::ActiveTheme as _;
 
 use super::{PAGE, RepoView};
 use crate::actions::{
-    self, ExtendSelectionNext, ExtendSelectionPrevious, NavigateBack, OpenInEditor,
+    self, CloseCompare, ExtendSelectionNext, ExtendSelectionPrevious, NavigateBack, OpenInEditor,
     OpenTerminalHere, SelectFirst, SelectLast, SelectNext, SelectPageDown, SelectPageUp,
     SelectPrevious, StashChanges, SwitchBranch, ToggleDetailsMaximized, ToggleFrameStats,
     UndoLastAction,
@@ -84,6 +84,9 @@ impl Render for RepoView {
                 this.toggle_details_maximized(cx)
             }))
             .on_action(
+                cx.listener(|this, _: &CloseCompare, window, cx| this.close_compare(window, cx)),
+            )
+            .on_action(
                 cx.listener(|this, _: &FocusSearch, window, cx| this.focus_search(window, cx)),
             )
             .on_action(cx.listener(|this, _: &SearchDismiss, window, cx| this.dismiss(window, cx)))
@@ -147,9 +150,12 @@ impl Render for RepoView {
             // coming back stale.
             if self.mode != MainMode::History {
                 self.discard_file_history();
+                self.discard_compare();
             }
             let content = if self.mode == MainMode::History && self.file_history.is_some() {
                 self.file_history_view(entity.clone(), cx)
+            } else if self.mode == MainMode::History && self.compare.is_some() {
+                self.compare_view(entity.clone(), cx)
             } else {
                 match self.mode {
                     MainMode::History => self.history_split(entity.clone(), &design, cx),

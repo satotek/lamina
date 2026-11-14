@@ -196,7 +196,10 @@ impl Repo {
 /// A merge base below the boundary cannot be found, so both histories are read
 /// up to their boundary commits (their roots) and compared. That is what
 /// `git rev-list --left-right --count a...b` counts there.
-fn count_exclusive_shallow(
+///
+/// `local` and `upstream` are just the two sides; the pair is returned in that
+/// order. A comparison of two arbitrary commits uses it the same way.
+pub(crate) fn count_exclusive_shallow(
     repo: &gix::Repository,
     shallow: &Shallow,
     local: Oid,
@@ -235,7 +238,7 @@ fn reachable(repo: &gix::Repository, shallow: &Shallow, tip: Oid) -> Result<Hash
 /// Walking stops at the merge bases instead of marking the other tip's whole
 /// history: everything at or below a merge base is shared, so only the commits
 /// that actually differ between the two tips are visited.
-fn count_exclusive(
+pub(crate) fn count_exclusive(
     graph: &mut gix::revwalk::Graph<'_, '_, Commit<Flags>>,
     tip: Oid,
     bases: &[Oid],

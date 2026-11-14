@@ -791,6 +791,24 @@ pub(crate) fn commit_menu(
                 }),
         );
     }
+    // One grouped entry rather than a submenu, so the compare view is one
+    // click away from the commit it starts at.
+    menu = menu.separator();
+    // A menu only opens with a session, so the repository is there.
+    let compare_blocked = super::compare::with_head_blocked(true, Some(commit), state.head);
+    menu = menu.item(
+        PopupMenuItem::new(menu_label("Compare with HEAD", compare_blocked))
+            .disabled(compare_blocked.is_some())
+            .on_click({
+                let entity = entity.clone();
+                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                    entity.update(cx, |view, cx| {
+                        view.open_compare_with_head(commit, window, cx)
+                    });
+                }
+            }),
+    );
+
     let edit = entity.read(cx).edit_context(commit);
     menu = menu.separator();
     menu = edit_group(menu, commit, &summary, &state, edit.as_ref(), &entity);
@@ -813,6 +831,26 @@ fn multi_commit_menu(
             },
         ))
         .separator();
+
+    // Exactly two commits are a comparison; more would need a base to compare
+    // them all against, which the entry does not offer.
+    if let [a, b] = multi.commits.as_slice() {
+        // A menu only opens with a session, so the repository is there.
+        let blocked = super::compare::two_commit_blocked(true, &multi.commits);
+        let (a, b) = (*a, *b);
+        menu = menu
+            .item(
+                PopupMenuItem::new(menu_label("Compare these commits", blocked))
+                    .disabled(blocked.is_some())
+                    .on_click({
+                        let entity = entity.clone();
+                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                            entity.update(cx, |view, cx| view.open_compare_pair(a, b, window, cx));
+                        }
+                    }),
+            )
+            .separator();
+    }
     let label = menu_label(
         format!("Cherry-pick {} commits onto {}", multi.count, multi.branch),
         multi.blocked,

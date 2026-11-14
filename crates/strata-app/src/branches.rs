@@ -1930,6 +1930,30 @@ fn local_row(
             } else {
                 busy.then_some("an operation is running")
             };
+            let head = view.compare_head();
+            let compare_blocked = crate::repo_view::compare::with_current_branch_blocked(
+                view.session.is_some(),
+                active,
+                busy,
+                head,
+            );
+            let compare = {
+                let entity = entity_menu.clone();
+                let branch = branch.clone();
+                PopupMenuItem::new(crate::ui::menu_label(
+                    "Compare with current branch",
+                    compare_blocked,
+                ))
+                .disabled(compare_blocked.is_some())
+                .on_click(
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        let branch = branch.clone();
+                        entity.update(cx, |view, cx| {
+                            view.open_compare_with_current_branch(&branch, window, cx)
+                        });
+                    },
+                )
+            };
             menu.item(
                 PopupMenuItem::new(crate::ui::menu_label("Checkout", checkout_blocked))
                     .disabled(checkout_blocked.is_some())
@@ -1960,6 +1984,8 @@ fn local_row(
                     });
                 }
             }))
+            .separator()
+            .item(compare)
             .item(
                 PopupMenuItem::new(crate::ui::menu_label(
                     "Merge into current branch",

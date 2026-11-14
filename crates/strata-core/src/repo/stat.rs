@@ -146,20 +146,7 @@ impl Repo {
         let empty = repo.empty_tree();
         let parent_tree = parent_tree.as_ref().unwrap_or(&empty);
 
-        // The walk needs no blobs, attributes or rename configuration, so it
-        // runs without the resource cache a rewrite-aware diff prepares.
-        let mut recorder = gix::diff::tree::Recorder::default();
-        let mut state = gix::diff::tree::State::default();
-        gix::diff::tree(
-            TreeRefIter::from_bytes(&parent_tree.data, parent_tree.id.kind()),
-            TreeRefIter::from_bytes(&tree.data, tree.id.kind()),
-            &mut state,
-            &repo.objects,
-            &mut recorder,
-        )
-        .map_err(Error::gix)?;
-
-        Ok(recorder.records.into_iter().map(detached_change).collect())
+        tree_changes(&repo, parent_tree, &tree)
     }
 
     fn commit_diffs(&self) -> MutexGuard<'_, CommitDiffCache> {
@@ -342,6 +329,30 @@ impl Drop for DiffLeader {
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
+/// The changes between two trees, without rewrite detection.
+///
+/// The walk needs no blobs, attributes or rename configuration, so it runs
+/// without the resource cache a rewrite-aware diff prepares. A first-parent
+/// commit diff and a comparison of two arbitrary commits both start here.
+pub(crate) fn tree_changes(
+    repo: &gix::Repository,
+    old: &gix::Tree<'_>,
+    new: &gix::Tree<'_>,
+) -> Result<Vec<ChangeDetached>> {
+    let mut recorder = gix::diff::tree::Recorder::default();
+    let mut state = gix::diff::tree::State::default();
+    gix::diff::tree(
+        TreeRefIter::from_bytes(&old.data, old.id.kind()),
+        TreeRefIter::from_bytes(&new.data, new.id.kind()),
+        &mut state,
+        &repo.objects,
+        &mut recorder,
+    )
+    .map_err(Error::gix)?;
+
+    Ok(recorder.records.into_iter().map(detached_change).collect())
+}
+
 /// One file of a first-parent tree diff, before its lines are counted.
 ///
 /// Shared with `commit_changes`, which reports the same entries as git's
@@ -543,7 +554,7 @@ pub(crate) fn changed_file(
     })
 }
 
-fn file_stat(repo: &gix::Repository, change: &ChangedFile) -> Result<FileStat> {
+pub(crate) fn file_stat(repo: &gix::Repository, change: &ChangedFile) -> Result<FileStat> {
     if change.uncountable() {
         return Ok(binary_stat(change));
     }
