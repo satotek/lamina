@@ -12,7 +12,7 @@ use gix::objs::commit::ref_iter::Token as CommitToken;
 use super::Repo;
 use crate::{CommitInfo, Error, HeadInfo, Oid, RefInfo, RefKind, Result, StashInfo};
 
-pub(crate) use path::PathWalk;
+pub(crate) use path::{PathCommit, PathWalk};
 
 /// The commits at a shallow clone's boundary, whose parents are not in the
 /// repository. Everything that walks ancestry stops at these commits, the way
@@ -333,12 +333,25 @@ impl Repo {
     /// ordering counters instead of a node per commit: a file history needs the
     /// order of the commits that touched the file, not the reachability state of
     /// the whole repository.
-    pub(crate) fn path_walk_with(&self, cancelled: Option<CancelCheck>) -> Result<PathWalk> {
+    pub(crate) fn path_walk_with(
+        &self,
+        cancelled: Option<CancelCheck>,
+    ) -> Result<(PathWalk, Shallow, Option<super::bloom::CommitGraphBloom>)> {
         let repo = self.local();
         let graph = repo.commit_graph_if_enabled().ok().flatten();
         let tips = walk_tips(&repo, graph.as_ref())?;
         let shallow = Shallow::load(&repo)?;
-        PathWalk::new(repo.objects.clone(), graph, &tips, shallow, cancelled)
+        let bloom = graph
+            .as_ref()
+            .and_then(|graph| super::bloom::CommitGraphBloom::load(&repo, graph));
+        let walk = PathWalk::new(
+            repo.objects.clone(),
+            graph,
+            &tips,
+            shallow.clone(),
+            cancelled,
+        )?;
+        Ok((walk, shallow, bloom))
     }
 }
 

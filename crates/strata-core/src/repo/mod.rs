@@ -12,6 +12,7 @@
 //! revert, bisect or `am`.
 
 mod blame;
+mod bloom;
 mod commit_graph;
 mod compare;
 mod conflicts;

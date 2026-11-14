@@ -2,9 +2,12 @@
 //!
 //! A commit changed `path` when its tree entry for `path` differs from the entry
 //! in its first parent. Only the path's own tree entries are read: the lookup
-//! descends the tree along the path components and never compares whole trees.
-//! With a commit-graph, tree ids come from the graph instead of re-parsing every
-//! commit object.
+//! descends both trees in lockstep along the path components, short-circuiting
+//! as soon as any ancestor subtree matches, and caches resolved entries per
+//! path level. When the commit-graph includes changed-path Bloom filters,
+//! commits whose filters prove the path untouched are skipped without reading
+//! any tree objects, and remaining batches are evaluated across worker threads
+//! while preserving exact `--date-order` and rename semantics.
 //!
 //! Renames are followed backwards, the way `git log --follow` does: when the
 //! tracked path appears in a commit but is absent from its first parent, the
@@ -12,22 +15,41 @@
 //! source of the matching rewrite for all older commits. Each reported commit
 //! carries the name the file had there.
 
-use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::JoinHandle;
 
+use gix::bstr::{BString, ByteSlice as _};
+use gix::diff::blob::platform::prepare_diff::Operation;
+use gix::diff::blob::{Diff, InternedInput, ResourceKind};
+use gix::diff::tree::visit::Relation;
 use gix::object::tree::diff::ChangeDetached;
+use gix::object::tree::{EntryKind, EntryMode};
 use gix::objs::{FindExt, TreeRefIter};
 
 use super::Repo;
-use super::log::{CancelCheck, PathWalk, Shallow};
+use super::bloom::{BloomKeys, CommitGraphBloom};
+use super::log::{CancelCheck, PathCommit, PathWalk, Shallow};
 use crate::{CommitInfo, Error, Oid, Result};
 
-/// Resolved entries are kept per tree id. In linear history a commit's tree is
-/// its child's parent tree, so the next row is usually a cache hit.
-const ENTRY_CACHE_LIMIT: usize = 8_192;
+/// Direct-mapped entry cache slots per worker/inline checker: power of two so
+/// lookup is a single unaligned load and bitmask, with no clearing cliff.
+const ROOT_CACHE_SLOTS: usize = 8_192;
+const SUBTREE_CACHE_SLOTS: usize = 2_048;
 
-/// 8 MiB of decoded objects is enough for a walk to reuse recent trees and
-/// commits without competing with the UI for memory.
+/// 8 MiB of decoded objects for the primary reader (used for rename diffs and
+/// inline checks); worker threads use smaller caches because their per-level
+/// tree-entry caches already absorb most lookups.
 const OBJECT_CACHE_BYTES: usize = 8 * 1024 * 1024;
+const WORKER_OBJECT_CACHE_BYTES: usize = 4 * 1024 * 1024;
+
+/// Check the first few hundred commits inline so paths touched near HEAD return
+/// their first row immediately without thread-pool startup overhead.
+const INLINE_WARMUP: usize = 256;
+const INITIAL_BATCH_SIZE: usize = 4_096;
+const MAX_BATCH_SIZE: usize = 16_384;
+const WORKER_CHUNK_SIZE: usize = 512;
+const MAX_WORKERS: usize = 8;
 
 /// A tree entry as it decides whether a commit changed the path: id and mode.
 /// The mode matters because a file turning executable, or a file becoming a
@@ -43,6 +65,571 @@ pub struct PathHistoryEntry {
     pub path: String,
 }
 
+#[derive(Clone, Copy)]
+enum CommitChange {
+    Unchanged,
+    ChangedNoRename,
+    /// Path exists in commit's tree with `dest_mode` and is absent in first parent.
+    ChangedAdded(u16),
+}
+
+#[derive(Clone)]
+struct CacheSlot {
+    key: Oid,
+    value: Option<Entry>,
+    occupied: bool,
+}
+
+impl Default for CacheSlot {
+    fn default() -> Self {
+        Self {
+            key: Oid::null(gix::hash::Kind::Sha1),
+            value: None,
+            occupied: false,
+        }
+    }
+}
+
+struct LevelCache {
+    slots: Vec<CacheSlot>,
+    mask: usize,
+}
+
+impl LevelCache {
+    fn new(capacity: usize) -> Self {
+        debug_assert!(capacity.is_power_of_two());
+        Self {
+            slots: vec![CacheSlot::default(); capacity],
+            mask: capacity - 1,
+        }
+    }
+
+    fn clear(&mut self) {
+        for slot in &mut self.slots {
+            slot.occupied = false;
+        }
+    }
+
+    #[inline]
+    fn index(&self, key: Oid) -> usize {
+        let bytes = key.as_bytes();
+        let raw = u64::from_ne_bytes(bytes[..8].try_into().expect("hash >= 8 bytes"));
+        (raw as usize) & self.mask
+    }
+
+    #[inline]
+    fn get(&self, key: Oid) -> Option<Option<Entry>> {
+        let slot = &self.slots[self.index(key)];
+        (slot.occupied && slot.key == key).then_some(slot.value)
+    }
+
+    #[inline]
+    fn insert(&mut self, key: Oid, value: Option<Entry>) {
+        let idx = self.index(key);
+        self.slots[idx] = CacheSlot {
+            key,
+            value,
+            occupied: true,
+        };
+    }
+}
+
+#[derive(Clone)]
+struct PathQuery {
+    components: Vec<Vec<u8>>,
+    bloom_keys: Option<BloomKeys>,
+}
+
+impl PathQuery {
+    fn from_components(components: Vec<Vec<u8>>) -> Self {
+        let bloom_keys = if components.is_empty() {
+            None
+        } else {
+            let total_len: usize =
+                components.iter().map(Vec::len).sum::<usize>() + components.len() - 1;
+            let mut joined = Vec::with_capacity(total_len);
+            for (i, comp) in components.iter().enumerate() {
+                if i > 0 {
+                    joined.push(b'/');
+                }
+                joined.extend_from_slice(comp);
+            }
+            Some(BloomKeys::new(&joined))
+        };
+        Self {
+            components,
+            bloom_keys,
+        }
+    }
+}
+
+struct TreeChecker {
+    repo: gix::Repository,
+    odb_buf: Vec<u8>,
+    caches: Vec<LevelCache>,
+    cached_generation: u64,
+}
+
+impl TreeChecker {
+    fn new(repo: gix::Repository) -> Self {
+        Self {
+            repo,
+            odb_buf: Vec::new(),
+            caches: Vec::new(),
+            cached_generation: u64::MAX,
+        }
+    }
+
+    fn sync_path(&mut self, path_generation: u64, num_components: usize) {
+        if self.cached_generation == path_generation && self.caches.len() == num_components {
+            return;
+        }
+        self.cached_generation = path_generation;
+        for (idx, cache) in self.caches.iter_mut().enumerate() {
+            if idx < num_components {
+                cache.clear();
+            }
+        }
+        while self.caches.len() < num_components {
+            let cap = if self.caches.is_empty() {
+                ROOT_CACHE_SLOTS
+            } else {
+                SUBTREE_CACHE_SLOTS
+            };
+            self.caches.push(LevelCache::new(cap));
+        }
+        self.caches.truncate(num_components);
+    }
+
+    fn read_commit_tree(&mut self, id: Oid) -> Result<Oid> {
+        let commit = self.repo.find_commit(id).map_err(Error::gix)?;
+        Ok(commit.tree_id().map_err(Error::gix)?.detach())
+    }
+
+    fn check_commit(
+        &mut self,
+        commit: &PathCommit,
+        query: &PathQuery,
+        bloom: Option<&CommitGraphBloom>,
+        path_generation: u64,
+    ) -> Result<CommitChange> {
+        self.sync_path(path_generation, query.components.len());
+        let tree = match commit.tree {
+            Some(tree) => tree,
+            None => self.read_commit_tree(commit.id)?,
+        };
+        let Some(parent) = commit.parent else {
+            // A root commit changed the path when it exists there (or for the
+            // empty repository-root path).
+            let changed = query.components.is_empty()
+                || self.lookup_from(0, tree, &query.components)?.is_some();
+            return Ok(if changed {
+                CommitChange::ChangedNoRename
+            } else {
+                CommitChange::Unchanged
+            });
+        };
+        let parent_tree = match commit.parent_tree {
+            Some(tree) => tree,
+            None => match self.read_commit_tree(parent) {
+                Ok(tree) => tree,
+                // The first parent is missing only outside a shallow clone's
+                // known boundary; report changed when the path exists here.
+                Err(_) => {
+                    let changed = !query.components.is_empty()
+                        && self.lookup_from(0, tree, &query.components)?.is_some();
+                    return Ok(if changed {
+                        CommitChange::ChangedNoRename
+                    } else {
+                        CommitChange::Unchanged
+                    });
+                }
+            },
+        };
+        if tree == parent_tree {
+            return Ok(CommitChange::Unchanged);
+        }
+        if query.components.is_empty() {
+            return Ok(CommitChange::ChangedNoRename);
+        }
+        if let (Some(bloom), Some(pos), Some(keys)) =
+            (bloom, commit.graph_pos, query.bloom_keys.as_ref())
+            && !bloom.may_contain(pos, keys)
+        {
+            return Ok(CommitChange::Unchanged);
+        }
+        self.trees_differ(tree, parent_tree, &query.components)
+    }
+
+    fn trees_differ(
+        &mut self,
+        mut tree_a: Oid,
+        mut tree_b: Oid,
+        components: &[Vec<u8>],
+    ) -> Result<CommitChange> {
+        let last = components.len() - 1;
+        for level in 0..=last {
+            if tree_a == tree_b {
+                return Ok(CommitChange::Unchanged);
+            }
+            let name = components[level].as_slice();
+            let entry_a = self.entry_at_level(level, tree_a, name)?;
+            let entry_b = self.entry_at_level(level, tree_b, name)?;
+            if entry_a == entry_b {
+                return Ok(CommitChange::Unchanged);
+            }
+            if level == last {
+                return Ok(match (entry_a, entry_b) {
+                    (Some((_, mode)), None) => CommitChange::ChangedAdded(mode),
+                    _ => CommitChange::ChangedNoRename,
+                });
+            }
+            match (next_tree(entry_a), next_tree(entry_b)) {
+                (Some(sub_a), Some(sub_b)) => {
+                    tree_a = sub_a;
+                    tree_b = sub_b;
+                }
+                (Some(sub_a), None) => {
+                    return Ok(match self.lookup_from(level + 1, sub_a, components)? {
+                        Some((_, mode)) => CommitChange::ChangedAdded(mode),
+                        None => CommitChange::Unchanged,
+                    });
+                }
+                (None, Some(sub_b)) => {
+                    return Ok(
+                        if self.lookup_from(level + 1, sub_b, components)?.is_some() {
+                            CommitChange::ChangedNoRename
+                        } else {
+                            CommitChange::Unchanged
+                        },
+                    );
+                }
+                (None, None) => return Ok(CommitChange::Unchanged),
+            }
+        }
+        Ok(CommitChange::Unchanged)
+    }
+
+    fn lookup_from(
+        &mut self,
+        start_level: usize,
+        mut tree: Oid,
+        components: &[Vec<u8>],
+    ) -> Result<Option<Entry>> {
+        let last = components.len();
+        for (offset, component) in components[start_level..].iter().enumerate() {
+            let level = start_level + offset;
+            let Some(entry) = self.entry_at_level(level, tree, component)? else {
+                return Ok(None);
+            };
+            if level + 1 == last {
+                return Ok(Some(entry));
+            }
+            let Some(sub_tree) = next_tree(Some(entry)) else {
+                return Ok(None);
+            };
+            tree = sub_tree;
+        }
+        Ok(None)
+    }
+
+    fn entry_at_level(
+        &mut self,
+        level: usize,
+        tree: Oid,
+        component: &[u8],
+    ) -> Result<Option<Entry>> {
+        if let Some(cached) = self.caches[level].get(tree) {
+            return Ok(cached);
+        }
+        let found = self.scan_tree(tree, component)?;
+        self.caches[level].insert(tree, found);
+        Ok(found)
+    }
+
+    fn scan_tree(&mut self, tree: Oid, target: &[u8]) -> Result<Option<Entry>> {
+        let data = self
+            .repo
+            .objects
+            .find(&tree, &mut self.odb_buf)
+            .map_err(Error::gix)?;
+        if data.kind != gix::objs::Kind::Tree {
+            return Ok(None);
+        }
+        let hash_len = data.object_hash.len_in_bytes();
+        if let Ok(found) = scan_tree_entry(data.data, hash_len, target) {
+            return Ok(found);
+        }
+        let found = TreeRefIter::from_bytes(data.data, data.object_hash)
+            .filter_map(std::result::Result::ok)
+            .find(|entry| entry.filename == target)
+            .map(|entry| (entry.oid.to_owned(), entry.mode.value()));
+        Ok(found)
+    }
+}
+
+#[inline]
+fn is_tree_mode(mode: u16) -> bool {
+    (mode & 0o170000) == 0o040000
+}
+
+#[inline]
+fn next_tree(entry: Option<Entry>) -> Option<Oid> {
+    let (oid, mode) = entry?;
+    is_tree_mode(mode).then_some(oid)
+}
+
+fn scan_tree_entry(
+    data: &[u8],
+    hash_len: usize,
+    target: &[u8],
+) -> std::result::Result<Option<Entry>, ()> {
+    let mut pos = 0usize;
+    while pos < data.len() {
+        let rest = &data[pos..];
+        let space_rel = rest.find_byte(b' ').ok_or(())?;
+        if space_rel == 0 || space_rel > 6 {
+            return Err(());
+        }
+        let after_space = space_rel + 1;
+        let nul_rel = rest[after_space..].find_byte(0).ok_or(())?;
+        let oid_start = after_space + nul_rel + 1;
+        let oid_end = oid_start + hash_len;
+        if oid_end > rest.len() {
+            return Err(());
+        }
+        if nul_rel == target.len() && &rest[after_space..after_space + nul_rel] == target {
+            let mut mode = 0u16;
+            for &b in &rest[..space_rel] {
+                if !(b'0'..=b'7').contains(&b) {
+                    return Err(());
+                }
+                mode = mode
+                    .checked_mul(8)
+                    .and_then(|m| m.checked_add(u16::from(b - b'0')))
+                    .ok_or(())?;
+            }
+            let oid = Oid::try_from(&rest[oid_start..oid_end]).map_err(|_| ())?;
+            return Ok(Some((oid, mode)));
+        }
+        pos += oid_end;
+    }
+    Ok(None)
+}
+
+struct SharedPoolState {
+    generation: u64,
+    shutdown: bool,
+    commits: Vec<PathCommit>,
+    query: Arc<PathQuery>,
+    path_generation: u64,
+    next_chunk: AtomicUsize,
+    chunks_total: usize,
+    chunks_done: usize,
+    chunk_results: Vec<Option<Vec<Result<CommitChange>>>>,
+}
+
+struct WorkerPool {
+    shared: Arc<(Mutex<SharedPoolState>, Condvar, Condvar)>,
+    handles: Vec<JoinHandle<()>>,
+}
+
+impl WorkerPool {
+    fn new(
+        num_workers: usize,
+        sync_repo: gix::ThreadSafeRepository,
+        bloom: Option<Arc<CommitGraphBloom>>,
+        cancelled: Option<CancelCheck>,
+    ) -> Self {
+        let state = SharedPoolState {
+            generation: 0,
+            shutdown: false,
+            commits: Vec::new(),
+            query: Arc::new(PathQuery::from_components(Vec::new())),
+            path_generation: 0,
+            next_chunk: AtomicUsize::new(0),
+            chunks_total: 0,
+            chunks_done: 0,
+            chunk_results: Vec::new(),
+        };
+        let shared = Arc::new((Mutex::new(state), Condvar::new(), Condvar::new()));
+        let mut handles = Vec::with_capacity(num_workers);
+
+        for _ in 0..num_workers {
+            let shared = Arc::clone(&shared);
+            let sync_repo = sync_repo.clone();
+            let bloom = bloom.clone();
+            let cancelled = cancelled.clone();
+            handles.push(std::thread::spawn(move || {
+                worker_loop(shared, sync_repo, bloom, cancelled);
+            }));
+        }
+
+        Self { shared, handles }
+    }
+
+    fn eval(
+        &mut self,
+        commits: Vec<PathCommit>,
+        query: &Arc<PathQuery>,
+        path_generation: u64,
+    ) -> (Vec<PathCommit>, Vec<Result<CommitChange>>) {
+        let chunks_total = commits.len().div_ceil(WORKER_CHUNK_SIZE);
+        let (lock, work_cv, done_cv) = &*self.shared;
+        let mut guard = lock.lock().expect("worker pool mutex poisoned");
+        guard.generation += 1;
+        guard.commits = commits;
+        guard.query = Arc::clone(query);
+        guard.path_generation = path_generation;
+        guard.next_chunk.store(0, Ordering::Relaxed);
+        guard.chunks_total = chunks_total;
+        guard.chunks_done = 0;
+        guard.chunk_results.resize_with(chunks_total, || None);
+        work_cv.notify_all();
+
+        while guard.chunks_done < guard.chunks_total {
+            guard = done_cv.wait(guard).expect("worker pool mutex poisoned");
+        }
+
+        let commits = std::mem::take(&mut guard.commits);
+        let mut results = Vec::with_capacity(commits.len());
+        for (chunk_idx, slot) in guard.chunk_results.drain(..).enumerate() {
+            let chunk = slot.expect("all chunks completed");
+            let expected_len =
+                WORKER_CHUNK_SIZE.min(commits.len().saturating_sub(chunk_idx * WORKER_CHUNK_SIZE));
+            let truncated = chunk.len() < expected_len;
+            results.extend(chunk);
+            if truncated {
+                break;
+            }
+        }
+        (commits, results)
+    }
+}
+
+impl Drop for WorkerPool {
+    fn drop(&mut self) {
+        {
+            let (lock, work_cv, _) = &*self.shared;
+            let mut guard = lock.lock().expect("worker pool mutex poisoned");
+            guard.shutdown = true;
+            work_cv.notify_all();
+        }
+        for handle in self.handles.drain(..) {
+            let _ = handle.join();
+        }
+    }
+}
+
+fn worker_loop(
+    shared: Arc<(Mutex<SharedPoolState>, Condvar, Condvar)>,
+    sync_repo: gix::ThreadSafeRepository,
+    bloom: Option<Arc<CommitGraphBloom>>,
+    cancelled: Option<CancelCheck>,
+) {
+    let mut local = sync_repo.to_thread_local();
+    local.object_cache_size_if_unset(WORKER_OBJECT_CACHE_BYTES);
+    let mut checker = TreeChecker::new(local);
+    let mut seen_generation = 0u64;
+    let (lock, work_cv, done_cv) = &*shared;
+
+    loop {
+        let (chunk_idx, generation, query, path_gen, commits_ptr_len): (
+            usize,
+            u64,
+            Arc<PathQuery>,
+            u64,
+            usize,
+        );
+        let chunk_start;
+        let chunk_end;
+        let result: Vec<Result<CommitChange>>;
+        {
+            let mut guard = lock.lock().expect("worker pool mutex poisoned");
+            loop {
+                if guard.shutdown {
+                    return;
+                }
+                if guard.generation != seen_generation && guard.chunks_total > 0 {
+                    break;
+                }
+                guard = work_cv.wait(guard).expect("worker pool mutex poisoned");
+            }
+            generation = guard.generation;
+            let total = guard.chunks_total;
+            let idx = guard.next_chunk.fetch_add(1, Ordering::Relaxed);
+            if idx >= total {
+                seen_generation = generation;
+                continue;
+            }
+            chunk_idx = idx;
+            commits_ptr_len = guard.commits.len();
+            chunk_start = idx * WORKER_CHUNK_SIZE;
+            chunk_end = (chunk_start + WORKER_CHUNK_SIZE).min(commits_ptr_len);
+            query = Arc::clone(&guard.query);
+            path_gen = guard.path_generation;
+
+            let mut slice = Vec::with_capacity(chunk_end - chunk_start);
+            for c in &guard.commits[chunk_start..chunk_end] {
+                slice.push(PathCommit {
+                    id: c.id,
+                    parent: c.parent,
+                    tree: c.tree,
+                    parent_tree: c.parent_tree,
+                    graph_pos: c.graph_pos,
+                });
+            }
+            drop(guard);
+
+            result = eval_chunk(
+                &mut checker,
+                &slice,
+                &query,
+                bloom.as_deref(),
+                path_gen,
+                &cancelled,
+            );
+        }
+
+        let mut guard = lock.lock().expect("worker pool mutex poisoned");
+        if guard.generation == generation {
+            guard.chunk_results[chunk_idx] = Some(result);
+            guard.chunks_done += 1;
+            if guard.chunks_done == guard.chunks_total {
+                done_cv.notify_one();
+            }
+        }
+    }
+}
+
+fn eval_chunk(
+    checker: &mut TreeChecker,
+    commits: &[PathCommit],
+    query: &PathQuery,
+    bloom: Option<&CommitGraphBloom>,
+    path_generation: u64,
+    cancelled: &Option<CancelCheck>,
+) -> Vec<Result<CommitChange>> {
+    let mut out = Vec::with_capacity(commits.len());
+    for (idx, commit) in commits.iter().enumerate() {
+        if idx & 63 == 0
+            && let Some(check) = cancelled
+            && check()
+        {
+            out.resize_with(commits.len(), || Ok(CommitChange::Unchanged));
+            return out;
+        }
+        match checker.check_commit(commit, query, bloom, path_generation) {
+            Ok(change) => out.push(Ok(change)),
+            Err(err) => {
+                out.push(Err(err));
+                return out;
+            }
+        }
+    }
+    out
+}
+
 /// Streams [`PathHistoryEntry`]s for commits that changed the path, in the same
 /// order as [`Repo::walk_commits`], following the file across renames.
 ///
@@ -54,17 +641,22 @@ pub struct PathHistoryEntry {
 /// history lists those, this walk does not, because it never traverses the
 /// other parents.
 pub struct PathHistoryEntries {
-    repo: gix::Repository,
+    sync_repo: gix::ThreadSafeRepository,
+    checker: TreeChecker,
     walk: PathWalk,
     shallow: Shallow,
-    /// Path components of the file in the commit being inspected. Moves from
-    /// the queried name to older names as the walk goes back past renames.
-    components: Vec<Vec<u8>>,
-    /// `components` joined back into a path for the caller.
+    bloom: Option<Arc<CommitGraphBloom>>,
+    query: Arc<PathQuery>,
+    /// `query.components` joined back into a path for the caller.
     display_path: String,
-    graph: Option<gix::commitgraph::Graph>,
-    entries: HashMap<Oid, Option<Entry>>,
-    odb_buf: Vec<u8>,
+    path_generation: u64,
+    checked_inline: usize,
+    batch_size: usize,
+    batch_commits: Vec<PathCommit>,
+    batch_results: Vec<Result<CommitChange>>,
+    batch_cursor: usize,
+    trailing_error: Option<Error>,
+    pool: Option<WorkerPool>,
     failed: bool,
     /// `None` for the public, uncancellable walk.
     cancelled: Option<CancelCheck>,
@@ -78,37 +670,93 @@ impl Iterator for PathHistoryEntries {
             return None;
         }
         loop {
-            // The commit walk checks too, but this is the loop that can keep
-            // running without ever yielding a row: a path that never matches
-            // would otherwise walk the whole history before the caller gets
-            // control back.
             if self.is_cancelled() {
                 return None;
             }
-            let commit = match self.walk.next()? {
-                Ok(commit) => commit,
-                Err(error) => {
-                    // The walk cannot be trusted after an error, so stop instead
-                    // of emitting every later commit as unchanged.
-                    self.failed = true;
-                    return Some(Err(error));
-                }
-            };
-            match self.changed(commit.id, commit.parent) {
-                Ok(true) => {
-                    // The entry names the file at this commit, before the
-                    // tracked path moves to the old name for older commits.
-                    let entry = PathHistoryEntry {
-                        commit: commit.id,
-                        path: self.display_path.clone(),
-                    };
-                    if let Err(error) = self.follow_rename(commit.id, commit.parent) {
+            if self.checked_inline < INLINE_WARMUP && self.batch_cursor >= self.batch_commits.len()
+            {
+                let commit = match self.walk.next() {
+                    Some(Ok(commit)) => commit,
+                    Some(Err(error)) => {
                         self.failed = true;
                         return Some(Err(error));
                     }
+                    None => return None,
+                };
+                self.checked_inline += 1;
+                match self.checker.check_commit(
+                    &commit,
+                    &self.query,
+                    self.bloom.as_deref(),
+                    self.path_generation,
+                ) {
+                    Ok(CommitChange::Unchanged) => continue,
+                    Ok(change) => {
+                        let entry = PathHistoryEntry {
+                            commit: commit.id,
+                            path: self.display_path.clone(),
+                        };
+                        if let CommitChange::ChangedAdded(dest_mode) = change
+                            && let Err(error) = self.follow_rename(&commit, dest_mode)
+                        {
+                            self.failed = true;
+                            return Some(Err(error));
+                        }
+                        return Some(Ok(entry));
+                    }
+                    Err(error) => {
+                        self.failed = true;
+                        return Some(Err(error));
+                    }
+                }
+            }
+
+            if self.batch_cursor >= self.batch_commits.len() && !self.refill_batch() {
+                if let Some(error) = self.trailing_error.take() {
+                    self.failed = true;
+                    return Some(Err(error));
+                }
+                return None;
+            }
+
+            let idx = self.batch_cursor;
+            self.batch_cursor += 1;
+            let result =
+                std::mem::replace(&mut self.batch_results[idx], Ok(CommitChange::Unchanged));
+            match result {
+                Ok(CommitChange::Unchanged) => continue,
+                Ok(change) => {
+                    let commit_id = self.batch_commits[idx].id;
+                    let entry = PathHistoryEntry {
+                        commit: commit_id,
+                        path: self.display_path.clone(),
+                    };
+                    if let CommitChange::ChangedAdded(dest_mode) = change {
+                        let commit = PathCommit {
+                            id: self.batch_commits[idx].id,
+                            parent: self.batch_commits[idx].parent,
+                            tree: self.batch_commits[idx].tree,
+                            parent_tree: self.batch_commits[idx].parent_tree,
+                            graph_pos: self.batch_commits[idx].graph_pos,
+                        };
+                        match self.follow_rename(&commit, dest_mode) {
+                            Ok(true) => {
+                                // Path switched to the rename source: discard
+                                // tail evaluations under the newer name and
+                                // re-check remaining commits in the batch.
+                                self.batch_commits.drain(..self.batch_cursor);
+                                self.batch_cursor = 0;
+                                self.evaluate_batch();
+                            }
+                            Ok(false) => {}
+                            Err(error) => {
+                                self.failed = true;
+                                return Some(Err(error));
+                            }
+                        }
+                    }
                     return Some(Ok(entry));
                 }
-                Ok(false) => {}
                 Err(error) => {
                     self.failed = true;
                     return Some(Err(error));
@@ -125,10 +773,10 @@ impl PathHistoryEntries {
         parents_buf: &mut Vec<Oid>,
     ) -> Result<CommitInfo> {
         super::log::commit_info(
-            &self.repo,
+            &self.checker.repo,
             id,
             &self.shallow,
-            &mut self.odb_buf,
+            &mut self.checker.odb_buf,
             parents_buf,
         )
     }
@@ -140,150 +788,186 @@ impl PathHistoryEntries {
         }
     }
 
-    fn changed(&mut self, commit: Oid, parent: Option<Oid>) -> Result<bool> {
-        let tree = self.tree_id(commit)?;
-        let Some(parent) = parent else {
-            // A root commit changed the path exactly when the path exists there.
-            // An empty path names the whole tree, which a root commit always has.
-            return Ok(self.components.is_empty() || self.entry(tree)?.is_some());
-        };
-        let parent_tree = match self.tree_id(parent) {
-            Ok(tree) => tree,
-            // The first parent is outside the walk only in a shallow clone; its
-            // tree cannot be read, so the commit is reported as changed rather
-            // than silently dropped.
-            Err(_) => return Ok(self.entry(tree)?.is_some()),
-        };
-        if tree == parent_tree {
-            return Ok(false);
+    fn refill_batch(&mut self) -> bool {
+        self.batch_commits.clear();
+        self.batch_results.clear();
+        self.batch_cursor = 0;
+
+        if let Some(error) = self.trailing_error.take() {
+            self.trailing_error = Some(error);
+            return false;
         }
-        if self.components.is_empty() {
-            return Ok(true);
+
+        let target = self.batch_size;
+        while self.batch_commits.len() < target {
+            if self.is_cancelled() {
+                self.batch_commits.clear();
+                return false;
+            }
+            match self.walk.next() {
+                Some(Ok(commit)) => self.batch_commits.push(commit),
+                Some(Err(error)) => {
+                    self.trailing_error = Some(error);
+                    break;
+                }
+                None => break,
+            }
         }
-        Ok(self.entry(tree)? != self.entry(parent_tree)?)
+        if self.batch_commits.is_empty() {
+            return false;
+        }
+        self.batch_size = (self.batch_size * 2).min(MAX_BATCH_SIZE);
+        self.evaluate_batch();
+        true
+    }
+
+    fn evaluate_batch(&mut self) {
+        self.batch_results.clear();
+        if self.batch_commits.is_empty() {
+            return;
+        }
+        let workers = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1)
+            .clamp(1, MAX_WORKERS);
+        if workers <= 1 || self.batch_commits.len() < WORKER_CHUNK_SIZE {
+            self.batch_results.reserve(self.batch_commits.len());
+            for commit in &self.batch_commits {
+                if self.is_cancelled() {
+                    self.batch_results
+                        .resize_with(self.batch_commits.len(), || Ok(CommitChange::Unchanged));
+                    return;
+                }
+                self.batch_results.push(self.checker.check_commit(
+                    commit,
+                    &self.query,
+                    self.bloom.as_deref(),
+                    self.path_generation,
+                ));
+            }
+            return;
+        }
+
+        let pool = self.pool.get_or_insert_with(|| {
+            WorkerPool::new(
+                workers,
+                self.sync_repo.clone(),
+                self.bloom.clone(),
+                self.cancelled.clone(),
+            )
+        });
+        let commits = std::mem::take(&mut self.batch_commits);
+        let (commits, results) = pool.eval(commits, &self.query, self.path_generation);
+        self.batch_commits = commits;
+        self.batch_results = results;
     }
 
     /// Move the tracked path to the old name when this commit renamed the file.
-    ///
-    /// Only a path that exists in `commit` but not in its parent can be the
-    /// destination of a rename; a file that kept its name never runs the tree
-    /// diff, which is what keeps this walk cheap.
-    fn follow_rename(&mut self, commit: Oid, parent: Option<Oid>) -> Result<()> {
-        let Some(parent) = parent else {
-            return Ok(());
+    /// Returns `true` when `display_path` changed.
+    fn follow_rename(&mut self, commit: &PathCommit, dest_mode: u16) -> Result<bool> {
+        let Some(parent_id) = commit.parent else {
+            return Ok(false);
         };
-        if self.components.is_empty() {
-            return Ok(());
+        if self.query.components.is_empty() {
+            return Ok(false);
         }
-        let commit_tree = self.tree_id(commit)?;
-        let parent_tree = match self.tree_id(parent) {
-            Ok(tree) => tree,
-            Err(_) => return Ok(()),
+        let commit_tree = match commit.tree {
+            Some(tree) => tree,
+            None => self.checker.read_commit_tree(commit.id)?,
         };
-        if commit_tree == parent_tree
-            || self.entry(commit_tree)?.is_none()
-            || self.entry(parent_tree)?.is_some()
-        {
-            return Ok(());
+        let parent_tree = match commit.parent_tree {
+            Some(tree) => tree,
+            None => match self.checker.read_commit_tree(parent_id) {
+                Ok(tree) => tree,
+                Err(_) => return Ok(false),
+            },
+        };
+        if commit_tree == parent_tree {
+            return Ok(false);
         }
-
-        let Some(old_path) = self.rename_source(parent_tree, commit_tree)? else {
-            return Ok(());
+        let Some(old_path) = self.rename_source(parent_tree, commit_tree, dest_mode)? else {
+            return Ok(false);
         };
         self.set_path(&old_path);
-        Ok(())
+        Ok(true)
     }
 
     /// The parent-side path of the rename whose destination is the tracked
-    /// path, as `git diff -M` would report it.
-    fn rename_source(&self, parent_tree: Oid, commit_tree: Oid) -> Result<Option<Vec<u8>>> {
-        let parent = self.repo.find_tree(parent_tree).map_err(Error::gix)?;
-        let commit = self.repo.find_tree(commit_tree).map_err(Error::gix)?;
-        let changes = self
+    /// path, as `gix`'s rewrite tracker reports it.
+    fn rename_source(
+        &self,
+        parent_tree: Oid,
+        commit_tree: Oid,
+        dest_mode: u16,
+    ) -> Result<Option<Vec<u8>>> {
+        let parent = self
+            .checker
+            .repo
+            .find_tree(parent_tree)
+            .map_err(Error::gix)?;
+        let commit = self
+            .checker
+            .repo
+            .find_tree(commit_tree)
+            .map_err(Error::gix)?;
+
+        // Directory renames in gix-diff only depend on exact-ID child matches
+        // (`percentage: None`); skipping the similarity pass avoids quadratic
+        // blob diffs when a directory moves alongside many other changes.
+        if is_tree_mode(dest_mode) {
+            let changes = self
+                .checker
+                .repo
+                .diff_tree_to_tree(
+                    Some(&parent),
+                    Some(&commit),
+                    Some(
+                        gix::diff::Options::default().with_rewrites(Some(gix::diff::Rewrites {
+                            percentage: None,
+                            ..gix::diff::Rewrites::default()
+                        })),
+                    ),
+                )
+                .map_err(Error::gix)?;
+            for change in changes {
+                if let ChangeDetached::Rewrite {
+                    location,
+                    source_location,
+                    copy: false,
+                    ..
+                } = change
+                    && location.as_slice() == self.display_path.as_bytes()
+                {
+                    return Ok(Some(source_location.into()));
+                }
+            }
+            return Ok(None);
+        }
+
+        // For non-tree targets, run the raw tree diff without rewrites and
+        // resolve renames with the exact same matching order as gix-diff,
+        // skipping blob diffs whose size ratio cannot reach the threshold and
+        // stopping as soon as the tracked destination is resolved.
+        let raw_changes = self
+            .checker
             .repo
             .diff_tree_to_tree(
                 Some(&parent),
                 Some(&commit),
-                Some(
-                    gix::diff::Options::default()
-                        .with_rewrites(Some(gix::diff::Rewrites::default())),
-                ),
+                Some(gix::diff::Options::default().with_rewrites(None)),
             )
             .map_err(Error::gix)?;
-
-        for change in changes {
-            if let ChangeDetached::Rewrite {
-                location,
-                source_location,
-                copy: false,
-                ..
-            } = change
-                && location.as_slice() == self.display_path.as_bytes()
-            {
-                return Ok(Some(source_location.into()));
-            }
-        }
-        Ok(None)
-    }
-
-    /// The commit's root tree, from the commit-graph when it covers the commit.
-    fn tree_id(&self, commit: Oid) -> Result<Oid> {
-        if let Some(graph) = &self.graph
-            && let Some(commit) = graph.commit_by_id(commit)
-        {
-            return Ok(commit.root_tree_id().to_owned());
-        }
-        let commit = self.repo.find_commit(commit).map_err(Error::gix)?;
-        Ok(commit.tree_id().map_err(Error::gix)?.detach())
-    }
-
-    /// The entry the tracked path resolves to in `tree`, or `None` if absent.
-    fn entry(&mut self, tree: Oid) -> Result<Option<Entry>> {
-        if let Some(cached) = self.entries.get(&tree) {
-            return Ok(*cached);
-        }
-        let entry = self.lookup(tree)?;
-        if self.entries.len() >= ENTRY_CACHE_LIMIT {
-            // The cache is only a locality hint; dropping it costs tree reads.
-            self.entries.clear();
-        }
-        self.entries.insert(tree, entry);
-        Ok(entry)
-    }
-
-    fn lookup(&mut self, mut tree: Oid) -> Result<Option<Entry>> {
-        for (index, component) in self.components.iter().enumerate() {
-            let data = self
-                .repo
-                .objects
-                .find(&tree, &mut self.odb_buf)
-                .map_err(Error::gix)?;
-            if data.kind != gix::objs::Kind::Tree {
-                return Ok(None);
-            }
-            let Some(entry) = TreeRefIter::from_bytes(data.data, data.object_hash)
-                .filter_map(std::result::Result::ok)
-                .find(|entry| entry.filename == component.as_slice())
-            else {
-                return Ok(None);
-            };
-            if index + 1 == self.components.len() {
-                return Ok(Some((entry.oid.to_owned(), entry.mode.value())));
-            }
-            // Only the final component may be a file; anything above it is a
-            // directory, so a non-tree entry means the path does not exist.
-            if !entry.mode.is_tree() {
-                return Ok(None);
-            }
-            tree = entry.oid.to_owned();
-        }
-        Ok(None)
+        find_file_rename_source(
+            &self.checker.repo,
+            raw_changes,
+            self.display_path.as_bytes(),
+        )
     }
 
     /// Point the walk at another name; cached entries were resolved for the old
     /// one, so they cannot be reused.
     fn set_path(&mut self, path: &[u8]) {
-        self.components = path
+        let components: Vec<Vec<u8>> = path
             .split(|byte| *byte == b'/')
             .filter(|component| {
                 let component: &[u8] = component;
@@ -291,14 +975,496 @@ impl PathHistoryEntries {
             })
             .map(<[u8]>::to_vec)
             .collect();
-        self.display_path = self
-            .components
+        self.display_path = components
             .iter()
             .map(|component| String::from_utf8_lossy(component))
             .collect::<Vec<_>>()
             .join("/");
-        self.entries.clear();
+        self.query = Arc::new(PathQuery::from_components(components));
+        self.path_generation += 1;
     }
+}
+
+struct RenameItem {
+    location: BString,
+    id: Oid,
+    mode: EntryMode,
+    added: bool,
+    relation: Option<Relation>,
+    emitted: bool,
+}
+
+#[derive(Clone, Copy)]
+enum BlobPrep {
+    Unloaded,
+    Skip,
+    Text { len: usize },
+}
+
+fn find_file_rename_source(
+    repo: &gix::Repository,
+    raw_changes: Vec<ChangeDetached>,
+    target_path: &[u8],
+) -> Result<Option<Vec<u8>>> {
+    let mut items = Vec::new();
+    let mut has_deletion = false;
+    let mut has_target = false;
+
+    for change in raw_changes {
+        match change {
+            ChangeDetached::Addition {
+                location,
+                relation,
+                entry_mode,
+                id,
+            } => {
+                if entry_mode.is_tree() && relation.is_none() {
+                    continue;
+                }
+                if location.as_slice() == target_path {
+                    has_target = true;
+                }
+                items.push(RenameItem {
+                    location,
+                    id,
+                    mode: entry_mode,
+                    added: true,
+                    relation,
+                    emitted: false,
+                });
+            }
+            ChangeDetached::Deletion {
+                location,
+                relation,
+                entry_mode,
+                id,
+            } => {
+                if entry_mode.is_tree() && relation.is_none() {
+                    continue;
+                }
+                has_deletion = true;
+                items.push(RenameItem {
+                    location,
+                    id,
+                    mode: entry_mode,
+                    added: false,
+                    relation,
+                    emitted: false,
+                });
+            }
+            ChangeDetached::Modification { .. } | ChangeDetached::Rewrite { .. } => {}
+        }
+    }
+
+    if !has_target || !has_deletion {
+        return Ok(None);
+    }
+
+    // Match `gix_diff::rewrites::Tracker::sort_items_by_id_and_location`.
+    items.sort_by(|a, b| {
+        a.id.cmp(&b.id)
+            .then_with(|| a.location.cmp(&b.location))
+            .then_with(|| a.added.cmp(&b.added))
+            .then_with(|| a.relation.cmp(&b.relation))
+            .then_with(|| a.mode.cmp(&b.mode))
+    });
+
+    let Some(target_idx) = items
+        .iter()
+        .position(|item| item.added && item.location.as_slice() == target_path)
+    else {
+        return Ok(None);
+    };
+
+    let rewrites = gix::diff::Rewrites::default();
+    let max_checks = if items.len() < 100_000 {
+        0
+    } else {
+        rewrites.limit.saturating_pow(2)
+    };
+
+    // Pass 1a: parent directories matched by identity (and their children).
+    if let Some(found) = match_identity_pass(&mut items, target_idx, max_checks, true, &rewrites) {
+        return Ok(Some(found));
+    }
+    if items[target_idx].emitted {
+        return Ok(None);
+    }
+
+    // Pass 1b: all additions vs deletions matched by exact object id.
+    if let Some(found) = match_identity_pass(&mut items, target_idx, max_checks, false, &rewrites) {
+        return Ok(Some(found));
+    }
+    if items[target_idx].emitted {
+        return Ok(None);
+    }
+
+    // Pass 2: similarity matching for non-empty blobs within limit.
+    let Some(percentage) = rewrites.percentage.filter(|&p| p < 1.0) else {
+        return Ok(None);
+    };
+    let target = &items[target_idx];
+    if !target.mode.is_blob() {
+        return Ok(None);
+    }
+    if !rewrites.track_empty
+        && !matches!(target.relation, Some(Relation::ChildOfParent(_)))
+        && target.id == Oid::empty_blob(target.id.kind())
+    {
+        return Ok(None);
+    }
+
+    let source_candidates: Vec<usize> = items
+        .iter()
+        .enumerate()
+        .filter_map(|(i, item)| (!item.added && !item.emitted).then_some(i))
+        .collect();
+    if source_candidates.is_empty() {
+        return Ok(None);
+    }
+    let num_dst = items
+        .iter()
+        .filter(|item| item.added && !item.emitted)
+        .count();
+    if rewrites.limit != 0
+        && (source_candidates.len() as u128) * (num_dst as u128)
+            > (rewrites.limit as u128).saturating_pow(2)
+    {
+        return Ok(None);
+    }
+
+    let mut platform = repo
+        .diff_resource_cache_for_tree_diff()
+        .map_err(Error::gix)?;
+    platform
+        .options
+        .skip_internal_diff_if_external_is_configured = false;
+
+    let mut preps = vec![BlobPrep::Unloaded; items.len()];
+
+    // Pre-check `target_idx`: if no un-emitted compatible source can possibly
+    // reach `percentage` similarity with `target`, skip scanning `0..target_idx`.
+    let target_len = match ensure_prep(
+        &mut platform,
+        repo,
+        &mut preps[target_idx],
+        &items[target_idx],
+    )? {
+        BlobPrep::Text { len } => len,
+        BlobPrep::Skip | BlobPrep::Unloaded => return Ok(None),
+    };
+    let mut target_has_any_candidate = false;
+    for &src_idx in &source_candidates {
+        if !modes_compatible(items[src_idx].mode, items[target_idx].mode) {
+            continue;
+        }
+        let BlobPrep::Text { len: src_len } =
+            ensure_prep(&mut platform, repo, &mut preps[src_idx], &items[src_idx])?
+        else {
+            continue;
+        };
+        let max_len = src_len.max(target_len);
+        if max_len == 0 {
+            continue;
+        }
+        let upper = (src_len.min(target_len) as f32) / (max_len as f32);
+        if upper < percentage {
+            continue;
+        }
+        if let Some(sim) =
+            compute_similarity(&mut platform, repo, &items[target_idx], &items[src_idx])?
+            && sim >= percentage
+        {
+            target_has_any_candidate = true;
+            break;
+        }
+    }
+    if !target_has_any_candidate {
+        return Ok(None);
+    }
+
+    // Run Pass 2 in exact sorted destination order up through `target_idx`.
+    let mut num_checks = 0usize;
+    for dest_idx in 0..=target_idx {
+        if items[dest_idx].emitted || !items[dest_idx].added {
+            continue;
+        }
+        let dest_allowed = rewrites.track_empty
+            || matches!(items[dest_idx].relation, Some(Relation::ChildOfParent(_)))
+            || items[dest_idx].id != Oid::empty_blob(items[dest_idx].id.kind());
+        if !dest_allowed || !items[dest_idx].mode.is_blob() {
+            continue;
+        }
+        let BlobPrep::Text { len: dst_len } =
+            ensure_prep(&mut platform, repo, &mut preps[dest_idx], &items[dest_idx])?
+        else {
+            continue;
+        };
+        let dest_name = basename(&items[dest_idx].location).to_vec();
+        let mut best: Option<(usize, f32, bool)> = None;
+
+        for &src_idx in &source_candidates {
+            if src_idx == dest_idx
+                || items[src_idx].emitted
+                || !modes_compatible(items[src_idx].mode, items[dest_idx].mode)
+            {
+                continue;
+            }
+            num_checks += 1;
+            let BlobPrep::Text { len: src_len } =
+                ensure_prep(&mut platform, repo, &mut preps[src_idx], &items[src_idx])?
+            else {
+                continue;
+            };
+            let max_len = src_len.max(dst_len);
+            if max_len == 0 {
+                continue;
+            }
+            let upper = (src_len.min(dst_len) as f32) / (max_len as f32);
+            if upper < percentage {
+                continue;
+            }
+            if let Some((_, best_sim, _)) = best
+                && upper < best_sim
+            {
+                continue;
+            }
+            let Some(sim) =
+                compute_similarity(&mut platform, repo, &items[dest_idx], &items[src_idx])?
+            else {
+                continue;
+            };
+            if sim < percentage {
+                continue;
+            }
+            let same_name = basename(&items[src_idx].location) == dest_name.as_slice();
+            let better =
+                best.is_none_or(
+                    |(_, best_sim, best_same_name)| match sim.total_cmp(&best_sim) {
+                        std::cmp::Ordering::Greater => true,
+                        std::cmp::Ordering::Equal => same_name && !best_same_name,
+                        std::cmp::Ordering::Less => false,
+                    },
+                );
+            if better {
+                best = Some((src_idx, sim, same_name));
+            }
+        }
+
+        if max_checks != 0 && num_checks > max_checks {
+            return Ok(None);
+        }
+        if let Some((src_idx, _, _)) = best {
+            items[dest_idx].emitted = true;
+            items[src_idx].emitted = true;
+            if dest_idx == target_idx {
+                return Ok(Some(items[src_idx].location.clone().into()));
+            }
+        }
+    }
+
+    Ok(None)
+}
+
+fn match_identity_pass(
+    items: &mut [RenameItem],
+    target_idx: usize,
+    max_checks: usize,
+    parents_only: bool,
+    rewrites: &gix::diff::Rewrites,
+) -> Option<Vec<u8>> {
+    let source_candidates: Vec<usize> = items
+        .iter()
+        .enumerate()
+        .filter_map(|(i, item)| (!item.added && !item.emitted).then_some(i))
+        .collect();
+    if source_candidates.is_empty() {
+        return None;
+    }
+
+    let mut num_checks = 0usize;
+    for dest_idx in 0..items.len() {
+        if items[dest_idx].emitted || !items[dest_idx].added {
+            continue;
+        }
+        if parents_only {
+            if !matches!(items[dest_idx].relation, Some(Relation::Parent(_))) {
+                continue;
+            }
+        } else {
+            let allowed = rewrites.track_empty
+                || matches!(items[dest_idx].relation, Some(Relation::ChildOfParent(_)))
+                || items[dest_idx].id != Oid::empty_blob(items[dest_idx].id.kind());
+            if !allowed {
+                continue;
+            }
+        }
+
+        let dest_id = items[dest_idx].id;
+        let dest_mode = items[dest_idx].mode;
+        let start = source_candidates.partition_point(|&i| items[i].id < dest_id);
+        let end = source_candidates.partition_point(|&i| items[i].id <= dest_id);
+        let mut matched_src = None;
+        if start < end {
+            let dest_name = basename(&items[dest_idx].location);
+            for &src_idx in &source_candidates[start..end] {
+                num_checks += 1;
+                if src_idx == dest_idx
+                    || items[src_idx].emitted
+                    || !modes_compatible(items[src_idx].mode, dest_mode)
+                {
+                    continue;
+                }
+                if basename(&items[src_idx].location) == dest_name {
+                    matched_src = Some(src_idx);
+                    break;
+                }
+                matched_src.get_or_insert(src_idx);
+            }
+        }
+
+        if max_checks != 0 && num_checks > max_checks {
+            return None;
+        }
+        let Some(src_idx) = matched_src else {
+            continue;
+        };
+
+        let relations = items[src_idx].relation.zip(items[dest_idx].relation);
+        items[dest_idx].emitted = true;
+        items[src_idx].emitted = true;
+
+        if dest_idx == target_idx {
+            return Some(items[src_idx].location.clone().into());
+        }
+
+        if let Some((Relation::Parent(src_rel), Relation::Parent(dst_rel))) = relations {
+            let src_children: Vec<usize> = items
+                .iter()
+                .enumerate()
+                .filter_map(|(i, item)| {
+                    (!item.emitted && matches!(item.relation, Some(Relation::ChildOfParent(id)) if id == src_rel))
+                        .then_some(i)
+                })
+                .collect();
+            let dst_children: Vec<usize> = items
+                .iter()
+                .enumerate()
+                .filter_map(|(i, item)| {
+                    (!item.emitted && matches!(item.relation, Some(Relation::ChildOfParent(id)) if id == dst_rel))
+                        .then_some(i)
+                })
+                .collect();
+            for (s, d) in src_children.into_iter().zip(dst_children) {
+                if items[s].id == items[d].id
+                    && basename(&items[s].location) == basename(&items[d].location)
+                {
+                    items[s].emitted = true;
+                    items[d].emitted = true;
+                    if d == target_idx {
+                        return Some(items[s].location.clone().into());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn ensure_prep(
+    platform: &mut gix::diff::blob::Platform,
+    repo: &gix::Repository,
+    slot: &mut BlobPrep,
+    item: &RenameItem,
+) -> Result<BlobPrep> {
+    if !matches!(*slot, BlobPrep::Unloaded) {
+        return Ok(*slot);
+    }
+    let kind = if item.added {
+        ResourceKind::NewOrDestination
+    } else {
+        ResourceKind::OldOrSource
+    };
+    platform
+        .set_resource(
+            item.id,
+            item.mode.kind(),
+            item.location.as_bstr(),
+            kind,
+            &repo.objects,
+        )
+        .map_err(|err| Error::other(err.to_string()))?;
+    let prep = match platform.resource(kind).and_then(|r| r.data.as_slice()) {
+        Some(buf) => BlobPrep::Text { len: buf.len() },
+        None => BlobPrep::Skip,
+    };
+    *slot = prep;
+    Ok(prep)
+}
+
+fn compute_similarity(
+    platform: &mut gix::diff::blob::Platform,
+    repo: &gix::Repository,
+    dest: &RenameItem,
+    source: &RenameItem,
+) -> Result<Option<f32>> {
+    platform
+        .set_resource(
+            dest.id,
+            dest.mode.kind(),
+            dest.location.as_bstr(),
+            ResourceKind::NewOrDestination,
+            &repo.objects,
+        )
+        .map_err(|err| Error::other(err.to_string()))?;
+    platform
+        .set_resource(
+            source.id,
+            source.mode.kind(),
+            source.location.as_bstr(),
+            ResourceKind::OldOrSource,
+            &repo.objects,
+        )
+        .map_err(|err| Error::other(err.to_string()))?;
+    let prep = platform
+        .prepare_diff()
+        .map_err(|err| Error::other(err.to_string()))?;
+    let Operation::InternalDiff { algorithm } = prep.operation else {
+        return Ok(None);
+    };
+    let old_len = prep.old.data.as_slice().unwrap_or_default().len();
+    let new_len = prep.new.data.as_slice().unwrap_or_default().len();
+    let input = InternedInput::new(prep.old.intern_source(), prep.new.intern_source());
+    let diff = Diff::compute(algorithm, &input);
+    let removed_bytes: usize = diff
+        .hunks()
+        .map(|hunk| {
+            input.before[hunk.before.start as usize..hunk.before.end as usize]
+                .iter()
+                .map(|token| input.interner[*token].len())
+                .sum::<usize>()
+        })
+        .sum();
+    Ok(Some(
+        old_len.saturating_sub(removed_bytes) as f32 / old_len.max(new_len) as f32,
+    ))
+}
+
+fn modes_compatible(a: EntryMode, b: EntryMode) -> bool {
+    matches!(
+        (a.kind(), b.kind()),
+        (
+            EntryKind::Blob | EntryKind::BlobExecutable,
+            EntryKind::Blob | EntryKind::BlobExecutable
+        ) | (EntryKind::Link, EntryKind::Link)
+            | (EntryKind::Tree, EntryKind::Tree)
+            | (EntryKind::Commit, EntryKind::Commit)
+    )
+}
+
+fn basename(path: &BString) -> &[u8] {
+    path.rfind_byte(b'/')
+        .map_or(path.as_slice(), |idx| &path[idx + 1..])
 }
 
 /// Streams ids of commits that changed `path`, for callers that do not need the
@@ -370,20 +1536,24 @@ impl Repo {
         cancelled: Option<CancelCheck>,
     ) -> Result<PathHistoryEntries> {
         let mut repo = self.local();
-        let walk = self.path_walk_with(cancelled.clone())?;
-        let shallow = Shallow::load(&repo)?;
-        // A missing or corrupt graph only costs speed here.
-        let graph = repo.commit_graph_if_enabled().ok().flatten();
         repo.object_cache_size_if_unset(OBJECT_CACHE_BYTES);
+        let (walk, shallow, bloom) = self.path_walk_with(cancelled.clone())?;
         let mut entries = PathHistoryEntries {
-            repo,
+            sync_repo: self.inner.clone(),
+            checker: TreeChecker::new(repo),
             walk,
             shallow,
-            components: Vec::new(),
+            bloom: bloom.map(Arc::new),
+            query: Arc::new(PathQuery::from_components(Vec::new())),
             display_path: String::new(),
-            graph,
-            entries: HashMap::new(),
-            odb_buf: Vec::new(),
+            path_generation: 0,
+            checked_inline: 0,
+            batch_size: INITIAL_BATCH_SIZE,
+            batch_commits: Vec::new(),
+            batch_results: Vec::new(),
+            batch_cursor: 0,
+            trailing_error: None,
+            pool: None,
             failed: false,
             cancelled,
         };
@@ -394,7 +1564,133 @@ impl Repo {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_support::shallow_clone_fixture;
+    use std::collections::HashMap;
+
+    use crate::repo::{PathHistoryEntry, Repo};
+    use crate::test_support::{TestRepo, shallow_clone_fixture};
+    use gix::object::tree::diff::ChangeDetached;
+    use gix::objs::{FindExt as _, TreeRefIter};
+
+    /// Straightforward single-threaded reference path walk without caches,
+    /// Bloom filters, parallel workers, or fast rename prefilters.
+    fn reference_path_history(repo: &Repo, path: &str) -> Vec<PathHistoryEntry> {
+        let local = repo.local();
+        let mut components: Vec<Vec<u8>> = path
+            .as_bytes()
+            .split(|b| *b == b'/')
+            .filter(|c| !c.is_empty() && *c != b".")
+            .map(<[u8]>::to_vec)
+            .collect();
+        let mut display_path = components
+            .iter()
+            .map(|c| String::from_utf8_lossy(c))
+            .collect::<Vec<_>>()
+            .join("/");
+
+        let lookup_entry =
+            |tree_id: gix::ObjectId, comps: &[Vec<u8>]| -> Option<(gix::ObjectId, u16)> {
+                let mut current = tree_id;
+                for (idx, comp) in comps.iter().enumerate() {
+                    let mut buf = Vec::new();
+                    let obj = local.objects.find(&current, &mut buf).ok()?;
+                    if obj.kind != gix::objs::Kind::Tree {
+                        return None;
+                    }
+                    let entry = TreeRefIter::from_bytes(obj.data, obj.object_hash)
+                        .filter_map(Result::ok)
+                        .find(|e| e.filename == comp.as_slice())?;
+                    if idx + 1 == comps.len() {
+                        return Some((entry.oid.to_owned(), entry.mode.value()));
+                    }
+                    if !entry.mode.is_tree() {
+                        return None;
+                    }
+                    current = entry.oid.to_owned();
+                }
+                None
+            };
+
+        let commits: Vec<_> = repo
+            .walk_commits()
+            .expect("walk commits")
+            .map(|c| c.expect("commit"))
+            .collect();
+        let mut trees = HashMap::new();
+        for c in &commits {
+            let tree = local
+                .find_commit(c.id)
+                .expect("commit")
+                .tree_id()
+                .expect("tree")
+                .detach();
+            trees.insert(c.id, tree);
+        }
+
+        let mut out = Vec::new();
+        for c in commits {
+            let tree = trees[&c.id];
+            let parent = c.parents.first().copied();
+            let changed = match parent.and_then(|p| trees.get(&p).copied()) {
+                None => components.is_empty() || lookup_entry(tree, &components).is_some(),
+                Some(ptree) => {
+                    tree != ptree
+                        && (components.is_empty()
+                            || lookup_entry(tree, &components) != lookup_entry(ptree, &components))
+                }
+            };
+            if !changed {
+                continue;
+            }
+            out.push(PathHistoryEntry {
+                commit: c.id,
+                path: display_path.clone(),
+            });
+
+            if let Some(ptree) = parent.and_then(|p| trees.get(&p).copied())
+                && !components.is_empty()
+                && tree != ptree
+                && lookup_entry(tree, &components).is_some()
+                && lookup_entry(ptree, &components).is_none()
+            {
+                let p_obj = local.find_tree(ptree).expect("ptree");
+                let c_obj = local.find_tree(tree).expect("ctree");
+                let changes = local
+                    .diff_tree_to_tree(
+                        Some(&p_obj),
+                        Some(&c_obj),
+                        Some(
+                            gix::diff::Options::default()
+                                .with_rewrites(Some(gix::diff::Rewrites::default())),
+                        ),
+                    )
+                    .expect("diff");
+                for change in changes {
+                    if let ChangeDetached::Rewrite {
+                        location,
+                        source_location,
+                        copy: false,
+                        ..
+                    } = change
+                        && location.as_slice() == display_path.as_bytes()
+                    {
+                        components = source_location
+                            .as_slice()
+                            .split(|b| *b == b'/')
+                            .filter(|c| !c.is_empty() && *c != b".")
+                            .map(<[u8]>::to_vec)
+                            .collect();
+                        display_path = components
+                            .iter()
+                            .map(|c| String::from_utf8_lossy(c))
+                            .collect::<Vec<_>>()
+                            .join("/");
+                        break;
+                    }
+                }
+            }
+        }
+        out
+    }
 
     #[test]
     fn file_history_stops_at_the_shallow_boundary() {
@@ -431,5 +1727,80 @@ mod tests {
             .map(|commit| commit.expect("history row"))
             .collect();
         assert_eq!(history, [boundary]);
+    }
+
+    #[test]
+    fn optimized_walk_matches_reference_across_merges_renames_deletions_and_readditions() {
+        let fixture = TestRepo::new();
+        let body = "alpha\nbeta\ngamma\ndelta\nepsilon\nzeta\neta\ntheta\n";
+        fixture.write("dir/a.txt", body);
+        fixture.write("other/keep.txt", "keep\n");
+        fixture.commit("initial");
+
+        // Branch with edits + rename with modification.
+        fixture.git(&["checkout", "-q", "-b", "feature"]);
+        fixture.write("dir/a.txt", &format!("{body}iota\n"));
+        fixture.commit("edit on feature");
+        std::fs::create_dir_all(fixture.path().join("sub")).expect("create sub dir");
+        fixture.git(&["mv", "dir/a.txt", "sub/b.txt"]);
+        fixture.write("sub/b.txt", &format!("{body}iota\nkappa\n"));
+        fixture.commit("rename with edit");
+
+        // Main branch adds unrelated commits (> INLINE_WARMUP to exercise worker pool too).
+        fixture.git(&["checkout", "-q", "main"]);
+        for i in 0..320 {
+            fixture.write("unrelated.txt", &format!("tick {i}\n"));
+            fixture.commit(&format!("unrelated {i}"));
+        }
+
+        // Merge feature into main.
+        fixture.git(&[
+            "merge",
+            "--no-ff",
+            "--quiet",
+            "feature",
+            "-m",
+            "merge feature",
+        ]);
+
+        // Delete sub/b.txt, do more commits, then re-add with completely new content,
+        // then rename directory.
+        fixture.git(&["rm", "--quiet", "sub/b.txt"]);
+        fixture.commit("delete sub/b.txt");
+        for i in 0..300 {
+            fixture.write("unrelated.txt", &format!("post-delete {i}\n"));
+            fixture.commit(&format!("post-delete {i}"));
+        }
+        fixture.write("sub/b.txt", &format!("{body}readded\nlambda\nmu\n"));
+        fixture.commit("re-add sub/b.txt");
+        std::fs::create_dir_all(fixture.path().join("final")).expect("create final dir");
+        fixture.git(&["mv", "sub/b.txt", "final/c.txt"]);
+        fixture.commit("move to final/c.txt");
+
+        // Also create a renamed directory with exact files.
+        fixture.write("old_dir/f1.txt", "one\ntwo\n");
+        fixture.write("old_dir/f2.txt", "three\nfour\n");
+        fixture.commit("add old_dir");
+        fixture.git(&["mv", "old_dir", "new_dir"]);
+        fixture.commit("rename directory");
+
+        for use_changed_paths_graph in [false, true] {
+            if use_changed_paths_graph {
+                fixture.git(&["commit-graph", "write", "--reachable", "--changed-paths"]);
+            }
+            let repo = fixture.open();
+            for query_path in ["final/c.txt", "new_dir", "unrelated.txt", "missing.txt", ""] {
+                let actual: Vec<PathHistoryEntry> = repo
+                    .path_history_entries(query_path)
+                    .expect("optimized walk")
+                    .map(|r| r.expect("row"))
+                    .collect();
+                let expected = reference_path_history(&repo, query_path);
+                assert_eq!(
+                    actual, expected,
+                    "mismatch for path={query_path:?} (bloom={use_changed_paths_graph})"
+                );
+            }
+        }
     }
 }
