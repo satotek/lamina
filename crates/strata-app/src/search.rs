@@ -498,6 +498,10 @@ impl RepoView {
             return;
         }
         self.close_file_history(window, cx);
+        // A search filters the commit list, which the maximized details hide.
+        if self.details_maximized(cx) {
+            self.toggle_details_maximized(cx);
+        }
         let Some(input) = self.search.input().cloned() else {
             return;
         };
