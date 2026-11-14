@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, Entity, FontWeight, IntoElement, ParentElement, Styled, div, px, uniform_list,
+    AnyElement, App, Entity, FontWeight, IntoElement, ParentElement, Styled, div, px, uniform_list,
 };
 use gpui_component::Selectable as _;
 use gpui_component::Theme;
@@ -130,6 +130,7 @@ impl WorktreePanel {
         snapshot: &RepoSnapshot,
         theme: &Theme,
         colors: &Colors,
+        cx: &mut App,
     ) -> AnyElement {
         let selected = self.selected.clone();
         let (path, side) = selected
@@ -220,93 +221,111 @@ impl WorktreePanel {
             );
         }
 
-        let body = match (&self.diff_error, self.diff.view()) {
-            (Some(error), _) => {
-                crate::ui::message(error, colors.danger, &colors.design).into_any_element()
-            }
-            (None, None) => {
-                crate::ui::message("computing diff…", colors.muted_foreground, &colors.design)
-                    .into_any_element()
-            }
-            (None, Some(view)) if view.lfs.is_some() => {
-                let summary = view.lfs.clone().expect("checked above");
-                let missing = summary.old.as_ref().is_some_and(|side| !side.present)
-                    || summary.new.as_ref().is_some_and(|side| !side.present);
-                let mut card = crate::ui::lfs_card(summary, &colors.design);
-                if missing && let Some(selected) = &selected {
-                    let path = selected.path.clone();
-                    let entity = entity.clone();
-                    card = card.action(
-                        crate::ui::button("worktree-lfs-download", "Download")
-                            .size(crate::ui::ButtonSize::Tiny)
-                            .on_click(move |_, window, cx| {
-                                let path = path.clone();
-                                entity.update(cx, |this, cx| {
-                                    this.run_operation(
-                                        Operation::LfsPull { path },
-                                        "Download LFS object",
-                                        window,
-                                        cx,
-                                    );
-                                });
-                            }),
-                    );
-                }
-                let body = if !self.rows.is_empty() {
-                    self.diff_list(entity.clone(), view, theme, colors)
-                } else if view.diff.binary {
-                    crate::ui::message("Binary file", colors.muted_foreground, &colors.design)
-                        .into_any_element()
-                } else if missing {
-                    crate::ui::message(
-                        "The object is not downloaded",
-                        colors.muted_foreground,
-                        &colors.design,
-                    )
-                    .into_any_element()
-                } else {
-                    crate::ui::message(
-                        "No textual changes",
-                        colors.muted_foreground,
-                        &colors.design,
-                    )
-                    .into_any_element()
-                };
-                div()
-                    .flex()
-                    .flex_col()
-                    .flex_1()
-                    .min_h_0()
-                    .child(card)
-                    .child(body)
-                    .into_any_element()
-            }
-            (None, Some(view)) if view.diff.binary => {
-                crate::ui::message("Binary file", colors.muted_foreground, &colors.design)
-                    .into_any_element()
-            }
-            (None, Some(_)) if self.rows.is_empty() => crate::ui::message(
-                "No textual changes",
-                colors.muted_foreground,
-                &colors.design,
-            )
-            .into_any_element(),
+        if let Some(toggle) = self
+            .diff
+            .view()
+            .and_then(|view| crate::image_diff::svg_toggle(&self.image_diff, view, entity.clone()))
+        {
+            header = header.child(toggle);
+        }
+
+        let image = match (&self.diff_error, self.diff.view()) {
             (None, Some(view)) => {
-                let list = self.diff_list(entity, view, theme, colors);
-                match self.context.notice() {
-                    Some(notice) => div()
+                crate::image_diff::body(&self.image_diff, view, &colors.design, entity.clone(), cx)
+            }
+            _ => None,
+        };
+        let body = if let Some(image) = image {
+            image
+        } else {
+            match (&self.diff_error, self.diff.view()) {
+                (Some(error), _) => {
+                    crate::ui::message(error, colors.danger, &colors.design).into_any_element()
+                }
+                (None, None) => {
+                    crate::ui::message("computing diff…", colors.muted_foreground, &colors.design)
+                        .into_any_element()
+                }
+                (None, Some(view)) if view.lfs.is_some() => {
+                    let summary = view.lfs.clone().expect("checked above");
+                    let missing = summary.old.as_ref().is_some_and(|side| !side.present)
+                        || summary.new.as_ref().is_some_and(|side| !side.present);
+                    let mut card = crate::ui::lfs_card(summary, &colors.design);
+                    if missing && let Some(selected) = &selected {
+                        let path = selected.path.clone();
+                        let entity = entity.clone();
+                        card = card.action(
+                            crate::ui::button("worktree-lfs-download", "Download")
+                                .size(crate::ui::ButtonSize::Tiny)
+                                .on_click(move |_, window, cx| {
+                                    let path = path.clone();
+                                    entity.update(cx, |this, cx| {
+                                        this.run_operation(
+                                            Operation::LfsPull { path },
+                                            "Download LFS object",
+                                            window,
+                                            cx,
+                                        );
+                                    });
+                                }),
+                        );
+                    }
+                    let body = if !self.rows.is_empty() {
+                        self.diff_list(entity.clone(), view, theme, colors)
+                    } else if view.diff.binary {
+                        crate::ui::message("Binary file", colors.muted_foreground, &colors.design)
+                            .into_any_element()
+                    } else if missing {
+                        crate::ui::message(
+                            "The object is not downloaded",
+                            colors.muted_foreground,
+                            &colors.design,
+                        )
+                        .into_any_element()
+                    } else {
+                        crate::ui::message(
+                            "No textual changes",
+                            colors.muted_foreground,
+                            &colors.design,
+                        )
+                        .into_any_element()
+                    };
+                    div()
                         .flex()
                         .flex_col()
                         .flex_1()
                         .min_h_0()
-                        .child(crate::ui::banner(
-                            crate::ui::BannerKind::Warning,
-                            notice,
-                            &colors.design,
-                        ))
-                        .child(list)
-                        .into_any_element(),
-                    None => list,
+                        .child(card)
+                        .child(body)
+                        .into_any_element()
+                }
+                (None, Some(view)) if view.diff.binary => {
+                    crate::ui::message("Binary file", colors.muted_foreground, &colors.design)
+                        .into_any_element()
+                }
+                (None, Some(_)) if self.rows.is_empty() => crate::ui::message(
+                    "No textual changes",
+                    colors.muted_foreground,
+                    &colors.design,
+                )
+                .into_any_element(),
+                (None, Some(view)) => {
+                    let list = self.diff_list(entity, view, theme, colors);
+                    match self.context.notice() {
+                        Some(notice) => div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_h_0()
+                            .child(crate::ui::banner(
+                                crate::ui::BannerKind::Warning,
+                                notice,
+                                &colors.design,
+                            ))
+                            .child(list)
+                            .into_any_element(),
+                        None => list,
+                    }
                 }
             }
         };

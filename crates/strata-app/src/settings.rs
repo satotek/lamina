@@ -78,6 +78,48 @@ pub enum DiffLayout {
     Split,
 }
 
+/// How the image diff view lays its two sides out.
+///
+/// The mode is a preference rather than per-file state: a user who compares
+/// pictures wants the same arrangement for the next one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ImageDiffMode {
+    /// Old beside new.
+    #[default]
+    SideBySide,
+    /// The two pictures on top of each other, split by a draggable divider.
+    Swipe,
+    /// The new picture over the old one, at an adjustable opacity.
+    OnionSkin,
+}
+
+impl ImageDiffMode {
+    /// The order the mode buttons appear in.
+    pub const ALL: [ImageDiffMode; 3] = [
+        ImageDiffMode::SideBySide,
+        ImageDiffMode::Swipe,
+        ImageDiffMode::OnionSkin,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ImageDiffMode::SideBySide => "Side by side",
+            ImageDiffMode::Swipe => "Swipe",
+            ImageDiffMode::OnionSkin => "Onion skin",
+        }
+    }
+
+    /// The stable id used in element ids and the saved file.
+    pub fn id(self) -> &'static str {
+        match self {
+            ImageDiffMode::SideBySide => "side-by-side",
+            ImageDiffMode::Swipe => "swipe",
+            ImageDiffMode::OnionSkin => "onion-skin",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DiffSettings {
@@ -88,6 +130,8 @@ pub struct DiffSettings {
     pub wrap_lines: bool,
     pub syntax_highlighting: bool,
     pub show_whitespace: bool,
+    /// The last image diff mode the user picked.
+    pub image_mode: ImageDiffMode,
 }
 
 impl Default for DiffSettings {
@@ -99,6 +143,7 @@ impl Default for DiffSettings {
             wrap_lines: false,
             syntax_highlighting: true,
             show_whitespace: false,
+            image_mode: ImageDiffMode::SideBySide,
         }
     }
 }
@@ -509,9 +554,30 @@ mod tests {
         let mut settings = Settings::default();
         settings.appearance.theme = ThemeMode::Dark;
         settings.diff.layout = DiffLayout::Split;
+        settings.diff.image_mode = ImageDiffMode::OnionSkin;
         settings.behaviour.git_executable = Some(PathBuf::from("/opt/git/bin/git"));
         settings.save(&path).unwrap();
         assert_eq!(Settings::load(&path), settings);
+    }
+
+    #[test]
+    fn the_last_image_mode_is_remembered() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut settings = Settings::default();
+        settings.diff.image_mode = ImageDiffMode::Swipe;
+        settings.save(&path).unwrap();
+        assert_eq!(
+            Settings::load(&path).diff.image_mode,
+            ImageDiffMode::Swipe,
+            "the image view opens the way it was left"
+        );
+        std::fs::write(&path, r#"{"diff":{"layout":"split"}}"#).unwrap();
+        assert_eq!(
+            Settings::load(&path).diff.image_mode,
+            ImageDiffMode::SideBySide,
+            "a file without the key takes the default"
+        );
     }
 
     #[test]

@@ -210,25 +210,35 @@ impl RepoView {
                     .text_color(design.muted)
                     .child(right),
             )
-            .child(if self.fake.is_none() && self.diff.view().is_some() {
-                let active = self.diff_context.is_whole_file();
-                let entity = self.entity();
-                ui::button("toggle-whole-file", "Whole file")
-                    .size(ButtonSize::Tiny)
-                    .ghost()
-                    .selected(active)
-                    .tooltip(if active {
-                        "Show only the changes"
-                    } else {
-                        "Show every line of the file"
+            .child(
+                if self.fake.is_none() && self.diff.view().is_some_and(|view| !view.diff.binary) {
+                    let active = self.diff_context.is_whole_file();
+                    let entity = self.entity();
+                    ui::button("toggle-whole-file", "Whole file")
+                        .size(ButtonSize::Tiny)
+                        .ghost()
+                        .selected(active)
+                        .tooltip(if active {
+                            "Show only the changes"
+                        } else {
+                            "Show every line of the file"
+                        })
+                        .on_click(move |_event, _window, cx| {
+                            entity.update(cx, |this, cx| this.toggle_whole_file(cx));
+                        })
+                        .into_any_element()
+                } else {
+                    div().into_any_element()
+                },
+            )
+            .child(
+                self.diff
+                    .view()
+                    .and_then(|view| {
+                        crate::image_diff::svg_toggle(&self.image_diff, view, self.entity())
                     })
-                    .on_click(move |_event, _window, cx| {
-                        entity.update(cx, |this, cx| this.toggle_whole_file(cx));
-                    })
-                    .into_any_element()
-            } else {
-                div().into_any_element()
-            })
+                    .unwrap_or_else(|| div().into_any_element()),
+            )
             .child({
                 let maximized = self.details_maximized(cx);
                 let entity = self.entity();
@@ -274,6 +284,11 @@ impl RepoView {
         let Some(view) = self.diff.view().cloned() else {
             return message("computing diff…", design.muted, design);
         };
+        if let Some(image) =
+            crate::image_diff::body(&self.image_diff, &view, design, self.entity(), cx)
+        {
+            return image;
+        }
         if let Some(summary) = view.lfs.clone() {
             return self.lfs_diff(summary, view, design, cx);
         }

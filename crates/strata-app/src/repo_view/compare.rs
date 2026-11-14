@@ -947,7 +947,16 @@ impl RepoView {
                             .into_any_element()
                     } else {
                         div().into_any_element()
-                    }),
+                    })
+                    .child(
+                        compare
+                            .view
+                            .as_ref()
+                            .and_then(|view| {
+                                crate::image_diff::svg_toggle(&self.image_diff, view, self.entity())
+                            })
+                            .unwrap_or_else(|| div().into_any_element()),
+                    ),
             );
 
         let body = if let Some(error) = &compare.diff_error {
@@ -955,7 +964,11 @@ impl RepoView {
         } else if compare.selected.is_none() {
             ui::message("Select a file", design.muted, design).into_any_element()
         } else if let Some(view) = &compare.view {
-            if view.diff.binary {
+            if let Some(image) =
+                crate::image_diff::body(&self.image_diff, view, design, self.entity(), cx)
+            {
+                image
+            } else if view.diff.binary {
                 ui::message("Binary file", design.muted, design).into_any_element()
             } else if compare.diff_rows.is_empty() {
                 ui::message("No textual changes", design.muted, design).into_any_element()

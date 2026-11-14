@@ -9,6 +9,7 @@ pub mod error;
 pub mod git_cli;
 pub mod graph;
 pub mod highlight;
+pub mod image;
 pub mod lfs;
 pub mod merge;
 pub mod patch;

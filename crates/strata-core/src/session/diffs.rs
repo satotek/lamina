@@ -5,8 +5,9 @@ use std::sync::mpsc::Receiver;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::Result;
-use crate::diff::{DiffOptions, diff_text, gaps, line_count};
+use crate::diff::{DiffOptions, FileDiff, diff_text, gaps, line_count};
 use crate::highlight::{Highlighter, language_for_path};
+use crate::image::{self, ImageKind};
 use crate::lfs::{self, LfsDiff, LfsDiffSummary};
 use crate::repo::Repo;
 use crate::session::publish::Shared;
@@ -61,6 +62,38 @@ pub(crate) fn run(shared: Arc<Shared>, jobs: Arc<Mutex<Receiver<DiffJob>>>) {
 
 fn compute(shared: &Shared, job: &DiffJob, highlighter: &mut Highlighter) -> Result<()> {
     let (old, new) = read_sides(&shared.repo, &job.request)?;
+    let kind = image::kind_for_path(path_of(&job.request));
+
+    // A bitmap has no lines to compare, and running the text diff over it
+    // would only decide it is binary; both pictures are what the pane shows.
+    if kind == Some(ImageKind::Raster) {
+        let resolved = image::resolve(
+            old.as_deref(),
+            new.as_deref(),
+            ImageKind::Raster,
+            shared.repo.common_dir(),
+            image::MAX_IMAGE_BYTES,
+        );
+        let view = Arc::new(DiffView {
+            request: job.request.clone(),
+            diff: FileDiff {
+                hunks: Vec::new(),
+                binary: true,
+            },
+            old_highlights: Arc::new(Vec::new()),
+            new_highlights: Arc::new(Vec::new()),
+            lfs: resolved.lfs,
+            old_text: Arc::from(""),
+            new_text: Arc::from(""),
+            gaps: Arc::from(Vec::new()),
+            image: Some(resolved.diff),
+        });
+        emit(shared, job.ticket, view);
+        return Ok(());
+    }
+
+    let old_present = old.is_some();
+    let new_present = new.is_some();
     let (old_bytes, new_bytes, lfs) = diff_inputs(&shared.repo, old, new);
     // The texts are decoded once and kept: the view slices them to reveal the
     // context the diff leaves out, and highlighting reads the same strings.
@@ -71,6 +104,18 @@ fn compute(shared: &Shared, job: &DiffJob, highlighter: &mut Highlighter) -> Res
     let diff = diff_text(old_text.as_bytes(), new_text.as_bytes(), &job.options);
     let binary = diff.binary;
     let gaps = Arc::from(gaps(&diff, line_count(&old_text), line_count(&new_text)));
+    // An SVG is text, so it keeps the diff above and offers the rendering
+    // beside it; it reads the bytes the diff already resolved.
+    let image = kind.map(|kind| {
+        image::from_text_inputs(
+            kind,
+            old_present,
+            new_present,
+            &old_bytes,
+            &new_bytes,
+            image::MAX_IMAGE_BYTES,
+        )
+    });
     let view = Arc::new(DiffView {
         request: job.request.clone(),
         diff,
@@ -80,6 +125,7 @@ fn compute(shared: &Shared, job: &DiffJob, highlighter: &mut Highlighter) -> Res
         old_text: Arc::clone(&old_text),
         new_text: Arc::clone(&new_text),
         gaps,
+        image,
     });
     if !emit(shared, job.ticket, Arc::clone(&view)) || binary {
         return Ok(());
@@ -101,6 +147,7 @@ fn compute(shared: &Shared, job: &DiffJob, highlighter: &mut Highlighter) -> Res
         new_text,
         gaps: Arc::clone(&view.gaps),
         lfs: view.lfs.clone(),
+        image: view.image.clone(),
     });
     emit(shared, job.ticket, highlighted);
     Ok(())

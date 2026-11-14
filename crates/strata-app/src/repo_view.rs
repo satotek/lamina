@@ -62,6 +62,7 @@ use crate::debug_launch::{self, DebugDialog, DebugLaunch, SnapshotRevMatch, Tree
 use crate::diff_view::{self, DiffContext, Row as DiffRow};
 use crate::fake::{self, FakeRepo};
 use crate::file_history::FileHistory;
+use crate::image_diff;
 use crate::metrics::FrameMetrics;
 use crate::remote::Remote;
 use crate::search::SearchState;
@@ -457,6 +458,8 @@ pub struct RepoView {
     /// Which hidden lines of the diff on screen are revealed.
     diff_context: DiffContext,
     diff_error: Option<String>,
+    /// The mode, zoom and swipe position of the image diff on screen.
+    pub(crate) image_diff: image_diff::State,
     /// Pre-flattened synthetic diffs so `--fake` does not rebuild one per frame.
     fake_diffs: Rc<Vec<Rc<Vec<DiffRow>>>>,
 
@@ -623,6 +626,7 @@ impl RepoView {
             diff_rows: Rc::new(Vec::new()),
             diff_context: DiffContext::default(),
             diff_error: None,
+            image_diff: image_diff::State::new(),
             fake_diffs: Rc::new(Vec::new()),
             last_command: None,
             status_error: None,
@@ -2527,6 +2531,7 @@ mod tests {
             old_text: Arc::from(""),
             new_text: Arc::from(""),
             gaps: Arc::from(Vec::new()),
+            image: None,
         })
     }
 

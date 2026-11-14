@@ -31,6 +31,7 @@ mod file_history;
 mod git_config_view;
 mod github;
 mod graph_canvas;
+mod image_diff;
 mod keymap;
 mod merge_editor;
 mod metrics;

@@ -172,11 +172,7 @@ pub fn resolve_diff(
     // id: it is checked-out content, not something LFS named.
     let old_side = pointer_side(old_pointer.as_ref(), common_dir).or_else(|| old.map(real_side));
     let new_side = pointer_side(new_pointer.as_ref(), common_dir).or_else(|| new.map(real_side));
-    let summary = LfsDiffSummary {
-        text: describe(&old_side, &new_side),
-        old: old_side,
-        new: new_side,
-    };
+    let summary = summarize(old_side, new_side);
 
     let old_real = match &old_pointer {
         Some(pointer) => read_object(common_dir, pointer, max_bytes).ok().flatten(),
@@ -199,6 +195,19 @@ fn pointer_side(pointer: Option<&LfsPointer>, common_dir: &Path) -> Option<LfsDi
         size: pointer.size,
         present: pointer.present(common_dir),
     })
+}
+
+/// Both sides' metadata plus the one-line summary a card shows.
+///
+/// The image diff resolves each side on its own (an added image has no old
+/// side at all), so it builds the summary from the same pieces the text diff
+/// uses instead of going through [`resolve_diff`].
+pub fn summarize(old: Option<LfsDiffSide>, new: Option<LfsDiffSide>) -> LfsDiffSummary {
+    LfsDiffSummary {
+        text: describe(&old, &new),
+        old,
+        new,
+    }
 }
 
 fn real_side(bytes: &[u8]) -> LfsDiffSide {

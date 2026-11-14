@@ -575,6 +575,10 @@ pub struct DiffView {
     /// precede; the last entry follows the last hunk. Empty gaps sit where two
     /// hunks or a hunk and a file edge meet directly.
     pub gaps: Arc<[crate::diff::Gap]>,
+    /// Both sides of a picture, for an image path or an SVG. A raster image
+    /// has no text diff, so `diff` then holds no hunks; an SVG keeps its text
+    /// diff and carries the rendering beside it.
+    pub image: Option<crate::image::ImageDiff>,
 }
 
 #[derive(Debug, Clone)]

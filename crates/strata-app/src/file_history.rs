@@ -864,7 +864,16 @@ impl RepoView {
                             .into_any_element()
                     } else {
                         div().into_any_element()
-                    }),
+                    })
+                    .child(
+                        history
+                            .view
+                            .as_ref()
+                            .and_then(|view| {
+                                crate::image_diff::svg_toggle(&self.image_diff, view, self.entity())
+                            })
+                            .unwrap_or_else(|| div().into_any_element()),
+                    ),
             );
 
         let body = if let Some(error) = &history.diff_error {
@@ -872,7 +881,11 @@ impl RepoView {
         } else if history.selected.is_none() {
             message("Select a commit", colors.muted_foreground, colors)
         } else if let Some(view) = &history.view {
-            if view.diff.binary {
+            if let Some(image) =
+                crate::image_diff::body(&self.image_diff, view, &colors.design, self.entity(), cx)
+            {
+                image
+            } else if view.diff.binary {
                 message("Binary file", colors.muted_foreground, colors)
             } else if history.diff_rows.is_empty() {
                 message("No textual changes", colors.muted_foreground, colors)

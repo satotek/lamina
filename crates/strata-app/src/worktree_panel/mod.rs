@@ -421,6 +421,8 @@ pub struct WorktreePanel {
     pub(crate) conflicts: Conflicts,
     diff: DiffSlot,
     rows: Rc<Vec<PanelRow>>,
+    /// The mode, zoom and swipe position of the worktree's image diff.
+    image_diff: crate::image_diff::State,
     /// Which hidden lines of the selected file's diff are revealed. Display
     /// only: the staging selection stays on the real hunks.
     context: DiffContext,
@@ -1860,7 +1862,10 @@ impl WorktreePanel {
             ))
             .child(match selected_conflict {
                 Some(path) => self.conflicts.pane(&path, entity.clone(), snapshot, cx),
-                None => self.diff_pane(entity.clone(), snapshot, cx.theme(), &colors),
+                None => {
+                    let theme = cx.theme().clone();
+                    self.diff_pane(entity.clone(), snapshot, &theme, &colors, cx)
+                }
             });
         if let Some(focus) = &self.focus {
             body = body.track_focus(focus);

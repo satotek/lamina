@@ -2160,6 +2160,7 @@ mod tests {
             new_text: Arc::from(new),
             gaps: Arc::from(gaps),
             lfs: None,
+            image: None,
         }
     }
 
@@ -2293,6 +2294,7 @@ mod tests {
                 new_start: 1,
                 len: 1,
             }]),
+            image: None,
         };
         assert!(!within_expand_cap(&view.old_text, &view.new_text));
 
