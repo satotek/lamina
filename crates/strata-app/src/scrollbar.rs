@@ -6,8 +6,10 @@
 //! so the sizing a call site chains afterwards (`flex_1`, a fixed width or
 //! height, borders) applies to the wrapper and the list fills it.
 
+use std::rc::Rc;
+
 use gpui::{Div, ParentElement, Styled, UniformList, UniformListScrollHandle, div};
-use gpui_component::scroll::ScrollableElement as _;
+use gpui_component::scroll::Scrollbar;
 
 pub trait WithScrollbar {
     fn with_scrollbar(self, handle: &UniformListScrollHandle) -> Div;
@@ -22,6 +24,23 @@ impl WithScrollbar for UniformList {
             .min_h_0()
             .min_w_0()
             .child(self.size_full())
-            .vertical_scrollbar(handle)
+            .child(
+                div().absolute().inset_0().child(
+                    Scrollbar::vertical(handle)
+                        .id(scrollbar_id(handle))
+                        .viewport_from_layout(),
+                ),
+            )
     }
+}
+
+/// An element id that is unique to the list the handle scrolls.
+///
+/// The scrollbar keeps its drag and hover state under its element id, and by
+/// default that id is the source location that built it. Every list is built
+/// on the line above, and the lists' ancestors rarely carry ids, so they all
+/// shared one state: grabbing one thumb moved, or lit up, another list's.
+/// The handle lives as long as its list, so its address tells lists apart.
+fn scrollbar_id(handle: &UniformListScrollHandle) -> (&'static str, usize) {
+    ("list-scrollbar", Rc::as_ptr(&handle.0) as usize)
 }
