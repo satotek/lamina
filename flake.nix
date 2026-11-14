@@ -81,6 +81,10 @@
             packages = with pkgs; [
               cargo
               clippy
+              # LD_LIBRARY_PATH below points at Nix's glibc-linked libraries,
+              # so the host's ssh-keygen fails to load. Signing tests and
+              # `git log %G?` on SSH-signed commits need a Nix one.
+              openssh
               pkg-config
               rustc
               rustfmt
