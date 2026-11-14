@@ -781,7 +781,7 @@ impl RepoView {
             .workdir()
             .unwrap_or_else(|| repo.git_dir())
             .to_path_buf();
-        crate::git_config_view::set_repository(path, cx);
+        crate::git_config_view::set_repository(path, session.git().log_handle(), cx);
     }
 
     pub(crate) fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {

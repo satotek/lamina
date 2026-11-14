@@ -42,9 +42,9 @@ pub use commit_graph::{
 };
 pub use compare::{CompareFile, CompareMode, Comparison};
 pub use config::{
-    ConfigEntry, ConfigIdentity, ConfigInclude, ConfigLayer, ConfigOrigin, ConfigSources,
-    ConfigValue, GitConfig, IncludeConditionKind, ValueRule, WELL_KNOWN_KEYS, WellKnownKey,
-    well_known_key,
+    ConfigEntry, ConfigFilePaths, ConfigIdentity, ConfigInclude, ConfigLayer, ConfigOrigin,
+    ConfigSources, ConfigValue, GitConfig, IncludeConditionKind, ValueRule, WELL_KNOWN_KEYS,
+    WellKnownKey, validate_key_name, validate_value, well_known_key,
 };
 pub use content_search::{
     ContentSearchEntries, ContentSearchEntry, ContentSearchMode, ContentSearchProgress,

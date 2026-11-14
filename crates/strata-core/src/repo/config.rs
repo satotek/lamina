@@ -1,4 +1,5 @@
-//! Read-only view of the git configuration the open repository sees.
+//! The git configuration the open repository sees, and the rules a change to
+//! it has to satisfy.
 //!
 //! Values are read with `gix-config`, which parses the same files git does.
 //! The parser keeps source paths and line numbers, so a value can be traced to
@@ -7,7 +8,9 @@
 //! *not* match as well, and only this module knows which condition selected
 //! which file.
 //!
-//! Nothing in this module writes a configuration file.
+//! Nothing in this module writes a configuration file. Writes live in
+//! `git_cli::config`; they call [`validate_key_name`] and [`validate_value`]
+//! here so the viewer and the write path agree on what is allowed.
 
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -87,6 +90,10 @@ pub struct ConfigEntry {
     pub values: Vec<ConfigValue>,
     /// Earlier values of a single-valued key, in file order.
     pub overridden: Vec<ConfigValue>,
+    /// Whether git keeps every value of this key instead of letting the last
+    /// one win. The editor uses it to offer "Add value" even when only one
+    /// value is set today.
+    pub multivalued: bool,
     /// The curated entry this key matches, if any.
     pub well_known: Option<&'static WellKnownKey>,
     /// Set when an effective value is not allowed by the curated entry.
@@ -141,6 +148,23 @@ pub struct ConfigInclude {
     pub error: Option<String>,
 }
 
+/// The configuration files resolved for this repository.
+///
+/// [`Self::worktree`] is only present when `extensions.worktreeConfig` is on;
+/// without it git ignores `config.worktree` and a write there would silently
+/// do nothing. [`Self::system`] is read-only for this process.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConfigFilePaths {
+    pub local: PathBuf,
+    pub worktree: Option<PathBuf>,
+    /// The user's global file. `None` when the environment overrode the
+    /// sources, as in tests.
+    pub global: Option<PathBuf>,
+    /// The system file. Shown by the viewer, never written: it needs
+    /// administrator rights.
+    pub system: Option<PathBuf>,
+}
+
 /// The whole configuration the repository sees.
 #[derive(Debug, Clone, Default)]
 pub struct GitConfig {
@@ -148,6 +172,9 @@ pub struct GitConfig {
     pub entries: Vec<ConfigEntry>,
     pub includes: Vec<ConfigInclude>,
     pub identity: ConfigIdentity,
+    /// Where the values came from. The editor may write local, worktree,
+    /// global and include files; the system file is listed but read-only.
+    pub files: ConfigFilePaths,
 }
 
 impl GitConfig {
@@ -200,15 +227,15 @@ impl GitConfig {
         }
 
         let worktree = git_dir.join("config.worktree");
-        if worktree.is_file()
-            && seen.insert(worktree.clone())
-            && reader
-                .assignments
-                .iter()
-                .rev()
-                .find(|assignment| assignment.key == "extensions.worktreeconfig")
-                .is_some_and(|assignment| is_git_true(&assignment.value))
-        {
+        // Only the repository's own configuration can turn the extension on;
+        // git ignores it anywhere else.
+        let worktree_enabled = reader
+            .assignments
+            .iter()
+            .rev()
+            .find(|assignment| assignment.key == "extensions.worktreeconfig")
+            .is_some_and(|assignment| is_git_true(&assignment.value));
+        if worktree_enabled && worktree.is_file() && seen.insert(worktree.clone()) {
             reader.load_file(&worktree, ConfigLayer::Worktree, None, 0)?;
         }
 
@@ -221,12 +248,31 @@ impl GitConfig {
             });
         }
 
-        Ok(finish(reader.assignments, reader.includes))
+        let files = ConfigFilePaths {
+            local: common_dir.join("config"),
+            worktree: worktree_enabled.then_some(worktree),
+            global: sources.global.clone(),
+            system: sources.system.clone(),
+        };
+
+        Ok(finish(reader.assignments, reader.includes, files))
     }
 
     /// The effective value of `key`, if the repository sets it.
     pub fn entry(&self, key: &str) -> Option<&ConfigEntry> {
         self.entries.iter().find(|entry| entry.key == key)
+    }
+
+    /// The identity value a repository-local override would clarify, if any.
+    ///
+    /// An email inherited through an `includeIf gitdir:…` block belongs to the
+    /// directory pattern, not necessarily to this repository. The viewer
+    /// offers to set it locally instead of leaving the user to guess which file
+    /// wins. A plain global email is not reported: that is the normal setup and
+    /// a local copy of it would only duplicate the value.
+    pub fn identity_needing_local_override(&self) -> Option<&ConfigValue> {
+        let email = self.identity.email.as_ref()?;
+        email.origin.include.is_some().then_some(email)
     }
 }
 
@@ -961,7 +1007,70 @@ fn canonical_key(key: &str) -> String {
     canonical
 }
 
-fn finish(assignments: Vec<Assignment>, includes: Vec<ConfigInclude>) -> GitConfig {
+/// Validate a configuration key written as `section[.subsection].name`.
+///
+/// The section and the name are letters, digits and hyphens, starting with a
+/// letter. A subsection can hold anything printable, including dots, because
+/// git writes it quoted; a key with an empty part (`bad..key`) is refused
+/// because git would quietly turn it into an empty subsection.
+pub fn validate_key_name(key: &str) -> Result<()> {
+    if key.is_empty() {
+        return Err(Error::other("the key name is empty"));
+    }
+    let parts: Vec<&str> = key.split('.').collect();
+    if parts.len() < 2 {
+        return Err(Error::other(format!(
+            "`{key}` needs a section and a name, like `user.email`"
+        )));
+    }
+    if !is_key_component(parts[0]) || !is_key_component(parts[parts.len() - 1]) {
+        return Err(Error::other(format!(
+            "`{key}` has a section or name that is not letters, digits and `-`"
+        )));
+    }
+    for subsection in &parts[1..parts.len() - 1] {
+        if subsection.is_empty() {
+            return Err(Error::other(format!("`{key}` has an empty subsection")));
+        }
+        if subsection.chars().any(char::is_control) {
+            return Err(Error::other(format!(
+                "`{key}` contains a control character"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn is_key_component(part: &str) -> bool {
+    let mut chars = part.chars();
+    matches!(chars.next(), Some(first) if first.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// Check a value against the curated rule for `key`, when the key has one.
+///
+/// Uncurated keys accept any text; git itself decides whether the value makes
+/// sense. A curated key with a misspelt value is refused here, before the
+/// preview can show a write that git would accept and then misread.
+pub fn validate_value(key: &str, value: &str) -> Result<()> {
+    let Some(well_known) = well_known_key(key) else {
+        return Ok(());
+    };
+    if well_known.rule.accepts(value) {
+        return Ok(());
+    }
+    Err(Error::other(format!(
+        "`{value}` is not a valid value for {} (expected {})",
+        well_known.key,
+        well_known.rule.allowed()
+    )))
+}
+
+fn finish(
+    assignments: Vec<Assignment>,
+    includes: Vec<ConfigInclude>,
+    files: ConfigFilePaths,
+) -> GitConfig {
     let mut grouped: BTreeMap<String, Vec<Assignment>> = BTreeMap::new();
     for assignment in assignments {
         grouped
@@ -1009,6 +1118,7 @@ fn finish(assignments: Vec<Assignment>, includes: Vec<ConfigInclude>) -> GitConf
             key,
             values,
             overridden,
+            multivalued,
             well_known,
             warning,
         });
@@ -1031,6 +1141,7 @@ fn finish(assignments: Vec<Assignment>, includes: Vec<ConfigInclude>) -> GitConf
         entries,
         includes,
         identity,
+        files,
     }
 }
 
@@ -1341,6 +1452,31 @@ mod tests {
     }
 
     #[test]
+    fn the_entry_says_whether_the_key_keeps_every_value() {
+        let repo = TestRepo::new();
+        repo.git(&[
+            "config",
+            "remote.origin.fetch",
+            "+refs/heads/*:refs/remotes/*",
+        ]);
+        repo.git(&["config", "user.name", "A Name"]);
+
+        let config = GitConfig::read(&repo.open(), &ConfigSources::default()).expect("read config");
+
+        assert!(
+            config
+                .entry("remote.origin.fetch")
+                .expect("fetch")
+                .multivalued,
+            "a refspec key keeps every value even with one value set"
+        );
+        assert!(
+            !config.entry("user.name").expect("user.name").multivalued,
+            "user.name lets the last value win"
+        );
+    }
+
+    #[test]
     fn an_invalid_well_known_value_is_a_warning() {
         let repo = TestRepo::new();
         repo.git(&["config", "pull.rebase", "ture"]);
@@ -1383,6 +1519,97 @@ mod tests {
         assert_eq!(name.origin.line, Some(2));
         assert_eq!(email.value, "local@example.invalid");
         assert_eq!(email.layer, ConfigLayer::Local);
+    }
+
+    #[test]
+    fn key_names_are_checked_as_section_subsection_name() {
+        for valid in [
+            "user.email",
+            "commit.gpgSign",
+            "remote.origin.fetch",
+            "url.https://example.invalid/.insteadOf",
+            "includeIf.gitdir:/tmp/repo/.path",
+        ] {
+            validate_key_name(valid).unwrap_or_else(|error| panic!("{valid}: {error}"));
+        }
+        for invalid in [
+            "",
+            "user",
+            "user.",
+            ".name",
+            "user..name",
+            "-user.name",
+            "2user.name",
+            "bad key.name",
+            "user.na me",
+            "user.name\nother",
+        ] {
+            assert!(
+                validate_key_name(invalid).is_err(),
+                "{invalid:?} is invalid"
+            );
+        }
+    }
+
+    #[test]
+    fn curated_values_are_checked_but_other_keys_take_any_text() {
+        validate_value("pull.rebase", "merges").expect("curated enum value");
+        validate_value("commit.gpgSign", "on").expect("curated boolean value");
+        validate_value("user.name", "anything # at all").expect("text keys accept any text");
+        validate_value("custom.key", "not curated").expect("unknown keys accept any text");
+
+        let error = validate_value("pull.rebase", "ture").expect_err("misspelt value");
+        let text = error.to_string();
+        assert!(text.contains("pull.rebase"), "{text}");
+        assert!(text.contains("ture"), "{text}");
+        assert!(text.contains("merges"), "{text}");
+    }
+
+    #[test]
+    fn the_file_paths_name_the_local_and_global_files_and_worktree_only_when_enabled() {
+        let repo = TestRepo::new();
+        let root = tempfile::TempDir::new().expect("config directory");
+        let global = root.path().join("global.gitconfig");
+        write(&global, "");
+
+        let config = GitConfig::read(&repo.open(), &sources(&global)).expect("read config");
+        assert_eq!(config.files.local, repo.path().join(".git/config"));
+        assert_eq!(config.files.global.as_deref(), Some(global.as_path()));
+        assert_eq!(config.files.worktree, None);
+
+        repo.git(&["config", "extensions.worktreeConfig", "true"]);
+        let config = GitConfig::read(&repo.open(), &sources(&global)).expect("read config");
+        assert_eq!(
+            config.files.worktree.as_deref(),
+            Some(repo.path().join(".git/config.worktree").as_path())
+        );
+    }
+
+    #[test]
+    fn an_identity_from_an_include_offers_a_local_override() {
+        let repo = TestRepo::new();
+        let root = tempfile::TempDir::new().expect("config directory");
+        let global = root.path().join("global.gitconfig");
+        let work = root.path().join("work.gitconfig");
+        write(&work, "[user]\n\temail = work@example.invalid\n");
+        write(
+            &global,
+            &format!(
+                "[includeIf \"gitdir:{}/\"]\n\tpath = {}\n",
+                repo.path().join(".git").display(),
+                work.display()
+            ),
+        );
+
+        let config = GitConfig::read(&repo.open(), &sources(&global)).expect("read config");
+        let identity = config
+            .identity_needing_local_override()
+            .expect("the include identity is worth a local override");
+        assert_eq!(identity.value, "work@example.invalid");
+
+        repo.git(&["config", "user.email", "local@example.invalid"]);
+        let config = GitConfig::read(&repo.open(), &sources(&global)).expect("read config");
+        assert!(config.identity_needing_local_override().is_none());
     }
 
     #[test]
