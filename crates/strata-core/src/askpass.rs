@@ -213,6 +213,8 @@ impl Listener {
         {
             // Windows has no portable Unix-socket path here, so the channel is
             // loopback TCP; the token is what keeps other local processes out.
+            // An ephemeral port is unique already, so the name is not needed.
+            let _ = unique;
             let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
             let address = listener.local_addr()?;
             Ok((Self::Tcp(listener), address.to_string().into(), None))
