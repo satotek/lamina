@@ -638,6 +638,7 @@ fn a_cherry_pick_sequence_skips_an_empty_pick_before_a_conflict() {
         harness.run(Operation::ResolveWithContent {
             path: "conflict.txt".into(),
             content: b"resolved\n".to_vec(),
+            expected: None,
         }),
         None
     );
@@ -734,6 +735,7 @@ fn cherry_pick_conflict_is_not_an_error_and_continues_after_resolving() {
         harness.run(Operation::ResolveWithContent {
             path: "conflict.txt".into(),
             content: b"resolved\n".to_vec(),
+            expected: None,
         }),
         None
     );
@@ -1134,6 +1136,7 @@ fn rebase_conflict_continues_without_an_editor() {
         harness.run(Operation::ResolveWithContent {
             path: "conflict.txt".into(),
             content: b"resolved\n".to_vec(),
+            expected: None,
         }),
         None
     );
@@ -1227,6 +1230,7 @@ fn resolve_with_content_refuses_paths_outside_the_worktree() {
             .run(Operation::ResolveWithContent {
                 path: path.clone(),
                 content: b"x\n".to_vec(),
+                expected: None,
             })
             .unwrap_or_else(|| panic!("{path} must be rejected"));
         assert!(

@@ -6,6 +6,7 @@ use gix::bstr::{BStr, ByteSlice};
 use gix::index::entry::Stage;
 
 use super::Repo;
+use crate::merge::ConflictStyle;
 use crate::{ConflictEntry, ConflictKind, ConflictSides, Error, RepoState, Result};
 
 /// Index stage bits, for combining the stages present on one path.
@@ -60,6 +61,19 @@ impl Repo {
                 kind: conflict_kind(stages),
             })
             .collect())
+    }
+
+    /// `merge.conflictStyle`, which only decides how unresolved conflicts are
+    /// written for display.
+    pub fn conflict_style(&self) -> ConflictStyle {
+        let mut repo = self.local();
+        // The configuration may have changed since the repository was opened.
+        let _ = repo.reload();
+        let config = repo.config_snapshot();
+        config
+            .string("merge.conflictStyle")
+            .map(|value| ConflictStyle::parse(&String::from_utf8_lossy(value.as_ref())))
+            .unwrap_or_default()
     }
 
     /// Contents of the index stages of a conflicted `path`.

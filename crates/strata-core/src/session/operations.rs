@@ -331,7 +331,11 @@ fn execute(shared: &Arc<Shared>, id: OperationId, operation: &Operation) -> Resu
         Operation::MarkResolved(paths) => git.mark_resolved(paths),
         Operation::MergeContinue => git.merge_continue(),
         Operation::OpenMergetool { path } => git.mergetool(path),
-        Operation::ResolveWithContent { path, content } => git.resolve_with_content(path, content),
+        Operation::ResolveWithContent {
+            path,
+            content,
+            expected,
+        } => git.resolve_with_content(path, content, *expected),
         Operation::CherryPick { commit } => git.cherry_pick(*commit),
         Operation::CherryPickMany { commits } => {
             let mut progress = ProgressReporter::new(shared, id);

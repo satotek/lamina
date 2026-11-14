@@ -34,8 +34,12 @@ use strata_core::{ChangeKind, FileChange, RepoState, WorktreeStatus};
 use commit_box::{commit_enabled, previous_message, trim_message};
 use hunks::{panel_rows, picked_in_range, picked_selection};
 
-use crate::conflicts::{Conflicts, MarkFileResolved, UseOurs, UseTheirs};
+use crate::conflicts::{
+    Conflicts, MarkFileResolved, NextConflict, PreviousConflict, ResetConflict, TakeBase,
+    TakeBothOursFirst, TakeBothTheirsFirst, TakeOurs, TakeTheirs, UseOurs, UseTheirs,
+};
 use crate::diff_view::Row as DiffRow;
+use crate::merge_editor::Choice as MergeChoice;
 use crate::repo_view::RepoView;
 use crate::settings::Settings;
 use crate::style::Design;
@@ -1765,6 +1769,28 @@ impl WorktreePanel {
             .on_action(
                 cx.listener(|this, _: &MarkFileResolved, _, cx| this.mark_conflict_resolved(cx)),
             )
+            .on_action(cx.listener(|this, _: &NextConflict, _, cx| this.move_conflict(true, cx)))
+            .on_action(
+                cx.listener(|this, _: &PreviousConflict, _, cx| this.move_conflict(false, cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ResetConflict, window, cx| this.reset_conflict(window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &TakeOurs, window, cx| {
+                this.apply_conflict_choice(MergeChoice::Ours, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &TakeTheirs, window, cx| {
+                this.apply_conflict_choice(MergeChoice::Theirs, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &TakeBothOursFirst, window, cx| {
+                this.apply_conflict_choice(MergeChoice::OursThenTheirs, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &TakeBothTheirsFirst, window, cx| {
+                this.apply_conflict_choice(MergeChoice::TheirsThenOurs, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &TakeBase, window, cx| {
+                this.apply_conflict_choice(MergeChoice::Base, window, cx)
+            }))
             .child(self.lists(
                 entity.clone(),
                 snapshot,

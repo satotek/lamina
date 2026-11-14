@@ -29,6 +29,7 @@ use crate::diff::FileDiff;
 use crate::git_cli::{CommandRecord, Git, RebaseStep};
 use crate::graph::{GraphRow, GraphRows};
 use crate::highlight::LineHighlights;
+use crate::merge::ContentHash;
 use crate::patch::LineSelection;
 use crate::repo::{CommitGraphAdvice, Repo, SubmoduleInfo, WorktreeInfo};
 use crate::watch::RepoWatcher;
@@ -398,6 +399,10 @@ pub enum Operation {
     ResolveWithContent {
         path: String,
         content: Vec<u8>,
+        /// Fingerprint of the worktree file the editor loaded. The write is
+        /// refused when the file on disk no longer matches it; `None` skips
+        /// the check, for a path that had no worktree file when it was loaded.
+        expected: Option<ContentHash>,
     },
     /// `git cherry-pick <commit>` (`-m 1` for a merge). Conflicts stop it like a merge.
     CherryPick {

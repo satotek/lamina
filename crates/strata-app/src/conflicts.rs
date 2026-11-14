@@ -1,48 +1,79 @@
-//! Merge conflict resolution: the conflicts list and the per-file conflict view.
+//! Merge conflict resolution: the conflicts list and the per-file merge editor.
 //!
 //! The session is the only route to git. The three sides of a conflicted path
 //! come from `Repo::conflict_sides` (a gix read, run on the background
-//! executor) and every write is an [`Operation`]; nothing here spawns git.
+//! executor) and are merged into regions by [`strata_core::merge`]; every write
+//! is an [`Operation`] and nothing here spawns git.
 //!
-//! Per-hunk resolution is deliberately absent: it needs an operation that writes
-//! a merged file and stages it, which core does not have. Until it does, the
-//! whole-file operations are the only choices offered.
+//! The editor shows ours and theirs side by side over the editable result.
+//! Both side panes are one virtualised list whose rows carry a line of each
+//! side, so they cannot drift out of sync, and a file above
+//! [`MAX_EDITOR_BYTES`] keeps the whole-file choices and the external merge
+//! tool instead of building a text area that large.
 
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, Context, Entity, Hsla, InteractiveElement, IntoElement, KeyBinding,
-    ParentElement, SharedString, StatefulInteractiveElement, Styled, UniformListScrollHandle,
-    actions, div, px, uniform_list,
+    AnyElement, App, AppContext as _, Context, Entity, Hsla, InteractiveElement, IntoElement,
+    KeyBinding, ParentElement, ScrollStrategy, StatefulInteractiveElement, Styled, Subscription,
+    UniformListScrollHandle, Window, actions, div, px, relative, uniform_list,
 };
 use gpui_component::ActiveTheme as _;
 use gpui_component::Theme;
-use strata_core::diff::{DiffOptions, LineKind, diff_text};
+use gpui_component::input::{InputEvent, Textarea, TextareaState};
 use strata_core::highlight::{Highlighter, LineHighlights, language_for_path};
+use strata_core::merge::{ConflictStyle, ContentHash, MergeAnalysis, SegmentKind};
 use strata_core::session::{ConflictSide, Operation, OperationId, RepoSnapshot};
 use strata_core::{ChangeKind, ConflictEntry, ConflictKind, ConflictSides, RepoState};
 
 use crate::diff_view::{self, DiffColors, DiffStyle};
+use crate::merge_editor::{Choice as MergeChoice, MergeModel, MergeRow, Resolution};
 use crate::repo_view::RepoView;
 use crate::scrollbar::WithScrollbar as _;
 use crate::settings::Settings;
 use crate::style::{self, Design};
-use crate::worktree_panel::WORKTREE_PANEL_LIST;
+use crate::worktree_panel::{WORKTREE_PANEL, WORKTREE_PANEL_LIST};
 
-actions!(strata_conflicts, [UseOurs, UseTheirs, MarkFileResolved]);
+actions!(
+    strata_conflicts,
+    [
+        UseOurs,
+        UseTheirs,
+        MarkFileResolved,
+        NextConflict,
+        PreviousConflict,
+        ResetConflict,
+        TakeOurs,
+        TakeTheirs,
+        TakeBothOursFirst,
+        TakeBothTheirsFirst,
+        TakeBase,
+    ]
+);
 
 // `KeyBinding::new` parses without an OS, so a platform modifier is chosen at
-// compile time instead of using `secondary-`. The keys only do something while
-// a conflicted file is selected, so single letters are safe here; a focused
-// text field still takes the letter, which is why the panel's list context
-// excludes `Input`.
+// compile time instead of using `secondary-`. Bare letters only reach the
+// panel while no text field has focus; the alt bindings keep the merge editor
+// usable while the result pane is focused, which is where the user edits.
 pub fn bind(cx: &mut App) {
-    let scope = Some(WORKTREE_PANEL_LIST);
+    let letters = Some(WORKTREE_PANEL_LIST);
+    let panel = Some(WORKTREE_PANEL);
     cx.bind_keys([
-        KeyBinding::new("o", UseOurs, scope),
-        KeyBinding::new("t", UseTheirs, scope),
-        KeyBinding::new("m", MarkFileResolved, scope),
+        KeyBinding::new("o", UseOurs, letters),
+        KeyBinding::new("t", UseTheirs, letters),
+        KeyBinding::new("m", MarkFileResolved, letters),
+        KeyBinding::new("n", NextConflict, letters),
+        KeyBinding::new("p", PreviousConflict, letters),
+        KeyBinding::new("alt-n", NextConflict, panel),
+        KeyBinding::new("alt-p", PreviousConflict, panel),
+        KeyBinding::new("alt-1", TakeOurs, panel),
+        KeyBinding::new("alt-2", TakeTheirs, panel),
+        KeyBinding::new("alt-3", TakeBothOursFirst, panel),
+        KeyBinding::new("alt-4", TakeBothTheirsFirst, panel),
+        KeyBinding::new("alt-5", TakeBase, panel),
+        KeyBinding::new("alt-0", ResetConflict, panel),
     ]);
 }
 
@@ -50,9 +81,12 @@ pub fn bind(cx: &mut App) {
 const ROW_HEIGHT: f32 = 20.0;
 /// A conflicts list stops growing here and scrolls instead.
 const MAX_LIST_ROWS: usize = 8;
-/// Regions past this are not element-built; the whole file is available through
-/// the merge tool, and a conflict this fragmented is better resolved there.
-const MAX_REGIONS: usize = 200;
+/// Files larger than this keep the whole-file choices and the merge tool: a
+/// text area with millions of characters cannot stay responsive, and the
+/// colouring work would be paid on every load.
+const MAX_EDITOR_BYTES: usize = 1024 * 1024;
+/// A conflict this fragmented is better resolved in the merge tool.
+const MAX_EDITOR_CONFLICTS: usize = 200;
 /// Same probe length core's binary detector uses.
 const BINARY_PROBE: usize = 8000;
 /// Sides larger than this are not highlighted; the merge tool is the better
@@ -78,7 +112,7 @@ pub(crate) fn kind_label(kind: ConflictKind) -> &'static str {
 
 /// One whole-file choice the resolution offers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct Choice {
+pub(crate) struct FileChoice {
     pub label: &'static str,
     pub side: ConflictSide,
     /// The choice removes the path, so it is painted as a destructive action.
@@ -90,33 +124,33 @@ pub(crate) struct Choice {
 /// A side that deleted the path has no version to check out; core resolves that
 /// by removing the path from the index, which is exactly "delete file". So every
 /// kind except "both deleted" (which has no sides at all) offers two choices.
-pub(crate) fn choices(kind: ConflictKind) -> Vec<Choice> {
-    let ours = Choice {
+pub(crate) fn choices(kind: ConflictKind) -> Vec<FileChoice> {
+    let ours = FileChoice {
         label: "Use ours",
         side: ConflictSide::Ours,
         destructive: false,
     };
-    let theirs = Choice {
+    let theirs = FileChoice {
         label: "Use theirs",
         side: ConflictSide::Theirs,
         destructive: false,
     };
-    let keep_ours = Choice {
+    let keep_ours = FileChoice {
         label: "Keep file",
         side: ConflictSide::Ours,
         destructive: false,
     };
-    let keep_theirs = Choice {
+    let keep_theirs = FileChoice {
         label: "Keep file",
         side: ConflictSide::Theirs,
         destructive: false,
     };
-    let delete_theirs = Choice {
+    let delete_theirs = FileChoice {
         label: "Delete file",
         side: ConflictSide::Theirs,
         destructive: true,
     };
-    let delete_ours = Choice {
+    let delete_ours = FileChoice {
         label: "Delete file",
         side: ConflictSide::Ours,
         destructive: true,
@@ -130,6 +164,15 @@ pub(crate) fn choices(kind: ConflictKind) -> Vec<Choice> {
         ConflictKind::DeletedByUs | ConflictKind::AddedByThem => vec![keep_theirs, delete_ours],
         ConflictKind::BothDeleted => Vec::new(),
     }
+}
+
+/// Whether the merge editor can resolve this kind of conflict.
+///
+/// A delete/modify conflict resolves by removing or keeping the path, which the
+/// whole-file choices already do; writing an empty result there would create an
+/// empty file instead of staging the deletion.
+fn kind_has_editor(kind: ConflictKind) -> bool {
+    matches!(kind, ConflictKind::BothModified | ConflictKind::BothAdded)
 }
 
 /// The kind implied by which index stages exist, used when the snapshot entry
@@ -149,112 +192,6 @@ fn kind_from_presence(base: bool, ours: bool, theirs: bool) -> ConflictKind {
     }
 }
 
-/// One line of a conflict side: the text shown and the 1-based line number it
-/// has in the file the side comes from.
-///
-/// The number is what makes syntax highlighting possible: the span data covers
-/// the whole side file, so a region line looks its spans up by line number
-/// instead of guessing from the fragment's text.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RegionLine {
-    pub number: u32,
-    pub text: String,
-}
-
-/// One region of a text conflict: the base lines the sides disagree about and
-/// what each side puts there.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Region {
-    /// 1-based first base line; for an insertion this is the line it follows,
-    /// and 0 means "before the first line".
-    pub base_start: u32,
-    pub base: Vec<RegionLine>,
-    pub ours: Vec<RegionLine>,
-    pub theirs: Vec<RegionLine>,
-    pub ours_changed: bool,
-    pub theirs_changed: bool,
-}
-
-impl Region {
-    fn base_label(&self) -> String {
-        match self.base.len() {
-            0 if self.base_start == 0 => "before the first base line".to_owned(),
-            0 => format!("after base line {}", self.base_start),
-            1 => format!("base line {}", self.base_start),
-            count => format!(
-                "base lines {}–{}",
-                self.base_start,
-                self.base_start + count as u32 - 1
-            ),
-        }
-    }
-}
-
-/// A changed run of base lines and the text one side puts in its place.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct Change {
-    /// 0-based, end-exclusive base line range.
-    start: usize,
-    end: usize,
-    /// The side's replacement text, empty for a deletion, with each line's
-    /// number in the side's own file.
-    lines: Vec<(u32, String)>,
-}
-
-/// `None` when either side is binary, which has no line diff to show.
-fn side_changes(base: &[u8], side: Option<&[u8]>) -> Option<Vec<Change>> {
-    let diff = diff_text(
-        base,
-        side.unwrap_or_default(),
-        &DiffOptions {
-            context_lines: 0,
-            ..DiffOptions::default()
-        },
-    );
-    if diff.binary {
-        return None;
-    }
-    Some(
-        diff.hunks
-            .iter()
-            .map(|hunk| {
-                // A header of length 0 points at the insertion slot rather than
-                // at a line, which is how core defines `header_start`.
-                let start = if hunk.old_len == 0 {
-                    hunk.old_start as usize
-                } else {
-                    hunk.old_start as usize - 1
-                };
-                Change {
-                    start,
-                    end: start + hunk.old_len as usize,
-                    lines: hunk
-                        .lines
-                        .iter()
-                        .filter(|line| line.kind == LineKind::Added)
-                        // An added line's number in the side's file is its new
-                        // line number; that is what the spans are indexed by.
-                        .map(|line| (line.new_lineno.unwrap_or(0), line.content.clone()))
-                        .collect(),
-                }
-            })
-            .collect(),
-    )
-}
-
-/// Splits text into display lines; a trailing newline does not add an empty one.
-fn text_lines(bytes: &[u8]) -> Vec<String> {
-    let text = String::from_utf8_lossy(bytes);
-    let mut lines: Vec<String> = text
-        .split('\n')
-        .map(|line| line.strip_suffix('\r').unwrap_or(line).to_owned())
-        .collect();
-    if text.is_empty() || text.ends_with('\n') {
-        lines.pop();
-    }
-    lines
-}
-
 fn is_binary(bytes: &[u8]) -> bool {
     bytes[..bytes.len().min(BINARY_PROBE)].contains(&0)
 }
@@ -269,139 +206,6 @@ pub(crate) fn has_conflict_markers(bytes: &[u8]) -> bool {
             || line.starts_with(b"=======")
             || line.starts_with(b">>>>>>>")
     })
-}
-
-/// The base lines each side changed, grouped into regions.
-///
-/// Each side is diffed against the base with no context, and overlapping
-/// changes from the two diffs are merged into one region so a base line never
-/// appears in two regions. A side that did not touch a region contributes the
-/// base text, which is what its version of the file holds there.
-fn regions_from_sides(sides: &ConflictSides) -> Vec<Region> {
-    let base_bytes = sides.base.as_deref().unwrap_or_default();
-    let base_lines = text_lines(base_bytes);
-    let ours = side_changes(base_bytes, sides.ours.as_deref()).unwrap_or_default();
-    let theirs = side_changes(base_bytes, sides.theirs.as_deref()).unwrap_or_default();
-    let ours_numbers = side_line_numbers(base_lines.len(), &ours);
-    let theirs_numbers = side_line_numbers(base_lines.len(), &theirs);
-
-    let mut bounds: Vec<(usize, usize)> = ours
-        .iter()
-        .chain(theirs.iter())
-        .map(|change| (change.start, change.end))
-        .collect();
-    bounds.sort_unstable();
-
-    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(bounds.len());
-    for (start, end) in bounds {
-        match merged.last_mut() {
-            // Strictly overlapping runs merge. A zero-length run is an insertion:
-            // it belongs to the region it touches so its text is shown next to
-            // the change it sits beside.
-            Some(last)
-                if start < last.1 || (start == last.1 && (start == end || last.0 == last.1)) =>
-            {
-                last.1 = last.1.max(end);
-            }
-            _ => merged.push((start, end)),
-        }
-    }
-
-    merged
-        .into_iter()
-        .map(|(start, end)| {
-            let (ours_lines, ours_changed) =
-                side_text(&base_lines, &ours_numbers, &ours, start, end);
-            let (theirs_lines, theirs_changed) =
-                side_text(&base_lines, &theirs_numbers, &theirs, start, end);
-            Region {
-                base_start: if end > start {
-                    start as u32 + 1
-                } else {
-                    start as u32
-                },
-                base: (start..end)
-                    .map(|index| RegionLine {
-                        number: index as u32 + 1,
-                        text: base_lines[index].clone(),
-                    })
-                    .collect(),
-                ours: ours_lines,
-                theirs: theirs_lines,
-                ours_changed,
-                theirs_changed,
-            }
-        })
-        .collect()
-}
-
-/// One side's text for `[start, end)`: the base lines with that side's changes
-/// spliced in, and whether it changed anything there.
-fn side_text(
-    base: &[String],
-    numbers: &[u32],
-    changes: &[Change],
-    start: usize,
-    end: usize,
-) -> (Vec<RegionLine>, bool) {
-    let mut out = Vec::with_capacity(end.saturating_sub(start));
-    let mut changed = false;
-    let mut pos = start;
-    for change in changes {
-        // Regions are unions of whole changes, so this only filters changes that
-        // belong to a different region.
-        if change.start < start || change.end > end {
-            continue;
-        }
-        if change.start > pos {
-            push_base(&mut out, base, numbers, pos, change.start);
-        }
-        out.extend(change.lines.iter().map(|(number, text)| RegionLine {
-            number: *number,
-            text: text.clone(),
-        }));
-        changed = true;
-        pos = change.end;
-    }
-    if pos < end {
-        push_base(&mut out, base, numbers, pos, end);
-    }
-    (out, changed)
-}
-
-fn push_base(
-    out: &mut Vec<RegionLine>,
-    base: &[String],
-    numbers: &[u32],
-    start: usize,
-    end: usize,
-) {
-    out.extend((start..end).map(|index| RegionLine {
-        number: numbers[index],
-        text: base[index].clone(),
-    }));
-}
-
-/// The line number each base line has in a file that applied `changes` to it.
-///
-/// A side's unchanged text is the base text, but its line numbers have moved by
-/// however many lines the earlier changes added or removed; highlighting needs
-/// the number in the side's own file.
-fn side_line_numbers(base_len: usize, changes: &[Change]) -> Vec<u32> {
-    let mut numbers = Vec::with_capacity(base_len);
-    let mut next = 0;
-    let mut shift = 0i64;
-    for index in 0..base_len {
-        while let Some(change) = changes.get(next) {
-            if change.end > index {
-                break;
-            }
-            shift += change.lines.len() as i64 - (change.end - change.start) as i64;
-            next += 1;
-        }
-        numbers.push((index as i64 + 1 + shift) as u32);
-    }
-    numbers
 }
 
 /// `812 B`, `1.4 KB`, `3.1 MB`.
@@ -439,24 +243,43 @@ fn sizes_line(data: &ConflictData) -> String {
 
 /// Everything the conflict view shows for one path, computed off the UI thread.
 pub(crate) struct ConflictData {
-    pub ours_present: bool,
-    pub theirs_present: bool,
-    pub base_present: bool,
-    pub ours_bytes: usize,
-    pub theirs_bytes: usize,
-    pub base_bytes: usize,
-    pub worktree_markers: bool,
-    pub binary: bool,
-    pub regions: Vec<Region>,
-    /// Syntax spans for every line of each whole side, indexed by line number
-    /// minus one. Empty when the path has no bundled grammar.
-    base_highlights: Vec<LineHighlights>,
-    ours_highlights: Vec<LineHighlights>,
-    theirs_highlights: Vec<LineHighlights>,
+    pub(crate) kind: ConflictKind,
+    pub(crate) ours_present: bool,
+    pub(crate) theirs_present: bool,
+    pub(crate) base_present: bool,
+    pub(crate) ours_bytes: usize,
+    pub(crate) theirs_bytes: usize,
+    pub(crate) base_bytes: usize,
+    pub(crate) worktree_markers: bool,
+    /// Fingerprint of the worktree file the editor loaded; the resolve
+    /// operation refuses to overwrite a file that no longer matches.
+    pub(crate) worktree_hash: Option<ContentHash>,
+    pub(crate) binary: bool,
+    /// Every present stage is UTF-8 text.
+    pub(crate) text: bool,
+    /// The file is past the editor's size or conflict cap.
+    pub(crate) too_large: bool,
+    /// Visual rows of the two side panes.
+    pub(crate) rows: Arc<Vec<MergeRow>>,
+    /// First visual row of each conflict, for scrolling to it.
+    pub(crate) conflict_rows: Vec<usize>,
+    ours_lines: Arc<Vec<String>>,
+    theirs_lines: Arc<Vec<String>>,
+    ours_highlights: Arc<Vec<LineHighlights>>,
+    theirs_highlights: Arc<Vec<LineHighlights>>,
+    /// Moved into the editor once the input exists; `None` when the editor is
+    /// not offered.
+    model: Option<MergeModel>,
 }
 
 impl ConflictData {
-    fn new(sides: ConflictSides, worktree: Option<&[u8]>, path: &str) -> Self {
+    fn new(
+        sides: ConflictSides,
+        worktree: Option<&[u8]>,
+        path: &str,
+        kind: Option<ConflictKind>,
+        style: ConflictStyle,
+    ) -> Self {
         let binary = [
             sides.base.as_deref(),
             sides.ours.as_deref(),
@@ -466,17 +289,53 @@ impl ConflictData {
         .into_iter()
         .flatten()
         .any(is_binary);
-        let regions = if binary {
-            Vec::new()
+
+        let mut analysis = MergeAnalysis::analyze(&sides, style);
+        let text = analysis.text && !binary;
+        let kind = kind.unwrap_or_else(|| {
+            kind_from_presence(
+                sides.base.is_some(),
+                sides.ours.is_some(),
+                sides.theirs.is_some(),
+            )
+        });
+        let conflicts = analysis
+            .segments
+            .iter()
+            .filter(|segment| segment.kind == SegmentKind::Conflict)
+            .count();
+        let longest = [
+            sides.base.as_ref().map_or(0, Vec::len),
+            sides.ours.as_ref().map_or(0, Vec::len),
+            sides.theirs.as_ref().map_or(0, Vec::len),
+        ]
+        .into_iter()
+        .max()
+        .unwrap_or(0);
+        let too_large = text && (longest > MAX_EDITOR_BYTES || conflicts > MAX_EDITOR_CONFLICTS);
+        let editable = text && !too_large && kind_has_editor(kind) && !analysis.segments.is_empty();
+
+        let (rows, conflict_rows, model) = if editable {
+            let (rows, conflict_rows) = MergeModel::rows(&analysis);
+            (
+                Arc::new(rows),
+                conflict_rows,
+                Some(MergeModel::new(&analysis)),
+            )
         } else {
-            regions_from_sides(&sides)
+            (Arc::new(Vec::new()), Vec::new(), None)
         };
-        let [base_highlights, ours_highlights, theirs_highlights] = if binary {
-            Default::default()
-        } else {
+        let (ours_highlights, theirs_highlights) = if text {
             highlight_sides(path, &sides)
+        } else {
+            Default::default()
         };
+
+        let ours_lines = Arc::new(std::mem::take(&mut analysis.ours.lines));
+        let theirs_lines = Arc::new(std::mem::take(&mut analysis.theirs.lines));
+
         Self {
+            kind,
             ours_present: sides.ours.is_some(),
             theirs_present: sides.theirs.is_some(),
             base_present: sides.base.is_some(),
@@ -484,30 +343,37 @@ impl ConflictData {
             theirs_bytes: sides.theirs.as_ref().map_or(0, Vec::len),
             base_bytes: sides.base.as_ref().map_or(0, Vec::len),
             worktree_markers: worktree.is_some_and(has_conflict_markers),
+            worktree_hash: worktree.map(ContentHash::of),
             binary,
-            regions,
-            base_highlights,
-            ours_highlights,
-            theirs_highlights,
+            text,
+            too_large,
+            rows,
+            conflict_rows,
+            ours_lines,
+            theirs_lines,
+            ours_highlights: Arc::new(ours_highlights),
+            theirs_highlights: Arc::new(theirs_highlights),
+            model,
         }
     }
 }
 
-/// The syntax spans of the three whole sides, in `[base, ours, theirs]` order.
+/// The syntax spans of ours and theirs, indexed by line number minus one.
 ///
-/// Highlighting the files rather than the region fragments keeps a construct
-/// that starts outside the region (a doc comment, a raw string) coloured the way
-/// it is in the file; [`RegionLine::number`] then finds each line's spans.
-fn highlight_sides(path: &str, sides: &ConflictSides) -> [Vec<LineHighlights>; 3] {
+/// Highlighting the whole files rather than the conflict fragments keeps a
+/// construct that starts outside a region (a doc comment, a raw string)
+/// coloured the way it is in the file; [`MergeRow`] then finds each line's
+/// spans by the line number it kept from the file.
+fn highlight_sides(
+    path: &str,
+    sides: &ConflictSides,
+) -> (Vec<LineHighlights>, Vec<LineHighlights>) {
     let Some(language) = language_for_path(path) else {
         return Default::default();
     };
     let mut highlighter = Highlighter::new();
-    let mut spans: [Vec<LineHighlights>; 3] = Default::default();
-    for (spans, bytes) in spans
-        .iter_mut()
-        .zip([&sides.base, &sides.ours, &sides.theirs])
-    {
+    let mut spans: (Vec<LineHighlights>, Vec<LineHighlights>) = Default::default();
+    for (spans, bytes) in [(&mut spans.0, &sides.ours), (&mut spans.1, &sides.theirs)] {
         let Some(bytes) = bytes else {
             continue;
         };
@@ -521,8 +387,18 @@ fn highlight_sides(path: &str, sides: &ConflictSides) -> [Vec<LineHighlights>; 3
 
 struct Loaded {
     path: String,
-    kind: ConflictKind,
     data: ConflictData,
+    editor: Option<MergeEditor>,
+}
+
+/// The editable result and the input that edits it. The input outlives a
+/// render, which is why it is an entity rather than a value.
+struct MergeEditor {
+    model: MergeModel,
+    input: Entity<TextareaState>,
+    /// A subscription that dies with the editor; dropping it would leave the
+    /// input emitting changes nobody applies.
+    _changes: Subscription,
 }
 
 /// Why a conflict operation was submitted, for the notice after it finishes.
@@ -556,12 +432,14 @@ pub(crate) struct Conflicts {
     /// Bumped on every load so a slow read cannot replace a newer one.
     epoch: u64,
     pending: Option<(OperationId, PendingAction)>,
-    /// Path that was already asked to be marked resolved while its worktree
-    /// file still held markers; a second click confirms.
+    /// Path that was already asked to be marked resolved while its result was
+    /// still unresolved or held markers; a second click confirms.
     marker_warning: Option<String>,
     notice: Option<String>,
     error: Option<String>,
     list_scroll: UniformListScrollHandle,
+    /// Shared by both side panes: one list, so one offset.
+    merge_scroll: UniformListScrollHandle,
 }
 
 impl Conflicts {
@@ -617,22 +495,23 @@ impl Conflicts {
         &mut self,
         epoch: u64,
         path: String,
-        kind: Option<ConflictKind>,
         result: strata_core::Result<ConflictData>,
+        cx: &mut Context<RepoView>,
     ) {
         if epoch != self.epoch {
             return;
         }
         self.loading = None;
         match result {
-            Ok(data) => {
-                let kind = kind.unwrap_or_else(|| {
-                    // The path left the conflict list between the read and its
-                    // result; the stages that were read still describe the kind.
-                    kind_from_presence(data.base_present, data.ours_present, data.theirs_present)
-                });
-                self.loaded = Some(Loaded { path, kind, data });
+            Ok(mut data) => {
+                let editor = data
+                    .model
+                    .take()
+                    .and_then(|model| install_editor(model, cx));
+                self.loaded = Some(Loaded { path, data, editor });
                 self.error = None;
+                // A new path starts at the top of the panes.
+                self.merge_scroll = UniformListScrollHandle::new();
             }
             Err(error) => {
                 self.loaded = None;
@@ -648,6 +527,10 @@ impl Conflicts {
     /// The loaded data, when it belongs to `path`.
     fn data_for(&self, path: &str) -> Option<&Loaded> {
         self.loaded.as_ref().filter(|loaded| loaded.path == path)
+    }
+
+    fn editor_for(&self, path: &str) -> Option<&MergeEditor> {
+        self.data_for(path)?.editor.as_ref()
     }
 
     fn start(&mut self, id: OperationId, action: PendingAction) {
@@ -666,17 +549,110 @@ impl Conflicts {
             return false;
         }
         self.pending = None;
-        // The stages of the path just changed; the next selection reads them again.
-        self.loaded = None;
         match error {
+            // A failed write leaves the loaded result alone: the stale-file
+            // refusal must not also throw away the merge the user typed.
             Some(error) => self.error = Some(error.to_owned()),
             None => {
+                // The stages of the path just changed; the next selection reads
+                // them again.
+                self.loaded = None;
                 self.error = None;
                 self.notice = Some(action.notice().to_owned());
             }
         }
         true
     }
+
+    /// Whether the loaded editor's result still needs an explicit confirmation
+    /// before it can be staged.
+    fn result_needs_confirmation(&self) -> bool {
+        self.loaded
+            .as_ref()
+            .and_then(|loaded| loaded.editor.as_ref())
+            .is_some_and(|editor| editor.model.has_markers() || !editor.model.all_resolved())
+    }
+
+    /// The message and detail of the confirmation banner.
+    fn confirmation_message(&self) -> (String, String) {
+        let Some(model) = self
+            .loaded
+            .as_ref()
+            .and_then(|loaded| loaded.editor.as_ref())
+            .map(|editor| &editor.model)
+        else {
+            return (
+                "This file still contains conflict markers".to_owned(),
+                "Edit it in another tool, then mark it resolved".to_owned(),
+            );
+        };
+        let unresolved = model.unresolved_count();
+        match (unresolved, model.has_markers()) {
+            (0, true) => (
+                "The result still contains conflict markers".to_owned(),
+                "Remove them, or mark resolved with them on purpose".to_owned(),
+            ),
+            (count, true) => (
+                format!(
+                    "{count} {} still unresolved",
+                    if count == 1 {
+                        "conflict is"
+                    } else {
+                        "conflicts are"
+                    }
+                ),
+                "The result still contains conflict markers".to_owned(),
+            ),
+            (count, false) => (
+                format!(
+                    "{count} {} still unresolved",
+                    if count == 1 {
+                        "conflict is"
+                    } else {
+                        "conflicts are"
+                    }
+                ),
+                "Their marker blocks were edited away".to_owned(),
+            ),
+        }
+    }
+}
+
+/// Creates the result pane's text area for a freshly loaded merge.
+///
+/// Text areas are entities, so this needs a window; the load finishes on the UI
+/// thread with one active, and a window that has gone away simply leaves the
+/// conflict without an editor.
+fn install_editor(model: MergeModel, cx: &mut Context<RepoView>) -> Option<MergeEditor> {
+    let text = model.text();
+    // The load finishes on the app's update path, which has no window of its
+    // own; the active window, or the only one open, is the one that will paint
+    // the text area.
+    let handle = cx
+        .active_window()
+        .or_else(|| cx.windows().into_iter().next())?;
+    let input = match handle.update(cx, |_, window, app| {
+        app.new(|cx| TextareaState::new(window, cx).default_value(text))
+    }) {
+        Ok(input) => input,
+        Err(error) => {
+            log::warn!("could not create the conflict result editor: {error}");
+            return None;
+        }
+    };
+    // A change the editor itself makes (a conflict choice) goes through
+    // `set_value`, which emits nothing, so every event here is the user typing.
+    let changes = cx.subscribe(&input, |view, input, event: &InputEvent, cx| {
+        if matches!(event, InputEvent::Change) {
+            let text = input.read(cx).value().to_string();
+            view.conflict_result_edited(&text, cx);
+        }
+    });
+    Some(MergeEditor {
+        model,
+        input,
+        _changes: changes,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -684,8 +660,7 @@ impl Conflicts {
 // ---------------------------------------------------------------------------
 
 impl RepoView {
-    /// Reads the index stages of `path` and derives its conflict regions, off
-    /// the UI thread.
+    /// Reads the index stages of `path` and merges them, off the UI thread.
     pub(crate) fn load_conflict_sides(&mut self, path: String, cx: &mut Context<Self>) {
         let Some(session) = self.session.as_ref() else {
             return;
@@ -704,12 +679,19 @@ impl RepoView {
                 .background_executor()
                 .spawn(async move {
                     let sides = repo.conflict_sides(&read_path)?;
+                    let style = repo.conflict_style();
                     let worktree = repo.file_in_worktree(&read_path).ok().flatten();
-                    Ok(ConflictData::new(sides, worktree.as_deref(), &read_path))
+                    Ok(ConflictData::new(
+                        sides,
+                        worktree.as_deref(),
+                        &read_path,
+                        kind,
+                        style,
+                    ))
                 })
                 .await;
             this.update(cx, |this, cx| {
-                this.worktree.conflicts.finish_load(epoch, path, kind, data);
+                this.worktree.conflicts.finish_load(epoch, path, data, cx);
                 this.notify_if_active(cx);
             })
             .ok();
@@ -733,6 +715,147 @@ impl RepoView {
         cx.notify();
     }
 
+    /// Applies a per-conflict choice and shows the new result.
+    pub(crate) fn apply_conflict_choice(
+        &mut self,
+        choice: MergeChoice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.worktree.conflicts.pending.is_some() {
+            return;
+        }
+        let changed = {
+            let Some(editor) = self
+                .worktree
+                .conflicts
+                .loaded
+                .as_mut()
+                .and_then(|loaded| loaded.editor.as_mut())
+            else {
+                return;
+            };
+            if !editor.model.apply(choice) {
+                // Re-applying the same choice still changes which one is
+                // recorded, so repaint even when the text stayed the same.
+                return;
+            }
+            let input = editor.input.clone();
+            let text = editor.model.text();
+            input.update(cx, |state, cx| state.set_value(text, window, cx));
+            true
+        };
+        if changed {
+            self.worktree.conflicts.marker_warning = None;
+            self.notify_if_active(cx);
+        }
+    }
+
+    /// Puts the selected conflict back to its marker block.
+    pub(crate) fn reset_conflict(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.worktree.conflicts.pending.is_some() {
+            return;
+        }
+        let changed = {
+            let Some(editor) = self
+                .worktree
+                .conflicts
+                .loaded
+                .as_mut()
+                .and_then(|loaded| loaded.editor.as_mut())
+            else {
+                return;
+            };
+            if !editor.model.reset() {
+                return;
+            }
+            let input = editor.input.clone();
+            let text = editor.model.text();
+            input.update(cx, |state, cx| state.set_value(text, window, cx));
+            true
+        };
+        if changed {
+            self.worktree.conflicts.marker_warning = None;
+            self.notify_if_active(cx);
+        }
+    }
+
+    /// Moves the counter to the next or previous conflict and scrolls its rows
+    /// into view.
+    pub(crate) fn move_conflict(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let row = {
+            let Some(loaded) = self.worktree.conflicts.loaded.as_mut() else {
+                return;
+            };
+            let Some(editor) = loaded.editor.as_mut() else {
+                return;
+            };
+            let moved = if forward {
+                editor.model.next_conflict()
+            } else {
+                editor.model.previous_conflict()
+            };
+            if !moved {
+                return;
+            }
+            loaded
+                .data
+                .conflict_rows
+                .get(editor.model.selected())
+                .copied()
+        };
+        if let Some(row) = row {
+            self.worktree
+                .conflicts
+                .merge_scroll
+                .scroll_to_item(row, ScrollStrategy::Center);
+        }
+        self.notify_if_active(cx);
+    }
+
+    /// Selects the conflict a side-pane row belongs to.
+    pub(crate) fn select_conflict(&mut self, conflict: usize, cx: &mut Context<Self>) {
+        let row = {
+            let Some(loaded) = self.worktree.conflicts.loaded.as_mut() else {
+                return;
+            };
+            let Some(editor) = loaded.editor.as_mut() else {
+                return;
+            };
+            if !editor.model.select(conflict) {
+                return;
+            }
+            loaded.data.conflict_rows.get(conflict).copied()
+        };
+        if let Some(row) = row {
+            self.worktree
+                .conflicts
+                .merge_scroll
+                .scroll_to_item(row, ScrollStrategy::Center);
+        }
+        self.notify_if_active(cx);
+    }
+
+    /// Applies a manual edit from the result pane to the resolution model.
+    pub(crate) fn conflict_result_edited(&mut self, text: &str, cx: &mut Context<Self>) {
+        let changed = {
+            let Some(editor) = self
+                .worktree
+                .conflicts
+                .loaded
+                .as_mut()
+                .and_then(|loaded| loaded.editor.as_mut())
+            else {
+                return;
+            };
+            editor.model.apply_text(text)
+        };
+        if changed {
+            self.worktree.conflicts.marker_warning = None;
+            self.notify_if_active(cx);
+        }
+    }
+
     /// Stages the selected conflict after checking the worktree file for
     /// markers, so a half-edited file is not marked resolved by accident.
     pub(crate) fn mark_conflict_resolved(&mut self, cx: &mut Context<Self>) {
@@ -742,6 +865,15 @@ impl RepoView {
         let Some(path) = self.worktree.selected_conflict().map(str::to_owned) else {
             return;
         };
+        if self.worktree.conflicts.result_needs_confirmation() {
+            self.worktree.conflicts.marker_warning = Some(path);
+            cx.notify();
+            return;
+        }
+        if self.worktree.conflicts.editor_for(&path).is_some() {
+            self.stage_resolved_conflict(cx);
+            return;
+        }
         let Some(session) = self.session.as_ref() else {
             return;
         };
@@ -783,7 +915,23 @@ impl RepoView {
         let Some(session) = self.session.as_ref() else {
             return;
         };
-        let id = session.run(Operation::MarkResolved(vec![path]));
+        // With the editor loaded, the result in it is what gets staged; the
+        // hash refuses the write if the file changed underneath it. Without
+        // one (binary, oversized, delete/modify), staging the worktree file is
+        // the same action the user would take in a terminal.
+        let operation = match self.worktree.conflicts.editor_for(&path) {
+            Some(editor) => Operation::ResolveWithContent {
+                path: path.clone(),
+                content: editor.model.bytes(),
+                expected: self
+                    .worktree
+                    .conflicts
+                    .data_for(&path)
+                    .and_then(|loaded| loaded.data.worktree_hash),
+            },
+            None => Operation::MarkResolved(vec![path]),
+        };
+        let id = session.run(operation);
         self.worktree
             .conflicts
             .start(id, PendingAction::MarkResolved);
@@ -819,15 +967,12 @@ impl RepoView {
 struct Colors {
     design: Design,
     background: Hsla,
-    foreground: Hsla,
     muted: Hsla,
     muted_foreground: Hsla,
     border: Hsla,
     danger: Hsla,
     warning: Hsla,
     success: Hsla,
-    info: Hsla,
-    mono: SharedString,
     /// The diff palette, so conflict lines use the same add/remove tinting and
     /// syntax colours as the diff panes.
     diff: DiffColors,
@@ -838,15 +983,12 @@ impl Colors {
         let design = Design::new(theme, settings);
         Self {
             background: design.background,
-            foreground: design.text,
             muted: design.field,
             muted_foreground: design.muted,
             border: design.border,
             danger: design.remove_text,
             warning: design.tag_text,
             success: design.add_text,
-            info: design.accent_text,
-            mono: design.mono.clone(),
             diff: DiffColors::from_theme(theme),
             design,
         }
@@ -986,10 +1128,9 @@ impl Conflicts {
         cx: &Context<RepoView>,
     ) -> AnyElement {
         let colors = Colors::from_theme(cx.theme(), Settings::get(cx));
-        let style = DiffStyle::from_settings(cx, &colors.mono);
+        let style = DiffStyle::from_settings(cx, &colors.design.mono);
         let busy = snapshot.busy.is_some() || self.pending.is_some();
         let loaded = self.data_for(path);
-        let kind = loaded.map(|loaded| loaded.kind);
 
         let (name, dir) = style::path_parts(path);
         let mut header = div()
@@ -1030,7 +1171,9 @@ impl Conflicts {
                             .flex_none()
                             .text_size(px(10.0))
                             .text_color(colors.warning)
-                            .child(kind.map(kind_label).unwrap_or("conflict")),
+                            .child(
+                                loaded.map_or("conflict", |loaded| kind_label(loaded.data.kind)),
+                            ),
                     ),
             );
         if let Some(loaded) = loaded {
@@ -1044,6 +1187,7 @@ impl Conflicts {
         }
 
         let ready = loaded.is_some() && !busy;
+        let kind = loaded.map(|loaded| loaded.data.kind);
         let mut toolbar = div()
             .flex()
             .items_center()
@@ -1078,7 +1222,7 @@ impl Conflicts {
                         }),
                 )
                 .child(
-                    crate::ui::button("conflict-mark-resolved", "Mark as resolved")
+                    crate::ui::button("conflict-mark-resolved", "Mark resolved")
                         .disabled(!ready)
                         .on_click({
                             let entity = entity.clone();
@@ -1099,7 +1243,9 @@ impl Conflicts {
 
         if self.marker_warning.as_deref() == Some(path) {
             column = column.child(self.marker_warning_bar(entity.clone(), &colors));
-        } else if loaded.is_some_and(|loaded| loaded.data.worktree_markers) {
+        } else if loaded
+            .is_some_and(|loaded| loaded.data.worktree_markers && loaded.editor.is_none())
+        {
             column = column.child(crate::ui::banner(
                 crate::ui::BannerKind::Warning,
                 "The file on disk still has conflict markers; edit it, then mark it resolved.",
@@ -1115,19 +1261,14 @@ impl Conflicts {
                 crate::ui::message("reading conflict…", colors.muted_foreground, &colors.design)
                     .into_any_element()
             }
-            (None, Some(loaded)) if loaded.data.binary => crate::ui::message(
-                "Binary conflict — choose a whole version above.",
-                colors.muted_foreground,
-                &colors.design,
-            )
-            .into_any_element(),
-            (None, Some(loaded)) if loaded.data.regions.is_empty() => crate::ui::message(
-                "No textual differences between the sides.",
-                colors.muted_foreground,
-                &colors.design,
-            )
-            .into_any_element(),
-            (None, Some(loaded)) => self.regions(&loaded.data, &colors, &style),
+            (None, Some(loaded)) => editor_body(
+                loaded,
+                &entity,
+                &colors,
+                &style,
+                busy,
+                self.merge_scroll.clone(),
+            ),
         });
 
         if let Some(notice) = &self.notice {
@@ -1171,210 +1312,426 @@ impl Conflicts {
                     entity.update(cx, |this, cx| this.stage_resolved_conflict(cx));
                 })
         };
-        crate::ui::banner(
-            crate::ui::BannerKind::Danger,
-            "This file still contains <<<<<<< conflict markers. Mark it resolved anyway?",
+        let (message, detail) = self.confirmation_message();
+        crate::ui::banner(crate::ui::BannerKind::Danger, message, &colors.design)
+            .detail(detail)
+            .action(cancel)
+            .action(resolve)
+            .into_any_element()
+    }
+}
+
+/// The body under the toolbar: the merge editor, or why it is not offered.
+fn editor_body(
+    loaded: &Loaded,
+    entity: &Entity<RepoView>,
+    colors: &Colors,
+    style: &DiffStyle,
+    busy: bool,
+    scroll: UniformListScrollHandle,
+) -> AnyElement {
+    let data = &loaded.data;
+    if data.binary {
+        return crate::ui::message(
+            "Binary conflict — choose a whole version above.",
+            colors.muted_foreground,
             &colors.design,
         )
-        .action(cancel)
-        .action(resolve)
-        .into_any_element()
+        .into_any_element();
     }
+    if !data.text {
+        return crate::ui::message(
+            "Not UTF-8 text — choose a whole version or use the merge tool above.",
+            colors.muted_foreground,
+            &colors.design,
+        )
+        .into_any_element();
+    }
+    if !kind_has_editor(data.kind) {
+        return crate::ui::message(
+            "This conflict is resolved by keeping or deleting the file.",
+            colors.muted_foreground,
+            &colors.design,
+        )
+        .into_any_element();
+    }
+    if data.too_large {
+        return crate::ui::message(
+            "This file is too large for the merge editor — use a whole version or the merge tool above.",
+            colors.muted_foreground,
+            &colors.design,
+        )
+        .into_any_element();
+    }
+    let Some(editor) = &loaded.editor else {
+        return crate::ui::message(
+            "No textual differences between the sides.",
+            colors.muted_foreground,
+            &colors.design,
+        )
+        .into_any_element();
+    };
 
-    fn regions(&self, data: &ConflictData, colors: &Colors, style: &DiffStyle) -> AnyElement {
-        let mut list = div()
-            .id("conflict-regions")
-            .flex()
-            .flex_col()
-            .flex_1()
-            .min_h_0()
-            .w_full()
-            .overflow_y_scroll();
-        for (index, region) in data.regions.iter().take(MAX_REGIONS).enumerate() {
-            list = list.child(region_block(index, region, data, colors, style));
-        }
-        if data.regions.len() > MAX_REGIONS {
-            list = list.child(
+    let conflict_bar = conflict_bar(editor, entity, colors, busy);
+    let panes = side_panes(loaded, editor, entity, colors, style, scroll);
+    let result = result_pane(editor, colors, style, busy);
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .w_full()
+        .child(conflict_bar)
+        .child(panes)
+        .child(result)
+        .into_any_element()
+}
+
+/// The counter, the conflict navigation and the per-conflict choices.
+fn conflict_bar(
+    editor: &MergeEditor,
+    entity: &Entity<RepoView>,
+    colors: &Colors,
+    busy: bool,
+) -> AnyElement {
+    let model = &editor.model;
+    let mut bar = div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_1p5()
+        .flex_none()
+        .px_3()
+        .py_1p5()
+        .border_b_1()
+        .border_color(colors.border);
+
+    match model.counter() {
+        Some(counter) => {
+            bar = bar.child(
                 div()
                     .flex_none()
-                    .px_3()
-                    .py_2()
                     .text_size(px(11.0))
-                    .text_color(colors.muted_foreground)
-                    .child(format!(
-                        "{} more regions not shown; use the merge tool for this file.",
-                        data.regions.len() - MAX_REGIONS
-                    )),
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(if model.all_resolved() {
+                        colors.success
+                    } else {
+                        colors.warning
+                    })
+                    .child(counter),
+            );
+            bar = bar
+                .child(
+                    crate::ui::button("conflict-previous", "Previous")
+                        .size(crate::ui::ButtonSize::Tiny)
+                        .disabled(busy || model.conflict_count() < 2)
+                        .on_click({
+                            let entity = entity.clone();
+                            move |_, _, cx| {
+                                entity.update(cx, |this, cx| this.move_conflict(false, cx));
+                            }
+                        }),
+                )
+                .child(
+                    crate::ui::button("conflict-next", "Next")
+                        .size(crate::ui::ButtonSize::Tiny)
+                        .disabled(busy || model.conflict_count() < 2)
+                        .on_click({
+                            let entity = entity.clone();
+                            move |_, _, cx| {
+                                entity.update(cx, |this, cx| this.move_conflict(true, cx));
+                            }
+                        }),
+                );
+        }
+        None => {
+            bar = bar.child(
+                div()
+                    .flex_none()
+                    .text_size(px(11.0))
+                    .text_color(colors.success)
+                    .child("No conflicts left"),
             );
         }
-        list.into_any_element()
     }
-}
 
-fn region_block(
-    index: usize,
-    region: &Region,
-    data: &ConflictData,
-    colors: &Colors,
-    style: &DiffStyle,
-) -> AnyElement {
-    let mut block = div()
-        .flex()
-        .flex_col()
-        .flex_none()
-        .w_full()
-        .border_t_1()
-        .border_color(colors.border)
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .h(px(20.0))
-                .px_3()
-                .flex_none()
-                .bg(colors.muted.opacity(0.35))
-                .text_size(px(10.0))
-                .text_color(colors.muted_foreground)
-                .child(format!("Region {} · {}", index + 1, region.base_label()))
-                .child(change_badges(region, colors)),
+    for (index, choice) in MergeChoice::ALL.into_iter().enumerate() {
+        let entity = entity.clone();
+        bar = bar.child(
+            crate::ui::button(("conflict-take", index), choice.label())
+                .size(crate::ui::ButtonSize::Tiny)
+                .disabled(busy || model.conflict_count() == 0)
+                .tooltip(format!("{} ({})", choice.label(), choice.shortcut()))
+                .on_click(move |_, window, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.apply_conflict_choice(choice, window, cx)
+                    });
+                }),
         );
-    block = block.child(side_block(
-        "OURS (HEAD)",
-        &region.ours,
-        region.ours_changed,
-        colors.success,
-        &data.ours_highlights,
-        colors,
-        style,
-    ));
-    block = block.child(side_block(
-        "THEIRS (incoming)",
-        &region.theirs,
-        region.theirs_changed,
-        colors.info,
-        &data.theirs_highlights,
-        colors,
-        style,
-    ));
-    if !region.base.is_empty() {
-        block = block.child(side_block(
-            "BASE",
-            &region.base,
-            false,
-            colors.muted,
-            &data.base_highlights,
-            colors,
-            style,
-        ));
     }
-    block.into_any_element()
-}
-
-fn change_badges(region: &Region, colors: &Colors) -> AnyElement {
-    let mut badges = div().flex().items_center().gap_1();
-    if region.ours_changed {
-        badges = badges.child(div().text_color(colors.success).child("ours changed"));
-    }
-    if region.theirs_changed {
-        badges = badges.child(div().text_color(colors.info).child("theirs changed"));
-    }
-    badges.into_any_element()
-}
-
-fn side_block(
-    title: &str,
-    lines: &[RegionLine],
-    changed: bool,
-    tint: Hsla,
-    highlights: &[LineHighlights],
-    colors: &Colors,
-    style: &DiffStyle,
-) -> AnyElement {
-    let mut block = div()
-        .flex()
-        .flex_col()
-        .flex_none()
-        .w_full()
-        .border_t_1()
-        .border_color(colors.border)
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .h(px(20.0))
-                .px_3()
-                .flex_none()
-                .bg(if changed {
-                    tint.opacity(0.18)
-                } else {
-                    colors.background
-                })
-                .text_size(px(10.0))
-                .text_color(if changed {
-                    colors.foreground
-                } else {
-                    colors.muted_foreground
-                })
-                .child(title.to_owned()),
-        );
-    if lines.is_empty() {
-        block = block.child(
-            div()
-                .px_3()
-                .py_1()
-                .text_size(px(11.0))
-                .text_color(colors.muted_foreground)
-                .child("(no content)"),
-        );
-    } else {
-        for line in lines {
-            // Spans are per line of the whole side, so a region line finds its
-            // own by the line number it kept from the file.
-            let spans = line
-                .number
-                .checked_sub(1)
-                .and_then(|index| highlights.get(index as usize));
-            block = block.child(line_row(line, spans, tint, changed, colors, style));
-        }
-    }
-    block.into_any_element()
-}
-
-fn line_row(
-    line: &RegionLine,
-    highlights: Option<&LineHighlights>,
-    tint: Hsla,
-    changed: bool,
-    colors: &Colors,
-    style: &DiffStyle,
-) -> AnyElement {
-    let mut row = div()
-        .flex()
-        .items_start()
-        .w_full()
-        .min_h(px(style.row_height()))
-        .px_3()
-        .font_family(style.mono().clone())
-        .text_size(px(style.font_size()))
-        .text_color(colors.foreground);
-    if changed {
-        row = row.bg(tint.opacity(0.08));
-    }
-    row.child(
-        div()
-            .flex_1()
-            .min_w_0()
-            .whitespace_normal()
-            .child(diff_view::styled_line(
-                &line.text,
-                style,
-                highlights,
-                &colors.diff,
-            )),
+    let entity_reset = entity.clone();
+    bar.child(
+        crate::ui::button("conflict-reset", "Reset")
+            .size(crate::ui::ButtonSize::Tiny)
+            .disabled(
+                busy || model.conflict_count() == 0
+                    || model.selected_resolution() == Some(Resolution::Unresolved)
+                    || model.selected_resolution().is_none(),
+            )
+            .on_click(move |_, window, cx| {
+                entity_reset.update(cx, |this, cx| this.reset_conflict(window, cx));
+            }),
     )
     .into_any_element()
+}
+
+/// Ours and theirs, one list row per line pair, so the two sides always show
+/// the same scroll position.
+fn side_panes(
+    loaded: &Loaded,
+    editor: &MergeEditor,
+    entity: &Entity<RepoView>,
+    colors: &Colors,
+    style: &DiffStyle,
+    scroll: UniformListScrollHandle,
+) -> AnyElement {
+    let data = &loaded.data;
+    let rows = data.rows.clone();
+    let ours_lines = data.ours_lines.clone();
+    let theirs_lines = data.theirs_lines.clone();
+    let ours_highlights = data.ours_highlights.clone();
+    let theirs_highlights = data.theirs_highlights.clone();
+    let selected = editor.model.selected();
+    let row_height = style.row_height();
+    let font_size = style.font_size();
+    let mono = style.mono().clone();
+    let diff = colors.diff;
+    let design = colors.design.clone();
+    let row_design = design.clone();
+    let row_style = style.clone();
+    let row_entity = entity.clone();
+
+    let list = uniform_list(
+        "conflict-merge-rows",
+        rows.len(),
+        move |range, _window, _cx| {
+            range
+                .map(|index| {
+                    let row = rows[index];
+                    let left = side_tint(row, true, selected, &row_design);
+                    let right = side_tint(row, false, selected, &row_design);
+                    let mut element = div()
+                        .id(("conflict-merge-row", index))
+                        .flex()
+                        .flex_row()
+                        .items_stretch()
+                        .w_full()
+                        .h(px(row_height))
+                        .font_family(mono.clone())
+                        .text_size(px(font_size));
+                    if let Some(conflict) = row.conflict {
+                        let click = row_entity.clone();
+                        element = element.cursor_pointer().on_click(move |_, _, cx| {
+                            click.update(cx, |this, cx| this.select_conflict(conflict, cx));
+                        });
+                    }
+                    if row.conflict == Some(selected) {
+                        element = element.border_l_2().border_color(row_design.accent);
+                    }
+                    element
+                        .child(side_cell(
+                            row.ours,
+                            &ours_lines,
+                            &ours_highlights,
+                            left,
+                            &diff,
+                            &row_style,
+                            true,
+                            &row_design,
+                        ))
+                        .child(side_cell(
+                            row.theirs,
+                            &theirs_lines,
+                            &theirs_highlights,
+                            right,
+                            &diff,
+                            &row_style,
+                            false,
+                            &row_design,
+                        ))
+                        .into_any_element()
+                })
+                .collect::<Vec<_>>()
+        },
+    )
+    .track_scroll(&scroll)
+    .with_scrollbar(&scroll)
+    .flex_1()
+    .min_h_0();
+
+    let ours_header = pane_header("OURS (HEAD)", &design);
+    let theirs_header = pane_header("THEIRS (incoming)", &design);
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .w_full()
+        .border_b_1()
+        .border_color(design.border)
+        .child(
+            // The two headings sit over the halves of the single row list.
+            div()
+                .flex()
+                .flex_row()
+                .flex_none()
+                .w_full()
+                .child(div().flex_1().min_w_0().child(ours_header))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .border_l_1()
+                        .border_color(design.border)
+                        .child(theirs_header),
+                ),
+        )
+        .child(list)
+        .into_any_element()
+}
+
+fn pane_header(title: &'static str, design: &Design) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .h(px(20.0))
+        .flex_none()
+        .px_2()
+        .bg(design.field)
+        .text_size(px(9.5))
+        .text_color(design.muted)
+        .child(title)
+        .into_any_element()
+}
+
+fn side_tint(row: MergeRow, ours_side: bool, selected: usize, design: &Design) -> Option<Hsla> {
+    match (row.kind, ours_side) {
+        // The selected conflict is the one the buttons act on; a stronger tint
+        // keeps it visible among the others.
+        (SegmentKind::Conflict, _) if row.conflict == Some(selected) => {
+            Some(design.diff_removed_word)
+        }
+        (SegmentKind::Conflict, _) => Some(design.diff_removed_bg),
+        (SegmentKind::Ours, true) => Some(design.diff_added_bg),
+        (SegmentKind::Theirs, false) => Some(design.accent_soft),
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn side_cell(
+    line: Option<u32>,
+    lines: &[String],
+    highlights: &[LineHighlights],
+    tint: Option<Hsla>,
+    diff: &DiffColors,
+    style: &DiffStyle,
+    left: bool,
+    design: &Design,
+) -> AnyElement {
+    let cell = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .flex_1()
+        .min_w_0()
+        .h_full()
+        .overflow_hidden()
+        .when_some(tint, |cell, tint| cell.bg(tint))
+        .when(left, |cell| cell.border_r_1().border_color(design.border));
+    match line {
+        Some(number) => {
+            let text = lines
+                .get(number as usize - 1)
+                .map(String::as_str)
+                .unwrap_or_default();
+            let spans = highlights.get(number as usize - 1);
+            cell.child(
+                div()
+                    .flex_none()
+                    .w(px(38.0))
+                    .pr_1()
+                    .text_size(px(style.font_size() - 2.0))
+                    .text_color(diff.gutter)
+                    .text_right()
+                    .child(number.to_string()),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .child(diff_view::styled_line(text, style, spans, diff)),
+            )
+        }
+        None => cell.child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(px(style.font_size() - 2.0))
+                .text_color(diff.gutter)
+                .child(""),
+        ),
+    }
+    .into_any_element()
+}
+
+/// The editable result under the side panes.
+fn result_pane(editor: &MergeEditor, colors: &Colors, style: &DiffStyle, busy: bool) -> AnyElement {
+    let model = &editor.model;
+    let status = match model.counter() {
+        Some(_) if model.all_resolved() && !model.has_markers() => {
+            "all conflicts resolved".to_owned()
+        }
+        Some(counter) => {
+            let unresolved = model.unresolved_count();
+            format!("{counter} · {unresolved} unresolved",)
+        }
+        None => "automatic merge".to_owned(),
+    };
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .w_full()
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .h(px(20.0))
+                .flex_none()
+                .px_2()
+                .bg(colors.muted.opacity(0.4))
+                .text_size(px(9.5))
+                .text_color(colors.muted_foreground)
+                .child("RESULT")
+                .child(div().flex_1().min_w_0().truncate().child(status))
+                .child("edit to resolve manually"),
+        )
+        .child(
+            div().flex_1().min_h_0().w_full().p_1p5().child(
+                Textarea::new(&editor.input)
+                    .h(relative(1.0))
+                    .w_full()
+                    .text_size(px(style.font_size()))
+                    .font_family(style.mono().clone())
+                    .disabled(busy),
+            ),
+        )
+        .into_any_element()
 }
 
 #[cfg(test)]
@@ -1389,12 +1746,8 @@ mod tests {
         }
     }
 
-    fn texts(lines: &[RegionLine]) -> Vec<&str> {
-        lines.iter().map(|line| line.text.as_str()).collect()
-    }
-
-    fn numbers(lines: &[RegionLine]) -> Vec<u32> {
-        lines.iter().map(|line| line.number).collect()
+    fn data(sides: ConflictSides, kind: ConflictKind) -> ConflictData {
+        ConflictData::new(sides, None, "src/lib.rs", Some(kind), ConflictStyle::Merge)
     }
 
     #[test]
@@ -1432,6 +1785,21 @@ mod tests {
             choices(ConflictKind::BothDeleted).is_empty(),
             "no side exists to check out"
         );
+    }
+
+    #[test]
+    fn only_content_conflicts_get_the_merge_editor() {
+        assert!(kind_has_editor(ConflictKind::BothModified));
+        assert!(kind_has_editor(ConflictKind::BothAdded));
+        for kind in [
+            ConflictKind::DeletedByUs,
+            ConflictKind::DeletedByThem,
+            ConflictKind::AddedByUs,
+            ConflictKind::AddedByThem,
+            ConflictKind::BothDeleted,
+        ] {
+            assert!(!kind_has_editor(kind), "{kind:?} resolves by file");
+        }
     }
 
     #[test]
@@ -1477,117 +1845,6 @@ mod tests {
     }
 
     #[test]
-    fn text_lines_keep_content_and_drop_the_final_newline() {
-        assert_eq!(
-            text_lines(b"a\r\nb\n"),
-            vec!["a".to_owned(), "b".to_owned()]
-        );
-        assert_eq!(text_lines(b"a\nb"), vec!["a".to_owned(), "b".to_owned()]);
-        assert!(text_lines(b"").is_empty());
-        assert_eq!(text_lines(b"\n"), vec![String::new()]);
-    }
-
-    #[test]
-    fn each_side_changes_are_shown_against_the_base() {
-        let sides = sides(
-            "one\ntwo\nthree\n",
-            "one\nTWO\nthree\n",
-            "one\ntwo\nTHREE\n",
-        );
-        let regions = regions_from_sides(&sides);
-        assert_eq!(regions.len(), 2, "the two changes are separate regions");
-
-        assert_eq!(texts(&regions[0].base), vec!["two"]);
-        assert_eq!(texts(&regions[0].ours), vec!["TWO"]);
-        assert_eq!(texts(&regions[0].theirs), vec!["two"]);
-        assert!(regions[0].ours_changed);
-        assert!(!regions[0].theirs_changed);
-
-        assert_eq!(texts(&regions[1].base), vec!["three"]);
-        assert_eq!(texts(&regions[1].ours), vec!["three"]);
-        assert_eq!(texts(&regions[1].theirs), vec!["THREE"]);
-        assert!(!regions[1].ours_changed);
-        assert!(regions[1].theirs_changed);
-    }
-
-    #[test]
-    fn region_lines_keep_the_line_number_they_have_in_their_file() {
-        // Our side inserts a line before the change, so its changed line is
-        // line 3 of `ours` even though it is line 2 of the base.
-        let sides = sides("a\nb\nc\n", "a\nnew\nB\nc\n", "a\nb\nc\n");
-        let regions = regions_from_sides(&sides);
-        assert_eq!(regions.len(), 1);
-
-        assert_eq!(texts(&regions[0].base), vec!["b"]);
-        assert_eq!(numbers(&regions[0].base), vec![2]);
-
-        assert_eq!(texts(&regions[0].ours), vec!["new", "B"]);
-        assert_eq!(numbers(&regions[0].ours), vec![2, 3]);
-
-        assert_eq!(texts(&regions[0].theirs), vec!["b"]);
-        assert_eq!(
-            numbers(&regions[0].theirs),
-            vec![2],
-            "an unchanged side keeps the base position when it did not shift"
-        );
-    }
-
-    #[test]
-    fn the_same_line_changed_by_both_sides_is_one_region() {
-        let sides = sides("a\nb\nc\n", "a\nB1\nc\n", "a\nB2\nc\n");
-        let regions = regions_from_sides(&sides);
-        assert_eq!(regions.len(), 1);
-        assert_eq!(texts(&regions[0].ours), vec!["B1"]);
-        assert_eq!(texts(&regions[0].theirs), vec!["B2"]);
-        assert_eq!(texts(&regions[0].base), vec!["b"]);
-        assert!(regions[0].ours_changed && regions[0].theirs_changed);
-    }
-
-    #[test]
-    fn a_side_that_deleted_the_file_shows_no_content() {
-        let sides = ConflictSides {
-            base: Some(b"a\nb\n".to_vec()),
-            ours: None,
-            theirs: Some(b"a\nb\nc\n".to_vec()),
-        };
-        let regions = regions_from_sides(&sides);
-        assert_eq!(regions.len(), 1);
-        assert!(regions[0].ours_changed);
-        assert!(regions[0].ours.is_empty(), "the file is gone on our side");
-        assert_eq!(texts(&regions[0].theirs), vec!["a", "b", "c"]);
-    }
-
-    #[test]
-    fn both_added_shows_the_whole_file() {
-        let sides = ConflictSides {
-            base: None,
-            ours: Some(b"ours\n".to_vec()),
-            theirs: Some(b"theirs\n".to_vec()),
-        };
-        let regions = regions_from_sides(&sides);
-        assert_eq!(regions.len(), 1);
-        assert_eq!(texts(&regions[0].ours), vec!["ours"]);
-        assert_eq!(texts(&regions[0].theirs), vec!["theirs"]);
-        assert!(regions[0].base.is_empty());
-    }
-
-    #[test]
-    fn identical_sides_have_no_regions() {
-        let sides = sides("a\nb\n", "a\nb\n", "a\nb\n");
-        assert!(regions_from_sides(&sides).is_empty());
-    }
-
-    #[test]
-    fn an_insertion_beside_the_other_sides_change_stays_in_that_region() {
-        let sides = sides("a\nc\n", "a\nb\nc\n", "a\nC\n");
-        let regions = regions_from_sides(&sides);
-        assert_eq!(regions.len(), 1, "the insertion touches the change");
-        assert_eq!(texts(&regions[0].base), vec!["c"]);
-        assert_eq!(texts(&regions[0].ours), vec!["b", "c"]);
-        assert_eq!(texts(&regions[0].theirs), vec!["C"]);
-    }
-
-    #[test]
     fn binary_detection_matches_the_nul_byte_rule() {
         assert!(is_binary(b"\x7fELF\x00\x00"));
         assert!(!is_binary(b"plain text\n"));
@@ -1597,29 +1854,78 @@ mod tests {
     }
 
     #[test]
-    fn highlight_sides_covers_whole_files_and_skips_unknown_languages() {
-        let sides = sides("fn a() {}\n", "fn b() {}\n", "fn c() {}\n");
-        let [base, ours, theirs] = highlight_sides("src/lib.rs", &sides);
-        assert_eq!(base.len(), 2, "one range per line, plus the empty tail");
-        assert!(base.iter().any(|spans| !spans.is_empty()));
-        assert!(ours.iter().any(|spans| !spans.is_empty()));
-        assert!(theirs.iter().any(|spans| !spans.is_empty()));
-
-        let [base, ours, theirs] = highlight_sides("notes.unknown", &sides);
-        assert!(base.is_empty() && ours.is_empty() && theirs.is_empty());
+    fn a_text_conflict_loads_rows_and_the_merge_model() {
+        let data = data(
+            sides(
+                "one\ntwo\nthree\n",
+                "one\nOURS\nthree\n",
+                "one\nTHEIRS\nthree\n",
+            ),
+            ConflictKind::BothModified,
+        );
+        assert!(data.text);
+        assert!(!data.binary && !data.too_large);
+        assert_eq!(data.model.as_ref().map(MergeModel::conflict_count), Some(1));
+        assert_eq!(data.conflict_rows, vec![1]);
+        assert_eq!(data.rows.len(), 3);
+        assert_eq!(data.rows[1].conflict, Some(0));
+        assert!(data.model.is_some());
     }
 
     #[test]
-    fn a_binary_conflict_has_sizes_instead_of_regions() {
-        let sides = ConflictSides {
-            base: Some(vec![0, 1, 2]),
-            ours: Some(vec![0, 3, 4]),
-            theirs: Some(vec![0, 5, 6]),
-        };
-        let data = ConflictData::new(sides, Some(&[0, 7]), "file.bin");
+    fn a_binary_conflict_has_sizes_instead_of_an_editor() {
+        let data = data(
+            ConflictSides {
+                base: Some(vec![0, 1, 2]),
+                ours: Some(vec![0, 3, 4]),
+                theirs: Some(vec![0, 5, 6]),
+            },
+            ConflictKind::BothModified,
+        );
         assert!(data.binary);
-        assert!(data.regions.is_empty());
+        assert!(!data.text);
+        assert!(data.rows.is_empty());
+        assert!(data.model.is_none());
         assert_eq!(sizes_line(&data), "ours 3 B · theirs 3 B · base 3 B");
+    }
+
+    #[test]
+    fn a_delete_modify_conflict_keeps_whole_file_choices() {
+        let data = data(
+            ConflictSides {
+                base: Some(b"a\nb\n".to_vec()),
+                ours: None,
+                theirs: Some(b"a\nb\nc\n".to_vec()),
+            },
+            ConflictKind::DeletedByUs,
+        );
+        assert!(data.text);
+        assert!(data.model.is_none(), "resolving it is a file-level choice");
+        assert!(data.rows.is_empty());
+    }
+
+    #[test]
+    fn an_oversized_file_keeps_the_whole_file_choices() {
+        let big = format!("{}\n", "x".repeat(MAX_EDITOR_BYTES + 1));
+        let data = data(
+            sides(&big, &format!("{big}ours\n"), &format!("{big}theirs\n")),
+            ConflictKind::BothModified,
+        );
+        assert!(data.text);
+        assert!(data.too_large);
+        assert!(data.model.is_none());
+    }
+
+    #[test]
+    fn highlight_sides_covers_both_editable_sides_and_skips_unknown_languages() {
+        let sides = sides("fn a() {}\n", "fn b() {}\n", "fn c() {}\n");
+        let (ours, theirs) = highlight_sides("src/lib.rs", &sides);
+        assert_eq!(ours.len(), 2, "one range per line, plus the empty tail");
+        assert!(ours.iter().any(|spans| !spans.is_empty()));
+        assert!(theirs.iter().any(|spans| !spans.is_empty()));
+
+        let (ours, theirs) = highlight_sides("notes.unknown", &sides);
+        assert!(ours.is_empty() && theirs.is_empty());
     }
 
     #[test]

@@ -29,6 +29,7 @@ mod fake;
 mod file_history;
 mod git_config_view;
 mod graph_canvas;
+mod merge_editor;
 mod metrics;
 mod palette;
 mod picker;

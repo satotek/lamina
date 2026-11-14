@@ -9,6 +9,7 @@
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+use crate::merge::ContentHash;
 use crate::repo::Repo;
 use crate::session::ResetMode;
 use crate::{Error, Oid, RepoState, Result};
@@ -41,8 +42,30 @@ impl Git {
     /// in the user's checkout form (line endings included), so they are written
     /// unchanged. `git add` then collapses the unmerged stages into a single
     /// resolved entry.
-    pub fn resolve_with_content(&self, path: &str, content: &[u8]) -> Result<()> {
+    ///
+    /// `expected` is the fingerprint of the worktree file the editor loaded.
+    /// When the file no longer matches, the write is refused: an editor that
+    /// waited while the file changed elsewhere would otherwise silently
+    /// overwrite that edit.
+    pub fn resolve_with_content(
+        &self,
+        path: &str,
+        content: &[u8],
+        expected: Option<ContentHash>,
+    ) -> Result<()> {
         let target = self.worktree_file(path)?;
+        if let Some(expected) = expected {
+            let current = fs::read(&target).map_err(|error| {
+                Error::other(format!(
+                    "{path} could not be re-read before writing it: {error}"
+                ))
+            })?;
+            if ContentHash::of(&current) != expected {
+                return Err(Error::other(format!(
+                    "{path} changed on disk since the merge editor loaded it; reload the conflict and try again"
+                )));
+            }
+        }
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent).map_err(|error| {
                 Error::other(format!(
@@ -494,6 +517,95 @@ mod tests {
         let line = format!("dropping {oid} two -- patch contents already upstream\n");
         assert_eq!(dropped_commits(line.as_bytes()), vec![oid]);
         assert!(dropped_commits(b"error: could not apply abc\n").is_empty());
+    }
+
+    /// A repository stopped in a merge with `conflict.txt` unmerged.
+    fn conflicted_repo() -> TestRepo {
+        let repo = TestRepo::new();
+        repo.write("conflict.txt", "base\n");
+        repo.commit("base");
+        repo.git(&["checkout", "-q", "-b", "side"]);
+        repo.write("conflict.txt", "theirs\n");
+        repo.commit("theirs");
+        repo.git(&["checkout", "-q", "main"]);
+        repo.write("conflict.txt", "ours\n");
+        repo.commit("ours");
+        let merge = repo.git_output(&["merge", "side"]);
+        assert!(!merge.status.success(), "the merge must stop on a conflict");
+        assert_eq!(
+            repo.open().conflicts().expect("conflicts"),
+            vec![crate::ConflictEntry {
+                path: "conflict.txt".into(),
+                kind: crate::ConflictKind::BothModified,
+            }]
+        );
+        repo
+    }
+
+    fn worktree_bytes(repo: &TestRepo, path: &str) -> Vec<u8> {
+        fs::read(repo.path().join(path)).expect("read worktree file")
+    }
+
+    #[test]
+    fn resolving_with_content_writes_the_file_and_collapses_the_stages() {
+        let repo = conflicted_repo();
+        let loaded = worktree_bytes(&repo, "conflict.txt");
+
+        repo.git_handle()
+            .resolve_with_content(
+                "conflict.txt",
+                b"resolved\n",
+                Some(ContentHash::of(&loaded)),
+            )
+            .expect("the resolution writes and stages");
+
+        assert_eq!(worktree_bytes(&repo, "conflict.txt"), b"resolved\n");
+        assert!(
+            repo.open().conflicts().expect("conflicts").is_empty(),
+            "git add must collapse the unmerged stages"
+        );
+        assert_eq!(
+            repo.git(&["show", ":conflict.txt"]),
+            "resolved\n",
+            "the staged blob is the resolved content"
+        );
+    }
+
+    #[test]
+    fn resolving_with_content_refuses_a_file_that_changed_on_disk() {
+        let repo = conflicted_repo();
+        let loaded = worktree_bytes(&repo, "conflict.txt");
+        let expected = ContentHash::of(&loaded);
+
+        // Another editor saves the path while the merge editor is open.
+        repo.write("conflict.txt", "edited elsewhere\n");
+        let error = repo
+            .git_handle()
+            .resolve_with_content("conflict.txt", b"resolved\n", Some(expected))
+            .expect_err("a changed file must not be overwritten");
+        assert!(
+            error.to_string().contains("changed on disk"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(worktree_bytes(&repo, "conflict.txt"), b"edited elsewhere\n");
+        assert_eq!(
+            repo.open().conflicts().expect("conflicts").len(),
+            1,
+            "a refused write must not stage anything"
+        );
+    }
+
+    #[test]
+    fn resolving_with_content_without_a_fingerprint_writes_anyway() {
+        let repo = conflicted_repo();
+        repo.write("conflict.txt", "edited elsewhere\n");
+
+        repo.git_handle()
+            .resolve_with_content("conflict.txt", b"resolved\n", None)
+            .expect("no fingerprint means no check");
+
+        assert_eq!(worktree_bytes(&repo, "conflict.txt"), b"resolved\n");
+        assert!(repo.open().conflicts().expect("conflicts").is_empty());
     }
 
     /// Git before 2.45 has no `--empty=drop`; the skip path must still drop an
