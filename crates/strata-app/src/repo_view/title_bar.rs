@@ -154,6 +154,7 @@ impl RepoView {
         };
         let search = div()
             .id("commit-search-field")
+            .occlude()
             .flex()
             .items_center()
             .gap(px(8.0))
@@ -184,6 +185,7 @@ impl RepoView {
             .items_center()
             .gap(px(2.0))
             .flex_none()
+            .occlude()
             .child(self.remote_buttons(
                 source.as_ref(),
                 &remote::Colors {
@@ -252,14 +254,25 @@ impl RepoView {
                             }),
                     )
                     .child(div().w(px(1.0)).h(px(18.0)).mx_1().bg(design.border))
-                    .when_some(back_button, |row, button| row.child(button))
-                    .child(repository)
-                    .when_some(branch_chip, |row, chip| row.child(chip)),
+                    .when_some(back_button, |row, button| row.child(control(button)))
+                    .child(control(repository))
+                    .when_some(branch_chip, |row, chip| row.child(control(chip))),
             )
             .when_some(search_pane, |bar, pane| bar.child(pane))
             .child(nav)
             .into_any_element()
     }
+}
+
+/// Wraps a title bar control so a click on it stays a click.
+///
+/// The bar under every control is a window drag area, and GPUI on Windows
+/// answers the OS hit test with the first window-control area among all the
+/// hitboxes under the pointer, not just the topmost one. Without a
+/// mouse-blocking layer in between, Windows treats a press on any button here
+/// as a press on the caption and the button never sees it.
+fn control(element: impl IntoElement) -> impl IntoElement {
+    div().min_w_0().occlude().child(element)
 }
 
 /// The Fetch / Pull / Push row at full size, with the 2 px gap between buttons.
