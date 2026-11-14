@@ -248,9 +248,9 @@ impl RepoView {
                             .flex()
                             .items_center()
                             .gap(px(7.0))
-                            .child(style::app_mark(16.0))
+                            .child(style::app_mark(style::BRAND_MARK))
                             .when(fit.wordmark, |mark| {
-                                mark.child(style::wordmark(9.5, design.muted))
+                                mark.child(style::wordmark(style::BRAND_WORDMARK, design.text))
                             }),
                     )
                     .child(div().w(px(1.0)).h(px(18.0)).mx_1().bg(design.border))
@@ -453,8 +453,16 @@ impl TitleBarFit {
     ) -> f32 {
         // App mark, the wordmark and its gap, three 8 px row gaps, the divider
         // with its margins, and the repository chip's own padding and icons.
-        let mut width =
-            16.0 + if wordmark { 71.0 } else { 0.0 } + 24.0 + 9.0 + 59.0 + repository_width;
+        let mut width = style::BRAND_MARK
+            + if wordmark {
+                style::wordmark_width(style::BRAND_WORDMARK) + 7.0
+            } else {
+                0.0
+            }
+            + 24.0
+            + 9.0
+            + 59.0
+            + repository_width;
         if has_back {
             // The row gap and the small ghost button's horizontal padding.
             width += 8.0 + 16.0 + back_width;

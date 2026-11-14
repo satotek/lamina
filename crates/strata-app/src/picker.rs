@@ -854,8 +854,11 @@ impl Render for Picker {
                                         .flex()
                                         .items_center()
                                         .gap(px(7.0))
-                                        .child(crate::style::app_mark(16.0))
-                                        .child(crate::style::wordmark(9.5, design.muted)),
+                                        .child(crate::style::app_mark(crate::style::BRAND_MARK))
+                                        .child(crate::style::wordmark(
+                                            crate::style::BRAND_WORDMARK,
+                                            design.text,
+                                        )),
                                 )
                                 .child(div().w(px(1.0)).h(px(18.0)).mx_1().bg(design.border))
                                 .child(

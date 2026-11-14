@@ -148,8 +148,8 @@ impl SettingsView {
                             .flex()
                             .items_center()
                             .gap(px(7.0))
-                            .child(style::app_mark(16.0))
-                            .child(style::wordmark(9.5, design.muted)),
+                            .child(style::app_mark(style::BRAND_MARK))
+                            .child(style::wordmark(style::BRAND_WORDMARK, design.text)),
                     )
                     .child(div().w(px(1.0)).h(px(18.0)).mx_1().bg(design.border))
                     .child(div().font_weight(FontWeight::SEMIBOLD).child("Settings")),

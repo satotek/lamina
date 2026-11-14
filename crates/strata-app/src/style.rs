@@ -615,15 +615,24 @@ pub mod glyph {
     pub const WORDMARK: &[u8] = include_bytes!("../assets/icons/wordmark.svg");
 }
 
+/// Side of the app mark at the start of every title bar.
+pub const BRAND_MARK: f32 = 18.0;
+/// Cap height of the wordmark beside the app mark.
+pub const BRAND_WORDMARK: f32 = 10.5;
+/// The wordmark's viewBox is 10400 x 1550; widths keep that aspect.
+const WORDMARK_ASPECT: f32 = 10400.0 / 1550.0;
+
+/// Width of the wordmark drawn at `height`.
+pub fn wordmark_width(height: f32) -> f32 {
+    height * WORDMARK_ASPECT
+}
+
 /// The title bar's "STRATA" wordmark at `height`, in `color`.
 pub fn wordmark(height: f32, color: Hsla) -> Icon {
-    // The SVG's viewBox is 10400 x 1550; keep that aspect so the letters are
-    // not squeezed into the icon's default square.
-    const ASPECT: f32 = 10400.0 / 1550.0;
     // No `with_size`: it forces a square that overrides the width set here.
     Icon::default()
         .data(glyph::WORDMARK)
-        .w(px(height * ASPECT))
+        .w(px(wordmark_width(height)))
         .h(px(height))
         .text_color(color)
 }
