@@ -58,13 +58,17 @@ pub struct Changes {
     /// `.git/config` changed, so remotes and upstreams may differ. History and
     /// status do not depend on it and are left alone.
     pub config: bool,
+    /// Watcher overflowed, reported a rescan/root event, dropped paths past
+    /// `MAX_PATHS`, or saw an ignore/attribute file change, so status must fall
+    /// back to a full scan.
+    pub rescan: bool,
     /// Worktree paths that changed, deduplicated, in event order.
     pub paths: Vec<PathBuf>,
 }
 
 impl Changes {
     fn is_idle(&self) -> bool {
-        !(self.worktree || self.index || self.refs || self.head || self.config)
+        !(self.worktree || self.index || self.refs || self.head || self.config || self.rescan)
     }
 }
 
@@ -208,6 +212,10 @@ impl Watch {
             // refreshes would cause storms, and the UI refreshes anyway when it
             // regains focus.
             let Ok(event) = event else { continue };
+            if event.need_rescan() {
+                changes.worktree = true;
+                changes.rescan = true;
+            }
             // Access events fire for every open/read, including our own reads,
             // and never change content. `Other` is meta-information.
             if matches!(event.kind, EventKind::Access(_) | EventKind::Other) {
@@ -242,6 +250,10 @@ impl Watch {
                         Scope::Refs => changes.refs = true,
                         Scope::Head => changes.head = true,
                         Scope::Config => changes.config = true,
+                        Scope::Rescan => {
+                            changes.worktree = true;
+                            changes.rescan = true;
+                        }
                         Scope::Ignored => {}
                     }
                     continue;
@@ -253,6 +265,7 @@ impl Watch {
                 if relative.as_os_str().is_empty() {
                     // The worktree root itself, e.g. an FSEvents "root changed".
                     changes.worktree = true;
+                    changes.rescan = true;
                     continue;
                 }
 
@@ -284,7 +297,7 @@ impl Watch {
         // batch. Failing to build it (missing index, unreadable config) must
         // not drop real changes on the floor, hence the fallbacks below.
         let repo = filter.repo.to_thread_local();
-        let index = match repo.open_index() {
+        let index = match repo.index_or_empty() {
             Ok(index) => index,
             Err(_) => {
                 push_candidates(changes, workdir, candidates);
@@ -304,6 +317,10 @@ impl Watch {
         };
 
         for (relative, is_dir) in candidates {
+            if is_rules_file(&relative) {
+                push_path(changes, workdir.given.join(relative));
+                continue;
+            }
             let mode = is_dir.then_some(gix::index::entry::Mode::DIR);
             let ignored = stack
                 .at_path(&relative, mode)
@@ -327,9 +344,21 @@ fn push_candidates(
 
 fn push_path(changes: &mut Changes, path: PathBuf) {
     changes.worktree = true;
+    if is_rules_file(&path) {
+        changes.rescan = true;
+    }
     if changes.paths.len() < MAX_PATHS {
         changes.paths.push(path);
+    } else {
+        changes.rescan = true;
     }
+}
+
+fn is_rules_file(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(OsStr::to_str),
+        Some(".gitignore" | ".gitattributes" | ".gitmodules")
+    )
 }
 
 /// The debounce loop.
@@ -495,6 +524,8 @@ enum Scope {
     Head,
     /// `.git/config`, which decides the configured remotes and upstreams.
     Config,
+    /// `.git/info/exclude` or `.git/info/attributes` changed; requires a full status scan.
+    Rescan,
     /// Git bookkeeping that cannot change what the UI shows.
     Ignored,
 }
@@ -504,7 +535,8 @@ enum Scope {
 /// `objects/` churn (fetches, gc), reflogs and lock files dominate event volume
 /// and never affect the views, so they are dropped before they can wake the UI.
 fn classify_git_dir(relative: &Path) -> Scope {
-    let Some(Component::Normal(first)) = relative.components().next() else {
+    let mut components = relative.components();
+    let Some(Component::Normal(first)) = components.next() else {
         // The git dir itself (metadata-only event).
         return Scope::Ignored;
     };
@@ -531,6 +563,15 @@ fn classify_git_dir(relative: &Path) -> Scope {
     // edit the configuration, so the file has to be visible to the session.
     if first == OsStr::new("config") {
         return Scope::Config;
+    }
+    if first == OsStr::new("info")
+        && matches!(
+            components.next(),
+            Some(Component::Normal(name))
+                if name == OsStr::new("exclude") || name == OsStr::new("attributes")
+        )
+    {
+        return Scope::Rescan;
     }
     // Pseudo-refs that move as a result of ref-changing operations; refreshing
     // refs is the closest match, and it is cheap.
@@ -576,6 +617,11 @@ mod tests {
         assert_eq!(classify_git_dir(Path::new("ORIG_HEAD")), Scope::Refs);
         assert_eq!(classify_git_dir(Path::new("MERGE_HEAD")), Scope::Refs);
         assert_eq!(classify_git_dir(Path::new("config")), Scope::Config);
+        assert_eq!(classify_git_dir(Path::new("info/exclude")), Scope::Rescan);
+        assert_eq!(
+            classify_git_dir(Path::new("info/attributes")),
+            Scope::Rescan
+        );
     }
 
     #[test]
@@ -611,16 +657,56 @@ mod tests {
             }
             .is_idle()
         );
+        assert!(
+            !Changes {
+                rescan: true,
+                ..Changes::default()
+            }
+            .is_idle()
+        );
     }
 
     #[test]
-    fn worktree_paths_are_capped() {
+    fn worktree_paths_are_capped_and_mark_rescan() {
         let mut changes = Changes::default();
-        for i in 0..MAX_PATHS + 10 {
+        for i in 0..MAX_PATHS {
             push_path(&mut changes, PathBuf::from(format!("/worktree/file{i}")));
         }
         assert!(changes.worktree);
+        assert!(!changes.rescan);
         assert_eq!(changes.paths.len(), MAX_PATHS);
+
+        push_path(&mut changes, PathBuf::from("/worktree/overflow"));
+        assert!(changes.rescan);
+        assert_eq!(changes.paths.len(), MAX_PATHS);
+    }
+
+    #[test]
+    fn rescan_flag_and_rules_files_force_rescan() {
+        let watch = Watch {
+            workdir: Some(Root::new(Path::new("/worktree"))),
+            git_dir: Root::new(Path::new("/worktree/.git")),
+            debounce: Duration::from_millis(10),
+            filter: None,
+        };
+
+        let overflow = notify::Event::new(EventKind::Other).set_flag(notify::event::Flag::Rescan);
+        let changes = watch.changes(&[Ok(overflow)]);
+        assert!(changes.worktree);
+        assert!(changes.rescan);
+        assert!(!changes.is_idle());
+
+        let gitignore = notify::Event::new(EventKind::Modify(notify::event::ModifyKind::Any))
+            .add_path(PathBuf::from("/worktree/.gitignore"));
+        let changes = watch.changes(&[Ok(gitignore)]);
+        assert!(changes.worktree);
+        assert!(changes.rescan);
+
+        let info_exclude = notify::Event::new(EventKind::Modify(notify::event::ModifyKind::Any))
+            .add_path(PathBuf::from("/worktree/.git/info/exclude"));
+        let changes = watch.changes(&[Ok(info_exclude)]);
+        assert!(changes.worktree);
+        assert!(changes.rescan);
     }
 
     /// The debounce used by the session, so the rule is tested at its real

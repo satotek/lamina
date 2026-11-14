@@ -946,3 +946,406 @@ fn failed_conversion_falls_back_to_raw_bytes() {
         Some(raw.as_slice())
     );
 }
+
+#[test]
+fn incremental_edit_and_delete_tracked_file_and_revert_clean() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "one\n");
+    repo.write("b.txt", "keep\n");
+    repo.git(&["add", "--", "a.txt", "b.txt"]);
+    repo.git(&["commit", "-q", "-m", "init"]);
+
+    let open = repo.open();
+    let mut prev = open.status().expect("baseline");
+
+    repo.write("a.txt", "two\n");
+    let next = open
+        .status_incremental(&prev, &[repo.path().join("a.txt")])
+        .expect("incremental edit")
+        .expect("must not fall back");
+    assert_eq!(next.unstaged, vec![modified("a.txt")]);
+    open.assert_incremental_matches_full(&next)
+        .expect("matches");
+    assert_matches_git(&repo);
+    prev = next;
+
+    // Reverting to original bytes makes the file clean again.
+    repo.write("a.txt", "one\n");
+    let next = open
+        .status_incremental(&prev, &[repo.path().join("a.txt")])
+        .expect("incremental revert")
+        .expect("must not fall back");
+    assert_eq!(next, WorktreeStatus::default());
+    open.assert_incremental_matches_full(&next)
+        .expect("matches");
+    prev = next;
+
+    // Deleting a tracked file and restoring it.
+    fs::remove_file(repo.path().join("b.txt")).expect("remove b.txt");
+    let next = open
+        .status_incremental(&prev, &[repo.path().join("b.txt")])
+        .expect("incremental delete")
+        .expect("must not fall back");
+    assert_eq!(next.unstaged, vec![deleted("b.txt")]);
+    open.assert_incremental_matches_full(&next)
+        .expect("matches");
+    prev = next;
+
+    repo.write("b.txt", "keep\n");
+    let next = open
+        .status_incremental(&prev, &[repo.path().join("b.txt")])
+        .expect("incremental restore")
+        .expect("must not fall back");
+    assert_eq!(next, WorktreeStatus::default());
+    open.assert_incremental_matches_full(&next)
+        .expect("matches");
+}
+
+#[test]
+fn incremental_create_delete_and_rename_untracked_file() {
+    let repo = TestRepo::new();
+    repo.write("tracked.txt", "base\n");
+    repo.git(&["add", "--", "tracked.txt"]);
+    repo.git(&["commit", "-q", "-m", "init"]);
+
+    let open = repo.open();
+    let mut prev = open.status().expect("baseline");
+
+    repo.write("uno.txt", "uno\n");
+    let next = open
+        .status_incremental(&prev, &[repo.path().join("uno.txt")])
+        .expect("incremental create")
+        .expect("must not fall back");
+    assert_eq!(next.unstaged, vec![untracked("uno.txt")]);
+    open.assert_incremental_matches_full(&next)
+        .expect("matches");
+    prev = next;
+
+    fs::rename(repo.path().join("uno.txt"), repo.path().join("due.txt")).expect("rename");
+    let next = open
+        .status_incremental(
+            &prev,
+            &[repo.path().join("uno.txt"), repo.path().join("due.txt")],
+        )
+        .expect("incremental rename")
+        .expect("must not fall back");
+    assert_eq!(next.unstaged, vec![untracked("due.txt")]);
+    open.assert_incremental_matches_full(&next)
+        .expect("matches");
+    prev = next;
+
+    fs::remove_file(repo.path().join("due.txt")).expect("remove");
+    let next = open
+        .status_incremental(&prev, &[repo.path().join("due.txt")])
+        .expect("incremental delete")
+        .expect("must not fall back");
+    assert_eq!(next, WorktreeStatus::default());
+    open.assert_incremental_matches_full(&next)
+        .expect("matches");
+}
+
+#[test]
+fn incremental_untracked_directory_with_files() {
+    let repo = TestRepo::new();
+    repo.write("tracked.txt", "base\n");
+    repo.git(&["add", "--", "tracked.txt"]);
+    repo.git(&["commit", "-q", "-m", "init"]);
+
+    let open = repo.open();
+    let mut prev = open.status().expect("baseline");
+
+    // Reporting only the newly created directory must still discover all files inside.
+    repo.write("dir/a.txt", "a\n");
+    repo.write("dir/sub/b.txt", "b\n");
+    let next = open
+        .status_incremental(&prev, &[repo.path().join("dir")])
+        .expect("incremental dir create")
+        .expect("must not fall back");
+    assert_eq!(
+        next.unstaged,
+        vec![untracked("dir/a.txt"), untracked("dir/sub/b.txt")]
+    );
+    open.assert_incremental_matches_full(&next)
+        .expect("matches");
+    prev = next;
+
+    // Renaming the whole directory.
+    fs::rename(repo.path().join("dir"), repo.path().join("dir2")).expect("rename dir");
+    let next = open
+        .status_incremental(&prev, &[repo.path().join("dir"), repo.path().join("dir2")])
+        .expect("incremental dir rename")
+        .expect("must not fall back");
+    assert_eq!(
+        next.unstaged,
+        vec![untracked("dir2/a.txt"), untracked("dir2/sub/b.txt")]
+    );
+    open.assert_incremental_matches_full(&next)
+        .expect("matches");
+    prev = next;
+
+    // Removing the directory clears all child untracked entries.
+    fs::remove_dir_all(repo.path().join("dir2")).expect("remove dir2");
+    let next = open
+        .status_incremental(&prev, &[repo.path().join("dir2")])
+        .expect("incremental dir remove")
+        .expect("must not fall back");
+    assert_eq!(next, WorktreeStatus::default());
+    open.assert_incremental_matches_full(&next)
+        .expect("matches");
+}
+
+#[test]
+fn incremental_ignored_files_and_rule_fallbacks() {
+    let repo = TestRepo::new();
+    repo.write(".gitignore", "*.log\nignored_dir/\n");
+    repo.write("tracked.txt", "base\n");
+    repo.git(&["add", "--", ".gitignore", "tracked.txt"]);
+    repo.git(&["commit", "-q", "-m", "init"]);
+
+    let open = repo.open();
+    let prev = open.status().expect("baseline");
+
+    repo.write("app.log", "ignored\n");
+    repo.write("ignored_dir/out.bin", "ignored\n");
+    let next = open
+        .status_incremental(
+            &prev,
+            &[
+                repo.path().join("app.log"),
+                repo.path().join("ignored_dir/out.bin"),
+            ],
+        )
+        .expect("incremental ignored")
+        .expect("must not fall back");
+    assert_eq!(next, WorktreeStatus::default());
+    open.assert_incremental_matches_full(&next)
+        .expect("matches");
+
+    // Any rules / exclude / git-internal / root path forces a full scan (`None`).
+    repo.write(".gitignore", "*.log\nignored_dir/\n*.tmp\n");
+    assert!(
+        open.status_incremental(&prev, &[repo.path().join(".gitignore")])
+            .expect("gitignore")
+            .is_none()
+    );
+    assert!(
+        open.status_incremental(&prev, &[repo.path().join("sub/.gitignore")])
+            .expect("nested gitignore")
+            .is_none()
+    );
+    assert!(
+        open.status_incremental(&prev, &[repo.path().join(".gitattributes")])
+            .expect("gitattributes")
+            .is_none()
+    );
+    assert!(
+        open.status_incremental(&prev, &[repo.path().join(".gitmodules")])
+            .expect("gitmodules")
+            .is_none()
+    );
+    assert!(
+        open.status_incremental(&prev, &[repo.path().join(".git/info/exclude")])
+            .expect("info/exclude")
+            .is_none()
+    );
+    assert!(
+        open.status_incremental(&prev, &[repo.path().join(".git/index")])
+            .expect("git index")
+            .is_none()
+    );
+    assert!(
+        open.status_incremental(&prev, &[repo.path().to_path_buf()])
+            .expect("workdir root")
+            .is_none()
+    );
+}
+
+#[test]
+fn incremental_tracked_dir_delete_and_file_dir_replacements() {
+    let repo = TestRepo::new();
+    repo.write("swap_f", "file\n");
+    repo.write("swap_d/nested.txt", "nested\n");
+    repo.write("gone_d/a.txt", "a\n");
+    repo.write("gone_d/sub/b.txt", "b\n");
+    repo.git(&["add", "--", "swap_f", "swap_d/nested.txt", "gone_d"]);
+    repo.git(&["commit", "-q", "-m", "init"]);
+
+    let open = repo.open();
+    let mut prev = open.status().expect("baseline");
+
+    // Replacing a tracked file with a directory (reported only via child path).
+    fs::remove_file(repo.path().join("swap_f")).expect("remove swap_f");
+    repo.write("swap_f/inside.txt", "inside\n");
+    let next = open
+        .status_incremental(&prev, &[repo.path().join("swap_f/inside.txt")])
+        .expect("file to dir")
+        .expect("must not fall back");
+    open.assert_incremental_matches_full(&next)
+        .expect("matches");
+    assert_matches_git(&repo);
+    prev = next;
+
+    // Replacing a tracked directory with a plain file.
+    fs::remove_dir_all(repo.path().join("swap_d")).expect("remove swap_d");
+    repo.write("swap_d", "now a file\n");
+    let next = open
+        .status_incremental(&prev, &[repo.path().join("swap_d")])
+        .expect("dir to file")
+        .expect("must not fall back");
+    open.assert_incremental_matches_full(&next)
+        .expect("matches");
+    assert_matches_git(&repo);
+    prev = next;
+
+    // Removing a whole tracked directory.
+    fs::remove_dir_all(repo.path().join("gone_d")).expect("remove gone_d");
+    let next = open
+        .status_incremental(&prev, &[repo.path().join("gone_d")])
+        .expect("remove tracked dir")
+        .expect("must not fall back");
+    open.assert_incremental_matches_full(&next)
+        .expect("matches");
+    assert_matches_git(&repo);
+}
+
+#[test]
+fn incremental_mixed_burst_and_special_characters() {
+    let repo = TestRepo::new();
+    repo.write(".gitignore", "*.log\n");
+    repo.write("staged.txt", "v1\n");
+    repo.write("edited.txt", "v1\n");
+    repo.write("deleted.txt", "bye\n");
+    repo.write("clean.txt", "same\n");
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "-q", "-m", "init"]);
+
+    // Partially staged change must be preserved across incremental updates.
+    repo.write("staged.txt", "v2\n");
+    repo.git(&["add", "--", "staged.txt"]);
+    repo.write("temp.txt", "temp\n");
+
+    let open = repo.open();
+    let prev = open.status().expect("baseline");
+
+    // Mixed burst: edit tracked, delete tracked, edit staged worktree, remove untracked,
+    // add untracked with special glob chars, add untracked dir, add ignored file.
+    repo.write("edited.txt", "v2\n");
+    fs::remove_file(repo.path().join("deleted.txt")).expect("remove deleted.txt");
+    repo.write("staged.txt", "v3\n");
+    fs::remove_file(repo.path().join("temp.txt")).expect("remove temp.txt");
+    repo.write("weird*[1].txt", "glob-like\n");
+    repo.write("newdir/one.txt", "one\n");
+    repo.write("newdir/sub/two.txt", "two\n");
+    repo.write("debug.log", "ignored\n");
+
+    let changed = vec![
+        repo.path().join("edited.txt"),
+        repo.path().join("deleted.txt"),
+        repo.path().join("staged.txt"),
+        repo.path().join("temp.txt"),
+        repo.path().join("weird*[1].txt"),
+        repo.path().join("newdir"),
+        repo.path().join("newdir/one.txt"),
+        repo.path().join("newdir/sub/two.txt"),
+        repo.path().join("debug.log"),
+    ];
+    let next = open
+        .status_incremental(&prev, &changed)
+        .expect("mixed burst")
+        .expect("must not fall back");
+    assert_eq!(next.staged, vec![modified("staged.txt")]);
+    open.assert_incremental_matches_full(&next)
+        .expect("matches");
+    assert_matches_git(&repo);
+}
+
+#[test]
+fn incremental_falls_back_when_change_set_or_directory_exceeds_limit() {
+    let repo = TestRepo::new();
+    repo.write("base.txt", "base\n");
+    repo.git(&["add", "--", "base.txt"]);
+    repo.git(&["commit", "-q", "-m", "init"]);
+    let open = repo.open();
+    let prev = open.status().expect("baseline");
+
+    // Over MAX_INCREMENTAL_PATHS distinct input paths.
+    let many: Vec<PathBuf> = (0..=strata_core::repo::MAX_INCREMENTAL_PATHS)
+        .map(|i| repo.path().join(format!("f{i}.txt")))
+        .collect();
+    assert!(
+        open.status_incremental(&prev, &many)
+            .expect("many paths")
+            .is_none()
+    );
+
+    // Directory with over MAX_INCREMENTAL_PATHS untracked files inside.
+    let big_dir = repo.path().join("big_untracked");
+    fs::create_dir_all(&big_dir).expect("create big_untracked");
+    for i in 0..=strata_core::repo::MAX_INCREMENTAL_PATHS {
+        fs::write(big_dir.join(format!("u{i}.txt")), "u").expect("write untracked");
+    }
+    assert!(
+        open.status_incremental(&prev, &[big_dir])
+            .expect("big untracked dir")
+            .is_none()
+    );
+}
+
+#[test]
+#[ignore = "perf: reads STRATA_BENCH_REPO"]
+fn bench_status_incremental_on_repo() {
+    use std::time::Instant;
+
+    let Some(repo_path) = std::env::var_os("STRATA_BENCH_REPO")
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+    else {
+        eprintln!("STRATA_BENCH_REPO is unset; skipping");
+        return;
+    };
+    let target = std::env::var("STRATA_BENCH_PATH").unwrap_or_else(|_| "README".into());
+    let targets: Vec<&str> = target.split(',').filter(|s| !s.is_empty()).collect();
+    let repo = Repo::open(&repo_path).expect("open benchmark repo");
+
+    // Warm up OS file cache and verify baseline.
+    let baseline = repo.status().expect("warmup status");
+    let mut full_times = Vec::with_capacity(5);
+    let mut full_status = baseline.clone();
+    for _ in 0..5 {
+        let start = Instant::now();
+        full_status = repo.status().expect("full status");
+        full_times.push(start.elapsed());
+    }
+
+    // Simulate the pre-edit snapshot where the target path was still clean.
+    let mut pre_edit = baseline.clone();
+    pre_edit
+        .unstaged
+        .retain(|change| !targets.contains(&change.path.as_str()));
+
+    let target_paths: Vec<PathBuf> = targets.iter().map(|p| repo_path.join(p)).collect();
+    let mut inc_times = Vec::with_capacity(10);
+    let mut inc_status = None;
+    for _ in 0..10 {
+        let start = Instant::now();
+        inc_status = repo
+            .status_incremental(&pre_edit, &target_paths)
+            .expect("incremental status");
+        inc_times.push(start.elapsed());
+    }
+    let inc_status = inc_status.expect("incremental path should not fall back");
+    assert_eq!(inc_status, full_status, "incremental must match full scan");
+
+    full_times.sort();
+    inc_times.sort();
+    eprintln!(
+        "repo={} target={} changes={} | full_status median={:.2} ms (min={:.2} ms) | incremental median={:.2} ms (min={:.2} ms)",
+        repo_path.display(),
+        target,
+        full_status.unstaged.len(),
+        full_times[full_times.len() / 2].as_secs_f64() * 1000.0,
+        full_times[0].as_secs_f64() * 1000.0,
+        inc_times[inc_times.len() / 2].as_secs_f64() * 1000.0,
+        inc_times[0].as_secs_f64() * 1000.0,
+    );
+}

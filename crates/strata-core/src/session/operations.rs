@@ -133,6 +133,7 @@ fn run_one(
     let _ = status.send(RefreshStatus {
         ack: Some(ack_tx),
         config: held.config && !history_stale,
+        ..RefreshStatus::default()
     });
     let _ = ack_rx.recv_timeout(REFRESH_TIMEOUT);
 

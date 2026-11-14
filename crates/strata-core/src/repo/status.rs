@@ -1,14 +1,20 @@
 //! Owned by the repo-status task: status, commit changes, file contents.
 
+use std::collections::BTreeSet;
 use std::io::{ErrorKind, Read};
+use std::path::{Component, Path, PathBuf};
 
-use gix::bstr::{BStr, ByteSlice};
+use gix::bstr::{BStr, BString, ByteSlice};
 use gix::object::tree::EntryMode;
 use gix::status::plumbing::index_as_worktree::{Change, EntryStatus};
 use gix::status::tree_index::TrackRenames;
 
 use super::Repo;
 use crate::{ChangeKind, Error, FileChange, Oid, Result, WorktreeStatus};
+
+/// Maximum number of changed paths (or affected index entries under a
+/// changed directory) handled incrementally before falling back to a full scan.
+pub const MAX_INCREMENTAL_PATHS: usize = 1000;
 
 impl Repo {
     /// Compare `HEAD` to the index and the index to the working tree.
@@ -56,6 +62,166 @@ impl Repo {
         staged.sort_by(|a, b| a.path.cmp(&b.path));
         unstaged.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(WorktreeStatus { staged, unstaged })
+    }
+
+    /// Recompute worktree status only for `paths` and merge into `prev`.
+    ///
+    /// Callers must only invoke this when `.git/index`, `HEAD`, and `refs` have
+    /// not changed since `prev` was produced. Returns `Ok(None)` when a full
+    /// scan is required (too many paths, worktree root, `.gitignore` /
+    /// `.gitattributes` / `.gitmodules` edits, or directories with large or
+    /// unknown contents).
+    pub fn status_incremental(
+        &self,
+        prev: &WorktreeStatus,
+        paths: &[PathBuf],
+    ) -> Result<Option<WorktreeStatus>> {
+        let Some(workdir) = self.workdir() else {
+            return Ok(None);
+        };
+        if paths.len() > MAX_INCREMENTAL_PATHS {
+            return Ok(None);
+        }
+
+        let workdir_abs = std::path::absolute(workdir).ok();
+        let workdir_canon = workdir.canonicalize().ok();
+        let mut targets = BTreeSet::new();
+
+        for path in paths {
+            let Some(rel) = normalize_relative(
+                path,
+                workdir,
+                workdir_abs.as_deref(),
+                workdir_canon.as_deref(),
+            ) else {
+                return Ok(None);
+            };
+            if rel.is_empty() || touches_git_or_rules(&rel) {
+                return Ok(None);
+            }
+            targets.insert(rel);
+        }
+
+        if targets.is_empty() {
+            return Ok(Some(prev.clone()));
+        }
+        if targets.len() > MAX_INCREMENTAL_PATHS {
+            return Ok(None);
+        }
+
+        let repo = self.local();
+        let index = repo.index_or_empty().map_err(Error::gix)?;
+
+        // If a file was replaced by a directory `a/b.txt`, also re-check any
+        // tracked or previously-dirty ancestor (`a`) so its deletion/type-change
+        // is picked up even if the watcher only reported the child path.
+        let initial_targets: Vec<String> = targets.iter().cloned().collect();
+        for rel in &initial_targets {
+            let mut rest = rel.as_str();
+            while let Some((parent, _)) = rest.rsplit_once('/') {
+                if index.entry_by_path(BStr::new(parent)).is_some()
+                    || prev.unstaged.iter().any(|change| change.path == parent)
+                {
+                    targets.insert(parent.to_owned());
+                }
+                rest = parent;
+            }
+        }
+
+        // Guard against directories that span many index entries or many files
+        // on disk; falling back to a full scan is safer and avoids scanning a
+        // large subtree through narrow pathspecs.
+        for rel in &targets {
+            let abs = workdir.join(rel);
+            match std::fs::symlink_metadata(&abs) {
+                Ok(meta) if meta.is_dir() => {
+                    let is_submodule = index
+                        .entry_by_path(BStr::new(rel.as_str()))
+                        .is_some_and(|entry| entry.mode.is_submodule());
+                    if !is_submodule {
+                        let prefix = format!("{rel}/");
+                        let tracked_count = index
+                            .prefixed_entries_range(BStr::new(prefix.as_str()))
+                            .map_or(0, |range| range.len());
+                        if tracked_count > MAX_INCREMENTAL_PATHS {
+                            return Ok(None);
+                        }
+                    }
+                }
+                Err(err) if err.kind() == ErrorKind::NotFound => {
+                    let prefix = format!("{rel}/");
+                    let tracked_count = index
+                        .prefixed_entries_range(BStr::new(prefix.as_str()))
+                        .map_or(0, |range| range.len());
+                    if tracked_count > MAX_INCREMENTAL_PATHS {
+                        return Ok(None);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Collapse child paths when an ancestor directory is already targeted.
+        let collapsed = collapse_nested_targets(&targets);
+        let patterns: Vec<BString> = collapsed
+            .iter()
+            .map(|rel| {
+                let mut pattern = BString::from(":(literal,top)");
+                pattern.extend_from_slice(rel.as_bytes());
+                pattern
+            })
+            .collect();
+
+        let iter = repo
+            .status(gix::progress::Discard)
+            .map_err(Error::gix)?
+            .untracked_files(gix::status::UntrackedFiles::Files)
+            .into_index_worktree_iter(patterns)
+            .map_err(Error::gix)?;
+
+        let mut targeted_unstaged = Vec::new();
+        for item in iter {
+            let item = item.map_err(Error::gix)?;
+            if let Some(change) = unstaged_change(item) {
+                if touches_git_or_rules(&change.path) {
+                    return Ok(None);
+                }
+                targeted_unstaged.push(change);
+                if targeted_unstaged.len() > MAX_INCREMENTAL_PATHS {
+                    return Ok(None);
+                }
+            }
+        }
+
+        let mut unstaged = prev.unstaged.clone();
+        unstaged.retain(|change| {
+            !matches_any_target(&change.path, &collapsed)
+                && !change
+                    .old_path
+                    .as_deref()
+                    .is_some_and(|old| matches_any_target(old, &collapsed))
+        });
+        unstaged.extend(targeted_unstaged);
+        unstaged.sort_by(|a, b| a.path.cmp(&b.path));
+        unstaged.dedup();
+
+        Ok(Some(WorktreeStatus {
+            staged: prev.staged.clone(),
+            unstaged,
+        }))
+    }
+
+    /// Asserts that an incremental status result matches a full scan.
+    ///
+    /// Intended for debug checks and tests where the full scan acts as the
+    /// single source of truth.
+    pub fn assert_incremental_matches_full(&self, incremental: &WorktreeStatus) -> Result<()> {
+        let full = self.status()?;
+        assert_eq!(
+            incremental, &full,
+            "incremental status diverged from full status scan"
+        );
+        Ok(())
     }
 
     /// Files changed by `commit` relative to its first parent (or the empty tree).
@@ -374,4 +540,80 @@ fn kind_changed(before: EntryMode, after: EntryMode) -> bool {
         }
     }
     family(before) != family(after)
+}
+
+fn normalize_relative(
+    path: &Path,
+    workdir: &Path,
+    workdir_abs: Option<&Path>,
+    workdir_canon: Option<&Path>,
+) -> Option<String> {
+    let rel = if path.is_relative() {
+        path.to_path_buf()
+    } else if let Ok(rel) = path.strip_prefix(workdir) {
+        rel.to_path_buf()
+    } else if let Some(abs) = workdir_abs
+        && let Ok(rel) = path.strip_prefix(abs)
+    {
+        rel.to_path_buf()
+    } else if let Some(canon) = workdir_canon
+        && let Ok(rel) = path.strip_prefix(canon)
+    {
+        rel.to_path_buf()
+    } else if let Some(canon) = workdir_canon
+        && let Ok(path_canon) = path.canonicalize()
+        && let Ok(rel) = path_canon.strip_prefix(canon)
+    {
+        rel.to_path_buf()
+    } else {
+        return None;
+    };
+
+    let mut out = String::new();
+    for component in rel.components() {
+        match component {
+            Component::Normal(part) => {
+                if !out.is_empty() {
+                    out.push('/');
+                }
+                out.push_str(&part.to_string_lossy());
+            }
+            Component::CurDir => {}
+            Component::ParentDir | Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(out)
+}
+
+fn touches_git_or_rules(rel: &str) -> bool {
+    rel.split('/').any(|part| part == ".git")
+        || matches!(
+            rel.rsplit('/').next(),
+            Some(".gitignore" | ".gitattributes" | ".gitmodules")
+        )
+}
+
+fn collapse_nested_targets(targets: &BTreeSet<String>) -> Vec<String> {
+    let mut collapsed: Vec<String> = Vec::with_capacity(targets.len());
+    for target in targets {
+        let covered_by_prev = collapsed.last().is_some_and(|prev| {
+            target == prev
+                || target
+                    .strip_prefix(prev.as_str())
+                    .is_some_and(|rest| rest.starts_with('/'))
+        });
+        if !covered_by_prev {
+            collapsed.push(target.clone());
+        }
+    }
+    collapsed
+}
+
+fn matches_any_target(path: &str, targets: &[String]) -> bool {
+    targets.iter().any(|target| {
+        path == target
+            || path
+                .strip_prefix(target.as_str())
+                .is_some_and(|rest| rest.starts_with('/'))
+    })
 }

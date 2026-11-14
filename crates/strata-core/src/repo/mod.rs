@@ -34,6 +34,7 @@ pub use commit_graph::{
 pub use history::{PathHistory, PathHistoryEntries, PathHistoryEntry};
 pub use in_progress::{InProgressCommit, InProgressDetails, RebaseOnto};
 pub use log::CommitWalk;
+pub use status::MAX_INCREMENTAL_PATHS;
 pub use submodules::{SubmoduleInfo, SubmoduleStatus};
 pub use worktrees::WorktreeInfo;
 

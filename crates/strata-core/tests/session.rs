@@ -1644,6 +1644,111 @@ fn cancelling_mid_stream_blame_stops_events() {
 }
 
 #[test]
+fn incremental_watch_tracks_worktree_edits_and_falls_back_on_gitignore_and_git_add() {
+    let repo = TestRepo::new();
+    repo.write(".gitignore", "*.log\n");
+    repo.write("a.txt", "one\n");
+    repo.write("b.txt", "one\n");
+    repo.commit_all("base");
+    let harness = Harness::open(repo);
+    harness.wait_for_complete(1);
+    harness.warm_up_watcher();
+
+    let repo_handle = harness.repo.repo_handle();
+
+    // 1. Edit a tracked file (reuses history & refs).
+    let before = harness.session.snapshot();
+    harness.repo.write("a.txt", "two\n");
+    let snap = harness.wait_for_status(|s| {
+        s.unstaged
+            .iter()
+            .any(|c| c.path == "a.txt" && c.kind == strata_core::ChangeKind::Modified)
+    });
+    assert!(Arc::ptr_eq(&before.refs, &snap.refs));
+    assert!(Arc::ptr_eq(&before.commit_index, &snap.commit_index));
+    repo_handle
+        .assert_incremental_matches_full(&snap.status)
+        .expect("edit tracked matches full");
+
+    // 2. Create, rename, and delete an untracked file.
+    harness.repo.write("uno.txt", "uno\n");
+    let snap = harness.wait_for_status(|s| s.unstaged.iter().any(|c| c.path == "uno.txt"));
+    repo_handle
+        .assert_incremental_matches_full(&snap.status)
+        .expect("create untracked matches full");
+
+    fs::rename(
+        harness.repo.path().join("uno.txt"),
+        harness.repo.path().join("due.txt"),
+    )
+    .expect("rename untracked");
+    let snap = harness.wait_for_status(|s| {
+        !s.unstaged.iter().any(|c| c.path == "uno.txt")
+            && s.unstaged.iter().any(|c| c.path == "due.txt")
+    });
+    repo_handle
+        .assert_incremental_matches_full(&snap.status)
+        .expect("rename untracked matches full");
+
+    fs::remove_file(harness.repo.path().join("due.txt")).expect("delete untracked");
+    let snap = harness.wait_for_status(|s| !s.unstaged.iter().any(|c| c.path == "due.txt"));
+    repo_handle
+        .assert_incremental_matches_full(&snap.status)
+        .expect("delete untracked matches full");
+
+    // 3. Create an untracked directory with files.
+    harness.repo.write("dir/one.txt", "one\n");
+    harness.repo.write("dir/sub/two.txt", "two\n");
+    let snap = harness.wait_for_status(|s| {
+        s.unstaged.iter().any(|c| c.path == "dir/one.txt")
+            && s.unstaged.iter().any(|c| c.path == "dir/sub/two.txt")
+    });
+    repo_handle
+        .assert_incremental_matches_full(&snap.status)
+        .expect("untracked dir matches full");
+
+    // 4. Add a file covered by .gitignore, plus change .gitignore (must fall back).
+    harness.repo.write("ignored.log", "noise\n");
+    harness.repo.write(".gitignore", "*.log\n*.tmp\n");
+    harness.repo.write("scratch.tmp", "tmp\n");
+    harness.repo.write("keep.txt", "keep\n");
+    let snap = harness.wait_for_status(|s| {
+        s.unstaged.iter().any(|c| c.path == ".gitignore")
+            && s.unstaged.iter().any(|c| c.path == "keep.txt")
+    });
+    assert!(!snap.status.unstaged.iter().any(|c| c.path == "ignored.log"));
+    assert!(!snap.status.unstaged.iter().any(|c| c.path == "scratch.tmp"));
+    repo_handle
+        .assert_incremental_matches_full(&snap.status)
+        .expect("gitignore change matches full");
+
+    // 5. External `git add` (index change, must fall back).
+    harness.repo.git(&["add", "a.txt"]);
+    let snap = harness.wait_for_status(|s| {
+        s.staged.iter().any(|c| c.path == "a.txt") && !s.unstaged.iter().any(|c| c.path == "a.txt")
+    });
+    repo_handle
+        .assert_incremental_matches_full(&snap.status)
+        .expect("git add matches full");
+
+    // 6. Mixed burst (tracked edit + untracked dir + delete + ignored).
+    harness.repo.write("b.txt", "two\n");
+    harness.repo.write("dir2/nested.txt", "nested\n");
+    fs::remove_file(harness.repo.path().join("keep.txt")).expect("remove keep.txt");
+    harness.repo.write("burst.log", "ignored\n");
+    let snap = harness.wait_for_status(|s| {
+        s.unstaged
+            .iter()
+            .any(|c| c.path == "b.txt" && c.kind == strata_core::ChangeKind::Modified)
+            && s.unstaged.iter().any(|c| c.path == "dir2/nested.txt")
+            && !s.unstaged.iter().any(|c| c.path == "keep.txt")
+    });
+    repo_handle
+        .assert_incremental_matches_full(&snap.status)
+        .expect("mixed burst matches full");
+}
+
+#[test]
 #[ignore = "benchmarks streaming Session::request_blame on STRATA_BENCH_REPO"]
 fn bench_streaming_blame_on_repo() {
     let repo_path = std::env::var("STRATA_BENCH_REPO")

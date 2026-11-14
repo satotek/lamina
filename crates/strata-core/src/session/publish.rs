@@ -20,6 +20,7 @@ pub(crate) struct PendingRefresh {
     pub(crate) index: bool,
     pub(crate) worktree: bool,
     pub(crate) config: bool,
+    pub(crate) rescan: bool,
 }
 
 impl PendingRefresh {
@@ -29,6 +30,7 @@ impl PendingRefresh {
         self.index |= changes.index;
         self.worktree |= changes.worktree;
         self.config |= changes.config;
+        self.rescan |= changes.rescan;
     }
 
     /// A ref or HEAD move invalidates the whole view, not just status.
@@ -37,7 +39,7 @@ impl PendingRefresh {
     }
 
     pub(crate) fn status_changed(&self) -> bool {
-        self.index || self.worktree
+        self.index || self.worktree || self.rescan
     }
 }
 

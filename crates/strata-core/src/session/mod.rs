@@ -963,9 +963,22 @@ fn on_watch(
     // A history reload re-reads the configuration anyway; the extra refresh is
     // only needed for a config edit that no reload covers.
     let config = changes.config && !(changes.refs || changes.head);
-    if config || changes.refs || changes.head || changes.index || changes.worktree {
+    if config || changes.refs || changes.head || changes.index || changes.worktree || changes.rescan
+    {
+        let paths = if !changes.rescan
+            && !changes.index
+            && !changes.refs
+            && !changes.head
+            && changes.worktree
+            && !changes.paths.is_empty()
+        {
+            Some(changes.paths.clone())
+        } else {
+            None
+        };
         let _ = status.send(RefreshStatus {
             config,
+            paths,
             ..RefreshStatus::default()
         });
     }
