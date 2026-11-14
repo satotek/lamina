@@ -41,7 +41,9 @@ use crate::ui::{self, ButtonSize, split_handle};
 /// One side of the comparison, as the menu that opened it named it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct CompareSide {
-    pub(crate) oid: Oid,
+    /// The commit, or `None` when the side is the empty tree: a range that
+    /// starts at a root commit has nothing on its left.
+    pub(crate) oid: Option<Oid>,
     /// A branch name when the side came from one. The header shows it beside
     /// the short id, because two branch tips of the same commit look alike.
     pub(crate) label: Option<String>,
@@ -49,22 +51,35 @@ pub(crate) struct CompareSide {
 
 impl CompareSide {
     pub(crate) fn commit(oid: Oid) -> Self {
-        Self { oid, label: None }
+        Self {
+            oid: Some(oid),
+            label: None,
+        }
     }
 
     pub(crate) fn branch(name: impl Into<String>, oid: Oid) -> Self {
         Self {
-            oid,
+            oid: Some(oid),
             label: Some(name.into()),
+        }
+    }
+
+    /// The empty tree, for a range whose oldest commit is a root.
+    pub(crate) fn empty_tree() -> Self {
+        Self {
+            oid: None,
+            label: Some(t!("compare.empty_tree").to_string()),
         }
     }
 
     /// The name the header leads with: the branch, or the short id. The short
     /// id follows a branch name, but is not repeated when it is the title.
     fn title(&self) -> String {
-        self.label
-            .clone()
-            .unwrap_or_else(|| data::short_oid(self.oid))
+        match (&self.label, self.oid) {
+            (Some(label), _) => label.clone(),
+            (None, Some(oid)) => data::short_oid(oid),
+            (None, None) => t!("compare.empty_tree").to_string(),
+        }
     }
 }
 
@@ -226,6 +241,28 @@ impl RepoView {
         );
     }
 
+    /// "Open in Compare" for a selection range: `base` is the left tree, or
+    /// `None` when the range starts at a root commit's empty tree.
+    pub(crate) fn open_compare_range(
+        &mut self,
+        base: Option<Oid>,
+        head: Oid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let left = match base {
+            Some(oid) => CompareSide::commit(oid),
+            None => CompareSide::empty_tree(),
+        };
+        self.open_compare(
+            left,
+            CompareSide::commit(head),
+            CompareMode::TwoDot,
+            window,
+            cx,
+        );
+    }
+
     /// "Compare with HEAD": the commit on the left, HEAD on the right.
     pub(crate) fn open_compare_with_head(
         &mut self,
@@ -318,7 +355,25 @@ impl RepoView {
         if let Some(ticket) = previous_diff {
             session.cancel_diff(ticket);
         }
-        let ticket = session.request_compare(compare.a.oid, compare.b.oid, compare.mode);
+        let ticket = match (compare.a.oid, compare.b.oid) {
+            (Some(a), Some(b)) => Some(session.request_compare(a, b, compare.mode)),
+            (None, Some(b)) => Some(session.request_compare_from(None, b)),
+            // An empty right side never comes from a menu; the three-dot mode
+            // has nothing to resolve either.
+            (_, None) => None,
+        };
+        let Some(ticket) = ticket else {
+            compare.ticket = None;
+            compare.comparison = None;
+            compare.files = Rc::new(Vec::new());
+            compare.error = None;
+            compare.selected = None;
+            compare.view = None;
+            compare.diff_rows = Rc::new(Vec::new());
+            compare.diff_error = None;
+            self.notify_if_active(cx);
+            return;
+        };
         compare.ticket = Some(ticket);
         compare.comparison = None;
         compare.files = Rc::new(Vec::new());
@@ -693,7 +748,7 @@ impl RepoView {
                     entity.update(cx, |this, cx| this.close_compare(window, cx));
                 })
         };
-        let swap = {
+        let swap = if a.oid.is_some() && b.oid.is_some() {
             let entity = entity.clone();
             ui::icon_button("compare-swap", IconName::Replace)
                 .size(ButtonSize::Tiny)
@@ -702,8 +757,15 @@ impl RepoView {
                 .on_click(move |_, _window, cx| {
                     entity.update(cx, |this, cx| this.swap_compare(cx));
                 })
+                .into_any_element()
+        } else {
+            // Swapping an empty tree would put it on the right, where the
+            // comparison has no tree to diff against.
+            div().into_any_element()
         };
-        let toggle = {
+        let toggle = if a.oid.is_none() {
+            div().into_any_element()
+        } else {
             let two_entity = entity.clone();
             let two_dot = ui::button("compare-two-dot", "A..B")
                 .size(ButtonSize::Tiny)
@@ -733,6 +795,7 @@ impl RepoView {
                 .gap_1()
                 .child(two_dot)
                 .child(three_dot)
+                .into_any_element()
         };
 
         let side = |side: &CompareSide| {
@@ -744,14 +807,16 @@ impl RepoView {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(side.title()),
             );
-            if side.label.is_some() {
+            if side.label.is_some()
+                && let Some(oid) = side.oid
+            {
                 block = block.child(
                     div()
                         .flex_none()
                         .font_family(design.mono.clone())
                         .text_size(px(10.5))
                         .text_color(design.muted)
-                        .child(data::short_oid(side.oid)),
+                        .child(data::short_oid(oid)),
                 );
             }
             block.into_any_element()
@@ -789,7 +854,10 @@ impl RepoView {
 
     /// "3 ahead · 2 behind", or nothing while the comparison is in flight.
     fn compare_counts(&self, design: &Design) -> Option<AnyElement> {
-        let comparison = self.compare.as_ref()?.comparison.as_ref()?;
+        let compare = self.compare.as_ref()?;
+        // The empty tree has no history to count.
+        compare.a.oid?;
+        let comparison = compare.comparison.as_ref()?;
         let mut row = div()
             .flex()
             .flex_none()

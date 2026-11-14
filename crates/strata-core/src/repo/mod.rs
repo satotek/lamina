@@ -5,9 +5,10 @@
 //! `upstream.rs` (tracking branches), `history.rs` (path-limited history),
 //! `message.rs` (commit and merge messages) and `remotes.rs` (configured
 //! remotes) are owned by separate tasks. `stat.rs` counts the lines a commit
-//! added and removed. `compare.rs` compares two arbitrary commits. `submodules.rs`
-//! and `worktrees.rs` list the checkouts a repository owns beyond its own
-//! working tree. `blame.rs` attributes each line of a file to a commit.
+//! added and removed. `compare.rs` compares two arbitrary commits. `range.rs`
+//! plans the comparison of a multi-selection. `submodules.rs` and
+//! `worktrees.rs` list the checkouts a repository owns beyond its own working
+//! tree. `blame.rs` attributes each line of a file to a commit.
 //! `in_progress.rs` reads details of an unfinished merge, rebase, cherry-pick,
 //! revert, bisect or `am`. `config.rs` reports every effective configuration
 //! value with the file and line that set it, without writing anything.
@@ -24,6 +25,7 @@ mod in_progress;
 mod lfs;
 mod log;
 mod message;
+mod range;
 mod reflog;
 mod remotes;
 mod renames;
@@ -53,6 +55,7 @@ pub use content_search::{
 pub use history::{PathHistory, PathHistoryEntries, PathHistoryEntry};
 pub use in_progress::{InProgressCommit, InProgressDetails, RebaseOnto};
 pub use log::CommitWalk;
+pub use range::{SelectionRange, SelectionRangeKind, SelectionRangeMode, plan_selection_range};
 pub use signature::{
     CommitSignature, SignatureConfigHints, SignatureFormat, SignatureValidity,
     classify_signature_armor,

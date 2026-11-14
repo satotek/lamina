@@ -24,6 +24,7 @@ mod rebase_dialog;
 pub(crate) mod rebase_onto;
 mod rebase_plan;
 mod reflog;
+mod selection_diff;
 mod sidebar;
 mod signatures;
 mod split;
@@ -446,6 +447,8 @@ pub struct RepoView {
     /// Commit-wide added/removed counts; the details pane keeps the selected
     /// file's counts until they arrive.
     stat: details::CommitStatSlot,
+    /// The range a multi-selection compares, and its answer.
+    selection_diff: selection_diff::SelectionDiff,
     signatures: signatures::SignatureTracker,
     show_signatures: bool,
     /// The selected commit's file tree while it replaces the diff pane.
@@ -619,6 +622,7 @@ impl RepoView {
             lfs_notice: None,
             lfs_notice_dismissed: false,
             stat: details::CommitStatSlot::default(),
+            selection_diff: selection_diff::SelectionDiff::default(),
             signatures: signatures::SignatureTracker::default(),
             show_signatures: crate::settings::Settings::get(cx)
                 .history
@@ -869,6 +873,7 @@ impl RepoView {
         self.cancel_file_history();
         self.discard_blame();
         self.cancel_diff();
+        self.drop_selection_diff();
         self.files_epoch = self.files_epoch.wrapping_add(1);
         self.tree.close();
         let worktree_diff = self.worktree.cancel_diff();
@@ -973,13 +978,16 @@ impl RepoView {
                 if !self.search_failed(ticket, &error, cx)
                     && !self.file_history_failed(ticket, &error, cx)
                     && !self.reflog_failed(ticket, &error, cx)
+                    && !self.selection_comparison_failed(ticket, &error, cx)
                     && !self.compare_failed(ticket, &error, cx)
                 {
                     self.blame_failed(ticket, &error, cx);
                 }
             }
             SessionEvent::CompareReady { ticket, comparison } => {
-                self.compare_ready(ticket, &comparison, cx);
+                if !self.selection_comparison_ready(ticket, &comparison, cx) {
+                    self.compare_ready(ticket, &comparison, cx);
+                }
             }
             SessionEvent::CommitStatReady { ticket, stat } => {
                 if self.stat.accept(ticket, stat) {
@@ -1515,14 +1523,26 @@ impl RepoView {
         self.tree.close();
         self.cancel_diff();
 
+        // A multi-selection compares its range instead of the focused commit:
+        // the summary block and the range's file list take the pane.
+        let multi = self.selection.is_multi();
+        if multi {
+            self.sync_selection_diff(cx);
+        } else {
+            self.drop_selection_diff();
+        }
+
         // The smoke run scrolls as fast as it can; loading a file list and a
         // diff for every row would measure git instead of the renderer.
         if let Some(commit) = commit
             && !self.smoke
+            && !multi
         {
             self.load_files(commit, cx);
         }
-        self.load_commit_stat(commit, cx);
+        // The range replaces the commit-wide totals, so the focused commit has
+        // none to show while several rows are selected.
+        self.load_commit_stat(if multi { None } else { commit }, cx);
         self.load_selected_signature(commit, cx);
         self.notify_if_active(cx);
     }
@@ -1547,7 +1567,8 @@ impl RepoView {
         let focused = self.selection.focused();
         if focused == previous {
             // Only the selected set changed; the focused commit and its diff
-            // stay on screen.
+            // stay on screen, but the range the set describes did not.
+            self.sync_selection_diff(cx);
             cx.notify();
             return;
         }
@@ -1584,6 +1605,7 @@ impl RepoView {
             self.scroll_to_position(position);
         }
         if Some(focused) == previous {
+            self.sync_selection_diff(cx);
             cx.notify();
             return;
         }
@@ -1761,18 +1783,37 @@ impl RepoView {
     }
 
     fn select_file(&mut self, index: usize, cx: &mut Context<Self>) {
-        let Some(path) = self
+        let Some(change) = self
             .files
             .as_ref()
             .and_then(|files| files.get(index))
-            .map(|change| change.path.clone())
+            .cloned()
         else {
             return;
         };
-        // The commit on screen, not the selected history row: the reflog pane
-        // shows a commit the history selection may not point at.
-        let (Some(commit), Some(session)) = (self.selection_commit, self.session.as_ref()) else {
+        let Some(session) = self.session.as_ref() else {
             return;
+        };
+
+        // A multi-selection shows the range at the pair the details summary
+        // names, so the same file diff pane serves both cases.
+        let request = if let Some((base, head)) = self.selection_diff.range() {
+            DiffRequest::Compare {
+                base,
+                head,
+                old_path: change.old_path.clone(),
+                path: change.path.clone(),
+            }
+        } else {
+            // The commit on screen, not the selected history row: the reflog
+            // pane shows a commit the history selection may not point at.
+            let Some(commit) = self.selection_commit else {
+                return;
+            };
+            DiffRequest::Commit {
+                commit,
+                path: change.path.clone(),
+            }
         };
 
         self.selected_file = Some(index);
@@ -1780,7 +1821,7 @@ impl RepoView {
         self.diff_rows = Rc::new(Vec::new());
         self.diff_context.reset();
         let options = history_diff_options(cx);
-        let ticket = session.request_diff_with(DiffRequest::Commit { commit, path }, options);
+        let ticket = session.request_diff_with(request, options);
         self.diff_options = options;
         if let Some(previous) = self.diff.begin(ticket) {
             session.cancel_diff(previous);
@@ -2050,6 +2091,26 @@ impl RepoView {
         self.select(Some(index), cx);
     }
 
+    /// Selects several rows for `--select a,b`, the same way Cmd-clicking them
+    /// builds a multi-selection. `rows` is in display order, newest first.
+    fn debug_multi_select(&mut self, rows: &[usize], cx: &mut Context<Self>) {
+        let order: Vec<usize> = (0..self.commit_count()).collect();
+        self.selection.clear();
+        // Oldest first so the newest row, which the details pane follows, ends
+        // up focused.
+        for &row in rows.iter().rev() {
+            if row < order.len() {
+                self.selection.click(row, false, true, &order);
+            }
+        }
+        let focused = self.selection.focused();
+        self.commit_scroll
+            .scroll_to_item(rows[0], ScrollStrategy::Center);
+        let commit =
+            focused.and_then(|index| self.source().and_then(|source| source.commit_id(index)));
+        self.focus_commit(focused, commit, cx);
+    }
+
     fn advance_smoke(&mut self, cx: &mut Context<Self>) {
         let len = self.commit_count();
         if len > 0 {
@@ -2164,18 +2225,21 @@ impl RepoView {
             return;
         };
 
-        let select_ready = if let Some(rev) = runner.launch.select.clone() {
-            runner.resolve_rev(
-                &rev,
-                RevSlot::Select,
-                &snapshot,
-                session.repo().clone(),
-                window,
-                cx,
-            )
-        } else {
-            true
-        };
+        let mut select_ready = true;
+        if let Some(list) = runner.launch.select.clone() {
+            for (index, rev) in debug_launch::select_revs(&list).into_iter().enumerate() {
+                if !runner.resolve_rev(
+                    rev,
+                    RevSlot::Select(index),
+                    &snapshot,
+                    session.repo().clone(),
+                    window,
+                    cx,
+                ) {
+                    select_ready = false;
+                }
+            }
+        }
         let tree_ready = if let Some(target) = runner.launch.tree.clone() {
             runner.resolve_rev(
                 target.rev(),
@@ -2207,25 +2271,38 @@ impl RepoView {
         }
 
         let launch = runner.launch;
-        if let Some(rev) = &launch.select {
-            match runner.select_oid {
-                Some(Ok(oid)) => match snapshot.commit_index.get(&oid).copied() {
-                    Some(index) => {
-                        self.jump(index, cx);
-                        eprintln!(
-                            "debug-launch: applied --select {rev} -> {} (row {index})",
-                            data::short_oid(oid)
-                        );
+        if let Some(list) = &launch.select {
+            let revs = debug_launch::select_revs(list);
+            let mut rows = Vec::new();
+            for (index, rev) in revs.iter().enumerate() {
+                match &runner.select_oids[index] {
+                    Some(Ok(oid)) => match snapshot.commit_index.get(oid).copied() {
+                        Some(row) => rows.push(row),
+                        None => eprintln!(
+                            "debug-launch: error: --select '{rev}' resolved to {}, which is not in the loaded history",
+                            data::short_oid(*oid)
+                        ),
+                    },
+                    Some(Err(err)) => {
+                        eprintln!("debug-launch: error: --select '{rev}' failed: {err}");
                     }
-                    None => eprintln!(
-                        "debug-launch: error: --select '{rev}' resolved to {}, which is not in the loaded history",
-                        data::short_oid(oid)
-                    ),
-                },
-                Some(Err(err)) => {
-                    eprintln!("debug-launch: error: --select '{rev}' failed: {err}");
+                    None => {}
                 }
-                None => {}
+            }
+            // A higher row is an older commit, so sorting puts the newest
+            // selection first, which is the order the details pane reads.
+            rows.sort_unstable();
+            rows.dedup();
+            match rows.as_slice() {
+                [] => {}
+                [row] => {
+                    self.jump(*row, cx);
+                    eprintln!("debug-launch: applied --select {list} (row {row})");
+                }
+                _ => {
+                    self.debug_multi_select(&rows, cx);
+                    eprintln!("debug-launch: applied --select {list} (rows {rows:?})");
+                }
             }
         }
 
@@ -2380,9 +2457,9 @@ impl RepoView {
             return;
         };
         match slot {
-            RevSlot::Select => {
+            RevSlot::Select(index) => {
                 runner.select_resolving = false;
-                runner.select_oid = Some(resolved);
+                runner.select_oids[index] = Some(resolved);
             }
             RevSlot::Tree => {
                 runner.tree_resolving = false;
@@ -2399,14 +2476,16 @@ impl RepoView {
 
 #[derive(Clone, Copy)]
 enum RevSlot {
-    Select,
+    Select(usize),
     Tree,
     Blame,
 }
 
 struct DebugLaunchRunner {
     launch: DebugLaunch,
-    select_oid: Option<Result<Oid, String>>,
+    /// One slot per comma-separated `--select` revision; a multi-selection
+    /// needs every revision in the loaded history before it can be applied.
+    select_oids: Vec<Option<Result<Oid, String>>>,
     select_resolving: bool,
     tree_oid: Option<Result<Oid, String>>,
     tree_resolving: bool,
@@ -2416,9 +2495,15 @@ struct DebugLaunchRunner {
 
 impl DebugLaunchRunner {
     fn new(launch: DebugLaunch) -> Self {
+        let select_oids = launch
+            .select
+            .as_deref()
+            .map(debug_launch::select_revs)
+            .map(|revs| vec![None; revs.len()])
+            .unwrap_or_default();
         Self {
             launch,
-            select_oid: None,
+            select_oids,
             select_resolving: false,
             tree_oid: None,
             tree_resolving: false,
@@ -2440,7 +2525,7 @@ impl DebugLaunchRunner {
         cx: &mut Context<RepoView>,
     ) -> bool {
         let (slot, resolving) = match which {
-            RevSlot::Select => (&mut self.select_oid, &mut self.select_resolving),
+            RevSlot::Select(index) => (&mut self.select_oids[index], &mut self.select_resolving),
             RevSlot::Tree => (&mut self.tree_oid, &mut self.tree_resolving),
             RevSlot::Blame => (&mut self.blame_oid, &mut self.blame_resolving),
         };

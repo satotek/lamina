@@ -118,6 +118,7 @@ pub(crate) struct BlameTarget {
 /// Debug launch options applied once the window and first snapshot are ready.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct DebugLaunch {
+    /// One revision, or several separated by commas for a multi-selection.
     pub select: Option<String>,
     pub file_history: Option<String>,
     pub tree: Option<TreeTarget>,
@@ -259,10 +260,11 @@ where
             match flag {
                 "--select" => {
                     if let Some(val) = take_value(flag, inline_val, &raw, &mut index, &mut errors) {
-                        if val.is_empty() {
+                        let revs = select_revs(&val);
+                        if revs.is_empty() {
                             errors.push("invalid --select '': revision cannot be empty".into());
                         } else {
-                            debug.select = Some(val);
+                            debug.select = Some(revs.join(","));
                         }
                     }
                 }
@@ -341,6 +343,15 @@ fn record_positional(arg: &str, start: &mut Option<StartMode>, errors: &mut Vec<
         None => *start = Some(StartMode::Path(PathBuf::from(arg))),
         Some(_) => errors.push(format!("unexpected extra argument '{arg}' (ignored)")),
     }
+}
+
+/// The revisions `--select` names: one, or several separated by commas.
+pub(crate) fn select_revs(select: &str) -> Vec<&str> {
+    select
+        .split(',')
+        .map(str::trim)
+        .filter(|rev| !rev.is_empty())
+        .collect()
 }
 
 fn split_flag_value(arg: &str) -> Option<(&str, Option<&str>)> {
@@ -450,6 +461,7 @@ pub(crate) fn help_text() -> String {
          --gallery shows every shared UI part, and needs no repository.\n\n\
          Debug launch options (applied once the first snapshot loads):\n\
          \x20 --select <rev>         Select and scroll to a commit (id or ref)\n\
+         \x20                        Comma-separate revisions to select several\n\
          \x20 --file-history <path>  Open file history for <path>\n\
          \x20 --tree <rev>[:<dir>]   Open the tree browser at <rev>, or in <dir>\n\
          \x20 --tree-file <rev>:<path>\n\
@@ -709,6 +721,23 @@ mod tests {
             })
         );
         assert!(parsed.debug.is_active());
+    }
+
+    #[test]
+    fn select_accepts_several_comma_separated_revisions() {
+        let parsed = parse(&[".", "--select", "HEAD, HEAD~2 ,main"]);
+        assert!(parsed.errors.is_empty());
+        assert_eq!(
+            parsed.debug.select.as_deref(),
+            Some("HEAD,HEAD~2,main"),
+            "the parsed value is normalised for the runner"
+        );
+        assert_eq!(select_revs("HEAD,HEAD~2,main"), ["HEAD", "HEAD~2", "main"]);
+
+        let empty = parse(&["--select", " , "]);
+        assert_eq!(empty.debug.select, None);
+        assert_eq!(empty.errors.len(), 1);
+        assert!(empty.errors[0].starts_with("invalid --select"));
     }
 
     #[test]

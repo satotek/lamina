@@ -45,7 +45,8 @@ pub use crate::diff::DiffOptions;
 pub use crate::repo::{
     Blame, BlameCommit, BlameHunk, CommitSignature, CompareFile, CompareMode, Comparison,
     ContentSearchEntry, ContentSearchMode, ContentSearchProgress, ContentSearchQuery,
-    InProgressCommit, InProgressDetails, RebaseOnto, SignatureFormat, SignatureValidity,
+    InProgressCommit, InProgressDetails, RebaseOnto, SelectionRange, SelectionRangeKind,
+    SelectionRangeMode, SignatureFormat, SignatureValidity,
 };
 
 use blame::BlameJob;
@@ -1010,6 +1011,15 @@ impl Session {
     /// commits, so the files are what `b` added since they diverged.
     pub fn request_compare(&self, a: Oid, b: Oid, mode: CompareMode) -> QueryTicket {
         self.queue_query(queries::QueryKind::Compare { a, b, mode })
+    }
+
+    /// Like [`request_compare`](Self::request_compare), with an explicit left
+    /// side: `base` names the commit, or is `None` for the empty tree, which is
+    /// what a range that starts at a root commit uses. The answer is the same
+    /// [`SessionEvent::CompareReady`], so callers that only need a ticket guard
+    /// handle both alike.
+    pub fn request_compare_from(&self, base: Option<Oid>, head: Oid) -> QueryTicket {
+        self.queue_query(queries::QueryKind::CompareFrom { base, head })
     }
 
     /// Lists submodules and linked worktrees off the UI thread; answers with

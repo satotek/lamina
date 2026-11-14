@@ -65,27 +65,83 @@ impl Repo {
     /// left-hand tree is the merge base, so unrelated histories compare
     /// against the empty tree, like `git diff A...B` does.
     pub fn comparison(&self, a: Oid, b: Oid, mode: CompareMode) -> Result<Comparison> {
-        let repo = self.local();
-        // One graph serves both the merge-base search and the two counting
-        // walks; a missing commit-graph only makes them slower.
-        let cache = repo.commit_graph_if_enabled().ok().flatten();
-        let mut graph = repo.revision_graph::<Commit<Flags>>(cache.as_ref());
-        let shallow = Shallow::load(&repo)?;
-
-        let merge_base = if a == b {
-            Some(a)
-        } else {
-            repo.merge_base_with_graph(a, b, &mut graph)
-                .map_err(Error::gix)?
-                .map(|id| id.detach())
-        };
+        let merge_base = self.merge_base(a, b)?;
         let base = match mode {
             CompareMode::TwoDot => Some(a),
             CompareMode::ThreeDot => merge_base,
         };
+        self.comparison_of(base, b, merge_base, Some(a))
+    }
+
+    /// The files changed between `base`'s tree and `head`'s tree.
+    ///
+    /// `base` is `None` when the left side is the empty tree, which is how a
+    /// range that starts at a root commit compares. With a commit on the left,
+    /// `merge_base` and the ahead/behind counts describe the two commits;
+    /// against the empty tree there is nothing to count.
+    pub fn comparison_from(&self, base: Option<Oid>, head: Oid) -> Result<Comparison> {
+        let merge_base = match base {
+            Some(base) => self.merge_base(base, head)?,
+            None => None,
+        };
+        self.comparison_of(base, head, merge_base, base)
+    }
+
+    /// The best merge base of `a` and `b`, or `None` for unrelated histories.
+    fn merge_base(&self, a: Oid, b: Oid) -> Result<Option<Oid>> {
+        if a == b {
+            return Ok(Some(a));
+        }
+        let repo = self.local();
+        let cache = repo.commit_graph_if_enabled().ok().flatten();
+        let mut graph = repo.revision_graph::<Commit<Flags>>(cache.as_ref());
+        Ok(repo
+            .merge_base_with_graph(a, b, &mut graph)
+            .map_err(Error::gix)?
+            .map(|id| id.detach()))
+    }
+
+    /// The comparison for an already resolved left tree. `counter` is the
+    /// commit on the other side of the ahead/behind counts, or `None` when the
+    /// left side is the empty tree.
+    fn comparison_of(
+        &self,
+        base: Option<Oid>,
+        head: Oid,
+        merge_base: Option<Oid>,
+        counter: Option<Oid>,
+    ) -> Result<Comparison> {
+        let repo = self.local();
+        let shallow = Shallow::load(&repo)?;
+
+        let (ahead, behind) = match counter {
+            Some(left) if left != head => {
+                // One graph serves the counting walks; a missing commit-graph
+                // only makes them slower.
+                let cache = repo.commit_graph_if_enabled().ok().flatten();
+                let mut graph = repo.revision_graph::<Commit<Flags>>(cache.as_ref());
+                if shallow.is_empty() {
+                    let bases: Vec<Oid> = merge_base.into_iter().collect();
+                    (
+                        count_exclusive(&mut graph, head, &bases)?,
+                        count_exclusive(&mut graph, left, &bases)?,
+                    )
+                } else {
+                    // Below the boundary there is no trustworthy merge base, so
+                    // the walk compares the two histories up to it instead. A
+                    // comparison has no unknown state, so an untrustworthy
+                    // count still shows the fetched range rather than zero.
+                    match count_exclusive_shallow(&repo, &shallow, head, left)? {
+                        Some(counts) => counts,
+                        None => exclusive_counts_shallow(&repo, &shallow, head, left)?,
+                    }
+                }
+            }
+            _ => (0, 0),
+        };
 
         let head_tree = repo
-            .find_commit(b)
+            .find_commit(head)
             .map_err(Error::gix)?
             .tree()
             .map_err(Error::gix)?;
@@ -96,7 +152,7 @@ impl Repo {
                 .map_err(Error::gix)?
                 .tree()
                 .map_err(Error::gix)?,
-            // No merge base means nothing is shared, so everything in `b` is.
+            // No base means the left side is empty, so everything is added.
             None => empty,
         };
 
@@ -116,28 +172,9 @@ impl Repo {
         let added = files.iter().map(|file| file.stat.added).sum();
         let removed = files.iter().map(|file| file.stat.removed).sum();
 
-        let (ahead, behind) = if a == b {
-            (0, 0)
-        } else if shallow.is_empty() {
-            let bases: Vec<Oid> = merge_base.into_iter().collect();
-            (
-                count_exclusive(&mut graph, b, &bases)?,
-                count_exclusive(&mut graph, a, &bases)?,
-            )
-        } else {
-            // Below the boundary there is no trustworthy merge base, so the
-            // walk compares the two histories up to it instead. A comparison
-            // has no unknown state, so an untrustworthy count still shows the
-            // fetched range rather than zero.
-            match count_exclusive_shallow(&repo, &shallow, b, a)? {
-                Some(counts) => counts,
-                None => exclusive_counts_shallow(&repo, &shallow, b, a)?,
-            }
-        };
-
         Ok(Comparison {
             base,
-            head: b,
+            head,
             merge_base,
             ahead,
             behind,
@@ -363,5 +400,38 @@ mod tests {
         assert_eq!(paths, ["theirs.txt"]);
         assert_eq!(comparison.behind, 1);
         assert_eq!(comparison.ahead, 1);
+    }
+
+    #[test]
+    fn a_range_against_the_empty_tree_lists_every_tracked_file() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "one\n");
+        repo.commit("add a");
+        repo.write("b.txt", "two\n");
+        let head = repo.commit("add b");
+        let opened = repo.open();
+
+        let all = opened.comparison_from(None, head).expect("compare");
+        assert_eq!(all.base, None, "a root range starts at the empty tree");
+        assert_eq!(all.merge_base, None);
+        assert_eq!((all.ahead, all.behind), (0, 0));
+        let paths: Vec<&str> = all
+            .files
+            .iter()
+            .map(|file| file.stat.path.as_str())
+            .collect();
+        assert_eq!(paths, ["a.txt", "b.txt"]);
+        assert_eq!(all.added, 2);
+
+        // Comparing from a parent commit is the same as the two-dot
+        // comparison of that pair, and counts the one commit between them.
+        let parent = repo.rev("HEAD~1");
+        let from_parent = opened.comparison_from(Some(parent), head).expect("compare");
+        let two_dot = opened
+            .comparison(parent, head, CompareMode::TwoDot)
+            .expect("compare");
+        assert_eq!(from_parent.files, two_dot.files);
+        assert_eq!(from_parent.base, Some(parent));
+        assert_eq!((from_parent.ahead, from_parent.behind), (1, 0));
     }
 }

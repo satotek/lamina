@@ -59,7 +59,15 @@ impl RepoView {
                 .child(self.files_summary(design))
                 .child(self.file_list(design))
         } else if self.selection.is_multi() {
-            left.child(self.commit_selection_summary(design))
+            let mut summary = left.child(self.commit_selection_summary(design));
+            // Until the range's file list arrives there is nothing to show;
+            // the diff side says what it is waiting for.
+            if self.files.is_some() {
+                summary = summary
+                    .child(self.files_summary(design))
+                    .child(self.file_list(design));
+            }
+            summary
         } else {
             let source = self.source();
             let commit = self
@@ -260,11 +268,7 @@ impl RepoView {
                 )
                 .size(ButtonSize::Tiny)
                 .ghost()
-                .tooltip(if maximized {
-                    "Restore the commit list"
-                } else {
-                    "Maximize details"
-                })
+                .tooltip(t!("action.toggle_details_maximized").to_string())
                 .on_click(move |_event, _window, cx| {
                     entity.update(cx, |this, cx| this.toggle_details_maximized(cx));
                 })
@@ -276,11 +280,29 @@ impl RepoView {
         if let Some(error) = &self.files_error {
             return message(error, design.remove_text, design);
         }
+        if self.selection.is_multi() {
+            if let Some(error) = self.selection_diff.error() {
+                return message(error, design.remove_text, design);
+            }
+            if self.selection_diff.plan().is_none() {
+                return message(t!("details.reading_range").as_ref(), design.muted, design);
+            }
+        }
         let Some(files) = &self.files else {
-            return message("reading changed files…", design.muted, design);
+            let text = if self.selection.is_multi() {
+                t!("details.comparing_range").to_string()
+            } else {
+                t!("details.reading_files").to_string()
+            };
+            return message(&text, design.muted, design);
         };
         if files.is_empty() {
-            return message("No changes in this commit", design.muted, design);
+            let text = if self.selection.is_multi() {
+                t!("details.no_range_changes").to_string()
+            } else {
+                t!("details.no_commit_changes").to_string()
+            };
+            return message(&text, design.muted, design);
         }
         self.diff_content(design, cx)
     }
@@ -290,7 +312,7 @@ impl RepoView {
             return message(error, design.remove_text, design);
         }
         let Some(view) = self.diff.view().cloned() else {
-            return message("computing diff…", design.muted, design);
+            return message(t!("worktree.computing_diff").as_ref(), design.muted, design);
         };
         if let Some(image) =
             crate::image_diff::body(&self.image_diff, &view, design, self.entity(), cx)
@@ -301,10 +323,14 @@ impl RepoView {
             return self.lfs_diff(summary, view, design, cx);
         }
         if view.diff.binary {
-            return message("Binary file", design.muted, design);
+            return message(t!("worktree.binary_file").as_ref(), design.muted, design);
         }
         if self.diff_rows.is_empty() {
-            return message("No textual changes", design.muted, design);
+            return message(
+                t!("worktree.no_text_changes").as_ref(),
+                design.muted,
+                design,
+            );
         }
         let list = self.diff_rows_list(Rc::clone(&self.diff_rows), Some(view), design, cx);
         match self.diff_context.notice() {
@@ -339,14 +365,14 @@ impl RepoView {
         if missing && let Some(path) = self.selected_file_path() {
             let entity = self.entity();
             card = card.action(
-                ui::button("lfs-download", "Download")
+                ui::button("lfs-download", t!("worktree.download").to_string())
                     .size(ButtonSize::Tiny)
                     .on_click(move |_, window, cx| {
                         let path = path.clone();
                         entity.update(cx, |this, cx| {
                             this.run_operation(
                                 Operation::LfsPull { path },
-                                "Download LFS object",
+                                t!("worktree.download_lfs").to_string(),
                                 window,
                                 cx,
                             );
@@ -357,11 +383,15 @@ impl RepoView {
         let body = if !self.diff_rows.is_empty() {
             self.diff_rows_list(Rc::clone(&self.diff_rows), Some(view), design, cx)
         } else if view.diff.binary {
-            message("Binary file", design.muted, design)
+            message(t!("worktree.binary_file").as_ref(), design.muted, design)
         } else if missing {
-            message("The object is not downloaded", design.muted, design)
+            message(t!("worktree.not_downloaded").as_ref(), design.muted, design)
         } else {
-            message("No textual changes", design.muted, design)
+            message(
+                t!("worktree.no_text_changes").as_ref(),
+                design.muted,
+                design,
+            )
         };
         div()
             .flex()

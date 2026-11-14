@@ -50,6 +50,11 @@ pub(crate) enum QueryKind {
         b: Oid,
         mode: CompareMode,
     },
+    /// A comparison with an explicit left side; `None` is the empty tree.
+    CompareFrom {
+        base: Option<Oid>,
+        head: Oid,
+    },
     /// Submodules and linked worktrees, read directly from the repository.
     SubmodulesAndWorktrees,
     /// Details of an unfinished merge/rebase/cherry-pick/revert/bisect/am.
@@ -133,6 +138,16 @@ fn answer(shared: Arc<Shared>, state: Arc<QueryState>, job: &QueryJob) -> Result
         }
         QueryKind::Compare { a, b, mode } => {
             let comparison = shared.repo.comparison(*a, *b, *mode)?;
+            if state.is_cancelled(job.ticket) || shared.is_shutdown() {
+                return Ok(());
+            }
+            shared.emit(SessionEvent::CompareReady {
+                ticket: job.ticket,
+                comparison: Arc::new(comparison),
+            });
+        }
+        QueryKind::CompareFrom { base, head } => {
+            let comparison = shared.repo.comparison_from(*base, *head)?;
             if state.is_cancelled(job.ticket) || shared.is_shutdown() {
                 return Ok(());
             }

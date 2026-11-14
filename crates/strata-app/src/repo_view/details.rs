@@ -9,10 +9,11 @@ use gpui::{
     AnyElement, App, ClickEvent, ClipboardItem, Context, FontWeight, InteractiveElement,
     IntoElement, ParentElement, Styled, Window, div, px, uniform_list,
 };
+use gpui_component::Selectable as _;
 use gpui_component::menu::PopupMenuItem;
 use gpui_kit_assets::IconName;
 use strata_core::diff::LineKind;
-use strata_core::session::QueryTicket;
+use strata_core::session::{QueryTicket, SelectionRangeMode};
 use strata_core::{ChangeKind, CommitStat, FileChange, FileStat, HeadInfo, Oid};
 
 use super::RepoView;
@@ -277,7 +278,7 @@ impl RepoView {
         } else {
             format!("{oldest} – {newest}")
         };
-        div()
+        let mut block = div()
             .flex()
             .flex_col()
             .gap_2()
@@ -303,7 +304,47 @@ impl RepoView {
                     .text_size(px(11.0))
                     .text_color(design.muted)
                     .child(range),
-            )
+            );
+
+        // What the file list and the diff below actually compare, and the ways
+        // to change or widen that pair.
+        if self.selection_diff.plan().is_some() {
+            if self.selection_diff.diverged() {
+                block = block.child(range_note(
+                    t!("details.not_one_line").to_string(),
+                    design.muted,
+                ));
+            } else if let Some(skipped) = self.selection_diff.skipped() {
+                block = block.child(range_note(
+                    t!("details.range_skipped", count = skipped).to_string(),
+                    design.muted,
+                ));
+            }
+            if self.selection_diff.offers_mode_toggle() {
+                block = block.child(self.selection_range_toggle());
+            }
+            let entity = self.entity();
+            block = block.child(
+                div().flex().items_center().child(
+                    crate::ui::button(
+                        "selection-open-compare",
+                        t!("details.open_in_compare").to_string(),
+                    )
+                    .icon(IconName::Replace)
+                    .size(crate::ui::ButtonSize::Small)
+                    .on_click(move |_event, window, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.open_selection_range_compare(window, cx);
+                        });
+                    }),
+                ),
+            );
+        }
+        if let Some(error) = self.selection_diff.error() {
+            block = block.child(range_note(error.to_owned(), design.remove_text));
+        }
+
+        block
             .child(
                 div()
                     .text_size(px(11.0))
@@ -311,6 +352,41 @@ impl RepoView {
                     .child(t!("history.cherry_pick_hint").to_string()),
             )
             .into_any_element()
+    }
+
+    /// The two-commit choice between the net range and the two endpoints.
+    fn selection_range_toggle(&self) -> AnyElement {
+        let current = self.selection_diff.mode();
+        let mut row = div().flex().items_center().gap_1();
+        for (mode, label, tooltip, id) in [
+            (
+                SelectionRangeMode::Range,
+                t!("details.range_changes").to_string(),
+                t!("details.range_changes_tooltip").to_string(),
+                "selection-range-mode",
+            ),
+            (
+                SelectionRangeMode::BetweenEndpoints,
+                t!("details.between_two").to_string(),
+                t!("details.between_two_tooltip").to_string(),
+                "selection-endpoints-mode",
+            ),
+        ] {
+            let entity = self.entity();
+            row = row.child(
+                crate::ui::button(id, label)
+                    .size(crate::ui::ButtonSize::Tiny)
+                    .ghost()
+                    .selected(current == mode)
+                    .tooltip(tooltip)
+                    .on_click(move |_event, _window, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.set_selection_range_mode(mode, cx);
+                        });
+                    }),
+            );
+        }
+        row.into_any_element()
     }
 
     /// "N files" and the commit's line counts once the stat has arrived; the
@@ -346,15 +422,22 @@ impl RepoView {
                     t!("history.files_changed.other", count = files).to_string()
                 }),
         );
-        if let Some((added, removed)) = self
-            .stat
-            .get()
-            .map(|stat| (stat.added, stat.removed))
-            .or_else(|| {
-                self.diff_stats()
-                    .map(|(added, removed)| (u64::from(added), u64::from(removed)))
-            })
-        {
+        // The range's totals replace the focused commit's; the diff on screen
+        // stands in only for a single commit until its stat arrives.
+        let totals = if self.range_diff_active() {
+            self.selection_diff
+                .comparison()
+                .map(|comparison| (comparison.added, comparison.removed))
+        } else {
+            self.stat
+                .get()
+                .map(|stat| (stat.added, stat.removed))
+                .or_else(|| {
+                    self.diff_stats()
+                        .map(|(added, removed)| (u64::from(added), u64::from(removed)))
+                })
+        };
+        if let Some((added, removed)) = totals {
             row = row.child(
                 div()
                     .flex()
@@ -394,7 +477,14 @@ impl RepoView {
         };
         let entity = self.entity();
         let selected = self.selected_file;
-        let blame_commit = self.selection_commit;
+        // A range shows files from two trees, not from the focused commit, so
+        // blame and the "at HEAD" editor wording would name the wrong commit.
+        let range_active = self.range_diff_active();
+        let blame_commit = if range_active {
+            None
+        } else {
+            self.selection_commit
+        };
         // The editor opens the working copy whatever commit is selected, so
         // the entry says when that copy is not what the diff shows.
         let at_head = match (blame_commit, head_oid(self.source().as_ref())) {
@@ -410,18 +500,32 @@ impl RepoView {
             .map(|change: &FileChange| (change.path.clone(), change.kind))
             .collect();
         // The stat is keyed by path and sorted, while the file list keeps the
-        // commit's change order, so align the two once per frame.
-        let counts: Vec<Option<FileStat>> = files
-            .iter()
-            .map(|change| {
-                self.stat.get().and_then(|stat| {
-                    stat.files
+        // commit's change order, so align the two once per frame. A range gets
+        // its counts from the comparison, which already lists matching files.
+        let counts: Vec<Option<FileStat>> = if range_active {
+            self.selection_diff
+                .comparison()
+                .map(|comparison| {
+                    comparison
+                        .files
                         .iter()
-                        .find(|file| file.path == change.path)
-                        .cloned()
+                        .map(|file| Some(file.stat.clone()))
+                        .collect()
                 })
-            })
-            .collect();
+                .unwrap_or_default()
+        } else {
+            files
+                .iter()
+                .map(|change| {
+                    self.stat.get().and_then(|stat| {
+                        stat.files
+                            .iter()
+                            .find(|file| file.path == change.path)
+                            .cloned()
+                    })
+                })
+                .collect()
+        };
 
         uniform_list("changed-files", count, move |range, _window, _cx| {
             range
@@ -538,6 +642,16 @@ impl RepoView {
         .min_h_0()
         .into_any_element()
     }
+}
+
+/// One explanation line inside the multi-selection summary.
+fn range_note(text: impl Into<gpui::SharedString>, color: gpui::Hsla) -> AnyElement {
+    div()
+        .min_w_0()
+        .text_size(px(11.0))
+        .text_color(color)
+        .child(text.into())
+        .into_any_element()
 }
 
 /// The commit HEAD points at, when the source knows it.
