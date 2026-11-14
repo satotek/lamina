@@ -15,6 +15,7 @@ use super::RepoView;
 use crate::diff_view::{self, DiffColors, Row as DiffRow};
 use crate::style::{self, Design};
 use crate::ui::{self, ButtonSize, split_handle};
+use crate::worktree_panel::MainMode;
 
 impl RepoView {
     pub(super) fn diff_pane(&self, design: &Design, cx: &mut App) -> AnyElement {
@@ -50,7 +51,13 @@ impl RepoView {
             // the first frame uses the same proportions as the measured ones.
             None => left.flex_basis(relative(super::split::files_fraction(cx))),
         };
-        left = if self.selection.is_multi() {
+        left = if self.mode == MainMode::Reflog {
+            // The reflog row is the commit on screen: the history selection is
+            // left where it was, so its details must not stand in.
+            left.child(self.reflog_details(design))
+                .child(self.files_summary(design))
+                .child(self.file_list(design))
+        } else if self.selection.is_multi() {
             left.child(self.commit_selection_summary(design))
         } else {
             let source = self.source();

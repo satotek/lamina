@@ -341,6 +341,7 @@ pub enum MainMode {
     #[default]
     History,
     Worktree,
+    Reflog,
 }
 
 /// One row of the flattened diff, plus where it points in the [`FileDiff`].
@@ -789,6 +790,7 @@ impl WorktreePanel {
 
 impl RepoView {
     pub(crate) fn open_worktree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.leave_reflog(cx);
         self.mode = MainMode::Worktree;
         let focus = self.worktree.ensure_focus(cx);
         window.focus(&focus, cx);
@@ -829,6 +831,9 @@ impl RepoView {
     }
 
     pub(crate) fn close_worktree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Leaving the reflog for the history view has to put the history
+        // selection back in the details pane.
+        self.leave_reflog(cx);
         self.mode = MainMode::History;
         if let Some(session) = self.session.as_ref()
             && let Some(ticket) = self.worktree.diff.cancel()

@@ -213,6 +213,12 @@ impl RepoView {
         if self.session.is_none() {
             return;
         }
+        // The file history replaces the history pane, so the reflog has to
+        // hand the main area back before it opens.
+        if self.mode == crate::worktree_panel::MainMode::Reflog {
+            self.leave_reflog(cx);
+            self.mode = crate::worktree_panel::MainMode::History;
+        }
         self.discard_blame();
         self.cancel_file_history();
         self.file_history = Some(FileHistory::new(path));

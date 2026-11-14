@@ -18,6 +18,7 @@ use crate::actions::{
     self, ExtendSelectionNext, ExtendSelectionPrevious, NavigateBack, OpenInEditor,
     OpenTerminalHere, SelectFirst, SelectLast, SelectNext, SelectPageDown, SelectPageUp,
     SelectPrevious, StashChanges, SwitchBranch, ToggleDetailsMaximized, ToggleFrameStats,
+    UndoLastAction,
 };
 use crate::branches::CreateBranchFromHead;
 use crate::data::Source;
@@ -92,6 +93,11 @@ impl Render for RepoView {
             .on_action(
                 cx.listener(|this, _: &StashChanges, window, cx| this.stash_changes(window, cx)),
             )
+            .on_action(
+                cx.listener(|this, _: &UndoLastAction, window, cx| {
+                    this.undo_last_action(window, cx)
+                }),
+            )
             .on_action(cx.listener(|this, _: &OpenTerminalHere, _, cx| this.open_terminal_here(cx)))
             .on_action(
                 cx.listener(|this, _: &OpenInEditor, _, cx| this.open_selected_file_in_editor(cx)),
@@ -148,6 +154,7 @@ impl Render for RepoView {
                 match self.mode {
                     MainMode::History => self.history_split(entity.clone(), &design, cx),
                     MainMode::Worktree => self.worktree_view(entity.clone(), window, cx),
+                    MainMode::Reflog => self.reflog_view(entity.clone(), &design, cx),
                 }
             };
             // The banner spans the top of the main area, above whichever view

@@ -17,6 +17,7 @@ mod history;
 mod in_progress;
 mod log;
 mod message;
+mod reflog;
 mod remotes;
 mod renames;
 mod stat;

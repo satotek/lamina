@@ -117,6 +117,111 @@ pub struct StashInfo {
     pub branch: Option<String>,
 }
 
+/// What a reflog message says the action was, as far as the messages strata
+/// recognises go. Anything else is [`ReflogKind::Other`] and is shown as the
+/// raw message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ReflogKind {
+    Commit,
+    /// `git commit --amend`.
+    Amend,
+    /// A checkout or switch, including one that creates a branch.
+    Checkout,
+    Reset,
+    /// A rebase entry other than its finish (start, pick, squash, abort).
+    RebaseStart,
+    /// The entry that records the branch the rebase left behind.
+    RebaseFinish,
+    Merge,
+    CherryPick,
+    Pull,
+    /// `git branch` creating a branch (or `git switch -c`).
+    BranchCreate,
+    /// `git branch -m`.
+    BranchRename,
+    Other,
+}
+
+impl ReflogKind {
+    /// Classifies one reflog message. The prefixes are git's own wording, which
+    /// is why they are matched literally instead of trying to infer the action
+    /// from the text after the colon.
+    pub fn parse(message: &str) -> Self {
+        let message = message.trim_start();
+        // The amend form shares the `commit` prefix, so it is checked first.
+        if message.starts_with("commit (amend)") {
+            Self::Amend
+        } else if message.starts_with("commit") {
+            Self::Commit
+        } else if message.starts_with("checkout: moving from ")
+            || message.starts_with("switch: moving from ")
+        {
+            Self::Checkout
+        } else if message.starts_with("reset: ") {
+            Self::Reset
+        } else if message.starts_with("rebase (finish)") {
+            Self::RebaseFinish
+        } else if message.starts_with("rebase (") {
+            Self::RebaseStart
+        } else if message.starts_with("merge ") {
+            Self::Merge
+        } else if message.starts_with("cherry-pick") {
+            Self::CherryPick
+        } else if message.starts_with("pull") {
+            Self::Pull
+        } else if message.starts_with("branch: Created") {
+            Self::BranchCreate
+        } else if message.starts_with("Branch: renamed") {
+            Self::BranchRename
+        } else {
+            Self::Other
+        }
+    }
+
+    /// Whether the state before an entry of this kind can be restored with a
+    /// branch move (see [`ReflogKind::moves_branch`]) or a switch.
+    ///
+    /// `RebaseStart`, branch creation and rename have no state of their own to
+    /// go back to: a rebase start is undone with its finish or abort entry, and
+    /// a created or renamed branch is not something a reset restores.
+    pub fn can_restore(self) -> bool {
+        matches!(
+            self,
+            Self::Commit
+                | Self::Amend
+                | Self::Checkout
+                | Self::Reset
+                | Self::RebaseFinish
+                | Self::Merge
+                | Self::CherryPick
+                | Self::Pull
+        )
+    }
+
+    /// Whether restoring this entry moves the branch rather than switching it.
+    pub fn moves_branch(self) -> bool {
+        self.can_restore() && self != Self::Checkout
+    }
+}
+
+/// One reflog entry, as the reflog view and undo read it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReflogEntry {
+    /// `HEAD`, or the local branch whose reflog holds the entry.
+    pub reference: String,
+    /// The ref's target before the action.
+    pub old_id: Oid,
+    /// The ref's target after the action.
+    pub new_id: Oid,
+    pub committer_name: String,
+    pub committer_email: String,
+    /// Seconds since the Unix epoch.
+    pub time: i64,
+    /// git's message for the action, e.g. `commit: fix the parser`.
+    pub message: String,
+    pub kind: ReflogKind,
+}
+
 /// Line counts of one file changed by a commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileStat {

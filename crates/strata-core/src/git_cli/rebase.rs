@@ -393,7 +393,7 @@ fn todo_text(steps: &[RebaseStep], scratch: &Scratch) -> Result<String> {
     Ok(todo)
 }
 
-fn state_name(state: RepoState) -> &'static str {
+pub(super) fn state_name(state: RepoState) -> &'static str {
     match state {
         RepoState::Normal => "nothing",
         RepoState::Merging => "a merge",

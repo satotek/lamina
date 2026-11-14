@@ -33,8 +33,8 @@ use crate::patch::LineSelection;
 use crate::repo::{CommitGraphAdvice, Repo, SubmoduleInfo, WorktreeInfo};
 use crate::watch::RepoWatcher;
 use crate::{
-    CommitInfo, CommitStat, ConflictEntry, Error, HeadInfo, Oid, RefInfo, RemoteInfo, RepoState,
-    Result, StashInfo, UpstreamInfo, WorktreeStatus,
+    CommitInfo, CommitStat, ConflictEntry, Error, HeadInfo, Oid, RefInfo, ReflogEntry, RemoteInfo,
+    RepoState, Result, StashInfo, UpstreamInfo, WorktreeStatus,
 };
 
 pub use crate::diff::DiffOptions;
@@ -432,6 +432,12 @@ pub enum Operation {
         target: Oid,
         mode: ResetMode,
     },
+    /// Restore the state before a reflog entry: `None` undoes the newest HEAD
+    /// action strata can restore, `Some(entry)` restores that row. A branch
+    /// move runs `git reset --keep`; a checkout switches back to its source.
+    UndoReflog {
+        entry: Option<ReflogEntry>,
+    },
     /// A lightweight tag when `message` is `None`, an annotated one otherwise.
     CreateTag {
         name: String,
@@ -610,6 +616,12 @@ pub enum SessionEvent {
         ticket: QueryTicket,
         submodules: Arc<Vec<SubmoduleInfo>>,
         worktrees: Arc<Vec<WorktreeInfo>>,
+    },
+    /// HEAD's and the local branches' reflogs, newest first, for a ticket from
+    /// [`Session::request_reflog`].
+    ReflogReady {
+        ticket: QueryTicket,
+        entries: Arc<Vec<ReflogEntry>>,
     },
     /// Details of an unfinished git operation for a ticket from
     /// [`Session::request_in_progress_details`].
@@ -865,6 +877,17 @@ impl Session {
     /// re-request as cheap as the refresh itself.
     pub fn request_submodules_and_worktrees(&self) -> QueryTicket {
         self.queue_query(queries::QueryKind::SubmodulesAndWorktrees)
+    }
+
+    /// Reads HEAD's reflog and each local branch's reflog off the UI thread,
+    /// newest first, at most `limit` entries per reflog. Answers with
+    /// [`SessionEvent::ReflogReady`], or `QueryFailed` with the same ticket when
+    /// the repository cannot be read.
+    ///
+    /// Not part of [`RepoSnapshot`]: the reflog view asks again when it opens
+    /// and whenever HEAD moves while it is open.
+    pub fn request_reflog(&self, limit: usize) -> QueryTicket {
+        self.queue_query(queries::QueryKind::Reflog(limit))
     }
 
     /// Reads details of an unfinished git operation off the UI thread; answers

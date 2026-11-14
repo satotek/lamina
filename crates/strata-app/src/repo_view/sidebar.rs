@@ -1,5 +1,5 @@
-//! The sidebar: the Working tree and History entries, and the container that
-//! hosts the branch, remote, tag and stash sections.
+//! The sidebar: the Working tree, History and Reflog entries, and the
+//! container that hosts the branch, remote, tag and stash sections.
 
 use gpui::prelude::*;
 use gpui::{
@@ -66,13 +66,15 @@ impl RepoView {
         .into_any_element()
     }
 
-    /// The two view entries at the top of the sidebar.
+    /// The view entries at the top of the sidebar.
     fn nav_section(&self, cx: &mut Context<Self>, design: &Design) -> AnyElement {
         let (staged, unstaged) = self
             .source()
             .map_or((0, 0), |source| source.sidebar().working_tree);
         let changes = staged + unstaged;
         let worktree = self.mode == MainMode::Worktree;
+        let history = self.mode == MainMode::History;
+        let reflog = self.mode == MainMode::Reflog;
 
         let working_tree = div()
             .id("working-tree-entry")
@@ -115,7 +117,7 @@ impl RepoView {
             .rounded(px(7.0))
             .text_size(px(design.ui))
             .cursor_pointer()
-            .when(!worktree, |row| row.bg(design.selected))
+            .when(history, |row| row.bg(design.selected))
             .hover(|style| style.bg(design.selected))
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                 if this.mode != MainMode::History {
@@ -125,10 +127,10 @@ impl RepoView {
             .child(glyph(
                 style::glyph::COMMIT,
                 15.0,
-                if worktree {
-                    design.text
-                } else {
+                if history {
                     design.accent_text
+                } else {
+                    design.text
                 },
             ))
             .child(
@@ -136,8 +138,39 @@ impl RepoView {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .when(!worktree, |row| row.font_weight(FontWeight::MEDIUM))
+                    .when(history, |row| row.font_weight(FontWeight::MEDIUM))
                     .child("History"),
+            );
+
+        let reflog_entry = div()
+            .id("reflog-entry")
+            .flex()
+            .items_center()
+            .gap_2()
+            .h(px(30.0))
+            .px_2()
+            .rounded(px(7.0))
+            .text_size(px(design.ui))
+            .cursor_pointer()
+            .when(reflog, |row| row.bg(design.selected))
+            .hover(|style| style.bg(design.selected))
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_reflog(window, cx)))
+            .child(icon(
+                IconName::ClockArrowDown,
+                15.0,
+                if reflog {
+                    design.accent_text
+                } else {
+                    design.text
+                },
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .when(reflog, |row| row.font_weight(FontWeight::MEDIUM))
+                    .child("Reflog"),
             );
 
         div()
@@ -146,6 +179,7 @@ impl RepoView {
             .gap(px(2.0))
             .child(working_tree)
             .child(history)
+            .child(reflog_entry)
             .into_any_element()
     }
 

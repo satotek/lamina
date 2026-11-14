@@ -68,6 +68,9 @@ actions!(
         /// Stashes the working tree's changes. Handled on `RepoView` by
         /// `stash.rs`.
         StashChanges,
+        /// Restores the state before the newest reflog action strata can undo.
+        /// Handled on `RepoView` by `reflog.rs`.
+        UndoLastAction,
         /// Opens a terminal in the repository's working tree. Handled on
         /// `RepoView` by `title_bar.rs`.
         OpenTerminalHere,
@@ -128,6 +131,10 @@ const PLATFORM_PALETTE: &str = "ctrl-shift-p";
 const PLATFORM_SWITCH_BRANCH: &str = "cmd-b";
 #[cfg(not(target_os = "macos"))]
 const PLATFORM_SWITCH_BRANCH: &str = "ctrl-b";
+#[cfg(target_os = "macos")]
+const PLATFORM_UNDO_LAST: &str = "cmd-z";
+#[cfg(not(target_os = "macos"))]
+const PLATFORM_UNDO_LAST: &str = "ctrl-z";
 
 pub fn bind(cx: &mut App) {
     let scope = Some(REPO_VIEW);
@@ -152,6 +159,9 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("f12", ToggleFrameStats, scope),
         KeyBinding::new(PLATFORM_STASH, StashChanges, scope),
         KeyBinding::new(PLATFORM_SWITCH_BRANCH, SwitchBranch, scope),
+        // `z` is a letter, so a focused text field keeps `Cmd/Ctrl+Z` for its
+        // own undo; the repository action only runs outside one.
+        KeyBinding::new(PLATFORM_UNDO_LAST, UndoLastAction, navigation),
         KeyBinding::new("alt-left", NavigateBack, scope),
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-[", NavigateBack, scope),

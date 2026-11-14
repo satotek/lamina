@@ -41,7 +41,7 @@ impl RepoView {
         self.status_note = None;
         let path = match self.mode {
             MainMode::Worktree => self.worktree.selected_path().map(str::to_owned),
-            MainMode::History => self
+            MainMode::History | MainMode::Reflog => self
                 .files
                 .as_ref()
                 .and_then(|files| self.selected_file.and_then(|index| files.get(index)))
@@ -78,7 +78,7 @@ impl RepoView {
     /// Whether the commit the details pane shows is the one HEAD points at.
     /// The worktree view always shows the working tree, so it always is.
     fn selection_is_head(&self) -> bool {
-        if self.mode != MainMode::History {
+        if self.mode == MainMode::Worktree {
             return true;
         }
         let source = self.source();

@@ -21,6 +21,7 @@ mod in_progress;
 mod rebase_dialog;
 pub(crate) mod rebase_onto;
 mod rebase_plan;
+mod reflog;
 mod sidebar;
 mod split;
 mod status_bar;
@@ -358,6 +359,8 @@ pub struct RepoView {
     pub(crate) file_history: Option<FileHistory>,
     /// The job in flight and the banner for what git left in progress.
     in_progress: InProgress,
+    /// The reflog rows and the undo this view is waiting for.
+    reflog: reflog::ReflogState,
     /// The history loader suggested writing a commit-graph and the user has
     /// not answered yet.
     commit_graph_offer: bool,
@@ -538,6 +541,7 @@ impl RepoView {
             search: SearchState::default(),
             file_history: None,
             in_progress: InProgress::default(),
+            reflog: reflog::ReflogState::default(),
             commit_graph_offer: false,
             commit_graph_writing: false,
             commit_graph_dismissed: false,
@@ -728,6 +732,7 @@ impl RepoView {
         self.sync_worktree(cx);
         self.search_on_snapshot(cx);
         self.file_history_on_snapshot(cx);
+        self.reflog_on_snapshot(cx);
         // The submodule and worktree lists sit outside the snapshot, so
         // every publish — including a watcher refresh — re-reads them.
         self.refresh_extra_lists();
@@ -764,6 +769,7 @@ impl RepoView {
         self.tree.close();
         let worktree_diff = self.worktree.cancel_diff();
         let extra = self.extra_lists.cancel();
+        let reflog = self.reflog.cancel();
         let search = self.search.reset();
         let stat = self.stat.begin(None);
         let in_progress = self.in_progress.clear_details();
@@ -771,7 +777,10 @@ impl RepoView {
             if let Some(ticket) = worktree_diff {
                 session.cancel_diff(ticket);
             }
-            for ticket in [extra, search, stat, in_progress].into_iter().flatten() {
+            for ticket in [extra, reflog, search, stat, in_progress]
+                .into_iter()
+                .flatten()
+            {
                 session.cancel_query(ticket);
             }
         }
@@ -850,6 +859,7 @@ impl RepoView {
                 }
                 if !self.search_failed(ticket, &error, cx)
                     && !self.file_history_failed(ticket, &error, cx)
+                    && !self.reflog_failed(ticket, &error, cx)
                 {
                     self.blame_failed(ticket, &error, cx);
                 }
@@ -883,6 +893,9 @@ impl RepoView {
             }
             SessionEvent::InProgressDetailsReady { ticket, details } => {
                 self.on_in_progress_details_ready(ticket, details, cx);
+            }
+            SessionEvent::ReflogReady { ticket, entries } => {
+                self.reflog_ready(ticket, &entries, cx);
             }
             SessionEvent::CommandLogged(record) => {
                 self.last_command = Some(command_line(&record));
@@ -930,6 +943,7 @@ impl RepoView {
                 // The label records which operation failed, so the status bar
                 // names it instead of showing a bare git message.
                 let label = self.branches.finish(id, error.as_deref());
+                self.reflog_operation_finished(id, error.is_some());
                 let multi_pick = self.multi_pick.take();
                 if let Some(error) = error {
                     // A refused or failed edit left the selection where it was.
@@ -1074,12 +1088,12 @@ impl RepoView {
         label: impl Into<String>,
         _window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Option<OperationId> {
         if self.session.is_none() || self.is_busy() {
-            return;
+            return None;
         }
         let Some(session) = &self.session else {
-            return;
+            return None;
         };
         let label = label.into();
         let retry = match &operation {
@@ -1106,6 +1120,7 @@ impl RepoView {
         self.in_progress.submitted(id, kind);
         self.branches.start(id, label, retry);
         cx.notify();
+        Some(id)
     }
 
     /// The create-branch shortcut: starts from HEAD.
@@ -1470,13 +1485,9 @@ impl RepoView {
         else {
             return;
         };
-        let (Some(selected), Some(session)) = (self.selected, self.session.as_ref()) else {
-            return;
-        };
-        let Some(source) = self.source() else {
-            return;
-        };
-        let Some(commit) = source.commit_id(selected) else {
+        // The commit on screen, not the selected history row: the reflog pane
+        // shows a commit the history selection may not point at.
+        let (Some(commit), Some(session)) = (self.selection_commit, self.session.as_ref()) else {
             return;
         };
 

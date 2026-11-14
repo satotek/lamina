@@ -47,6 +47,8 @@ pub(crate) enum QueryKind {
     SubmodulesAndWorktrees,
     /// Details of an unfinished merge/rebase/cherry-pick/revert/bisect/am.
     InProgressDetails,
+    /// HEAD's and the local branches' reflogs, at most this many entries each.
+    Reflog(usize),
 }
 
 /// Ticket allocation and cancellation, shared between the session and the
@@ -142,6 +144,16 @@ fn answer(shared: Arc<Shared>, state: Arc<QueryState>, job: &QueryJob) -> Result
             shared.emit(SessionEvent::InProgressDetailsReady {
                 ticket: job.ticket,
                 details,
+            });
+        }
+        QueryKind::Reflog(limit) => {
+            let entries = shared.repo.reflog(*limit)?;
+            if state.is_cancelled(job.ticket) || shared.is_shutdown() {
+                return Ok(());
+            }
+            shared.emit(SessionEvent::ReflogReady {
+                ticket: job.ticket,
+                entries: Arc::new(entries),
             });
         }
         QueryKind::Search(query) => {

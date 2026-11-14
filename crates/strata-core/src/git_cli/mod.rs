@@ -21,6 +21,7 @@ mod merge;
 mod ops;
 mod progress;
 mod rebase;
+mod reflog;
 
 pub use clone::{CloneOptions, CloneOutcome, clone_repository, init_repository};
 pub use command_log::{CommandLog, CommandRecord, MAX_CAPTURE_BYTES, MAX_LOG_ENTRIES, StreamLine};
@@ -30,6 +31,7 @@ pub use rebase::{
     MoveDirection, RebaseAction, RebaseStep, drop_commit, move_commit, reword_commit,
     squash_commit_into_parent,
 };
+pub use reflog::{SwitchTarget, UndoPlan, UndoStep};
 
 use std::ffi::OsString;
 use std::io::{self, BufRead, Read, Write};

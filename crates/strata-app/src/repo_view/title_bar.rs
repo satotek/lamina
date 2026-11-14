@@ -535,7 +535,7 @@ impl RepoView {
     pub(crate) fn open_selection_in_editor(&mut self, cx: &mut Context<Self>) {
         let path = match self.mode {
             MainMode::Worktree => self.worktree.selected_path().map(str::to_owned),
-            MainMode::History => self
+            MainMode::History | MainMode::Reflog => self
                 .files
                 .as_ref()
                 .and_then(|files| self.selected_file.and_then(|index| files.get(index)))
