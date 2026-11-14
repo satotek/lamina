@@ -20,8 +20,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 
 use gix::bstr::{BString, ByteSlice as _};
-use gix::diff::blob::platform::prepare_diff::Operation;
-use gix::diff::blob::{Diff, InternedInput, ResourceKind};
+use gix::diff::blob::{Algorithm, Diff, ResourceKind};
 use gix::diff::tree::visit::Relation;
 use gix::object::tree::diff::ChangeDetached;
 use gix::object::tree::{EntryKind, EntryMode};
@@ -30,6 +29,11 @@ use gix::objs::{FindExt, TreeRefIter};
 use super::Repo;
 use super::bloom::{BloomKeys, CommitGraphBloom};
 use super::log::{CancelCheck, PathCommit, PathWalk, Shallow};
+use super::renames::{
+    CachedObjects, PreparedBlob, SimilarityCandidate, candidate_can_beat, ensure_pair_profiles,
+    is_better_match, similarity_bytes, similarity_via_platform, size_bound_passes, sort_candidates,
+    upper_similarity,
+};
 use crate::{CommitInfo, Error, Oid, Result};
 
 /// Direct-mapped entry cache slots per worker/inline checker: power of two so
@@ -994,13 +998,6 @@ struct RenameItem {
     emitted: bool,
 }
 
-#[derive(Clone, Copy)]
-enum BlobPrep {
-    Unloaded,
-    Skip,
-    Text { len: usize },
-}
-
 fn find_file_rename_source(
     repo: &gix::Repository,
     raw_changes: Vec<ChangeDetached>,
@@ -1140,40 +1137,248 @@ fn find_file_rename_source(
         .options
         .skip_internal_diff_if_external_is_configured = false;
 
-    let mut preps = vec![BlobPrep::Unloaded; items.len()];
+    let simple_platform = platform.filter.drivers().is_empty();
+    let algorithm = platform.options.algorithm.unwrap_or(Algorithm::Histogram);
+    let objects = CachedObjects::new(repo, None);
+    let mut preps = vec![PreparedBlob::Unloaded; items.len()];
+    let mut diff = Diff::default();
 
-    // Pre-check `target_idx`: if no un-emitted compatible source can possibly
-    // reach `percentage` similarity with `target`, skip scanning `0..target_idx`.
-    let target_len = match ensure_prep(
-        &mut platform,
-        repo,
-        &mut preps[target_idx],
-        &items[target_idx],
-    )? {
-        BlobPrep::Text { len } => len,
-        BlobPrep::Skip | BlobPrep::Unloaded => return Ok(None),
-    };
+    if simple_platform {
+        let Some(target_len) = preps[target_idx].ensure_len(
+            &mut platform,
+            &objects,
+            items[target_idx].id,
+            items[target_idx].mode.kind(),
+            items[target_idx].location.as_bstr(),
+            ResourceKind::NewOrDestination,
+        )?
+        else {
+            return Ok(None);
+        };
+        if target_len == 0 {
+            return Ok(None);
+        }
+
+        // Pre-check `target_idx`: build multiset-bounded candidates and verify
+        // at least one source can reach `percentage` before scanning `0..target_idx`.
+        let target_name = basename(&items[target_idx].location).to_vec();
+        let mut target_candidates = Vec::new();
+        for (src_pos, &src_idx) in source_candidates.iter().enumerate() {
+            if !modes_compatible(items[src_idx].mode, items[target_idx].mode) {
+                continue;
+            }
+            let Some(src_len) = preps[src_idx].ensure_len(
+                &mut platform,
+                &objects,
+                items[src_idx].id,
+                items[src_idx].mode.kind(),
+                items[src_idx].location.as_bstr(),
+                ResourceKind::OldOrSource,
+            )?
+            else {
+                continue;
+            };
+            if !size_bound_passes(src_len, target_len, percentage) {
+                continue;
+            }
+            let (dst_profile, src_profile) = ensure_pair_profiles(&mut preps, target_idx, src_idx);
+            let upper_sim = upper_similarity(src_len, target_len, src_profile, dst_profile);
+            if upper_sim < percentage {
+                continue;
+            }
+            let same_name = basename(&items[src_idx].location) == target_name.as_slice();
+            target_candidates.push(SimilarityCandidate {
+                src_idx,
+                src_pos,
+                upper_sim,
+                same_name,
+            });
+        }
+        if target_candidates.is_empty() {
+            return Ok(None);
+        }
+
+        sort_candidates(&mut target_candidates);
+        let target_data = preps[target_idx].data().expect("text target");
+        let mut cached_target_sims: Vec<(usize, f32)> = Vec::new();
+        let mut target_has_any = false;
+        for &cand in &target_candidates {
+            let src_data = preps[cand.src_idx].data().expect("text src");
+            let sim = similarity_bytes(src_data, target_data, algorithm, &mut diff);
+            cached_target_sims.push((cand.src_idx, sim));
+            if sim >= percentage {
+                target_has_any = true;
+                break;
+            }
+        }
+        if !target_has_any {
+            return Ok(None);
+        }
+
+        // Run Pass 2 in exact sorted destination order up through `target_idx`.
+        let mut num_checks = 0usize;
+        let mut candidates = Vec::new();
+        for dest_idx in 0..=target_idx {
+            if items[dest_idx].emitted || !items[dest_idx].added {
+                continue;
+            }
+            let dest_allowed = rewrites.track_empty
+                || matches!(items[dest_idx].relation, Some(Relation::ChildOfParent(_)))
+                || items[dest_idx].id != Oid::empty_blob(items[dest_idx].id.kind());
+            if !dest_allowed || !items[dest_idx].mode.is_blob() {
+                continue;
+            }
+
+            if dest_idx == target_idx {
+                let compatible_count = source_candidates
+                    .iter()
+                    .filter(|&&src_idx| {
+                        src_idx != dest_idx
+                            && !items[src_idx].emitted
+                            && modes_compatible(items[src_idx].mode, items[dest_idx].mode)
+                    })
+                    .count();
+                num_checks += compatible_count;
+                if max_checks != 0 && num_checks > max_checks {
+                    return Ok(None);
+                }
+
+                let dst_data = preps[dest_idx].data().expect("text dest");
+                let mut best: Option<(usize, usize, f32, bool)> = None;
+                for &cand in &target_candidates {
+                    if items[cand.src_idx].emitted {
+                        continue;
+                    }
+                    if !candidate_can_beat(best, cand) {
+                        break;
+                    }
+                    let sim = if let Some(&(_, cached)) = cached_target_sims
+                        .iter()
+                        .find(|&&(src, _)| src == cand.src_idx)
+                    {
+                        cached
+                    } else {
+                        let src_data = preps[cand.src_idx].data().expect("text src");
+                        similarity_bytes(src_data, dst_data, algorithm, &mut diff)
+                    };
+                    if sim < percentage {
+                        continue;
+                    }
+                    if is_better_match(best, cand.src_pos, sim, cand.same_name) {
+                        best = Some((cand.src_idx, cand.src_pos, sim, cand.same_name));
+                    }
+                }
+                if let Some((src_idx, _, _, _)) = best {
+                    return Ok(Some(items[src_idx].location.clone().into()));
+                }
+                return Ok(None);
+            }
+
+            let Some(dst_len) = preps[dest_idx].ensure_len(
+                &mut platform,
+                &objects,
+                items[dest_idx].id,
+                items[dest_idx].mode.kind(),
+                items[dest_idx].location.as_bstr(),
+                ResourceKind::NewOrDestination,
+            )?
+            else {
+                continue;
+            };
+            if dst_len == 0 {
+                continue;
+            }
+
+            let dest_name = basename(&items[dest_idx].location).to_vec();
+            candidates.clear();
+
+            for (src_pos, &src_idx) in source_candidates.iter().enumerate() {
+                if src_idx == dest_idx
+                    || items[src_idx].emitted
+                    || !modes_compatible(items[src_idx].mode, items[dest_idx].mode)
+                {
+                    continue;
+                }
+                num_checks += 1;
+                let Some(src_len) = preps[src_idx].ensure_len(
+                    &mut platform,
+                    &objects,
+                    items[src_idx].id,
+                    items[src_idx].mode.kind(),
+                    items[src_idx].location.as_bstr(),
+                    ResourceKind::OldOrSource,
+                )?
+                else {
+                    continue;
+                };
+                if !size_bound_passes(src_len, dst_len, percentage) {
+                    continue;
+                }
+                let (dst_profile, src_profile) =
+                    ensure_pair_profiles(&mut preps, dest_idx, src_idx);
+                let upper_sim = upper_similarity(src_len, dst_len, src_profile, dst_profile);
+                if upper_sim < percentage {
+                    continue;
+                }
+                let same_name = basename(&items[src_idx].location) == dest_name.as_slice();
+                candidates.push(SimilarityCandidate {
+                    src_idx,
+                    src_pos,
+                    upper_sim,
+                    same_name,
+                });
+            }
+
+            if max_checks != 0 && num_checks > max_checks {
+                return Ok(None);
+            }
+            if candidates.is_empty() {
+                continue;
+            }
+
+            sort_candidates(&mut candidates);
+            let dst_data = preps[dest_idx].data().expect("text dest");
+            let mut best: Option<(usize, usize, f32, bool)> = None;
+            for &cand in &candidates {
+                if !candidate_can_beat(best, cand) {
+                    break;
+                }
+                let src_data = preps[cand.src_idx].data().expect("text src");
+                let sim = similarity_bytes(src_data, dst_data, algorithm, &mut diff);
+                if sim < percentage {
+                    continue;
+                }
+                if is_better_match(best, cand.src_pos, sim, cand.same_name) {
+                    best = Some((cand.src_idx, cand.src_pos, sim, cand.same_name));
+                }
+            }
+
+            if let Some((src_idx, _, _, _)) = best {
+                items[dest_idx].emitted = true;
+                items[src_idx].emitted = true;
+            }
+        }
+        return Ok(None);
+    }
+
+    // Fallback path when custom diff drivers/filters are configured.
     let mut target_has_any_candidate = false;
     for &src_idx in &source_candidates {
         if !modes_compatible(items[src_idx].mode, items[target_idx].mode) {
             continue;
         }
-        let BlobPrep::Text { len: src_len } =
-            ensure_prep(&mut platform, repo, &mut preps[src_idx], &items[src_idx])?
-        else {
-            continue;
-        };
-        let max_len = src_len.max(target_len);
-        if max_len == 0 {
-            continue;
-        }
-        let upper = (src_len.min(target_len) as f32) / (max_len as f32);
-        if upper < percentage {
-            continue;
-        }
-        if let Some(sim) =
-            compute_similarity(&mut platform, repo, &items[target_idx], &items[src_idx])?
-            && sim >= percentage
+        if let Some(sim) = similarity_via_platform(
+            &mut platform,
+            &objects,
+            items[target_idx].id,
+            items[target_idx].mode,
+            items[target_idx].location.as_bstr(),
+            items[src_idx].id,
+            items[src_idx].mode,
+            items[src_idx].location.as_bstr(),
+            Some(percentage),
+            &mut diff,
+        )? && sim >= percentage
         {
             target_has_any_candidate = true;
             break;
@@ -1183,7 +1388,6 @@ fn find_file_rename_source(
         return Ok(None);
     }
 
-    // Run Pass 2 in exact sorted destination order up through `target_idx`.
     let mut num_checks = 0usize;
     for dest_idx in 0..=target_idx {
         if items[dest_idx].emitted || !items[dest_idx].added {
@@ -1195,11 +1399,6 @@ fn find_file_rename_source(
         if !dest_allowed || !items[dest_idx].mode.is_blob() {
             continue;
         }
-        let BlobPrep::Text { len: dst_len } =
-            ensure_prep(&mut platform, repo, &mut preps[dest_idx], &items[dest_idx])?
-        else {
-            continue;
-        };
         let dest_name = basename(&items[dest_idx].location).to_vec();
         let mut best: Option<(usize, f32, bool)> = None;
 
@@ -1211,26 +1410,18 @@ fn find_file_rename_source(
                 continue;
             }
             num_checks += 1;
-            let BlobPrep::Text { len: src_len } =
-                ensure_prep(&mut platform, repo, &mut preps[src_idx], &items[src_idx])?
-            else {
-                continue;
-            };
-            let max_len = src_len.max(dst_len);
-            if max_len == 0 {
-                continue;
-            }
-            let upper = (src_len.min(dst_len) as f32) / (max_len as f32);
-            if upper < percentage {
-                continue;
-            }
-            if let Some((_, best_sim, _)) = best
-                && upper < best_sim
-            {
-                continue;
-            }
-            let Some(sim) =
-                compute_similarity(&mut platform, repo, &items[dest_idx], &items[src_idx])?
+            let Some(sim) = similarity_via_platform(
+                &mut platform,
+                &objects,
+                items[dest_idx].id,
+                items[dest_idx].mode,
+                items[dest_idx].location.as_bstr(),
+                items[src_idx].id,
+                items[src_idx].mode,
+                items[src_idx].location.as_bstr(),
+                Some(best.map_or(percentage, |(_, b, _)| b)),
+                &mut diff,
+            )?
             else {
                 continue;
             };
@@ -1369,85 +1560,6 @@ fn match_identity_pass(
         }
     }
     None
-}
-
-fn ensure_prep(
-    platform: &mut gix::diff::blob::Platform,
-    repo: &gix::Repository,
-    slot: &mut BlobPrep,
-    item: &RenameItem,
-) -> Result<BlobPrep> {
-    if !matches!(*slot, BlobPrep::Unloaded) {
-        return Ok(*slot);
-    }
-    let kind = if item.added {
-        ResourceKind::NewOrDestination
-    } else {
-        ResourceKind::OldOrSource
-    };
-    platform
-        .set_resource(
-            item.id,
-            item.mode.kind(),
-            item.location.as_bstr(),
-            kind,
-            &repo.objects,
-        )
-        .map_err(|err| Error::other(err.to_string()))?;
-    let prep = match platform.resource(kind).and_then(|r| r.data.as_slice()) {
-        Some(buf) => BlobPrep::Text { len: buf.len() },
-        None => BlobPrep::Skip,
-    };
-    *slot = prep;
-    Ok(prep)
-}
-
-fn compute_similarity(
-    platform: &mut gix::diff::blob::Platform,
-    repo: &gix::Repository,
-    dest: &RenameItem,
-    source: &RenameItem,
-) -> Result<Option<f32>> {
-    platform
-        .set_resource(
-            dest.id,
-            dest.mode.kind(),
-            dest.location.as_bstr(),
-            ResourceKind::NewOrDestination,
-            &repo.objects,
-        )
-        .map_err(|err| Error::other(err.to_string()))?;
-    platform
-        .set_resource(
-            source.id,
-            source.mode.kind(),
-            source.location.as_bstr(),
-            ResourceKind::OldOrSource,
-            &repo.objects,
-        )
-        .map_err(|err| Error::other(err.to_string()))?;
-    let prep = platform
-        .prepare_diff()
-        .map_err(|err| Error::other(err.to_string()))?;
-    let Operation::InternalDiff { algorithm } = prep.operation else {
-        return Ok(None);
-    };
-    let old_len = prep.old.data.as_slice().unwrap_or_default().len();
-    let new_len = prep.new.data.as_slice().unwrap_or_default().len();
-    let input = InternedInput::new(prep.old.intern_source(), prep.new.intern_source());
-    let diff = Diff::compute(algorithm, &input);
-    let removed_bytes: usize = diff
-        .hunks()
-        .map(|hunk| {
-            input.before[hunk.before.start as usize..hunk.before.end as usize]
-                .iter()
-                .map(|token| input.interner[*token].len())
-                .sum::<usize>()
-        })
-        .sum();
-    Ok(Some(
-        old_len.saturating_sub(removed_bytes) as f32 / old_len.max(new_len) as f32,
-    ))
 }
 
 fn modes_compatible(a: EntryMode, b: EntryMode) -> bool {
@@ -1802,5 +1914,182 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn renames_at_varied_similarity_levels_binaries_and_huge_files_match_reference() {
+        fn numbered(prefix: &str, count: usize, start: usize) -> String {
+            use std::fmt::Write as _;
+            let mut s = String::new();
+            for i in start..(start + count) {
+                let _ = writeln!(
+                    s,
+                    "{prefix} line {i:04} payload content for history rename test"
+                );
+            }
+            s
+        }
+
+        fn write_bytes(repo: &TestRepo, rel: &str, bytes: &[u8]) {
+            let p = repo.path().join(rel);
+            if let Some(parent) = p.parent() {
+                std::fs::create_dir_all(parent).expect("create parent");
+            }
+            std::fs::write(p, bytes).expect("write bytes");
+        }
+
+        let fixture = TestRepo::new();
+        // Multiple files that will undergo renames at ~90%, ~60%, ~50% boundary, ~30% (below threshold).
+        fixture.write("src/high_0.txt", &numbered("high", 20, 0));
+        fixture.write("src/mid_0.txt", &numbered("mid", 20, 0));
+        fixture.write("src/edge_0.txt", &numbered("edge", 20, 0));
+        fixture.write("src/low_0.txt", &numbered("low", 20, 0));
+        // Competing basename tie-breakers with similar content.
+        fixture.write("竞争/alpha/dup.txt", &numbered("dup", 20, 0));
+        fixture.write("other/dup_alt.txt", &numbered("dup", 20, 0));
+        // Binary files: one exact rename, one edited binary.
+        let bin_exact: Vec<u8> = (0..256)
+            .map(|i| if i % 8 == 0 { 0 } else { i as u8 })
+            .collect();
+        let bin_edit_a: Vec<u8> = (0..256)
+            .map(|i| if i % 6 == 0 { 0 } else { i as u8 })
+            .collect();
+        write_bytes(&fixture, "bin/exact_0.bin", &bin_exact);
+        write_bytes(&fixture, "bin/edit_0.bin", &bin_edit_a);
+        // Huge (> 4 MiB) text file renamed with a small edit.
+        let mut huge = String::with_capacity(4 * 1024 * 1024 + 8192);
+        let row = "huge_history_line_0123456789abcdef0123456789abcdef\n";
+        let mut idx = 0usize;
+        while huge.len() <= 4 * 1024 * 1024 + 4096 {
+            huge.push_str(&format!("{idx:06}:{row}"));
+            idx += 1;
+        }
+        fixture.write("big/huge_0.txt", &huge);
+        fixture.commit("seed files");
+
+        // Touch each file once so history has pre-rename edits.
+        fixture.write(
+            "src/high_0.txt",
+            &format!("{}prelude\n", numbered("high", 20, 0)),
+        );
+        fixture.write("big/huge_0.txt", &format!("{huge}second line\n"));
+        fixture.commit("edit before rename");
+
+        // Commit 1: rename all simultaneously in one commit to exercise Pass 2 destination ordering.
+        for rel in [
+            "src/high_0.txt",
+            "src/mid_0.txt",
+            "src/edge_0.txt",
+            "src/low_0.txt",
+            "竞争/alpha/dup.txt",
+            "other/dup_alt.txt",
+            "bin/exact_0.bin",
+            "bin/edit_0.bin",
+            "big/huge_0.txt",
+        ] {
+            std::fs::remove_file(fixture.path().join(rel)).expect("rm old");
+        }
+        fixture.write(
+            "dst/high_1.txt",
+            &format!("{}prelude\nchanged tail\n", numbered("high", 19, 0)),
+        );
+        fixture.write(
+            "dst/mid_1.txt",
+            &format!("{}{}", numbered("mid", 12, 0), numbered("newmid", 8, 0)),
+        );
+        fixture.write(
+            "dst/edge_1.txt",
+            &format!("{}{}", numbered("edge", 10, 0), numbered("enew", 10, 10)),
+        );
+        fixture.write(
+            "dst/low_1.txt",
+            &format!("{}{}", numbered("low", 6, 0), numbered("newlow", 14, 0)),
+        );
+        fixture.write("dst/dup.txt", &format!("{}extra\n", numbered("dup", 19, 0)));
+        fixture.write(
+            "dst/dup_other.txt",
+            &format!("{}alt\n", numbered("dup", 19, 0)),
+        );
+        write_bytes(&fixture, "bin/exact_1.bin", &bin_exact);
+        let bin_edit_b: Vec<u8> = (0..256)
+            .map(|i| {
+                if i % 6 == 0 {
+                    0
+                } else {
+                    (i as u8).wrapping_mul(3)
+                }
+            })
+            .collect();
+        write_bytes(&fixture, "bin/edit_1.bin", &bin_edit_b);
+        fixture.write(
+            "big/huge_1.txt",
+            &format!("{huge}second line\nthird line\n"),
+        );
+        fixture.commit("simultaneous renames");
+
+        let repo = fixture.open();
+        for query_path in [
+            "dst/high_1.txt",
+            "dst/mid_1.txt",
+            "dst/edge_1.txt",
+            "dst/low_1.txt",
+            "dst/dup.txt",
+            "dst/dup_other.txt",
+            "bin/exact_1.bin",
+            "bin/edit_1.bin",
+            "big/huge_1.txt",
+        ] {
+            let actual: Vec<PathHistoryEntry> = repo
+                .path_history_entries(query_path)
+                .expect("path history")
+                .map(|r| r.expect("row"))
+                .collect();
+            let expected = reference_path_history(&repo, query_path);
+            assert_eq!(actual, expected, "history mismatch for {query_path}");
+        }
+
+        // Verify expected follow / stop outcomes explicitly.
+        assert_eq!(
+            repo.path_history_entries("dst/high_1.txt")
+                .expect("ok")
+                .count(),
+            3
+        );
+        assert_eq!(
+            repo.path_history_entries("dst/mid_1.txt")
+                .expect("ok")
+                .count(),
+            2
+        );
+        assert_eq!(
+            repo.path_history_entries("dst/edge_1.txt")
+                .expect("ok")
+                .count(),
+            2
+        );
+        assert_eq!(
+            repo.path_history_entries("dst/low_1.txt")
+                .expect("ok")
+                .count(),
+            1
+        );
+        assert_eq!(
+            repo.path_history_entries("bin/exact_1.bin")
+                .expect("ok")
+                .count(),
+            2
+        );
+        assert_eq!(
+            repo.path_history_entries("bin/edit_1.bin")
+                .expect("ok")
+                .count(),
+            1
+        );
+        assert_eq!(
+            repo.path_history_entries("big/huge_1.txt")
+                .expect("ok")
+                .count(),
+            3
+        );
     }
 }

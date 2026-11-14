@@ -77,6 +77,32 @@ fn merge_commit_selection_tree_diff() {
     assert_eq!(stat, stat_second, "the stats of both orders differ");
     assert_eq!(files, files_first, "the file lists of both orders differ");
 
+    if let Some(dump_dir) = std::env::var_os("STRATA_BENCH_DUMP")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty())
+    {
+        use std::fmt::Write as _;
+        std::fs::create_dir_all(&dump_dir).expect("create STRATA_BENCH_DUMP dir");
+        let mut out = format!(
+            "added={} removed={} files={}\n",
+            stat.added,
+            stat.removed,
+            stat.files.len()
+        );
+        for file in &stat.files {
+            let _ = writeln!(
+                out,
+                "{}\t{}\t{}\t{}\t{}",
+                file.path,
+                file.old_path.as_deref().unwrap_or(""),
+                file.added,
+                file.removed,
+                file.binary
+            );
+        }
+        std::fs::write(dump_dir.join(format!("{commit}.stat.txt")), out).expect("write stat dump");
+    }
+
     // The selection path asks for both at once; the second caller should wait
     // for the tree diff instead of running it again.
     let repo = Repo::open(&path).expect("open benchmark repository");

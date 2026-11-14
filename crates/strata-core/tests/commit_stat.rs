@@ -379,3 +379,121 @@ fn session_request_commit_stat_answers_with_the_same_counts() {
     };
     assert_eq!(*stat, expected);
 }
+
+#[test]
+fn parallel_commit_stat_and_blob_cache_match_git_across_mixed_edge_cases() {
+    let repo = TestRepo::new();
+
+    // Create enough files (>= MIN_PARALLEL_STAT_FILES = 64) to exercise chunked
+    // parallel workers alongside binaries, renames, empty-blob transitions, and
+    // files > 4 MiB.
+    for i in 0..80 {
+        let content = format!(
+            "// header line 1\n// header line 2\nbody line A of {i}\nbody line B of {i}\n// footer 1\n// footer 2\n"
+        );
+        repo.write(&format!("mod/file_{i:03}.rs"), &content);
+    }
+    for i in 0..10 {
+        repo.write(
+            &format!("rename/src_{i:02}.txt"),
+            &format!("prefix\nline {i} a\nline {i} b\nline {i} c\nline {i} d\nsuffix\n"),
+        );
+    }
+    repo.write_bytes("bin/old.dat", &[0, 1, 2, 3, 4]);
+    repo.write("to_empty.txt", "alpha\nbeta\n");
+    repo.write("from_empty.txt", "");
+
+    let mut huge_old = String::new();
+    let unit = "0123456789abcdef0123456789abcdef0123456789abcdef\n";
+    while huge_old.len() <= 4 * 1024 * 1024 + 256 {
+        huge_old.push_str(unit);
+    }
+    repo.write("huge_mod.txt", &huge_old);
+    repo.write("huge_renamed_old.txt", &huge_old);
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "-q", "-m", "base"]);
+
+    // Modify the 80 text files across different edit shapes (prefix/suffix/middle/EOF newline).
+    for i in 0..80 {
+        let content = match i % 4 {
+            0 => format!(
+                "// SPDX added\n// header line 1\n// header line 2\nbody line A of {i}\nbody line B of {i}\n// footer 1\n// footer 2\n"
+            ),
+            1 => format!(
+                "// header line 1\n// header line 2\nbody changed {i}\n// footer 1\n// footer 2\n"
+            ),
+            2 => format!(
+                "// header line 1\n// header line 2\nbody line A of {i}\nbody line B of {i}\n// footer 1\n// footer 2"
+            ),
+            _ => format!(
+                "// header line 1\n// header line 2\nbody line A of {i}\nbody line B of {i}\n// footer 1\n// footer 2\nadded\n"
+            ),
+        };
+        repo.write(&format!("mod/file_{i:03}.rs"), &content);
+    }
+    for i in 0..10 {
+        fs::remove_file(repo.path().join(format!("rename/src_{i:02}.txt"))).expect("rm rename src");
+        repo.write(
+            &format!("rename/dst_{i:02}.txt"),
+            &format!(
+                "prefix\nline {i} a\nline {i} b\nline {i} c\nline {i} d\nline {i} e\nsuffix\n"
+            ),
+        );
+    }
+    repo.write_bytes("bin/new.dat", &[0, 9, 8, 7]);
+    repo.write("to_empty.txt", "");
+    repo.write("from_empty.txt", "now populated\nline 2\n");
+    repo.write("huge_mod.txt", &format!("{huge_old}extra\n"));
+    fs::remove_file(repo.path().join("huge_renamed_old.txt")).expect("rm huge old");
+    repo.write(
+        "huge_renamed_new.txt",
+        &format!("{huge_old}renamed extra\n"),
+    );
+    repo.git(&["add", "-A"]);
+    repo.git(&["commit", "-q", "-m", "mixed parallel commit"]);
+    let commit = repo.head();
+
+    // Order 1: stat then changes.
+    let h1 = repo.open();
+    let stat1 = h1.commit_stat(commit).expect("stat1");
+    let changes1 = h1.commit_changes(commit).expect("changes1");
+
+    // Order 2: changes then stat.
+    let h2 = repo.open();
+    let changes2 = h2.commit_changes(commit).expect("changes2");
+    let stat2 = h2.commit_stat(commit).expect("stat2");
+
+    assert_eq!(stat1, stat2);
+    assert_eq!(changes1, changes2);
+    assert!(
+        stat1
+            .files
+            .iter()
+            .filter(|f| f.path.starts_with("huge_"))
+            .all(|f| f.binary && f.added == 0 && f.removed == 0)
+    );
+    // Huge file rename must still be paired by commit_changes despite being flagged in stat.
+    let huge_change = changes1
+        .iter()
+        .find(|c| c.path == "huge_renamed_new.txt")
+        .expect("huge rename in changes");
+    assert_eq!(huge_change.kind, ChangeKind::Renamed);
+    assert_eq!(
+        huge_change.old_path.as_deref(),
+        Some("huge_renamed_old.txt")
+    );
+
+    // Verify all non-huge files match `git show --numstat --no-renames` verbatim.
+    let git_expected = repo.git_numstat(commit);
+    let actual_non_huge: BTreeMap<String, (u64, u64, bool)> = stat1
+        .files
+        .iter()
+        .filter(|f| !f.path.starts_with("huge_"))
+        .map(|f| (f.path.clone(), (f.added, f.removed, f.binary)))
+        .collect();
+    let expected_non_huge: BTreeMap<String, (u64, u64, bool)> = git_expected
+        .into_iter()
+        .filter(|(p, _)| !p.starts_with("huge_"))
+        .collect();
+    assert_eq!(actual_non_huge, expected_non_huge);
+}

@@ -13,7 +13,7 @@ use gix::revwalk::graph::Commit;
 use super::Repo;
 use super::log::Shallow;
 use super::renames;
-use super::stat::{file_stat, tree_changes};
+use super::stat::{BlobCache, StatScratch, file_stat_with, tree_changes};
 use super::upstream::{count_exclusive, count_exclusive_shallow, exclusive_counts_shallow};
 use crate::{ChangeKind, Error, FileStat, Oid, Result};
 
@@ -101,9 +101,12 @@ impl Repo {
         };
 
         let changes = tree_changes(&repo, &base_tree, &head_tree)?;
+        let blobs = BlobCache::default();
         let mut files = Vec::new();
-        for file in renames::apply(&changes, &repo)? {
-            let stat = file_stat(&repo, &file)?;
+        let applied = renames::apply(&changes, &repo, Some(&blobs))?;
+        let mut scratch = StatScratch::new(repo.clone(), Some(&blobs));
+        for file in applied {
+            let stat = file_stat_with(&mut scratch, &file)?;
             files.push(CompareFile {
                 stat,
                 kind: file.kind,

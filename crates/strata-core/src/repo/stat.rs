@@ -12,12 +12,14 @@
 //! separate pass only the file list needs, so a line count never waits for it.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 
 use gix::bstr::{BString, ByteSlice};
+use gix::diff::blob::{Diff, InternedInput};
 use gix::object::tree::EntryMode;
 use gix::object::tree::diff::ChangeDetached;
-use gix::objs::TreeRefIter;
+use gix::objs::{FindExt as _, TreeRefIter};
 
 use super::Repo;
 use super::log::Shallow;
@@ -26,12 +28,18 @@ use crate::{ChangeKind, CommitStat, Error, FileStat, Oid, Result};
 /// A text diff above this size is skipped: counting the lines of a huge blob
 /// costs more than the whole commit view is worth, so the file is reported the
 /// way the UI shows "no line counts" (like a binary) instead.
-const MAX_STAT_BYTES: u64 = 4 * 1024 * 1024;
+pub(crate) const MAX_STAT_BYTES: u64 = 4 * 1024 * 1024;
 
 /// How many commit diffs to keep. The UI looks at one commit at a time; a
 /// selected commit and the one next to it are enough to make moving through the
 /// log cheap without holding a large merge's file list forever.
 const DIFF_CACHE_COMMITS: usize = 2;
+
+/// Minimum number of changed files before spinning up scoped worker threads.
+const MIN_PARALLEL_STAT_FILES: usize = 64;
+const STAT_CHUNK_SIZE: usize = 32;
+const MAX_STAT_WORKERS: usize = 8;
+const BLOB_CACHE_SHARDS: usize = 16;
 
 impl Repo {
     /// Added and removed lines of `commit` against its first parent, with the
@@ -44,15 +52,78 @@ impl Repo {
         // deletion and the addition that `--no-renames` counts, which is what a
         // stat needs. Rename detection is the file list's job.
         let diff = self.commit_diff(commit)?;
-        let repo = self.local();
+        let files: Vec<ChangedFile> = diff.changes.iter().filter_map(changed_file).collect();
+        if files.is_empty() {
+            return Ok(CommitStat::default());
+        }
+
+        let workers = std::thread::available_parallelism()
+            .map_or(1, |n| n.get())
+            .clamp(1, MAX_STAT_WORKERS);
 
         let mut stat = CommitStat::default();
-        for file in diff.changes.iter().filter_map(changed_file) {
-            let file = file_stat(&repo, &file)?;
-            stat.added += file.added;
-            stat.removed += file.removed;
-            stat.files.push(file);
+        stat.files.reserve(files.len());
+
+        if workers <= 1 || files.len() < MIN_PARALLEL_STAT_FILES {
+            let mut scratch = StatScratch::new(self.local(), Some(&diff.blobs));
+            for file in &files {
+                let entry = file_stat_with(&mut scratch, file)?;
+                stat.added += entry.added;
+                stat.removed += entry.removed;
+                stat.files.push(entry);
+            }
+        } else {
+            let chunks: Vec<&[ChangedFile]> = files.chunks(STAT_CHUNK_SIZE).collect();
+            let results: Vec<OnceLock<Result<Vec<FileStat>>>> =
+                (0..chunks.len()).map(|_| OnceLock::new()).collect();
+            let next_chunk = AtomicUsize::new(0);
+            let worker_count = workers.min(chunks.len());
+
+            std::thread::scope(|scope| {
+                for _ in 0..worker_count {
+                    let chunks = &chunks;
+                    let results = &results;
+                    let next_chunk = &next_chunk;
+                    let blobs = &diff.blobs;
+                    scope.spawn(move || {
+                        let mut scratch = StatScratch::new(self.local(), Some(blobs));
+                        loop {
+                            let idx = next_chunk.fetch_add(1, Ordering::Relaxed);
+                            if idx >= chunks.len() {
+                                break;
+                            }
+                            let chunk = chunks[idx];
+                            let mut out = Vec::with_capacity(chunk.len());
+                            let mut err = None;
+                            for file in chunk {
+                                match file_stat_with(&mut scratch, file) {
+                                    Ok(entry) => out.push(entry),
+                                    Err(e) => {
+                                        err = Some(e);
+                                        break;
+                                    }
+                                }
+                            }
+                            let value = match err {
+                                Some(e) => Err(e),
+                                None => Ok(out),
+                            };
+                            let _ = results[idx].set(value);
+                        }
+                    });
+                }
+            });
+
+            for slot in results {
+                let chunk_files = slot.into_inner().expect("all stat chunks completed")?;
+                for entry in chunk_files {
+                    stat.added += entry.added;
+                    stat.removed += entry.removed;
+                    stat.files.push(entry);
+                }
+            }
         }
+
         stat.files.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(stat)
     }
@@ -96,7 +167,10 @@ impl Repo {
                 };
                 let result = self
                     .diff_first_parent(commit)
-                    .map(|changes| CommitDiff { changes })
+                    .map(|changes| CommitDiff {
+                        changes,
+                        blobs: BlobCache::default(),
+                    })
                     .map(Arc::new);
                 leader.finish(&result);
                 result
@@ -118,7 +192,11 @@ impl Repo {
         #[cfg(test)]
         self.commit_diffs().record_rewrite_pass();
         let repo = self.local();
-        let files = Arc::new(super::renames::apply(&diff.changes, &repo)?);
+        let files = Arc::new(super::renames::apply(
+            &diff.changes,
+            &repo,
+            Some(&diff.blobs),
+        )?);
         self.commit_diffs().cache_rewritten(commit, &files);
         Ok(files)
     }
@@ -174,11 +252,70 @@ impl Repo {
     }
 }
 
+/// Sharded cache of decoded Added/Deleted blobs shared between `commit_stat`
+/// and `commit_files` (rename detection) on a [`CommitDiff`].
+#[derive(Default)]
+pub(crate) struct BlobCache {
+    shards: [Mutex<HashMap<Oid, CachedBlob>>; BLOB_CACHE_SHARDS],
+}
+
+#[derive(Clone)]
+pub(crate) enum CachedBlob {
+    /// Exceeded `MAX_STAT_BYTES`; `commit_stat` skips counting without inflating.
+    TooLarge,
+    Loaded(Arc<CachedBlobData>),
+}
+
+pub(crate) struct CachedBlobData {
+    pub(crate) data: Arc<[u8]>,
+    pub(crate) binary: bool,
+    pub(crate) lines: OnceLock<u64>,
+}
+
+impl BlobCache {
+    fn shard_index(oid: Oid) -> usize {
+        usize::from(oid.as_bytes()[0]) & (BLOB_CACHE_SHARDS - 1)
+    }
+
+    pub(crate) fn get(&self, oid: Oid) -> Option<CachedBlob> {
+        let map = lock(&self.shards[Self::shard_index(oid)]);
+        map.get(&oid).cloned()
+    }
+
+    pub(crate) fn insert_loaded(
+        &self,
+        oid: Oid,
+        data: Arc<[u8]>,
+        binary: bool,
+        lines: Option<u64>,
+    ) {
+        let line_cell = OnceLock::new();
+        if let Some(count) = lines {
+            let _ = line_cell.set(count);
+        }
+        let entry = CachedBlob::Loaded(Arc::new(CachedBlobData {
+            data,
+            binary,
+            lines: line_cell,
+        }));
+        let mut map = lock(&self.shards[Self::shard_index(oid)]);
+        map.entry(oid).or_insert(entry);
+    }
+
+    pub(crate) fn insert_too_large(&self, oid: Oid) {
+        let mut map = lock(&self.shards[Self::shard_index(oid)]);
+        map.entry(oid).or_insert(CachedBlob::TooLarge);
+    }
+}
+
 /// One first-parent tree walk, without rewrite detection.
 pub(crate) struct CommitDiff {
     /// The tree changes as the walk emitted them. The stat skips directory
     /// entries; rename detection pairs the added and deleted ones.
     changes: Vec<ChangeDetached>,
+    /// Shared cache of Added/Deleted blobs so stat and rename detection do not
+    /// inflate or NUL-scan the same blob twice.
+    blobs: BlobCache,
 }
 
 /// One cached commit: the shared walk, and the file list built from it once
@@ -554,32 +691,105 @@ pub(crate) fn changed_file(
     })
 }
 
-pub(crate) fn file_stat(repo: &gix::Repository, change: &ChangedFile) -> Result<FileStat> {
+pub(crate) struct StatScratch<'a> {
+    repo: gix::Repository,
+    empty_blob: Oid,
+    blobs: Option<&'a BlobCache>,
+    old_buf: Vec<u8>,
+    new_buf: Vec<u8>,
+    diff: Diff,
+}
+
+impl<'a> StatScratch<'a> {
+    pub(crate) fn new(repo: gix::Repository, blobs: Option<&'a BlobCache>) -> Self {
+        let empty_blob = Oid::empty_blob(repo.object_hash());
+        Self {
+            repo,
+            empty_blob,
+            blobs,
+            old_buf: Vec::new(),
+            new_buf: Vec::new(),
+            diff: Diff::default(),
+        }
+    }
+}
+
+enum LoadedSide<'b> {
+    Skip,
+    Cached(Arc<CachedBlobData>),
+    Borrowed(&'b [u8]),
+}
+
+impl<'b> LoadedSide<'b> {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            LoadedSide::Skip => &[],
+            LoadedSide::Cached(data) => &data.data,
+            LoadedSide::Borrowed(slice) => slice,
+        }
+    }
+}
+
+pub(crate) fn file_stat_with(
+    scratch: &mut StatScratch<'_>,
+    change: &ChangedFile,
+) -> Result<FileStat> {
     if change.uncountable() {
         return Ok(binary_stat(change));
     }
 
-    // A missing side is empty content: an addition or a deletion, counted in
-    // full. Identical blobs only changed mode, which has no lines.
+    // A missing side or empty blob needs no two-way diff: count lines on the
+    // present side directly. Identical blobs only changed mode, which has no
+    // line changes.
     let (added, removed) = match (change.old_id, change.new_id) {
         (None, None) => return Ok(binary_stat(change)),
         (old, new) if old == new => (0, 0),
-        (old, new) => {
-            if is_large(repo, old) || is_large(repo, new) {
+        (None, Some(new_id)) => match single_side_lines(scratch, new_id, true)? {
+            Some(lines) => (lines, 0),
+            None => return Ok(binary_stat(change)),
+        },
+        (Some(old_id), None) => match single_side_lines(scratch, old_id, true)? {
+            Some(lines) => (0, lines),
+            None => return Ok(binary_stat(change)),
+        },
+        (Some(old_id), Some(new_id)) if old_id == scratch.empty_blob => {
+            match single_side_lines(scratch, new_id, false)? {
+                Some(lines) => (lines, 0),
+                None => return Ok(binary_stat(change)),
+            }
+        }
+        (Some(old_id), Some(new_id)) if new_id == scratch.empty_blob => {
+            match single_side_lines(scratch, old_id, false)? {
+                Some(lines) => (0, lines),
+                None => return Ok(binary_stat(change)),
+            }
+        }
+        (Some(old_id), Some(new_id)) => {
+            // Inspect `old` completely before inflating `new` so binary or
+            // oversized left-hand files bail out early.
+            let old = load_blob_side(
+                &scratch.repo,
+                scratch.empty_blob,
+                scratch.blobs,
+                old_id,
+                false,
+                &mut scratch.old_buf,
+            )?;
+            if matches!(old, LoadedSide::Skip) {
                 return Ok(binary_stat(change));
             }
-            let old = read_blob(repo, old)?;
-            let new = read_blob(repo, new)?;
-            let old = old.as_deref().unwrap_or_default();
-            let new = new.as_deref().unwrap_or_default();
-            if is_binary(old) || is_binary(new) {
+            let new = load_blob_side(
+                &scratch.repo,
+                scratch.empty_blob,
+                scratch.blobs,
+                new_id,
+                false,
+                &mut scratch.new_buf,
+            )?;
+            if matches!(new, LoadedSide::Skip) {
                 return Ok(binary_stat(change));
             }
-            match (change.old_id, change.new_id) {
-                (None, Some(_)) => (count_lines(new), 0),
-                (Some(_), None) => (0, count_lines(old)),
-                _ => count_changed_lines(old, new),
-            }
+            count_changed_lines_with(old.as_slice(), new.as_slice(), &mut scratch.diff)
         }
     };
 
@@ -590,6 +800,70 @@ pub(crate) fn file_stat(repo: &gix::Repository, change: &ChangedFile) -> Result<
         removed,
         binary: false,
     })
+}
+
+fn single_side_lines(
+    scratch: &mut StatScratch<'_>,
+    id: Oid,
+    cache_for_renames: bool,
+) -> Result<Option<u64>> {
+    if id == scratch.empty_blob {
+        return Ok(Some(0));
+    }
+    let loaded = load_blob_side(
+        &scratch.repo,
+        scratch.empty_blob,
+        scratch.blobs,
+        id,
+        cache_for_renames,
+        &mut scratch.new_buf,
+    )?;
+    match loaded {
+        LoadedSide::Skip => Ok(None),
+        LoadedSide::Cached(entry) => {
+            Ok(Some(*entry.lines.get_or_init(|| count_lines(&entry.data))))
+        }
+        LoadedSide::Borrowed(slice) => Ok(Some(count_lines(slice))),
+    }
+}
+
+fn load_blob_side<'b>(
+    repo: &gix::Repository,
+    empty_blob: Oid,
+    blobs: Option<&BlobCache>,
+    id: Oid,
+    cache_insert: bool,
+    buf: &'b mut Vec<u8>,
+) -> Result<LoadedSide<'b>> {
+    if id == empty_blob {
+        return Ok(LoadedSide::Borrowed(&[]));
+    }
+    if let Some(cache) = blobs
+        && let Some(cached) = cache.get(id)
+    {
+        return Ok(match cached {
+            CachedBlob::TooLarge => LoadedSide::Skip,
+            CachedBlob::Loaded(entry) if entry.binary => LoadedSide::Skip,
+            CachedBlob::Loaded(entry) => LoadedSide::Cached(entry),
+        });
+    }
+    if is_large_id(repo, id) {
+        if cache_insert && let Some(cache) = blobs {
+            cache.insert_too_large(id);
+        }
+        return Ok(LoadedSide::Skip);
+    }
+    let blob = repo.objects.find_blob(&id, buf).map_err(Error::gix)?;
+    let binary = is_binary(blob.data);
+    if cache_insert && let Some(cache) = blobs {
+        let lines = (!binary).then(|| count_lines(blob.data));
+        let data: Arc<[u8]> = Arc::from(blob.data);
+        cache.insert_loaded(id, data, binary, lines);
+    }
+    if binary {
+        return Ok(LoadedSide::Skip);
+    }
+    Ok(LoadedSide::Borrowed(blob.data))
 }
 
 /// A binary or uncountable file: flagged, with no line counts.
@@ -604,8 +878,8 @@ fn binary_stat(change: &ChangedFile) -> FileStat {
 }
 
 /// The lines a blob adds or removes as a whole file.
-fn count_lines(data: &[u8]) -> u64 {
-    let lines = data.iter().filter(|byte| **byte == b'\n').count();
+pub(crate) fn count_lines(data: &[u8]) -> u64 {
+    let lines = data.find_iter(b"\n").count();
     let lines = if data.is_empty() || data.ends_with(b"\n") {
         lines
     } else {
@@ -615,27 +889,122 @@ fn count_lines(data: &[u8]) -> u64 {
     lines as u64
 }
 
+/// Strip leading and trailing byte-identical line tokens before invoking
+/// `imara_diff`. Because `Diff::compute` strips the same common prefix and
+/// suffix tokens before running histogram diffing, trimming at exact line
+/// boundaries produces identical edit-script counts while skipping tokenization
+/// and hashing of unchanged lines.
+pub(crate) fn strip_common_lines<'a>(old: &'a [u8], new: &'a [u8]) -> (&'a [u8], &'a [u8]) {
+    let common_prefix = common_prefix_len(old, new);
+    let prefix = if common_prefix == old.len() && common_prefix == new.len() {
+        common_prefix
+    } else {
+        old[..common_prefix]
+            .rfind_byte(b'\n')
+            .map_or(0, |idx| idx + 1)
+    };
+
+    let old_mid = &old[prefix..];
+    let new_mid = &new[prefix..];
+    let common_suffix = common_suffix_len(old_mid, new_mid);
+    let suffix = if common_suffix == 0 {
+        0
+    } else {
+        let old_start = old_mid.len() - common_suffix;
+        let new_start = new_mid.len() - common_suffix;
+        let old_aligned = old_start == 0 || old_mid[old_start - 1] == b'\n';
+        let new_aligned = new_start == 0 || new_mid[new_start - 1] == b'\n';
+        if old_aligned && new_aligned {
+            common_suffix
+        } else {
+            let s = &old_mid[old_start..];
+            match s.find_byte(b'\n') {
+                Some(nl) => common_suffix - (nl + 1),
+                None => 0,
+            }
+        }
+    };
+
+    (
+        &old_mid[..old_mid.len() - suffix],
+        &new_mid[..new_mid.len() - suffix],
+    )
+}
+
+fn common_prefix_len(a: &[u8], b: &[u8]) -> usize {
+    let len = a.len().min(b.len());
+    let mut i = 0;
+    while i + 8 <= len {
+        if a[i..i + 8] != b[i..i + 8] {
+            break;
+        }
+        i += 8;
+    }
+    while i < len && a[i] == b[i] {
+        i += 1;
+    }
+    i
+}
+
+fn common_suffix_len(a: &[u8], b: &[u8]) -> usize {
+    let len = a.len().min(b.len());
+    let mut s = 0;
+    while s + 8 <= len {
+        let ai = a.len() - s - 8;
+        let bi = b.len() - s - 8;
+        if a[ai..ai + 8] != b[bi..bi + 8] {
+            break;
+        }
+        s += 8;
+    }
+    while s < len && a[a.len() - 1 - s] == b[b.len() - 1 - s] {
+        s += 1;
+    }
+    s
+}
+
+#[inline]
+pub(crate) fn is_single_line(data: &[u8]) -> bool {
+    !data.is_empty() && data[..data.len() - 1].find_byte(b'\n').is_none()
+}
+
 /// Added and removed lines of two text blobs.
 ///
 /// Only the edit script's ranges are read: building hunks, line text and
 /// emphasis would mean allocating a copy of every changed line, which is what
 /// made counting a large merge as slow as rendering it.
-fn count_changed_lines(old: &[u8], new: &[u8]) -> (u64, u64) {
-    let input = imara_diff::InternedInput::new(old, new);
-    let diff = imara_diff::Diff::compute(imara_diff::Algorithm::Histogram, &input);
-    let mut added = 0;
-    let mut removed = 0;
-    for hunk in diff.hunks() {
-        removed += u64::from(hunk.before.end - hunk.before.start);
-        added += u64::from(hunk.after.end - hunk.after.start);
+fn count_changed_lines_with(old: &[u8], new: &[u8], diff: &mut Diff) -> (u64, u64) {
+    let (old_mid, new_mid) = strip_common_lines(old, new);
+    if old_mid.is_empty() {
+        return (count_lines(new_mid), 0);
     }
-    (added, removed)
+    if new_mid.is_empty() {
+        return (0, count_lines(old_mid));
+    }
+    if is_single_line(old_mid) && is_single_line(new_mid) {
+        return (1, 1);
+    }
+
+    let input = InternedInput::new(old_mid, new_mid);
+    diff.compute_with(
+        gix::diff::blob::Algorithm::Histogram,
+        &input.before,
+        &input.after,
+        input.interner.num_tokens(),
+    );
+    (diff.count_additions() as u64, diff.count_removals() as u64)
+}
+
+#[cfg(test)]
+fn count_changed_lines(old: &[u8], new: &[u8]) -> (u64, u64) {
+    let mut diff = Diff::default();
+    count_changed_lines_with(old, new, &mut diff)
 }
 
 /// Whether a blob looks binary: a NUL byte near its start, as git decides.
 ///
 /// Only the head is inspected, which keeps the check cheap for a large file.
-fn is_binary(data: &[u8]) -> bool {
+pub(crate) fn is_binary(data: &[u8]) -> bool {
     const PROBE: usize = 8_000;
     data[..data.len().min(PROBE)].contains(&0)
 }
@@ -651,22 +1020,11 @@ fn countable(mode: Option<EntryMode>) -> bool {
 
 /// Whether a blob is too large to count, read from its header so the content is
 /// never inflated for it.
-fn is_large(repo: &gix::Repository, id: Option<Oid>) -> bool {
-    let Some(id) = id else {
-        return false;
-    };
+fn is_large_id(repo: &gix::Repository, id: Oid) -> bool {
     match repo.try_find_header(id) {
         Ok(Some(header)) => header.size() > MAX_STAT_BYTES,
         _ => false,
     }
-}
-
-fn read_blob(repo: &gix::Repository, id: Option<Oid>) -> Result<Option<Vec<u8>>> {
-    let Some(id) = id else {
-        return Ok(None);
-    };
-    let blob = repo.find_blob(id).map_err(Error::gix)?;
-    Ok(Some(blob.data.clone()))
 }
 
 fn kind_changed(before: EntryMode, after: EntryMode) -> bool {
@@ -716,6 +1074,15 @@ mod tests {
             (b"", b"one\n"),
             (b"one\n", b""),
             (b"one\ntwo\n", b"one\nthree\n"),
+            // Single-line and incomplete final newline edge cases around prefix/suffix trimming.
+            (b"one", b"two"),
+            (b"abc", b"abc\ndef"),
+            (b"abc\ndef", b"abc"),
+            (b"x\nabc", b"x\nabc\n"),
+            (b"ax\ny\n", b"bx\ny\n"),
+            (b"a1\nend", b"b1\nend"),
+            (b"prefix\nfoo\nbar\nsuffix\n", b"prefix\nsuffix\n"),
+            (b"prefix\nsuffix\n", b"prefix\nfoo\nbar\nsuffix\n"),
             // A move that the slider heuristic can place differently.
             (b"a\nb\na\nb\n", b"b\na\nb\na\n"),
             // A dropped terminator and a CRLF switch are changes.
