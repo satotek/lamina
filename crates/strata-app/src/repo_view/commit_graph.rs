@@ -51,19 +51,22 @@ impl RepoView {
         let never = entity;
         let banner = crate::ui::banner(
             crate::ui::BannerKind::Info,
-            "History loads faster with a commit-graph. Write it now? (runs git commit-graph write)",
+            t!("history.commit_graph_offer").to_string(),
             design,
         )
-        .detail("git maintenance start, or fetch.writeCommitGraph, can keep it up to date.")
+        .detail(t!("history.commit_graph_detail").to_string())
         .action(
-            crate::ui::button("commit-graph-write", "Write")
-                .size(crate::ui::ButtonSize::Tiny)
-                .on_click(move |_, window, cx| {
-                    write.update(cx, |this, cx| this.write_commit_graph(window, cx));
-                }),
+            crate::ui::button(
+                "commit-graph-write",
+                t!("history.commit_graph_write").to_string(),
+            )
+            .size(crate::ui::ButtonSize::Tiny)
+            .on_click(move |_, window, cx| {
+                write.update(cx, |this, cx| this.write_commit_graph(window, cx));
+            }),
         )
         .action(
-            crate::ui::button("commit-graph-not-now", "Not now")
+            crate::ui::button("commit-graph-not-now", t!("history.not_now").to_string())
                 .size(crate::ui::ButtonSize::Tiny)
                 .kind(crate::ui::ButtonKind::Ghost)
                 .on_click(move |_, _, cx| {
@@ -71,7 +74,7 @@ impl RepoView {
                 }),
         )
         .action(
-            crate::ui::button("commit-graph-never", "Don't ask for this repository")
+            crate::ui::button("commit-graph-never", t!("history.dont_ask").to_string())
                 .size(crate::ui::ButtonSize::Tiny)
                 .kind(crate::ui::ButtonKind::Ghost)
                 .on_click(move |_, _, cx| {

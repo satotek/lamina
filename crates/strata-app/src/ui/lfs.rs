@@ -116,7 +116,7 @@ fn side_row(label: &str, side: &LfsDiffSide, design: &Design) -> AnyElement {
                 .truncate()
                 .font_family(design.mono.clone())
                 .text_size(px(design.code))
-                .child(oid.unwrap_or_else(|| "worktree file".to_owned())),
+                .child(oid.unwrap_or_else(|| t!("lfs.worktree_file").to_string().to_owned())),
         )
         .child(
             div()
@@ -125,9 +125,17 @@ fn side_row(label: &str, side: &LfsDiffSide, design: &Design) -> AnyElement {
                 .child(format_size(side.size)),
         );
     row = if side.present {
-        row.child(status_badge("local", BadgeTone::Neutral, design))
+        row.child(status_badge(
+            t!("lfs.local").to_string(),
+            BadgeTone::Neutral,
+            design,
+        ))
     } else {
-        row.child(status_badge("not downloaded", BadgeTone::Danger, design))
+        row.child(status_badge(
+            t!("lfs.not_downloaded").to_string(),
+            BadgeTone::Danger,
+            design,
+        ))
     };
     row.into_any_element()
 }

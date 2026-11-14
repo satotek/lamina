@@ -464,7 +464,12 @@ impl Workspace {
 
             let launch = self.open_launch(&root, cx);
             if let Launch::Error { error, .. } = &launch {
-                return Err(format!("Cannot open {}: {error}", root.display()));
+                return Err(t!(
+                    "workspace.cannot_open",
+                    path = root.display(),
+                    error = error
+                )
+                .to_string());
             }
             let slot_path = repo_path(&launch);
             let title = launch.title();
@@ -535,7 +540,12 @@ impl Workspace {
         let root = crate::picker::resolve_repository(&target.path)?;
         let launch = self.open_launch(&root, cx);
         if let Launch::Error { error, .. } = &launch {
-            return Err(format!("Cannot open {}: {error}", root.display()));
+            return Err(t!(
+                "workspace.cannot_open",
+                path = root.display(),
+                error = error
+            )
+            .to_string());
         }
 
         let mut parents = match &self.content {
@@ -572,7 +582,12 @@ impl Workspace {
     ) -> Result<(), String> {
         let launch = self.open_launch(root, cx);
         if let Launch::Error { error, .. } = &launch {
-            return Err(format!("Cannot open {}: {error}", root.display()));
+            return Err(t!(
+                "workspace.cannot_open",
+                path = root.display(),
+                error = error
+            )
+            .to_string());
         }
         let parents = match disposition {
             OpenDisposition::Replace => NavigationStack::default(),
@@ -831,7 +846,7 @@ impl Workspace {
                     let label = active_name
                         .map(str::to_owned)
                         .or_else(|| slot.path.as_deref().map(recent::repository_name))
-                        .unwrap_or_else(|| "Repository".to_owned());
+                        .unwrap_or_else(|| t!("workspace.repository_tab").to_string());
                     (label, active_busy)
                 } else {
                     (
@@ -919,8 +934,8 @@ impl Workspace {
         let picker = cx.new(|cx| Picker::new(Mode::Dialog, target, workspace, window, cx));
         let input = picker.read(cx).input().clone();
         let title = match target {
-            OpenTarget::Current => "Open repository",
-            OpenTarget::NewTab => "Open in new tab",
+            OpenTarget::Current => t!("picker.open_repository").to_string(),
+            OpenTarget::NewTab => t!("picker.open_new_tab").to_string(),
         };
         window.open_dialog(cx, move |dialog, _, _| {
             let content_picker = picker.clone();
@@ -931,14 +946,17 @@ impl Workspace {
             let confirm_picker = picker.clone();
             let footer = DialogFooter::new()
                 .child(
-                    crate::ui::button("picker-dialog-open", "Open repository…")
-                        .size(crate::ui::ButtonSize::Medium)
-                        .on_click(move |_, window, cx| {
-                            footer_picker.update(cx, |picker, cx| picker.open_native(window, cx));
-                        }),
+                    crate::ui::button(
+                        "picker-dialog-open",
+                        format!("{}…", t!("picker.open_repository")),
+                    )
+                    .size(crate::ui::ButtonSize::Medium)
+                    .on_click(move |_, window, cx| {
+                        footer_picker.update(cx, |picker, cx| picker.open_native(window, cx));
+                    }),
                 )
                 .child(
-                    crate::ui::button("picker-dialog-clone", "Clone repository…")
+                    crate::ui::button("picker-dialog-clone", t!("picker.clone").to_string())
                         .kind(crate::ui::ButtonKind::Normal)
                         .size(crate::ui::ButtonSize::Medium)
                         .on_click(move |_, window, cx| {
@@ -947,7 +965,7 @@ impl Workspace {
                         }),
                 )
                 .child(
-                    crate::ui::button("picker-dialog-init", "New repository…")
+                    crate::ui::button("picker-dialog-init", t!("picker.new").to_string())
                         .kind(crate::ui::ButtonKind::Normal)
                         .size(crate::ui::ButtonSize::Medium)
                         .on_click(move |_, window, cx| {
@@ -957,22 +975,25 @@ impl Workspace {
                 )
                 .when(target == OpenTarget::Current && has_open_repo, |footer| {
                     footer.child(
-                        crate::ui::button("picker-dialog-open-new-tab", "Open in New Tab…")
-                            .size(crate::ui::ButtonSize::Medium)
-                            .on_click(move |_, window, cx| {
-                                new_tab_footer_picker.update(cx, |picker, cx| {
-                                    picker.open_native_in(OpenTarget::NewTab, window, cx)
-                                });
-                            }),
+                        crate::ui::button(
+                            "picker-dialog-open-new-tab",
+                            t!("workspace.open_new_tab_ellipsis").to_string(),
+                        )
+                        .size(crate::ui::ButtonSize::Medium)
+                        .on_click(move |_, window, cx| {
+                            new_tab_footer_picker.update(cx, |picker, cx| {
+                                picker.open_native_in(OpenTarget::NewTab, window, cx)
+                            });
+                        }),
                     )
                 })
                 .child(
-                    crate::ui::button("picker-dialog-cancel", "Cancel")
+                    crate::ui::button("picker-dialog-cancel", t!("common.cancel").to_string())
                         .size(crate::ui::ButtonSize::Medium)
                         .on_click(|_, window, cx| window.close_dialog(cx)),
                 );
             dialog
-                .title(title)
+                .title(title.clone())
                 .w(px(720.0))
                 .content(move |content, _, _| content.child(content_picker.clone()))
                 .footer(footer)

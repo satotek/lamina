@@ -147,19 +147,19 @@ impl RepoView {
 
     fn diff_header(&self, design: &Design, row_count: usize, cx: &App) -> AnyElement {
         let (path, kind) = match (&self.fake, &self.files, self.selected_file) {
-            _ if self.fake.is_some() => ("synthetic diff".to_owned(), None),
+            _ if self.fake.is_some() => (t!("history.synthetic_diff").to_string(), None),
             (_, Some(files), Some(index)) => match files.get(index) {
                 Some(change) => (change.path.clone(), Some(change.kind)),
-                None => ("no file selected".to_owned(), None),
+                None => (t!("compare.no_file_selected").to_string(), None),
             },
-            _ => ("no file selected".to_owned(), None),
+            _ => (t!("compare.no_file_selected").to_string(), None),
         };
         let (name, dir) = style::path_parts(&path);
         let right = match self.fake {
-            Some(_) => format!("{row_count} rows"),
+            Some(_) => t!("diff.header.rows", count = row_count).to_string(),
             None => match self.files.as_ref().map_or(0, Vec::len) {
                 0 => String::new(),
-                files => format!("{files} changed"),
+                files => t!("diff.header.changed", count = files).to_string(),
             },
         };
 
@@ -222,14 +222,14 @@ impl RepoView {
                 if self.fake.is_none() && self.diff.view().is_some_and(|view| !view.diff.binary) {
                     let active = self.diff_context.is_whole_file();
                     let entity = self.entity();
-                    ui::button("toggle-whole-file", "Whole file")
+                    ui::button("toggle-whole-file", t!("history.whole_file").to_string())
                         .size(ButtonSize::Tiny)
                         .ghost()
                         .selected(active)
                         .tooltip(if active {
-                            "Show only the changes"
+                            t!("worktree.show_only_changes").to_string()
                         } else {
-                            "Show every line of the file"
+                            t!("worktree.show_every_line").to_string()
                         })
                         .on_click(move |_event, _window, cx| {
                             entity.update(cx, |this, cx| this.toggle_whole_file(cx));

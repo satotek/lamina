@@ -110,16 +110,16 @@ impl WorktreePanel {
             .filter(|change| change.kind != ChangeKind::Conflicted)
             .collect();
         let title = match side {
-            Side::Unstaged => "UNSTAGED",
-            Side::Staged => "STAGED",
-            Side::Conflict => "CONFLICTS",
+            Side::Unstaged => t!("worktree.section.unstaged"),
+            Side::Staged => t!("worktree.section.staged"),
+            Side::Conflict => t!("worktree.section.conflicts"),
         };
         let button = match side {
             Side::Unstaged => {
                 let entity = entity.clone();
                 crate::ui::button(
                     gpui::ElementId::named_usize("stage-all", side as usize),
-                    "Stage all",
+                    t!("worktree.stage_all").to_string(),
                 )
                 .kind(crate::ui::ButtonKind::Normal)
                 // Header actions sit on a 11 px caption row; anything larger
@@ -135,7 +135,7 @@ impl WorktreePanel {
                 let entity = entity.clone();
                 crate::ui::button(
                     gpui::ElementId::named_usize("unstage-all", side as usize),
-                    "Unstage all",
+                    t!("worktree.unstage_all").to_string(),
                 )
                 .kind(crate::ui::ButtonKind::Normal)
                 // Header actions sit on a 11 px caption row; anything larger
@@ -304,23 +304,26 @@ fn file_row(
             // holds several files.
             let editor_entity = menu_entity.clone();
             let editor_path = menu_path.clone();
-            let mut menu = menu.item(PopupMenuItem::new("Open in Editor").on_click(
-                move |_, _window, cx| {
-                    let path = editor_path.clone();
-                    editor_entity.update(cx, |this, cx| this.open_file_in_editor(&path, None, cx));
-                },
-            ));
+            let mut menu = menu.item(
+                PopupMenuItem::new(t!("history.open_in_editor").to_string()).on_click(
+                    move |_, _window, cx| {
+                        let path = editor_path.clone();
+                        editor_entity
+                            .update(cx, |this, cx| this.open_file_in_editor(&path, None, cx));
+                    },
+                ),
+            );
 
             if !menu_lfs_tracked {
                 let track_entity = menu_entity.clone();
                 let track_path = menu_path.clone();
-                menu = menu.item(PopupMenuItem::new("Track with LFS").on_click(
+                menu = menu.item(PopupMenuItem::new(t!("lfs.track").to_string()).on_click(
                     move |_, window, cx| {
                         let path = track_path.clone();
                         track_entity.update(cx, |this, cx| {
                             this.run_operation(
                                 Operation::LfsTrack { path },
-                                "Track with LFS",
+                                t!("lfs.track").to_string(),
                                 window,
                                 cx,
                             );
@@ -334,8 +337,8 @@ fn file_row(
                         let unlock_entity = menu_entity.clone();
                         let unlock_path = menu_path.clone();
                         let label = match lock.owner.as_deref() {
-                            Some(owner) => format!("Unlock (locked by {owner})"),
-                            None => "Unlock".to_owned(),
+                            Some(owner) => t!("lfs.unlock_owner", owner = owner).to_string(),
+                            None => t!("lfs.unlock").to_string(),
                         };
                         menu =
                             menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
@@ -353,8 +356,8 @@ fn file_row(
                     None => {
                         let lock_entity = menu_entity.clone();
                         let lock_path = menu_path.clone();
-                        menu =
-                            menu.item(PopupMenuItem::new("Lock").on_click(move |_, window, cx| {
+                        menu = menu.item(PopupMenuItem::new(t!("lfs.lock").to_string()).on_click(
+                            move |_, window, cx| {
                                 let path = lock_path.clone();
                                 lock_entity.update(cx, |this, cx| {
                                     this.run_operation(
@@ -364,7 +367,8 @@ fn file_row(
                                         cx,
                                     );
                                 });
-                            }));
+                            },
+                        ));
                     }
                 }
             }
@@ -373,9 +377,9 @@ fn file_row(
                 Side::Unstaged => {
                     let stage_entity = menu_entity.clone();
                     let label = if count > 1 {
-                        format!("Stage {count} files")
+                        t!("worktree.stage_count", count = count).to_string()
                     } else {
-                        "Stage".to_owned()
+                        t!("common.stage").to_string()
                     };
                     menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _window, cx| {
                         stage_entity.update(cx, |this, cx| this.stage_selected(cx));
@@ -383,9 +387,9 @@ fn file_row(
 
                     let discard_entity = menu_entity.clone();
                     let label = match count {
-                        1 if untracked => "Delete file…".to_owned(),
-                        1 => "Discard changes…".to_owned(),
-                        _ => format!("Discard {count} files…"),
+                        1 if untracked => t!("worktree.delete_file").to_string(),
+                        1 => t!("worktree.discard_changes").to_string(),
+                        _ => t!("worktree.discard_count", count = count).to_string(),
                     };
                     menu = menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
                         discard_entity
@@ -395,9 +399,9 @@ fn file_row(
                 Side::Staged => {
                     let unstage_entity = menu_entity.clone();
                     let label = if count > 1 {
-                        format!("Unstage {count} files")
+                        t!("worktree.unstage_count", count = count).to_string()
                     } else {
-                        "Unstage".to_owned()
+                        t!("common.unstage").to_string()
                     };
                     menu = menu.item(PopupMenuItem::new(label).on_click(move |_, _window, cx| {
                         unstage_entity.update(cx, |this, cx| this.unstage_selected(cx));
@@ -406,12 +410,15 @@ fn file_row(
                     // Staged discard drops both the index and the worktree at
                     // these paths, so it is offered separately from unstage.
                     let discard_entity = menu_entity.clone();
-                    menu = menu.item(PopupMenuItem::new("Discard changes…").on_click(
-                        move |_, window, cx| {
-                            discard_entity
-                                .update(cx, |this, cx| this.discard_staged_selection(window, cx));
-                        },
-                    ));
+                    menu = menu.item(
+                        PopupMenuItem::new(t!("worktree.discard_changes").to_string()).on_click(
+                            move |_, window, cx| {
+                                discard_entity.update(cx, |this, cx| {
+                                    this.discard_staged_selection(window, cx)
+                                });
+                            },
+                        ),
+                    );
                 }
                 // The conflict section has no context menu; its actions live in
                 // the conflict view.

@@ -134,12 +134,12 @@ impl Compare {
 /// The caller passes only the selection's real commits: the synthetic
 /// benchmark has ids but no trees, so its list arrives empty and the entry is
 /// disabled with this reason.
-pub(crate) fn two_commit_blocked(repo_open: bool, commits: &[Oid]) -> Option<&'static str> {
+pub(crate) fn two_commit_blocked(repo_open: bool, commits: &[Oid]) -> Option<String> {
     if !repo_open {
-        return Some("no repository is open");
+        return Some(t!("compare.no_repository").to_string());
     }
     if commits.len() != 2 {
-        return Some("select exactly two commits");
+        return Some(t!("compare.select_two").to_string());
     }
     None
 }
@@ -149,15 +149,15 @@ pub(crate) fn with_head_blocked(
     repo_open: bool,
     commit: Option<Oid>,
     head: Option<Oid>,
-) -> Option<&'static str> {
+) -> Option<String> {
     if !repo_open {
-        return Some("no repository is open");
+        return Some(t!("compare.no_repository").to_string());
     }
     if commit.is_none() {
-        return Some("no commit to compare");
+        return Some(t!("compare.no_commit").to_string());
     }
     if head.is_none() {
-        return Some("no HEAD commit");
+        return Some(t!("compare.no_head").to_string());
     }
     None
 }
@@ -168,18 +168,18 @@ pub(crate) fn with_current_branch_blocked(
     is_current: bool,
     busy: bool,
     head: Option<Oid>,
-) -> Option<&'static str> {
+) -> Option<String> {
     if !repo_open {
-        return Some("no repository is open");
+        return Some(t!("compare.no_repository").to_string());
     }
     if is_current {
-        return Some("this is the current branch");
+        return Some(t!("compare.current_branch").to_string());
     }
     if busy {
-        return Some("an operation is running");
+        return Some(t!("compare.busy").to_string());
     }
     if head.is_none() {
-        return Some("no HEAD commit");
+        return Some(t!("compare.no_head").to_string());
     }
     None
 }
@@ -525,7 +525,7 @@ impl RepoView {
         self.notify_if_active(cx);
     }
 
-    /// The compare view's "Whole file" toggle.
+    /// The compare view's t!("history.whole_file").to_string() toggle.
     pub(crate) fn toggle_compare_whole_file(&mut self, cx: &mut Context<Self>) {
         let Some(view) = self
             .compare
@@ -688,7 +688,7 @@ impl RepoView {
             ui::icon_button("compare-close", IconName::Close)
                 .size(ButtonSize::Tiny)
                 .ghost()
-                .tooltip("Close compare (Esc)")
+                .tooltip(t!("compare.close_tooltip").to_string())
                 .on_click(move |_, window, cx| {
                     entity.update(cx, |this, cx| this.close_compare(window, cx));
                 })
@@ -698,7 +698,7 @@ impl RepoView {
             ui::icon_button("compare-swap", IconName::Replace)
                 .size(ButtonSize::Tiny)
                 .ghost()
-                .tooltip("Swap sides")
+                .tooltip(t!("compare.swap").to_string())
                 .on_click(move |_, _window, cx| {
                     entity.update(cx, |this, cx| this.swap_compare(cx));
                 })
@@ -709,7 +709,7 @@ impl RepoView {
                 .size(ButtonSize::Tiny)
                 .ghost()
                 .selected(mode == CompareMode::TwoDot)
-                .tooltip("Compare the two trees as they are")
+                .tooltip(t!("compare.two_dot_tooltip").to_string())
                 .on_click(move |_, _window, cx| {
                     two_entity.update(cx, |this, cx| {
                         this.set_compare_mode(CompareMode::TwoDot, cx)
@@ -720,7 +720,7 @@ impl RepoView {
                 .size(ButtonSize::Tiny)
                 .ghost()
                 .selected(mode == CompareMode::ThreeDot)
-                .tooltip("Compare against the merge base")
+                .tooltip(t!("compare.three_dot_tooltip").to_string())
                 .on_click(move |_, _window, cx| {
                     three_entity.update(cx, |this, cx| {
                         this.set_compare_mode(CompareMode::ThreeDot, cx)
@@ -775,7 +775,7 @@ impl RepoView {
                     .flex_none()
                     .text_size(px(12.0))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child("Compare"),
+                    .child(t!("compare.title").to_string()),
             )
             .child(side(a))
             .child(div().flex_none().text_color(design.muted).child("⇄"))
@@ -801,18 +801,18 @@ impl RepoView {
             row = row.child(
                 div()
                     .text_color(design.add_text)
-                    .child(format!("{} ahead", comparison.ahead)),
+                    .child(t!("compare.ahead", count = comparison.ahead).to_string()),
             );
         }
         if comparison.behind > 0 {
             row = row.child(
                 div()
                     .text_color(design.remove_text)
-                    .child(format!("{} behind", comparison.behind)),
+                    .child(t!("compare.behind", count = comparison.behind).to_string()),
             );
         }
         if comparison.ahead == 0 && comparison.behind == 0 {
-            row = row.child("same history");
+            row = row.child(t!("compare.same_history").to_string());
         }
         Some(row.into_any_element())
     }
@@ -832,11 +832,16 @@ impl RepoView {
                 .justify_center()
                 .text_size(px(11.0))
                 .text_color(design.muted)
-                .child("comparing…")
+                .child(t!("compare.comparing").to_string())
                 .into_any_element();
         };
         if comparison.files.is_empty() {
-            return ui::message("No changed files", design.muted, design).into_any_element();
+            return ui::message(
+                t!("compare.no_changed_files").to_string(),
+                design.muted,
+                design,
+            )
+            .into_any_element();
         }
 
         let files = Rc::clone(&compare.files);
@@ -895,7 +900,7 @@ impl RepoView {
             return div().into_any_element();
         };
         let path = compare.selected_file().map_or_else(
-            || "no file selected".to_owned(),
+            || t!("compare.no_file_selected").to_string().to_owned(),
             |file| file.stat.path.clone(),
         );
         let totals = compare
@@ -932,19 +937,22 @@ impl RepoView {
                     .child(if compare.view.is_some() {
                         let active = compare.context.is_whole_file();
                         let entity = self.entity();
-                        ui::button("compare-toggle-whole-file", "Whole file")
-                            .size(ButtonSize::Tiny)
-                            .ghost()
-                            .selected(active)
-                            .tooltip(if active {
-                                "Show only the changes"
-                            } else {
-                                "Show every line of the file"
-                            })
-                            .on_click(move |_event, _window, cx| {
-                                entity.update(cx, |this, cx| this.toggle_compare_whole_file(cx));
-                            })
-                            .into_any_element()
+                        ui::button(
+                            "compare-toggle-whole-file",
+                            t!("history.whole_file").to_string(),
+                        )
+                        .size(ButtonSize::Tiny)
+                        .ghost()
+                        .selected(active)
+                        .tooltip(if active {
+                            t!("worktree.show_only_changes").to_string()
+                        } else {
+                            t!("worktree.show_every_line").to_string()
+                        })
+                        .on_click(move |_event, _window, cx| {
+                            entity.update(cx, |this, cx| this.toggle_compare_whole_file(cx));
+                        })
+                        .into_any_element()
                     } else {
                         div().into_any_element()
                     })
@@ -962,16 +970,23 @@ impl RepoView {
         let body = if let Some(error) = &compare.diff_error {
             ui::message(error, design.remove_text, design).into_any_element()
         } else if compare.selected.is_none() {
-            ui::message("Select a file", design.muted, design).into_any_element()
+            ui::message(t!("compare.select_file").to_string(), design.muted, design)
+                .into_any_element()
         } else if let Some(view) = &compare.view {
             if let Some(image) =
                 crate::image_diff::body(&self.image_diff, view, design, self.entity(), cx)
             {
                 image
             } else if view.diff.binary {
-                ui::message("Binary file", design.muted, design).into_any_element()
+                ui::message(t!("worktree.binary_file").to_string(), design.muted, design)
+                    .into_any_element()
             } else if compare.diff_rows.is_empty() {
-                ui::message("No textual changes", design.muted, design).into_any_element()
+                ui::message(
+                    t!("worktree.no_text_changes").to_string(),
+                    design.muted,
+                    design,
+                )
+                .into_any_element()
             } else {
                 let list = diff_view::diff_list(
                     diff_view::DiffList {
@@ -998,7 +1013,12 @@ impl RepoView {
                 }
             }
         } else {
-            ui::message("computing diff…", design.muted, design).into_any_element()
+            ui::message(
+                t!("worktree.computing_diff").to_string(),
+                design.muted,
+                design,
+            )
+            .into_any_element()
         };
 
         div()
@@ -1062,20 +1082,20 @@ mod tests {
     fn two_commits_must_be_selected() {
         assert_eq!(
             two_commit_blocked(false, &[oid(1), oid(2)]),
-            Some("no repository is open")
+            Some(t!("compare.no_repository").to_string())
         );
         assert_eq!(
             two_commit_blocked(true, &[]),
-            Some("select exactly two commits")
+            Some(t!("compare.select_two").to_string())
         );
         assert_eq!(
             two_commit_blocked(true, &[oid(1)]),
-            Some("select exactly two commits")
+            Some(t!("compare.select_two").to_string())
         );
         assert_eq!(two_commit_blocked(true, &[oid(1), oid(2)]), None);
         assert_eq!(
             two_commit_blocked(true, &[oid(1), oid(2), oid(3)]),
-            Some("select exactly two commits")
+            Some(t!("compare.select_two").to_string())
         );
     }
 
@@ -1083,15 +1103,15 @@ mod tests {
     fn compare_with_head_needs_both_commits() {
         assert_eq!(
             with_head_blocked(false, Some(oid(1)), Some(oid(2))),
-            Some("no repository is open")
+            Some(t!("compare.no_repository").to_string())
         );
         assert_eq!(
             with_head_blocked(true, None, Some(oid(2))),
-            Some("no commit to compare")
+            Some(t!("compare.no_commit").to_string())
         );
         assert_eq!(
             with_head_blocked(true, Some(oid(1)), None),
-            Some("no HEAD commit"),
+            Some(t!("compare.no_head").to_string()),
             "an unborn branch has nothing to compare against"
         );
         assert_eq!(with_head_blocked(true, Some(oid(1)), Some(oid(2))), None);
@@ -1101,15 +1121,15 @@ mod tests {
     fn comparing_the_current_branch_names_its_reason() {
         assert_eq!(
             with_current_branch_blocked(true, true, false, Some(oid(1))),
-            Some("this is the current branch")
+            Some(t!("compare.current_branch").to_string())
         );
         assert_eq!(
             with_current_branch_blocked(true, false, true, Some(oid(1))),
-            Some("an operation is running")
+            Some(t!("compare.busy").to_string())
         );
         assert_eq!(
             with_current_branch_blocked(true, false, false, None),
-            Some("no HEAD commit")
+            Some(t!("compare.no_head").to_string())
         );
         assert_eq!(
             with_current_branch_blocked(true, false, false, Some(oid(1))),

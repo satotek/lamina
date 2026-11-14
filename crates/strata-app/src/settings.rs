@@ -17,6 +17,8 @@ use gpui::{App, BorrowAppContext as _, Global, Window};
 use gpui_component::Theme;
 use serde::{Deserialize, Serialize};
 
+use crate::i18n::Language;
+
 /// Every field has a default, so a file written by an older or newer build
 /// still loads: missing keys take the default and unknown keys are ignored.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -48,6 +50,9 @@ pub enum ThemeMode {
 #[serde(default)]
 pub struct Appearance {
     pub theme: ThemeMode,
+    /// The interface language. `System` follows the operating system; a file
+    /// written before this key existed takes the default.
+    pub language: Language,
     /// `None` uses the platform's UI font.
     pub ui_font: Option<String>,
     pub ui_font_size: f32,
@@ -61,6 +66,7 @@ impl Default for Appearance {
     fn default() -> Self {
         Self {
             theme: ThemeMode::System,
+            language: Language::System,
             ui_font: None,
             ui_font_size: 13.0,
             code_font: None,
@@ -660,6 +666,39 @@ mod tests {
         let path = dir.path().join("settings.json");
         std::fs::write(&path, r#"{"appearance":{"theme":"dark"}}"#).unwrap();
         assert_eq!(Settings::load(&path).layout, LayoutSettings::default());
+    }
+
+    #[test]
+    fn a_file_without_a_language_follows_the_system() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        // The file an older build wrote has no `language` key.
+        std::fs::write(
+            &path,
+            r#"{"appearance":{"theme":"dark","ui_font_size":14.0}}"#,
+        )
+        .unwrap();
+        let settings = Settings::load(&path);
+        assert_eq!(settings.appearance.language, crate::i18n::Language::System);
+        assert_eq!(settings.appearance.theme, ThemeMode::Dark);
+    }
+
+    #[test]
+    fn the_language_survives_a_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut settings = Settings::default();
+        settings.appearance.language = crate::i18n::Language::Japanese;
+        settings.save(&path).unwrap();
+        assert_eq!(
+            Settings::load(&path).appearance.language,
+            crate::i18n::Language::Japanese
+        );
+        let json = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            json.contains("\"language\": \"japanese\""),
+            "the file stores a stable id, not a display name: {json}"
+        );
     }
 
     #[test]

@@ -122,7 +122,7 @@ fn substitute(template: &str, path: &Path, line: Option<u32>) -> String {
 fn configured_command(template: &str, path: &Path, line: Option<u32>) -> Result<Command, String> {
     let arguments = split_command(template)?;
     let Some((program, arguments)) = arguments.split_first() else {
-        return Err("the command in settings is empty".to_owned());
+        return Err(t!("external.command_empty").to_string().to_owned());
     };
     let mut command = Command::new(substitute(program, path, line));
     command.args(
@@ -216,7 +216,7 @@ fn default_terminal(dir: &Path) -> Result<(), String> {
             Err(error) => last_error = Some(error),
         }
     }
-    Err(last_error.unwrap_or_else(|| "no terminal program found".to_owned()))
+    Err(last_error.unwrap_or_else(|| t!("external.no_terminal").to_string().to_owned()))
 }
 
 #[cfg(target_os = "macos")]

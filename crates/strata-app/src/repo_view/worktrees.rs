@@ -554,7 +554,7 @@ impl AddWorktreeDialog {
         let (branch, new_branch, commit) = if self.create_branch {
             let name = self.new_branch.read(cx).value().trim().to_owned();
             if let Err(message) = crate::branches::validate_branch_name(&name) {
-                self.fail(message, cx);
+                self.fail(&message, cx);
                 return;
             }
             let Some(commit) = self.start else {

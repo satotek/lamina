@@ -134,14 +134,16 @@ pub type GapHandler = Rc<dyn Fn(usize, GapAction, &mut Window, &mut App)>;
 #[derive(Clone, Default)]
 pub struct DiffContext {
     expansion: Expansion,
-    notice: Option<&'static str>,
+    notice: Option<String>,
     /// Bumped whenever the rows the context describes change, so a rebuild
     /// that finishes late cannot replace a newer one.
     revision: u64,
 }
 
 /// Shown when a file is past the cap instead of building rows for all of it.
-const TOO_LARGE: &str = "This file is too large to show in full (1 MiB limit).";
+fn too_large() -> String {
+    t!("diff.too_large").to_string()
+}
 
 impl DiffContext {
     /// Back to no revealed gap and no whole-file view.
@@ -172,8 +174,8 @@ impl DiffContext {
     }
 
     /// Why the last whole-file or reveal-all request was refused, if it was.
-    pub fn notice(&self) -> Option<&'static str> {
-        self.notice
+    pub fn notice(&self) -> Option<&str> {
+        self.notice.as_deref()
     }
 
     /// Applies one press on a gap bar; true when the rows must be rebuilt.
@@ -182,7 +184,7 @@ impl DiffContext {
             return false;
         };
         if action == GapAction::All && !within_expand_cap(&view.old_text, &view.new_text) {
-            self.notice = Some(TOO_LARGE);
+            self.notice = Some(too_large());
             return false;
         }
         self.notice = None;
@@ -203,7 +205,7 @@ impl DiffContext {
             return true;
         }
         if !within_expand_cap(&view.old_text, &view.new_text) {
-            self.notice = Some(TOO_LARGE);
+            self.notice = Some(too_large());
             return false;
         }
         self.expansion.set_whole_file(true);
@@ -1176,29 +1178,30 @@ pub(crate) fn gap_bar(
         .font_family(style.mono.clone())
         .text_size(px((style.font_size - 1.0).max(9.0)))
         .text_color(colors.muted)
-        .child(format!(
-            "⋯ {hidden} hidden line{}",
-            if hidden == 1 { "" } else { "s" }
-        ));
+        .child(if hidden == 1 {
+            t!("diff.hidden.one", count = hidden).to_string()
+        } else {
+            t!("diff.hidden.other", count = hidden).to_string()
+        });
     if let Some(on_gap) = on_gap {
         for (id, label, action, tooltip) in [
             (
                 "gap-above",
                 format!("↑ {REVEAL_STEP}"),
                 GapAction::Above,
-                "Reveal more lines above",
+                t!("diff.reveal_more_above").to_string(),
             ),
             (
                 "gap-below",
                 format!("↓ {REVEAL_STEP}"),
                 GapAction::Below,
-                "Reveal more lines below",
+                t!("diff.reveal_more_below").to_string(),
             ),
             (
                 "gap-all",
                 "All".to_owned(),
                 GapAction::All,
-                "Reveal the gap",
+                t!("diff.reveal_gap").to_string(),
             ),
         ] {
             let on_gap = Rc::clone(on_gap);

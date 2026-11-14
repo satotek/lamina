@@ -149,7 +149,8 @@ impl Picker {
         let focus = cx.focus_handle();
         // A fresh read: a repository may have been opened since the last picker.
         let recents = RecentRepositories::load_default();
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter repositories"));
+        let input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(t!("picker.filter").to_string()));
         let _input_events =
             cx.subscribe(&input, |this, _input, event: &InputEvent, cx| match event {
                 InputEvent::Change => {
@@ -359,12 +360,12 @@ impl Picker {
         let path = if self.path_mode {
             let text = self.input.read(cx).value().trim().to_owned();
             if text.is_empty() {
-                return Err("Type the path to a repository, then press Enter.".to_owned());
+                return Err(t!("picker.path_hint").to_string());
             }
             PathBuf::from(text)
         } else {
             self.selected_path(cx)
-                .ok_or_else(|| "Choose a repository first.".to_owned())?
+                .ok_or_else(|| t!("picker.choose_first").to_string())?
         };
         self.open_path_in(path, target, window, cx)
     }
@@ -565,8 +566,8 @@ impl Picker {
     /// Its answer arrives on a later frame, so the picker stays as it is until then.
     pub(crate) fn open_native_in(&mut self, target: OpenTarget, window: &mut Window, cx: &mut App) {
         let prompt = match target {
-            OpenTarget::Current => "Open repository",
-            OpenTarget::NewTab => "Open in new tab",
+            OpenTarget::Current => t!("picker.open_repository").to_string(),
+            OpenTarget::NewTab => t!("picker.open_new_tab").to_string(),
         };
         let receiver = cx.prompt_for_paths(PathPromptOptions {
             files: false,
@@ -683,28 +684,30 @@ impl Picker {
 
         let mut column = div().flex().flex_col().gap_2().w_full();
         if self.mode == Mode::Page {
-            column =
-                column
-                    .child(
-                        div()
-                            .text_size(px(22.0))
-                            .font_weight(FontWeight::BOLD)
-                            .child("Strata"),
-                    )
-                    .child(div().text_size(px(12.0)).text_color(design.muted).child(
-                        "Open a repository to browse its history, working tree and stashes.",
-                    ))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .pt_1()
-                            .child(open_native_button(&self.entity, self.mode))
-                            .child(clone_button(&self.entity, self.mode))
-                            .child(init_button(&self.entity, self.mode))
-                            .child(path_toggle_button(&self.entity, self.mode, self.path_mode)),
-                    );
+            column = column
+                .child(
+                    div()
+                        .text_size(px(22.0))
+                        .font_weight(FontWeight::BOLD)
+                        .child(t!("app.name").to_string()),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(design.muted)
+                        .child(t!("picker.tagline").to_string()),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .pt_1()
+                        .child(open_native_button(&self.entity, self.mode))
+                        .child(clone_button(&self.entity, self.mode))
+                        .child(init_button(&self.entity, self.mode))
+                        .child(path_toggle_button(&self.entity, self.mode, self.path_mode)),
+                );
         }
 
         column = column.child(
@@ -726,10 +729,14 @@ impl Picker {
 
         column = column.child(
             div().flex().items_center().justify_between().pt_1().child(
-                ui::section_header("picker-recent", "RECENT REPOSITORIES", design)
-                    .count(self.recents.len())
-                    .px(px(0.0))
-                    .h(px(20.0)),
+                ui::section_header(
+                    "picker-recent",
+                    t!("picker.section.recent").to_string(),
+                    design,
+                )
+                .count(self.recents.len())
+                .px(px(0.0))
+                .h(px(20.0)),
             ),
         );
 
@@ -748,9 +755,9 @@ impl Picker {
                     .text_size(px(11.5))
                     .text_color(design.muted)
                     .child(if self.recents.is_empty() {
-                        "No recent repositories yet."
+                        t!("picker.empty.recent").to_string()
                     } else {
-                        "No recent repository matches that filter."
+                        t!("picker.empty.recent_filter").to_string()
                     }),
             );
         } else {
@@ -788,7 +795,7 @@ impl Picker {
         if ghq_visible {
             column = column.child(
                 div().flex().items_center().justify_between().pt_1().child(
-                    ui::section_header("picker-ghq", "GHQ REPOSITORIES", design)
+                    ui::section_header("picker-ghq", t!("picker.section.ghq").to_string(), design)
                         .count(ghq_paths.len())
                         .px(px(0.0))
                         .h(px(20.0)),
@@ -799,12 +806,12 @@ impl Picker {
                     div()
                         .text_size(px(11.5))
                         .text_color(design.muted)
-                        .child("Loading ghq repositories…"),
+                        .child(t!("picker.loading_ghq").to_string()),
                 );
             } else if let Some(error) = ghq_error {
                 column = column.child(div().max_w(px(520.0)).child(ui::banner(
                     ui::BannerKind::Danger,
-                    format!("ghq list failed: {error}"),
+                    t!("picker.ghq_failed", error = error).to_string(),
                     design,
                 )));
             } else if ghq_count == 0 {
@@ -872,40 +879,48 @@ impl Picker {
 /// screen and the dialog can be on screen at the same time.
 fn open_native_button(entity: &Entity<Picker>, mode: Mode) -> ui::UiButton {
     let entity = entity.clone();
-    ui::button(format!("picker-open-native-{mode:?}"), "Open repository…").on_click(
-        move |_, window, cx| {
-            entity.update(cx, |picker, cx| picker.open_native(window, cx));
-        },
+    ui::button(
+        format!("picker-open-native-{mode:?}"),
+        t!("picker.open_repository").to_string() + "…",
     )
+    .on_click(move |_, window, cx| {
+        entity.update(cx, |picker, cx| picker.open_native(window, cx));
+    })
 }
 
 /// A button that starts a clone, keeping the picker's target.
 fn clone_button(entity: &Entity<Picker>, mode: Mode) -> ui::UiButton {
     let entity = entity.clone();
-    ui::button(format!("picker-clone-{mode:?}"), "Clone repository…")
-        .kind(ui::ButtonKind::Normal)
-        .on_click(move |_, window, cx| {
-            entity.update(cx, |picker, cx| picker.open_clone(window, cx));
-        })
+    ui::button(
+        format!("picker-clone-{mode:?}"),
+        t!("picker.clone").to_string(),
+    )
+    .kind(ui::ButtonKind::Normal)
+    .on_click(move |_, window, cx| {
+        entity.update(cx, |picker, cx| picker.open_clone(window, cx));
+    })
 }
 
 /// A button that creates a new repository, keeping the picker's target.
 fn init_button(entity: &Entity<Picker>, mode: Mode) -> ui::UiButton {
     let entity = entity.clone();
-    ui::button(format!("picker-init-{mode:?}"), "New repository…")
-        .kind(ui::ButtonKind::Normal)
-        .on_click(move |_, window, cx| {
-            entity.update(cx, |picker, cx| picker.open_init(window, cx));
-        })
+    ui::button(
+        format!("picker-init-{mode:?}"),
+        t!("picker.new").to_string(),
+    )
+    .kind(ui::ButtonKind::Normal)
+    .on_click(move |_, window, cx| {
+        entity.update(cx, |picker, cx| picker.open_init(window, cx));
+    })
 }
 
 /// Switches the text field between filtering the list and taking a path.
 fn path_toggle_button(entity: &Entity<Picker>, mode: Mode, path_mode: bool) -> ui::UiButton {
     let entity = entity.clone();
     let label: SharedString = if path_mode {
-        "Use the recent list".into()
+        t!("picker.use_recent").to_string().into()
     } else {
-        "Type a path…".into()
+        t!("picker.type_path").to_string().into()
     };
     ui::button(format!("picker-toggle-path-{mode:?}"), label)
         .ghost()
@@ -1047,11 +1062,17 @@ fn recent_row(
                 entity.update(cx, |picker, cx| picker.remove(position, cx));
             }
         };
-        menu.item(PopupMenuItem::new("Open").on_click(open_current))
-            .item(PopupMenuItem::new("Open in New Tab").on_click(open_new_tab))
-            .item(PopupMenuItem::new("Open in New Window").on_click(open_new_window))
+        menu.item(PopupMenuItem::new(t!("branch.menu.open").to_string()).on_click(open_current))
+            .item(
+                PopupMenuItem::new(t!("branch.menu.open_new_tab").to_string())
+                    .on_click(open_new_tab),
+            )
+            .item(
+                PopupMenuItem::new(t!("branch.menu.open_new_window").to_string())
+                    .on_click(open_new_window),
+            )
             .separator()
-            .item(PopupMenuItem::new("Remove from Recent").on_click(remove))
+            .item(PopupMenuItem::new(t!("picker.remove_recent").to_string()).on_click(remove))
     })
     .into_any_element()
 }
@@ -1158,9 +1179,15 @@ fn ghq_row(
                 });
             }
         };
-        menu.item(PopupMenuItem::new("Open").on_click(open_current))
-            .item(PopupMenuItem::new("Open in New Tab").on_click(open_new_tab))
-            .item(PopupMenuItem::new("Open in New Window").on_click(open_new_window))
+        menu.item(PopupMenuItem::new(t!("branch.menu.open").to_string()).on_click(open_current))
+            .item(
+                PopupMenuItem::new(t!("branch.menu.open_new_tab").to_string())
+                    .on_click(open_new_tab),
+            )
+            .item(
+                PopupMenuItem::new(t!("branch.menu.open_new_window").to_string())
+                    .on_click(open_new_window),
+            )
     })
     .into_any_element()
 }
@@ -1222,7 +1249,7 @@ impl Render for Picker {
                                     div()
                                         .text_size(px(11.0))
                                         .text_color(design.muted)
-                                        .child("Welcome"),
+                                        .child(t!("picker.welcome").to_string()),
                                 ),
                         ),
                 )
@@ -1239,8 +1266,8 @@ impl Render for Picker {
                 .into_any_element(),
             Mode::Dialog => {
                 let subtitle = match self.target {
-                    OpenTarget::Current => "Choose a repository to open in this window.",
-                    OpenTarget::NewTab => "Choose a repository to open in a new tab.",
+                    OpenTarget::Current => t!("picker.choose_window").to_string(),
+                    OpenTarget::NewTab => t!("picker.choose_tab").to_string(),
                 };
                 div()
                     .flex()
@@ -1298,19 +1325,35 @@ pub(crate) fn move_selection(current: usize, delta: isize, len: usize) -> usize 
 pub(crate) fn opened_label(opened_at: u64, now: u64) -> String {
     let seconds = now.saturating_sub(opened_at);
     match seconds {
-        0..=59 => "just now".to_owned(),
-        60..=3_599 => counted(seconds / 60, "minute"),
-        3_600..=86_399 => counted(seconds / 3_600, "hour"),
-        86_400..=2_591_999 => counted(seconds / 86_400, "day"),
+        0..=59 => t!("time.just_now").to_string(),
+        60..=3_599 => minutes(seconds / 60),
+        3_600..=86_399 => hours(seconds / 3_600),
+        86_400..=2_591_999 => days(seconds / 86_400),
         _ => crate::data::format_time(opened_at as i64),
     }
 }
 
-fn counted(value: u64, unit: &str) -> String {
-    if value == 1 {
-        format!("1 {unit} ago")
+fn minutes(count: u64) -> String {
+    if count == 1 {
+        t!("time.minutes_long.one", count = count).to_string()
     } else {
-        format!("{value} {unit}s ago")
+        t!("time.minutes_long.other", count = count).to_string()
+    }
+}
+
+fn hours(count: u64) -> String {
+    if count == 1 {
+        t!("time.hours.one", count = count).to_string()
+    } else {
+        t!("time.hours.other", count = count).to_string()
+    }
+}
+
+fn days(count: u64) -> String {
+    if count == 1 {
+        t!("time.days.one", count = count).to_string()
+    } else {
+        t!("time.days.other", count = count).to_string()
     }
 }
 
@@ -1319,23 +1362,17 @@ fn counted(value: u64, unit: &str) -> String {
 /// list on the worktree rather than on the subdirectory the user picked.
 pub(crate) fn resolve_repository(path: &Path) -> Result<PathBuf, String> {
     if !path.exists() {
-        return Err(format!("{} does not exist.", path.display()));
+        return Err(t!("picker.err.does_not_exist", path = path.display()).to_string());
     }
     if !path.is_dir() {
-        return Err(format!(
-            "{} is a file. Choose the folder that contains the repository.",
-            path.display()
-        ));
+        return Err(t!("picker.err.is_file", path = path.display()).to_string());
     }
     match Repo::open(path) {
         Ok(repo) => Ok(repo
             .workdir()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| repo.git_dir().to_path_buf())),
-        Err(_) => Err(format!(
-            "{} is not inside a git repository.",
-            path.display()
-        )),
+        Err(_) => Err(t!("picker.err.not_repo", path = path.display()).to_string()),
     }
 }
 

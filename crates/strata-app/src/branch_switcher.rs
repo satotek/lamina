@@ -75,7 +75,7 @@ pub(crate) struct LocalBranch {
     /// `↑2 ↓1`, `?`, `gone`, or nothing when level with the upstream.
     pub(crate) upstream: Option<String>,
     /// Why the label is `?`, for its tooltip.
-    pub(crate) upstream_note: Option<&'static str>,
+    pub(crate) upstream_note: Option<String>,
 }
 
 /// A remote-tracking branch with no local branch of the same name.
@@ -146,11 +146,12 @@ pub(crate) enum Section {
 }
 
 impl Section {
-    fn title(self) -> &'static str {
+    fn title(self) -> String {
         match self {
-            Section::Local => "Local branches",
-            Section::Remote => "Remote branches",
+            Section::Local => t!("switcher.local"),
+            Section::Remote => t!("switcher.remote"),
         }
+        .to_string()
     }
 
     fn index(self) -> usize {
@@ -283,7 +284,8 @@ impl BranchSwitcher {
         if self.input.is_some() {
             return;
         }
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Switch to branch"));
+        let input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(t!("switcher.title").to_string()));
         let events = cx.subscribe(
             &input,
             |this: &mut RepoView, _input, event: &InputEvent, cx| {
@@ -423,7 +425,7 @@ impl RepoView {
                     return;
                 }
                 let name = branch.name.clone();
-                let label = format!("check out {name}");
+                let label = t!("branch.op.checkout", branch = name).to_string();
                 self.run_operation(Operation::Checkout { branch: name }, label, window, cx);
             }
             Row::Remote(index) => {
@@ -557,9 +559,9 @@ fn card(
                 .text_size(px(design.tiny()))
                 .text_color(design.muted)
                 .child(if busy {
-                    "an operation is running · Esc close"
+                    t!("switcher.busy_hint").to_string()
                 } else {
-                    "↑/↓ choose · Enter switch · Esc close"
+                    t!("switcher.hint").to_string()
                 }),
         )
         .child(list(
@@ -611,7 +613,7 @@ fn list(
             }
             Row::Empty => {
                 column = column.child(
-                    ui::empty_state("No branch matches.", design)
+                    ui::empty_state(t!("switcher.no_match").to_string(), design)
                         .h(px(52.0))
                         .bg(design.panel),
                 );
@@ -692,13 +694,18 @@ fn local_row(
             .text_size(px(design.tiny()))
             .text_color(design.muted)
             .child(upstream.clone());
-        if let Some(note) = branch.upstream_note {
-            label = label.row_tooltip(move |window, cx| Tooltip::new(note).build(window, cx));
+        if let Some(note) = branch.upstream_note.clone() {
+            label =
+                label.row_tooltip(move |window, cx| Tooltip::new(note.clone()).build(window, cx));
         }
         row = row.child(label);
     }
     if branch.current {
-        row = row.child(status_badge("current", BadgeTone::Accent, design));
+        row = row.child(status_badge(
+            t!("switcher.current").to_string(),
+            BadgeTone::Accent,
+            design,
+        ));
     }
     if let Some(pull_request) = pull_requests.get(&branch.name) {
         row = row.child(crate::pull_requests::badge(
@@ -775,7 +782,13 @@ fn new_branch_row(highlight: bool, design: &Design, entity: &Entity<RepoView>) -
             .text_color(design.muted)
             .child("+"),
     )
-    .child(div().flex_1().min_w_0().truncate().child("New branch…"))
+    .child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .child(t!("switcher.new").to_string()),
+    )
     .into_any_element()
 }
 

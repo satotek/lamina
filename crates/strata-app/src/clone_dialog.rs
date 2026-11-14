@@ -70,13 +70,13 @@ pub(crate) fn open_clone(
         let confirm = confirm.clone();
         let close = close.clone();
         let running = close.read(cx).is_running();
-        card.title("Clone repository")
+        card.title(t!("clone.title").to_string())
             .w(px(640.0))
             .content(move |body, _, _| body.child(content.clone()))
             .footer(
                 DialogFooter::new()
                     .child(
-                        ui::button("clone-cancel", "Cancel")
+                        ui::button("clone-cancel", t!("common.cancel").to_string())
                             .size(ui::ButtonSize::Medium)
                             .on_click(move |_, window, cx| {
                                 cancel.update(cx, |dialog, cx| {
@@ -85,7 +85,7 @@ pub(crate) fn open_clone(
                             }),
                     )
                     .child(
-                        ui::button("clone-ok", "Clone")
+                        ui::button("clone-ok", t!("clone.clone").to_string())
                             .size(ui::ButtonSize::Medium)
                             .disabled(running)
                             .on_click(move |_, window, cx| {
@@ -123,20 +123,20 @@ pub(crate) fn open_init(
         let confirm = confirm.clone();
         let guard = confirm.clone();
         let busy = confirm.read(cx).busy;
-        card.title("New repository")
+        card.title(t!("init.title").to_string())
             .w(px(560.0))
             .content(move |body, _, _| body.child(content.clone()))
             .footer(
                 DialogFooter::new()
                     .child(
-                        ui::button("init-cancel", "Cancel")
+                        ui::button("init-cancel", t!("common.cancel").to_string())
                             .size(ui::ButtonSize::Medium)
                             .disabled(busy)
                             .on_click(|_, window, cx| window.close_dialog(cx)),
                     )
                     .child({
                         let confirm = confirm.clone();
-                        ui::button("init-ok", "Create repository")
+                        ui::button("init-ok", t!("init.create").to_string())
                             .size(ui::ButtonSize::Medium)
                             .disabled(busy)
                             .on_click(move |_, window, cx| {
@@ -198,7 +198,11 @@ fn error_text(error: strata_core::Error) -> String {
 
 /// A label above a text field. Forms are not a shared part yet, so the dialogs
 /// that have one draw the same two-line shape here.
-fn field(label: &'static str, input: &Entity<InputState>, design: &Design) -> AnyElement {
+fn field(
+    label: impl Into<gpui::SharedString>,
+    input: &Entity<InputState>,
+    design: &Design,
+) -> AnyElement {
     div()
         .flex()
         .flex_col()
@@ -208,7 +212,7 @@ fn field(label: &'static str, input: &Entity<InputState>, design: &Design) -> An
             div()
                 .text_size(px(design.tiny()))
                 .text_color(design.muted)
-                .child(label),
+                .child(label.into()),
         )
         .child(Input::new(input).w_full().bg(design.field))
         .into_any_element()
@@ -315,19 +319,23 @@ impl CloneDialog {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let url = cx
-            .new(|cx| InputState::new(window, cx).placeholder("https://host/owner/repository.git"));
+        let url = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(t!("clone.url_placeholder").to_string())
+        });
         let parent = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Folder to clone into")
+                .placeholder(t!("clone.destination_placeholder").to_string())
                 .default_value(home_directory().to_string_lossy().into_owned())
         });
-        let name = cx.new(|cx| InputState::new(window, cx).placeholder("repository"));
-        let branch = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("Leave empty for the remote's default")
+        let name = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(t!("clone.folder_placeholder").to_string())
         });
-        let depth = cx
-            .new(|cx| InputState::new(window, cx).placeholder("Leave empty for the full history"));
+        let branch = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(t!("clone.branch_placeholder").to_string())
+        });
+        let depth = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(t!("clone.depth_placeholder").to_string())
+        });
         let url_events = cx.subscribe_in(
             &url,
             window,
@@ -441,20 +449,20 @@ impl CloneDialog {
         self.error = None;
         let url = self.url.read(cx).value().trim().to_owned();
         if url.is_empty() {
-            self.error = Some("Enter the URL of the repository to clone.".to_owned());
+            self.error = Some(t!("clone.err.url").to_string());
             cx.notify();
             return;
         }
         let parent_text = self.parent.read(cx).value().trim().to_owned();
         if parent_text.is_empty() {
-            self.error = Some("Choose the folder to clone into.".to_owned());
+            self.error = Some(t!("clone.err.parent").to_string());
             cx.notify();
             return;
         }
         let name = match self.name.read(cx).value().trim().to_owned() {
             name if name.is_empty() => {
                 let Some(derived) = directory_name(&url) else {
-                    self.error = Some("Enter a folder name for the clone.".to_owned());
+                    self.error = Some(t!("clone.err.name").to_string());
                     cx.notify();
                     return;
                 };
@@ -463,8 +471,7 @@ impl CloneDialog {
             name => name,
         };
         if name.contains(['/', '\\']) || name == "." || name == ".." {
-            self.error =
-                Some("The folder name must be one folder name, without slashes.".to_owned());
+            self.error = Some(t!("clone.err.name_shape").to_string());
             cx.notify();
             return;
         }
@@ -475,8 +482,7 @@ impl CloneDialog {
             match depth_text.parse::<u32>() {
                 Ok(depth) if depth > 0 => Some(depth),
                 _ => {
-                    self.error =
-                        Some("Shallow depth must be a whole number of commits (1 or more).".into());
+                    self.error = Some(t!("clone.err.depth").to_string());
                     cx.notify();
                     return;
                 }
@@ -508,7 +514,7 @@ impl CloneDialog {
         self.cancel = Some(Arc::clone(&cancel));
         self.attempt = Some(target.clone());
         self.phase = Phase::Clone {
-            text: "Starting the clone…".to_owned(),
+            text: t!("clone.starting").to_string(),
             percent: None,
         };
         self.error = None;
@@ -622,7 +628,7 @@ impl CloneDialog {
                     break result;
                 }
                 if disconnected {
-                    break Err("The clone stopped before it reported an outcome.".to_owned());
+                    break Err(t!("clone.stopped").to_string());
                 }
             };
 
@@ -736,7 +742,7 @@ impl CloneDialog {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("Choose where to clone".into()),
+            prompt: Some(t!("clone.choose_parent").to_string().into()),
         });
         let handle = window.window_handle();
         let this = cx.entity().downgrade();
@@ -747,9 +753,7 @@ impl CloneDialog {
                 Ok(Ok(None)) => return,
                 Ok(Err(error)) => {
                     let _ = this.update(cx, |dialog, cx| {
-                        dialog.error = Some(format!(
-                            "The system folder chooser could not be opened: {error}."
-                        ));
+                        dialog.error = Some(t!("clone.choose_failed", error = error).to_string());
                         cx.notify();
                     });
                     return;
@@ -793,7 +797,7 @@ impl Render for CloneDialog {
             .gap_2()
             .w_full()
             .track_focus(&self.focus)
-            .child(field("REPOSITORY URL", &self.url, &design))
+            .child(field(t!("clone.url_field").to_string(), &self.url, &design))
             .child(
                 div()
                     .flex()
@@ -804,7 +808,7 @@ impl Render for CloneDialog {
                         div()
                             .text_size(px(design.tiny()))
                             .text_color(design.muted)
-                            .child("DESTINATION FOLDER"),
+                            .child(t!("clone.destination").to_string()),
                     )
                     .child(
                         div()
@@ -813,7 +817,7 @@ impl Render for CloneDialog {
                             .gap_2()
                             .child(Input::new(&self.parent).flex_1().bg(design.field))
                             .child(
-                                ui::button("clone-choose-parent", "Choose…")
+                                ui::button("clone-choose-parent", t!("clone.choose").to_string())
                                     .kind(ui::ButtonKind::Normal)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.choose_parent(window, cx);
@@ -821,9 +825,13 @@ impl Render for CloneDialog {
                             ),
                     ),
             )
-            .child(field("FOLDER NAME", &self.name, &design))
+            .child(field(
+                t!("clone.folder_name").to_string(),
+                &self.name,
+                &design,
+            ))
             .child(
-                ui::section_header("clone-options", "OPTIONS", &design)
+                ui::section_header("clone-options", t!("clone.options").to_string(), &design)
                     .disclosure(self.options_open)
                     .px(px(0.0))
                     .on_click(move |_, cx| {
@@ -834,12 +842,12 @@ impl Render for CloneDialog {
                     }),
             )
             .when(self.options_open, |form| {
-                form.child(field("BRANCH", &self.branch, &design))
-                    .child(field("SHALLOW DEPTH", &self.depth, &design))
+                form.child(field(t!("clone.branch").to_string(), &self.branch, &design))
+                    .child(field(t!("clone.depth").to_string(), &self.depth, &design))
                     .child(
                         Checkbox::new("clone-submodules")
                             .checked(self.recurse_submodules)
-                            .label("Recurse into submodules")
+                            .label(t!("clone.recurse_submodules").to_string())
                             .on_change(cx.listener(|this, checked, _, cx| {
                                 this.recurse_submodules = *checked;
                                 cx.notify();
@@ -883,7 +891,7 @@ impl Render for CloneDialog {
                             div()
                                 .text_size(px(design.tiny()))
                                 .text_color(design.muted)
-                                .child("Cancelling the clone…"),
+                                .child(t!("clone.cancelling").to_string()),
                         ),
                 );
             }
@@ -917,7 +925,7 @@ impl InitDialog {
         let suggested = home_directory().join("new-repository");
         let folder = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("/path/to/new-repository")
+                .placeholder(t!("init.folder_placeholder").to_string())
                 .default_value(suggested.to_string_lossy().into_owned())
         });
         let branch = cx.new(|cx| InputState::new(window, cx).default_value("main"));
@@ -941,7 +949,7 @@ impl InitDialog {
             files: false,
             directories: true,
             multiple: false,
-            prompt: Some("Choose a folder for the new repository".into()),
+            prompt: Some(t!("init.choose_folder").to_string().into()),
         });
         let handle = window.window_handle();
         let this = cx.entity().downgrade();
@@ -952,9 +960,7 @@ impl InitDialog {
                 Ok(Ok(None)) => return,
                 Ok(Err(error)) => {
                     let _ = this.update(cx, |dialog, cx| {
-                        dialog.error = Some(format!(
-                            "The system folder chooser could not be opened: {error}."
-                        ));
+                        dialog.error = Some(t!("clone.choose_failed", error = error).to_string());
                         cx.notify();
                     });
                     return;
@@ -1049,7 +1055,7 @@ impl Render for InitDialog {
                 div()
                     .text_size(px(design.small()))
                     .text_color(design.muted)
-                    .child("Create an empty repository in this folder, then open it here."),
+                    .child(t!("init.description").to_string()),
             )
             .child(
                 div()
@@ -1070,7 +1076,7 @@ impl Render for InitDialog {
                             .gap_2()
                             .child(Input::new(&self.folder).flex_1().bg(design.field))
                             .child(
-                                ui::button("init-choose-folder", "Choose…")
+                                ui::button("init-choose-folder", t!("init.choose").to_string())
                                     .kind(ui::ButtonKind::Normal)
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.choose_folder(window, cx);
@@ -1078,7 +1084,11 @@ impl Render for InitDialog {
                             ),
                     ),
             )
-            .child(field("INITIAL BRANCH", &self.branch, &design));
+            .child(field(
+                t!("init.initial_branch").to_string(),
+                &self.branch,
+                &design,
+            ));
 
         if let Some(error) = &self.error {
             form = form.child(ui::banner(ui::BannerKind::Danger, error.clone(), &design));

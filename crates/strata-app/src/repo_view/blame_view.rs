@@ -431,7 +431,7 @@ fn attribution_percent(attributed_lines: usize, total_lines: usize) -> u8 {
 }
 
 fn progress_label(percent: u8) -> String {
-    format!("attributing… {percent}%")
+    t!("blame.attributing", percent = percent).to_string()
 }
 
 /// The oldest and newest author times among the commits the hunks reference.
@@ -737,7 +737,7 @@ impl RepoView {
                 Ok(parents) => match parents.first().copied() {
                     Some(parent) => this.open_blame_target(parent, path, cx),
                     None => {
-                        this.status_error = Some("this commit has no parent to blame".to_owned());
+                        this.status_error = Some(t!("blame.no_parent").to_string().to_owned());
                         this.notify_if_active(cx);
                     }
                 },
@@ -787,7 +787,7 @@ impl RepoView {
 
     fn blame_header(&self, design: &Design) -> AnyElement {
         let entity = self.entity();
-        let back = crate::ui::button("blame-back", "Back")
+        let back = crate::ui::button("blame-back", t!("blame.back").to_string())
             .icon(IconName::ArrowLeft)
             .size(crate::ui::ButtonSize::Tiny)
             .ghost()
@@ -815,7 +815,7 @@ impl RepoView {
                     .flex_none()
                     .text_size(px(12.0))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child("Blame"),
+                    .child(t!("blame.title").to_string()),
             )
             .child(
                 div()
@@ -880,17 +880,25 @@ impl RepoView {
                 design,
             )
             .into_any_element(),
-            BlameState::Loading => {
-                crate::ui::message("attributing lines…", design.muted, design).into_any_element()
-            }
-            BlameState::Formatting => {
-                crate::ui::message("preparing lines…", design.muted, design).into_any_element()
-            }
+            BlameState::Loading => crate::ui::message(
+                t!("blame.attributing_lines").to_string(),
+                design.muted,
+                design,
+            )
+            .into_any_element(),
+            BlameState::Formatting => crate::ui::message(
+                t!("blame.preparing_lines").to_string(),
+                design.muted,
+                design,
+            )
+            .into_any_element(),
             BlameState::Streaming if self.blame.row_count() == 0 => {
-                crate::ui::message("Empty file", design.muted, design).into_any_element()
+                crate::ui::message(t!("blame.empty").to_string(), design.muted, design)
+                    .into_any_element()
             }
             BlameState::Ready if self.blame.rows.is_empty() => {
-                crate::ui::message("Empty file", design.muted, design).into_any_element()
+                crate::ui::message(t!("blame.empty").to_string(), design.muted, design)
+                    .into_any_element()
             }
             BlameState::Streaming | BlameState::Ready => self.blame_rows(design, cx),
             BlameState::Closed => div().into_any_element(),
@@ -1014,7 +1022,7 @@ impl RepoView {
                                     if let Some(path) = editor_path.clone() {
                                         let editor_entity = menu_entity.clone();
                                         menu = menu.item(
-                                            PopupMenuItem::new("Open in Editor").on_click(
+                                            PopupMenuItem::new(t!("history.open_in_editor").to_string()).on_click(
                                                 move |_: &ClickEvent,
                                                       _window: &mut Window,
                                                       cx: &mut App| {
@@ -1031,7 +1039,7 @@ impl RepoView {
                                         );
                                     }
                                     menu.item(
-                                        PopupMenuItem::new("Blame this commit's parent").on_click(
+                                        PopupMenuItem::new(t!("blame.parent").to_string()).on_click(
                                             move |_: &ClickEvent,
                                                   _window: &mut Window,
                                                   cx: &mut App| {
@@ -1042,7 +1050,7 @@ impl RepoView {
                                             },
                                         ),
                                     )
-                                    .item(PopupMenuItem::new("Copy commit id").on_click(
+                                    .item(PopupMenuItem::new(t!("blame.copy_id").to_string()).on_click(
                                         move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
                                             cx.write_to_clipboard(ClipboardItem::new_string(
                                                 copy.clone(),

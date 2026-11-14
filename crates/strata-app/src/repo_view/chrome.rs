@@ -196,7 +196,7 @@ impl Render for RepoView {
                 let dismiss_entity = self.entity();
                 main = main.child(
                     crate::ui::banner(crate::ui::BannerKind::Warning, text, &design).action(
-                        crate::ui::button("dismiss-lfs-notice", "Dismiss")
+                        crate::ui::button("dismiss-lfs-notice", t!("common.close").to_string())
                             .size(crate::ui::ButtonSize::Tiny)
                             .on_click(move |_, _, cx| {
                                 dismiss_entity.update(cx, |this, cx| {
@@ -261,32 +261,51 @@ impl RepoView {
             .border_color(design.border)
             .text_size(px(11.0))
             .text_color(design.text)
-            .child(div().font_weight(FontWeight::SEMIBOLD).child(format!(
-                "{:.2} ms/frame mean · p95 {:.2} ms · {:.1} fps",
-                stats.frame_ms, stats.p95_ms, stats.fps
-            )))
-            .child(format!(
-                "render {:.2} ms · {} samples · {} frames",
-                stats.render_ms,
-                stats.samples,
-                self.metrics.frames()
-            ))
-            .child(format!(
-                "display target {:.2} ms ({:.0} Hz)",
-                target, target_hz
-            ))
-            .child(format!(
-                "{commits} commits · selected {}",
-                self.selected
-                    .map_or_else(|| "none".to_owned(), |index| index.to_string())
-            ));
+            .child(
+                div().font_weight(FontWeight::SEMIBOLD).child(
+                    t!(
+                        "chrome.frame_summary",
+                        frame = format!("{:.2}", stats.frame_ms),
+                        p95 = format!("{:.2}", stats.p95_ms),
+                        fps = format!("{:.1}", stats.fps)
+                    )
+                    .to_string(),
+                ),
+            )
+            .child(
+                t!(
+                    "chrome.frame_render",
+                    render = format!("{:.2}", stats.render_ms),
+                    samples = stats.samples,
+                    frames = self.metrics.frames()
+                )
+                .to_string(),
+            )
+            .child(
+                t!(
+                    "chrome.frame_target",
+                    target = format!("{target:.2}"),
+                    hz = format!("{target_hz:.0}")
+                )
+                .to_string(),
+            )
+            .child(
+                t!(
+                    "chrome.frame_commits",
+                    commits = commits,
+                    selected = self
+                        .selected
+                        .map_or_else(|| t!("common.none").to_string(), |index| index.to_string())
+                )
+                .to_string(),
+            );
 
         if stats.samples > 0 {
             panel = panel.child(div().text_color(design.muted).child(
                 if stats.frame_ms <= target * 1.05 {
-                    format!("smooth ({target_hz:.0} fps target)")
+                    t!("chrome.smooth", hz = format!("{target_hz:.0}")).to_string()
                 } else {
-                    format!("below {target_hz:.0} fps target")
+                    t!("chrome.below_target", hz = format!("{target_hz:.0}")).to_string()
                 },
             ));
         }
@@ -308,7 +327,7 @@ impl RepoView {
                     .text_size(px(18.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(design.remove_text)
-                    .child("Could not open repository"),
+                    .child(t!("chrome.could_not_open").to_string()),
             )
             .child(
                 div()

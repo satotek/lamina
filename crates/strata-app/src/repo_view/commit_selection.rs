@@ -195,24 +195,24 @@ pub(super) fn multi_pick_blocked(
     busy: bool,
     pending: bool,
     detached: bool,
-) -> Option<&'static str> {
+) -> Option<String> {
     if rows.is_empty() {
-        return Some("no commits are selected");
+        return Some(t!("commit_selection.no_commits").to_string());
     }
     if busy {
-        return Some("an operation is running");
+        return Some(t!("branch.reason.busy").to_string());
     }
     if pending {
-        return Some("finish the operation in progress first");
+        return Some(t!("reflog.finish_first").to_string());
     }
     if detached {
-        return Some("HEAD is detached");
+        return Some(t!("reflog.head_detached").to_string());
     }
     if rows.iter().any(|row| row.merge) {
-        return Some("a merge commit is selected");
+        return Some(t!("commit_selection.merge_selected").to_string());
     }
     if rows.iter().any(|row| row.reachable) {
-        return Some("already on the current branch");
+        return Some(t!("commit_selection.on_branch").to_string());
     }
     None
 }
@@ -374,15 +374,15 @@ mod tests {
     #[test]
     fn a_pick_is_refused_with_the_reason_that_stops_it() {
         assert_eq!(
-            multi_pick_blocked(&[pick(false, false)], true, false, false),
+            multi_pick_blocked(&[pick(false, false)], true, false, false).as_deref(),
             Some("an operation is running")
         );
         assert_eq!(
-            multi_pick_blocked(&[pick(false, false)], false, true, false),
+            multi_pick_blocked(&[pick(false, false)], false, true, false).as_deref(),
             Some("finish the operation in progress first")
         );
         assert_eq!(
-            multi_pick_blocked(&[pick(false, false)], false, false, true),
+            multi_pick_blocked(&[pick(false, false)], false, false, true).as_deref(),
             Some("HEAD is detached")
         );
         assert_eq!(
@@ -391,7 +391,8 @@ mod tests {
                 false,
                 false,
                 false
-            ),
+            )
+            .as_deref(),
             Some("a merge commit is selected")
         );
         assert_eq!(
@@ -400,7 +401,8 @@ mod tests {
                 false,
                 false,
                 false
-            ),
+            )
+            .as_deref(),
             Some("already on the current branch")
         );
         assert_eq!(
@@ -408,7 +410,7 @@ mod tests {
             None
         );
         assert_eq!(
-            multi_pick_blocked(&[], false, false, false),
+            multi_pick_blocked(&[], false, false, false).as_deref(),
             Some("no commits are selected")
         );
     }

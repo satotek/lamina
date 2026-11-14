@@ -197,7 +197,7 @@ fn choose_selection(rows: &[PathHistoryCommit], current: Option<Oid>) -> Option<
 /// name, or `None` when it had the requested one.
 fn rename_label(requested: &str, path: Option<&str>) -> Option<String> {
     let path = path?;
-    (path != requested).then(|| format!("renamed from {path}"))
+    (path != requested).then(|| t!("file_history.renamed_from", path = path).to_string())
 }
 
 // ---------------------------------------------------------------------------
@@ -574,7 +574,7 @@ impl RepoView {
 
         let back = {
             let entity = entity.clone();
-            crate::ui::button("file-history-back", "‹ History")
+            crate::ui::button("file-history-back", t!("file_history.back").to_string())
                 .size(crate::ui::ButtonSize::Tiny)
                 .ghost()
                 .on_click(move |_, window, cx| {
@@ -585,7 +585,7 @@ impl RepoView {
         };
         let blame = {
             let entity = entity.clone();
-            crate::ui::button("file-history-blame", "Blame")
+            crate::ui::button("file-history-blame", t!("blame.title").to_string())
                 .icon(gpui_kit_assets::IconName::FileText)
                 .size(crate::ui::ButtonSize::Tiny)
                 .ghost()
@@ -598,11 +598,12 @@ impl RepoView {
         };
         let count = {
             let rows = history.rows().len();
-            let plural = if rows == 1 { "" } else { "s" };
-            if history.walking() {
-                format!("{rows} commit{plural} · loading…")
-            } else {
-                format!("{rows} commit{plural}")
+            let walking = history.walking();
+            match (rows, walking) {
+                (1, true) => t!("file_history.count_loading.one", count = rows).to_string(),
+                (_, true) => t!("file_history.count_loading.other", count = rows).to_string(),
+                (1, false) => t!("file_history.count.one", count = rows).to_string(),
+                _ => t!("file_history.count.other", count = rows).to_string(),
             }
         };
 
@@ -622,7 +623,7 @@ impl RepoView {
                     .flex_none()
                     .text_size(px(12.0))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .child("File history"),
+                    .child(t!("file_history.title").to_string()),
             )
             .child(
                 div()
@@ -691,13 +692,13 @@ impl RepoView {
                     div()
                         .text_size(px(11.0))
                         .text_color(colors.muted_foreground)
-                        .child("walking history…"),
+                        .child(t!("file_history.walking").to_string()),
                 )
                 .into_any_element();
         }
         if history.rows().is_empty() {
             return list_message(
-                "No commit touches this path",
+                t!("file_history.empty").to_string(),
                 colors.muted_foreground,
                 colors,
             );
@@ -835,33 +836,39 @@ impl RepoView {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .child(div().flex_none().text_color(colors.muted_foreground).child(
-                        match commit {
-                            Some(commit) => format!(
-                                "{} · {} rows",
-                                data::short_oid(commit),
-                                history.diff_rows.len()
-                            ),
-                            None => "no commit selected".to_owned(),
-                        },
-                    ))
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_color(colors.muted_foreground)
+                            .child(match commit {
+                                Some(commit) => t!(
+                                    "file_history.row_detail",
+                                    author = data::short_oid(commit),
+                                    count = history.diff_rows.len()
+                                )
+                                .to_string(),
+                                None => t!("file_history.no_selection").to_string(),
+                            }),
+                    )
                     .child(if history.view.is_some() {
                         let active = history.context.is_whole_file();
                         let entity = self.entity();
-                        crate::ui::button("history-toggle-whole-file", "Whole file")
-                            .size(crate::ui::ButtonSize::Tiny)
-                            .ghost()
-                            .selected(active)
-                            .tooltip(if active {
-                                "Show only the changes"
-                            } else {
-                                "Show every line of the file"
-                            })
-                            .on_click(move |_event, _window, cx| {
-                                entity
-                                    .update(cx, |this, cx| this.toggle_file_history_whole_file(cx));
-                            })
-                            .into_any_element()
+                        crate::ui::button(
+                            "history-toggle-whole-file",
+                            t!("history.whole_file").to_string(),
+                        )
+                        .size(crate::ui::ButtonSize::Tiny)
+                        .ghost()
+                        .selected(active)
+                        .tooltip(if active {
+                            t!("worktree.show_only_changes").to_string()
+                        } else {
+                            t!("worktree.show_every_line").to_string()
+                        })
+                        .on_click(move |_event, _window, cx| {
+                            entity.update(cx, |this, cx| this.toggle_file_history_whole_file(cx));
+                        })
+                        .into_any_element()
                     } else {
                         div().into_any_element()
                     })
@@ -879,16 +886,28 @@ impl RepoView {
         let body = if let Some(error) = &history.diff_error {
             message(error, colors.danger, colors)
         } else if history.selected.is_none() {
-            message("Select a commit", colors.muted_foreground, colors)
+            message(
+                t!("file_history.select_commit").to_string(),
+                colors.muted_foreground,
+                colors,
+            )
         } else if let Some(view) = &history.view {
             if let Some(image) =
                 crate::image_diff::body(&self.image_diff, view, &colors.design, self.entity(), cx)
             {
                 image
             } else if view.diff.binary {
-                message("Binary file", colors.muted_foreground, colors)
+                message(
+                    t!("worktree.binary_file").to_string(),
+                    colors.muted_foreground,
+                    colors,
+                )
             } else if history.diff_rows.is_empty() {
-                message("No textual changes", colors.muted_foreground, colors)
+                message(
+                    t!("worktree.no_text_changes").to_string(),
+                    colors.muted_foreground,
+                    colors,
+                )
             } else {
                 let list = self.history_diff_rows(colors, diff_colors, cx);
                 match history.context.notice() {
@@ -908,7 +927,11 @@ impl RepoView {
                 }
             }
         } else {
-            message("computing diff…", colors.muted_foreground, colors)
+            message(
+                t!("worktree.computing_diff").to_string(),
+                colors.muted_foreground,
+                colors,
+            )
         };
 
         div()
@@ -961,11 +984,11 @@ fn loading_row(colors: &Colors) -> AnyElement {
     .text_size(px(colors.design.small()))
     .text_color(colors.muted_foreground)
     .child(Spinner::new().color(colors.muted_foreground))
-    .child("Loading…")
+    .child(t!("common.loading").to_string())
     .into_any_element()
 }
 
-fn list_message(text: &str, color: Hsla, colors: &Colors) -> AnyElement {
+fn list_message(text: impl Into<gpui::SharedString>, color: Hsla, colors: &Colors) -> AnyElement {
     div()
         .flex()
         .w(px(LIST_WIDTH))
@@ -976,7 +999,7 @@ fn list_message(text: &str, color: Hsla, colors: &Colors) -> AnyElement {
         .into_any_element()
 }
 
-fn message(text: &str, color: Hsla, colors: &Colors) -> AnyElement {
+fn message(text: impl Into<gpui::SharedString>, color: Hsla, colors: &Colors) -> AnyElement {
     crate::ui::message(text, color, &colors.design).into_any_element()
 }
 

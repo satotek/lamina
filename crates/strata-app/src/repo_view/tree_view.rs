@@ -377,17 +377,20 @@ fn file_content(
     tab_width: usize,
 ) -> FileContent {
     if bytes.len() > MAX_FILE_BYTES {
-        return FileContent::Notice(format!(
-            "File is {} — the viewer shows files up to {}.",
-            format_bytes(bytes.len() as u64),
-            format_bytes(MAX_FILE_BYTES as u64)
-        ));
+        return FileContent::Notice(
+            t!(
+                "tree.file_too_large",
+                size = format_bytes(bytes.len() as u64),
+                limit = format_bytes(MAX_FILE_BYTES as u64)
+            )
+            .to_string(),
+        );
     }
     let (decoded, encoding) = decode_for_display(&bytes, || attribute);
     // A UTF-16 file contains NUL bytes in its code units; only another
     // encoding's NUL marks a binary file.
     if !encoding.is_utf16() && bytes.contains(&0) {
-        return FileContent::Notice("Binary file — contents are not shown.".to_owned());
+        return FileContent::Notice(t!("tree.binary").to_string());
     }
     let text = decoded.as_ref();
 
@@ -505,10 +508,9 @@ impl RepoView {
                 let epoch = self.tree.enter_dir(entry.path);
                 self.request_tree_listing(epoch, cx);
             }
-            TreeEntryKind::Submodule => self.tree.open_notice(
-                entry.path,
-                "Submodule — its contents live in another repository.".to_owned(),
-            ),
+            TreeEntryKind::Submodule => self
+                .tree
+                .open_notice(entry.path, t!("tree.submodule").to_string()),
             TreeEntryKind::File | TreeEntryKind::Symlink => {
                 let epoch = self.tree.begin_file(entry.path.clone());
                 self.request_tree_file(epoch, entry.path, cx);
@@ -578,11 +580,14 @@ impl RepoView {
                         {
                             Some(real) => bytes = real,
                             None => {
-                                return Ok::<FileContent, String>(FileContent::Notice(format!(
-                                    "Git LFS object {} ({}) is not downloaded",
-                                    short_label(&pointer.oid),
-                                    format_size(pointer.size),
-                                )));
+                                return Ok::<FileContent, String>(FileContent::Notice(
+                                    t!(
+                                        "tree.lfs_missing",
+                                        oid = short_label(&pointer.oid),
+                                        size = format_size(pointer.size)
+                                    )
+                                    .to_string(),
+                                ));
                             }
                         }
                     }
@@ -648,20 +653,23 @@ impl RepoView {
 
     fn tree_path_bar(&self, design: &Design) -> AnyElement {
         let entity = self.entity();
-        let back = crate::ui::button("tree-back-to-changes", "Back to changes")
-            .icon(IconName::ArrowLeft)
-            .size(crate::ui::ButtonSize::Tiny)
-            .ghost()
-            .on_click(move |_, window, cx| {
-                entity.update(cx, |this, cx| this.close_tree(window, cx));
-            });
+        let back = crate::ui::button(
+            "tree-back-to-changes",
+            t!("tree.back_to_changes").to_string(),
+        )
+        .icon(IconName::ArrowLeft)
+        .size(crate::ui::ButtonSize::Tiny)
+        .ghost()
+        .on_click(move |_, window, cx| {
+            entity.update(cx, |this, cx| this.close_tree(window, cx));
+        });
 
         let path = self.tree.path().to_owned();
         let blame = self.tree.commit().and_then(|commit| {
             self.tree.file.as_ref().map(|file| {
                 let entity = self.entity();
                 let path = file.path.clone();
-                crate::ui::button("tree-blame", "Blame")
+                crate::ui::button("tree-blame", t!("tree.blame").to_string())
                     .icon(IconName::FileText)
                     .size(crate::ui::ButtonSize::Tiny)
                     .ghost()
@@ -754,7 +762,8 @@ impl RepoView {
             return crate::ui::message("reading tree…", design.muted, design).into_any_element();
         };
         if entries.is_empty() {
-            return crate::ui::message("Empty directory", design.muted, design).into_any_element();
+            return crate::ui::message(t!("tree.empty_dir").to_string(), design.muted, design)
+                .into_any_element();
         }
 
         let entries = Rc::new(entries.clone());

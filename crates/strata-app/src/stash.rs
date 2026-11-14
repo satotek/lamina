@@ -33,7 +33,9 @@ use crate::style;
 use crate::ui::RowTipExt as _;
 
 /// Title of the stash dialog and of the notifications it raises.
-const STASH_TITLE: &str = "Stash changes";
+fn stash_title() -> String {
+    t!("action.stash_changes").to_string()
+}
 
 /// Tallest the file checklist grows before it scrolls; a dialog that lists a
 /// whole worktree must not grow past the window.
@@ -47,7 +49,7 @@ impl RepoView {
             notify(
                 window,
                 cx,
-                Notification::warning("Stashing needs an open repository."),
+                Notification::warning(t!("stash.needs_repo").to_string()),
             );
             return;
         }
@@ -60,7 +62,7 @@ impl RepoView {
             notify(
                 window,
                 cx,
-                Notification::warning("An operation is already running."),
+                Notification::warning(t!("stash.busy").to_string()),
             );
             return;
         }
@@ -73,7 +75,7 @@ impl RepoView {
             notify(
                 window,
                 cx,
-                Notification::info("The working tree has no changes to stash."),
+                Notification::info(t!("stash.nothing").to_string()),
             );
             return;
         }
@@ -97,18 +99,18 @@ impl RepoView {
             let content = content.clone();
             let footer = footer.clone();
             let confirm = confirm.clone();
-            card.title(STASH_TITLE)
+            card.title(stash_title())
                 .w(px(520.0))
                 .content(move |body, _, _| body.child(content.clone()))
                 .footer(
                     DialogFooter::new()
                         .child(
-                            crate::ui::button("stash-cancel", "Cancel")
+                            crate::ui::button("stash-cancel", t!("common.cancel").to_string())
                                 .size(crate::ui::ButtonSize::Medium)
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
-                            crate::ui::button("stash-submit", "Stash changes")
+                            crate::ui::button("stash-submit", stash_title())
                                 .size(crate::ui::ButtonSize::Medium)
                                 .on_click(move |_, window, cx| {
                                     footer.update(cx, |dialog, cx| dialog.submit(window, cx));
@@ -134,13 +136,13 @@ impl RepoView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let label = format!("apply stash@{{{index}}}");
+        let label = t!("stash.apply_op", index = index).to_string();
         self.run_operation(Operation::StashApply { index }, label, window, cx);
     }
 
     /// Applies `stash@{index}` and drops it when the apply succeeded.
     pub(crate) fn stash_pop(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let label = format!("pop stash@{{{index}}}");
+        let label = t!("stash.pop_op", index = index).to_string();
         self.run_operation(Operation::StashPop { index }, label, window, cx);
     }
 
@@ -161,11 +163,11 @@ impl RepoView {
             window,
             cx,
             crate::ui::Confirm::new(
-                format!("Drop stash@{{{index}}}?"),
+                t!("stash.drop_title", index = index).to_string(),
                 "The stashed changes are deleted. Unlike a pop, the changes are not \
                  applied to the working tree first.",
             )
-            .ok_label("Drop stash"),
+            .ok_label(t!("stash.drop_button").to_string()),
             move |window, cx| {
                 let _ = entity.update(cx, |view, cx| view.stash_drop(index, window, cx));
             },
@@ -173,7 +175,7 @@ impl RepoView {
     }
 
     fn stash_drop(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        let label = format!("drop stash@{{{index}}}");
+        let label = t!("stash.drop_op", index = index).to_string();
         self.run_operation(Operation::StashDrop { index }, label, window, cx);
     }
 
@@ -257,21 +259,23 @@ fn stash_operation(
 fn operation_label(operation: &Operation) -> String {
     match operation {
         Operation::StashPush { message, .. } => message.as_ref().map_or_else(
-            || "stash changes".to_owned(),
-            |message| format!("stash \"{message}\""),
+            || t!("stash.op.changes").to_string(),
+            |message| t!("stash.op.message", message = message).to_string(),
         ),
         Operation::StashPushPaths { message, paths, .. } => {
-            let count = format!(
-                "stash {} file{}",
-                paths.len(),
-                if paths.len() == 1 { "" } else { "s" }
-            );
+            let count = if paths.len() == 1 {
+                t!("stash.op.files.one", count = paths.len()).to_string()
+            } else {
+                t!("stash.op.files.other", count = paths.len()).to_string()
+            };
             match message {
-                Some(message) => format!("{count} as \"{message}\""),
+                Some(message) => {
+                    t!("stash.op.count_as", count = count, message = message).to_string()
+                }
                 None => count,
             }
         }
-        _ => "stash changes".to_owned(),
+        _ => t!("stash.op.changes").to_string(),
     }
 }
 
@@ -280,7 +284,7 @@ fn operation_label(operation: &Operation) -> String {
 fn stash_detail(stash: &StashInfo, now: i64) -> String {
     let age = style::relative_time(stash.created_time, now);
     match &stash.branch {
-        Some(branch) => format!("on {branch} · {age}"),
+        Some(branch) => t!("stash.detail", branch = branch, age = age).to_string(),
         None => age,
     }
 }
@@ -361,23 +365,32 @@ pub(crate) fn sidebar_row(
                     entity.update(cx, |view, cx| view.confirm_stash_drop(index, window, cx));
                 }
             };
-            let blocked = busy.then_some("an operation is running");
-            menu.item(PopupMenuItem::new("Reveal in history").on_click(reveal))
+            let blocked = busy.then_some(t!("branch.reason.busy").to_string());
+            menu.item(PopupMenuItem::new(t!("stash.reveal").to_string()).on_click(reveal))
                 .item(
-                    PopupMenuItem::new(crate::ui::menu_label("Apply", blocked))
-                        .disabled(blocked.is_some())
-                        .on_click(apply),
+                    PopupMenuItem::new(crate::ui::menu_label(
+                        t!("stash.apply").to_string(),
+                        blocked.as_ref(),
+                    ))
+                    .disabled(blocked.is_some())
+                    .on_click(apply),
                 )
                 .item(
-                    PopupMenuItem::new(crate::ui::menu_label("Pop", blocked))
-                        .disabled(blocked.is_some())
-                        .on_click(pop),
+                    PopupMenuItem::new(crate::ui::menu_label(
+                        t!("stash.pop_button").to_string(),
+                        blocked.as_ref(),
+                    ))
+                    .disabled(blocked.is_some())
+                    .on_click(pop),
                 )
                 .separator()
                 .item(
-                    PopupMenuItem::new(crate::ui::menu_label("Drop…", blocked))
-                        .disabled(blocked.is_some())
-                        .on_click(drop),
+                    PopupMenuItem::new(crate::ui::menu_label(
+                        t!("stash.drop").to_string(),
+                        blocked.as_ref(),
+                    ))
+                    .disabled(blocked.is_some())
+                    .on_click(drop),
                 )
         },
     )
@@ -417,8 +430,9 @@ impl StashDialog {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Stash message (optional)"));
+        let input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(t!("stash.message_placeholder").to_string())
+        });
         let _input_events = cx.subscribe(&input, |this, _input, event: &InputEvent, cx| {
             if matches!(
                 event,
@@ -453,7 +467,7 @@ impl StashDialog {
             notify(
                 window,
                 cx,
-                Notification::warning("Tick at least one file to stash."),
+                Notification::warning(t!("stash.tick_one").to_string()),
             );
             return;
         };
@@ -486,13 +500,9 @@ impl Render for StashDialog {
             .filter(|file| include_untracked || file.kind != ChangeKind::Untracked)
             .count();
         let summary = if ticked == eligible {
-            format!(
-                "All {} changed file{} move to a new stash entry.",
-                eligible,
-                if eligible == 1 { "" } else { "s" }
-            )
+            t!("stash.all_files", count = eligible).to_string()
         } else {
-            format!("{ticked} of {eligible} changed files move to a new stash entry.")
+            t!("stash.some_files", ticked = ticked, eligible = eligible).to_string()
         };
         let rows = self
             .files
@@ -541,14 +551,14 @@ impl Render for StashDialog {
             .child(
                 Checkbox::new("stash-include-untracked")
                     .checked(self.include_untracked)
-                    .label("Include untracked files")
+                    .label(t!("stash.include_untracked").to_string())
                     .on_change(toggle),
             )
     }
 }
 
 fn notify(window: &mut Window, cx: &mut App, note: Notification) {
-    window.push_notification(note.title(STASH_TITLE), cx);
+    window.push_notification(note.title(stash_title()), cx);
 }
 
 #[cfg(test)]

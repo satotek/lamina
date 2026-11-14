@@ -173,7 +173,7 @@ impl Launch {
 
     pub fn title(&self) -> String {
         match self {
-            Launch::Fake { .. } => "Strata — synthetic (main)".into(),
+            Launch::Fake { .. } => t!("history.window_synthetic").to_string(),
             Launch::Repo { title, .. } => title.clone(),
             Launch::Error { path, .. } => format!("Strata — {path}"),
         }
@@ -1183,7 +1183,7 @@ impl RepoView {
             crate::ui::askpass_prompt(
                 window,
                 cx,
-                "Authentication",
+                t!("history.authentication").to_string(),
                 prompt,
                 secret,
                 move |answer, _window, cx| {
@@ -1281,9 +1281,11 @@ impl RepoView {
             return;
         }
         let label = match self.source().and_then(|source| source.head().cloned()) {
-            Some(HeadInfo::Branch { short_name, .. }) => format!("from {short_name}"),
-            Some(HeadInfo::Detached { .. }) => "from the current commit".to_owned(),
-            None => "from HEAD".to_owned(),
+            Some(HeadInfo::Branch { short_name, .. }) => {
+                t!("history.from_branch", name = short_name).to_string()
+            }
+            Some(HeadInfo::Detached { .. }) => t!("history.from_current").to_string(),
+            None => t!("history.from_head").to_string(),
         };
         self.open_create_dialog(None, label, window, cx);
     }
@@ -1301,7 +1303,9 @@ impl RepoView {
             return;
         }
         self.branches.set_viewport(window.viewport_size());
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("branch name"));
+        let input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(t!("branch.placeholder.name").to_string())
+        });
         let handle = input.focus_handle(cx);
         self.branches.open_create(
             input,
@@ -1337,10 +1341,10 @@ impl RepoView {
             window,
             cx,
             crate::ui::Confirm::new(
-                format!("Delete branch {name}?"),
-                "Its commits stay in the repository until they are garbage collected.",
+                t!("history.delete_branch", name = name).to_string(),
+                t!("history.delete_branch_detail").to_string(),
             )
-            .ok_label("Delete"),
+            .ok_label(t!("common.delete").to_string()),
             move |window, cx| {
                 let name = name.clone();
                 let _ = entity.update(cx, |view, cx| view.delete_branch(name, false, window, cx));
@@ -2081,7 +2085,7 @@ impl RepoView {
 
     fn sync_title(&mut self, window: &mut Window) {
         let title = if self.fake.is_some() {
-            "Strata — synthetic (main)".to_owned()
+            t!("history.window_synthetic").to_string()
         } else if let Some(name) = &self.name {
             let head: Option<HeadInfo> = self.source().and_then(|source| source.head().cloned());
             data::window_title(name, head.as_ref())

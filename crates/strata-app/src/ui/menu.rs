@@ -126,10 +126,10 @@ fn note_menu_open(window: &mut Window, cx: &mut Context<PopupMenu>) {
 
 /// A menu label that says why it is disabled; a popup item has no tooltip, so
 /// the reason has to travel in the text.
-pub fn menu_label(base: impl Into<String>, blocked: Option<&'static str>) -> String {
+pub fn menu_label(base: impl Into<String>, blocked: Option<impl Into<String>>) -> String {
     let base = base.into();
     match blocked {
-        Some(reason) => format!("{base} ({reason})"),
+        Some(reason) => format!("{base} ({})", reason.into()),
         None => base,
     }
 }
@@ -140,7 +140,7 @@ mod tests {
 
     #[test]
     fn a_blocked_entry_names_the_reason_in_parentheses() {
-        assert_eq!(menu_label("Checkout", None), "Checkout");
+        assert_eq!(menu_label("Checkout", None::<&str>), "Checkout");
         assert_eq!(
             menu_label("Checkout", Some("already checked out")),
             "Checkout (already checked out)"

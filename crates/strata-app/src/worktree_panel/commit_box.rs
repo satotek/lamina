@@ -64,14 +64,18 @@ impl WorktreePanel {
                         .text_color(colors.accent)
                         .child(if checked { "✓" } else { "" }),
                 )
-                .child("Amend")
+                .child(t!("worktree.amend").to_string())
         };
 
         let commit_button = {
             let entity = entity.clone();
             crate::ui::button(
                 "commit-button",
-                format!("Commit {staged} file{}", if staged == 1 { "" } else { "s" }),
+                if staged == 1 {
+                    t!("worktree.commit.one", count = staged).to_string()
+                } else {
+                    t!("worktree.commit.other", count = staged).to_string()
+                },
             )
             .size(crate::ui::ButtonSize::Medium)
             .disabled(!enabled)
@@ -90,7 +94,7 @@ impl WorktreePanel {
         };
         let history_button = {
             let entity = entity.clone();
-            crate::ui::button("show-history", "← History")
+            crate::ui::button("show-history", t!("worktree.history_button").to_string())
                 .ghost()
                 .on_click(move |_, window, cx| {
                     entity.update(cx, |this, cx| this.close_worktree(window, cx));
@@ -112,7 +116,7 @@ impl WorktreePanel {
                 .text_size(px(10.0))
                 .text_color(colors.muted_foreground)
                 .child(if snapshot.busy.is_some() {
-                    "working…".to_owned()
+                    t!("worktree.working").to_string()
                 } else {
                     String::new()
                 })
@@ -134,7 +138,7 @@ impl WorktreePanel {
                     .text_size(px(11.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(colors.muted_foreground)
-                    .child("COMMIT MESSAGE"),
+                    .child(t!("worktree.commit_message").to_string()),
             )
             .child(
                 Textarea::new(&input)
@@ -203,7 +207,8 @@ fn summary_len(message: &str) -> usize {
 
 fn summary_hint(message: &str, limit: u32) -> Option<String> {
     let len = summary_len(message);
-    (len > limit as usize).then(|| format!("summary is {len} characters (guideline: {limit})"))
+    (len > limit as usize)
+        .then(|| t!("worktree.summary_warning", length = len, limit = limit).to_string())
 }
 
 /// HEAD's full message, used to prefill the amend box.

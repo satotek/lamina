@@ -97,7 +97,7 @@ impl Command {
         let slot = spec.palette.expect("palette commands carry a slot");
         Self {
             source: Source::Builtin(spec),
-            label: spec.title.to_owned(),
+            label: keymap::display_title(spec),
             identity: keymap::short_name(spec.name).to_owned(),
             needs_repo: slot.needs_repo,
             key: None,
@@ -193,7 +193,9 @@ impl Palette {
         let commands = commands(cx);
         let (entries, repo_open) = snapshot(&commands, window, cx);
         let return_focus = window.focused(cx);
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Type a command"));
+        let input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(t!("palette.placeholder").to_string())
+        });
         let focus = input.focus_handle(cx);
         let _input_events =
             cx.subscribe(&input, |this, _input, event: &InputEvent, cx| match event {
@@ -329,7 +331,7 @@ impl Render for Palette {
 
         let mut list = div().flex().flex_col().w_full().py_1();
         if filtered.is_empty() {
-            list = list.child(ui::empty_state("No command matches.", &design));
+            list = list.child(ui::empty_state(t!("palette.no_match").to_string(), &design));
         } else {
             list = list.children(
                 filtered
@@ -357,8 +359,12 @@ impl Render for Palette {
                     .px_1()
                     .text_size(px(design.tiny()))
                     .text_color(design.muted)
-                    .child("↑/↓ choose · Enter run · Esc close")
-                    .child(format!("{} commands", filtered.len())),
+                    .child(t!("palette.hint").to_string())
+                    .child(if filtered.len() == 1 {
+                        t!("palette.commands.one", count = filtered.len()).to_string()
+                    } else {
+                        t!("palette.commands.other", count = filtered.len()).to_string()
+                    }),
             )
             .child(list)
     }

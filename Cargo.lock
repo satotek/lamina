@@ -7702,6 +7702,7 @@ dependencies = [
  "gpui-pre-platform",
  "image",
  "log",
+ "rust-i18n",
  "serde",
  "serde_json",
  "strata-core",

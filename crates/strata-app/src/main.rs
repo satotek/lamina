@@ -13,6 +13,13 @@
 //! open a repository from the system chooser or pick one from the recent list.
 //! A path that is not a repository keeps the error screen instead of exiting.
 
+// The interface catalogue. `t!` resolves the module-level `_rust_i18n_t` this
+// macro generates, which is why both statements live at the crate root.
+#[macro_use]
+extern crate rust_i18n;
+
+rust_i18n::i18n!("locales", fallback = "en");
+
 mod actions;
 mod assets;
 mod autofetch;
@@ -31,6 +38,7 @@ mod file_history;
 mod git_config_view;
 mod github;
 mod graph_canvas;
+mod i18n;
 mod image_diff;
 mod keymap;
 mod merge_editor;
@@ -101,6 +109,7 @@ fn main() {
     app.run(move |cx: &mut App| {
         gpui_component::init(cx);
         settings::init(cx);
+        i18n::apply(cx);
         tools::init(cx);
         keymap::init(cx);
         commands::init(cx);

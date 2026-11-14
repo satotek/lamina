@@ -113,29 +113,39 @@ fn page(section: Section, control: f32, design: &Design) -> SettingPage {
 fn appearance(control: f32, design: &Design) -> SettingPage {
     shell(
         Section::Appearance,
-        "Preferences for Strata itself. Nothing here writes git config.",
+        t!("settings.appearance.description").to_string(),
         design,
     )
-    .groups(card("Theme").item(
-        SettingItem::new("Theme", theme_field(control)).description(
-            "Follow the system, or pin light or dark. Every window follows immediately.",
-        ),
-    ))
     .groups(
-        card("Fonts").items([
+        card(t!("settings.theme.card").to_string()).item(
+            SettingItem::new(t!("settings.theme.card").to_string(), theme_field(control))
+                .description(t!("settings.theme.description").to_string()),
+        ),
+    )
+    .groups(
+        card(t!("settings.appearance.language").to_string()).item(
             SettingItem::new(
-                "Interface font",
+                t!("settings.appearance.language").to_string(),
+                language_field(control),
+            )
+            .description(t!("settings.appearance.language_description").to_string()),
+        ),
+    )
+    .groups(
+        card(t!("settings.fonts.card").to_string()).items([
+            SettingItem::new(
+                t!("settings.fonts.interface").to_string(),
                 text_field(
-                    "System default",
+                    t!("settings.fonts.system_default").to_string(),
                     UI_FONTS,
                     control,
                     |settings| settings.appearance.ui_font.clone(),
                     change::ui_font,
                 ),
             )
-            .description("Lists, labels and the status bar. Leave empty for the platform font."),
+            .description(t!("settings.fonts.interface_description").to_string()),
             SettingItem::new(
-                "Interface size",
+                t!("settings.fonts.interface_size").to_string(),
                 number(
                     change::FONT_SIZE,
                     0.5,
@@ -145,20 +155,18 @@ fn appearance(control: f32, design: &Design) -> SettingPage {
                 ),
             ),
             SettingItem::new(
-                "Code font",
+                t!("settings.fonts.code").to_string(),
                 text_field(
-                    "Bundled monospace",
+                    t!("settings.fonts.bundled_monospace").to_string(),
                     CODE_FONTS,
                     control,
                     |settings| settings.appearance.code_font.clone(),
                     change::code_font,
                 ),
             )
-            .description(
-                "Diffs, object ids and git commands. Leave empty for the bundled monospace face.",
-            ),
+            .description(t!("settings.fonts.code_description").to_string()),
             SettingItem::new(
-                "Code size",
+                t!("settings.fonts.code_size").to_string(),
                 number(
                     change::FONT_SIZE,
                     0.5,
@@ -168,7 +176,7 @@ fn appearance(control: f32, design: &Design) -> SettingPage {
                 ),
             ),
             SettingItem::new(
-                "Tab width",
+                t!("settings.fonts.tab_width").to_string(),
                 number(
                     change::TAB_WIDTH,
                     1.0,
@@ -177,7 +185,7 @@ fn appearance(control: f32, design: &Design) -> SettingPage {
                     change::tab_width,
                 ),
             )
-            .description("Columns a tab expands to in a diff."),
+            .description(t!("settings.fonts.tab_width_description").to_string()),
         ]),
     )
 }
@@ -185,125 +193,127 @@ fn appearance(control: f32, design: &Design) -> SettingPage {
 fn diff(control: f32, design: &Design) -> SettingPage {
     shell(
         Section::Diff,
-        "How a diff is drawn, in every pane that shows one.",
+        t!("settings.diff.description").to_string(),
         design,
     )
-        .groups(
-            card("Layout").items([
+    .groups(
+        card(t!("settings.diff.layout.card").to_string()).items([
+            SettingItem::new(
+                t!("settings.diff.layout.card").to_string(),
+                choice(
+                    &[
+                        ("unified", t!("settings.diff.layout.unified").to_string()),
+                        ("split", t!("settings.diff.layout.split").to_string()),
+                    ],
+                    control,
+                    |settings| match settings.diff.layout {
+                        DiffLayout::Unified => "unified".to_owned(),
+                        DiffLayout::Split => "split".to_owned(),
+                    },
+                    |settings, value| {
+                        let layout = match value {
+                            "split" => DiffLayout::Split,
+                            _ => DiffLayout::Unified,
+                        };
+                        change::diff_layout(settings, layout);
+                    },
+                ),
+            )
+            .description(t!("settings.diff.layout.description").to_string()),
+            SettingItem::new(
+                t!("settings.diff.wrap").to_string(),
+                toggle(|settings| settings.diff.wrap_lines, change::wrap_lines),
+            )
+            .description(t!("settings.diff.wrap_description").to_string()),
+        ]),
+    )
+    .groups(
+        card(t!("settings.diff.text.card").to_string()).items([
+            SettingItem::new(
+                t!("settings.diff.syntax").to_string(),
+                toggle(
+                    |settings| settings.diff.syntax_highlighting,
+                    change::syntax_highlighting,
+                ),
+            )
+            .description(t!("settings.diff.syntax_description").to_string()),
+            SettingItem::new(
+                t!("settings.diff.whitespace").to_string(),
+                toggle(
+                    |settings| settings.diff.show_whitespace,
+                    change::show_whitespace,
+                ),
+            )
+            .description(t!("settings.diff.whitespace_description").to_string()),
+        ]),
+    )
+    .groups(
+        card(t!("settings.diff.comparison.card").to_string())
+            .description(t!("settings.diff.comparison_description").to_string())
+            .items([
                 SettingItem::new(
-                    "Layout",
-                    choice(
-                        &[("unified", "Unified"), ("split", "Side by side")],
+                    t!("settings.diff.ignore_whitespace").to_string(),
+                    toggle(
+                        |settings| settings.diff.ignore_whitespace,
+                        change::ignore_whitespace,
+                    ),
+                )
+                .description(t!("settings.diff.ignore_whitespace_description").to_string()),
+                SettingItem::new(
+                    t!("settings.diff.context_lines").to_string(),
+                    number(
+                        change::CONTEXT_LINES,
+                        1.0,
                         control,
-                        |settings| match settings.diff.layout {
-                            DiffLayout::Unified => "unified".to_owned(),
-                            DiffLayout::Split => "split".to_owned(),
-                        },
-                        |settings, value| {
-                            let layout = match value {
-                                "split" => DiffLayout::Split,
-                                _ => DiffLayout::Unified,
-                            };
-                            change::diff_layout(settings, layout);
-                        },
+                        |settings| f64::from(settings.diff.context_lines),
+                        change::context_lines,
                     ),
                 )
-                .description(
-                    "Side by side shows the old file in the left column and the new one beside it.",
-                ),
-                SettingItem::new(
-                    "Wrap long lines",
-                    toggle(|settings| settings.diff.wrap_lines, change::wrap_lines),
-                )
-                .description("Long lines wrap onto the next line instead of running off the pane."),
+                .description(t!("settings.diff.context_lines_description").to_string()),
             ]),
-        )
-        .groups(
-            card("Text").items([
-                SettingItem::new(
-                    "Syntax highlighting",
-                    toggle(
-                        |settings| settings.diff.syntax_highlighting,
-                        change::syntax_highlighting,
-                    ),
-                )
-                .description(
-                    "Colour keywords, strings, comments and the rest. Off draws plain text.",
-                ),
-                SettingItem::new(
-                    "Show whitespace",
-                    toggle(
-                        |settings| settings.diff.show_whitespace,
-                        change::show_whitespace,
-                    ),
-                )
-                .description("Spaces as · and tabs as →, drawn dimmed."),
-            ]),
-        )
-        .groups(
-            card("Comparison")
-                .description("Applied to every history diff. The staging diff keeps git's default context and whitespace, because staging picks real file lines.")
-                .items([
-                    SettingItem::new(
-                        "Ignore whitespace",
-                        toggle(
-                            |settings| settings.diff.ignore_whitespace,
-                            change::ignore_whitespace,
-                        ),
-                    )
-                    .description("Compare lines without their whitespace, as git diff -w."),
-                    SettingItem::new(
-                        "Context lines",
-                        number(
-                            change::CONTEXT_LINES,
-                            1.0,
-                            control,
-                            |settings| f64::from(settings.diff.context_lines),
-                            change::context_lines,
-                        ),
-                    )
-                    .description("Unchanged lines shown around each change (git's default is 3)."),
-                ]),
-        )
+    )
 }
 
 fn history(control: f32, design: &Design) -> SettingPage {
     shell(
         Section::History,
-        "What the commit list and the sidebar show.",
+        t!("settings.history.description").to_string(),
         design,
     )
     .groups(
-        card("Refs").items([
+        card(t!("settings.history.refs").to_string()).items([
             SettingItem::new(
-                "Remote branches",
+                t!("settings.history.remote_branches").to_string(),
                 toggle(
                     |settings| settings.history.show_remote_branches,
                     change::show_remote_branches,
                 ),
             )
-            .description("Badge remote-tracking branches and list them in the sidebar."),
+            .description(t!("settings.history.remote_branches_description").to_string()),
             SettingItem::new(
-                "Tags",
+                t!("settings.history.tags").to_string(),
                 toggle(|settings| settings.history.show_tags, change::show_tags),
             )
-            .description("Badge tagged commits and list tags in the sidebar."),
+            .description(t!("settings.history.tags_description").to_string()),
             SettingItem::new(
-                "Stashes",
+                t!("settings.history.stashes").to_string(),
                 toggle(
                     |settings| settings.history.show_stashes,
                     change::show_stashes,
                 ),
             )
-            .description("List the stash in the sidebar."),
+            .description(t!("settings.history.stashes_description").to_string()),
         ]),
     )
     .groups(
-        card("Dates").item(
+        card(t!("settings.history.dates").to_string()).item(
             SettingItem::new(
-                "Date format",
+                t!("settings.history.date_format").to_string(),
                 choice(
-                    &[("relative", "Relative"), ("absolute", "Absolute")],
+                    &[
+                        ("relative", t!("settings.history.relative").to_string()),
+                        ("absolute", t!("settings.history.absolute").to_string()),
+                    ],
                     control,
                     |settings| match settings.history.date_format {
                         DateFormat::Relative => "relative".to_owned(),
@@ -318,21 +328,19 @@ fn history(control: f32, design: &Design) -> SettingPage {
                     },
                 ),
             )
-            .description("Relative says \"2 hours ago\"; absolute says 2026-11-13 14:05."),
+            .description(t!("settings.history.date_format_description").to_string()),
         ),
     )
     .groups(
-        card("Signatures").item(
+        card(t!("settings.history.signatures").to_string()).item(
             SettingItem::new(
-                "Commit signatures",
+                t!("settings.history.commit_signatures").to_string(),
                 toggle(
                     |settings| settings.history.show_commit_signatures,
                     change::show_commit_signatures,
                 ),
             )
-            .description(
-                "Show signature status badges and verify visible signed commits in the background.",
-            ),
+            .description(t!("settings.history.commit_signatures_description").to_string()),
         ),
     )
 }
@@ -340,103 +348,116 @@ fn history(control: f32, design: &Design) -> SettingPage {
 fn behaviour(control: f32, design: &Design) -> SettingPage {
     shell(
         Section::Behaviour,
-        "Background work and the questions Strata asks before it acts.",
+        t!("settings.behaviour.description").to_string(),
         design,
     )
-        .groups(
-            card("Fetching").items([
-                SettingItem::new(
-                    "Auto-fetch",
-                    choice(
-                        &[
-                            ("0", "Off"),
-                            ("5", "Every 5 minutes"),
-                            ("10", "Every 10 minutes"),
-                            ("15", "Every 15 minutes"),
-                            ("30", "Every 30 minutes"),
-                            ("60", "Every 60 minutes"),
-                        ],
-                        control,
-                        |settings| settings.behaviour.auto_fetch_minutes.to_string(),
-                        |settings, value| {
-                            change::auto_fetch_minutes(
-                                settings,
-                                value.parse().unwrap_or_default(),
-                            );
-                        },
-                    ),
-                )
-                .description("Fetch every remote on an interval while a repository is open. Skipped while another operation runs."),
-                SettingItem::new(
-                    "Prune on fetch",
-                    toggle(
-                        |settings| settings.behaviour.prune_on_fetch,
-                        change::prune_on_fetch,
-                    ),
-                )
-                .description("Delete remote-tracking branches that no longer exist on the remote."),
-            ]),
-        )
-        .groups(
-            card("Safety").items([
-                SettingItem::new(
-                    "Confirm destructive actions",
-                    toggle(
-                        |settings| settings.behaviour.confirm_destructive,
-                        change::confirm_destructive,
-                    ),
-                )
-                .description("Ask before discarding changes, deleting branches or force pushing."),
-                SettingItem::new(
-                    "Summary length hint",
-                    number(
-                        change::SUMMARY_LENGTH,
-                        1.0,
-                        control,
-                        |settings| f64::from(settings.behaviour.summary_length_hint),
-                        change::summary_length_hint,
-                    ),
-                )
-                .description("Warn once a commit summary is longer than this many characters."),
-                SettingItem::new(
-                    "Reopen the last repository",
-                    toggle(
-                        |settings| settings.behaviour.restore_last_repository,
-                        change::restore_last_repository,
-                    ),
-                )
-                .description("Open the repositories that were open at quit."),
-            ]),
-        )
+    .groups(
+        card(t!("settings.behaviour.fetching").to_string()).items([
+            SettingItem::new(
+                t!("settings.behaviour.auto_fetch").to_string(),
+                choice(
+                    &[
+                        ("0", t!("settings.behaviour.off").to_string()),
+                        (
+                            "5",
+                            t!("settings.behaviour.every_minutes", count = 5).to_string(),
+                        ),
+                        (
+                            "10",
+                            t!("settings.behaviour.every_minutes", count = 10).to_string(),
+                        ),
+                        (
+                            "15",
+                            t!("settings.behaviour.every_minutes", count = 15).to_string(),
+                        ),
+                        (
+                            "30",
+                            t!("settings.behaviour.every_minutes", count = 30).to_string(),
+                        ),
+                        (
+                            "60",
+                            t!("settings.behaviour.every_minutes", count = 60).to_string(),
+                        ),
+                    ],
+                    control,
+                    |settings| settings.behaviour.auto_fetch_minutes.to_string(),
+                    |settings, value| {
+                        change::auto_fetch_minutes(settings, value.parse().unwrap_or_default());
+                    },
+                ),
+            )
+            .description(t!("settings.behaviour.auto_fetch_description").to_string()),
+            SettingItem::new(
+                t!("settings.behaviour.prune_on_fetch").to_string(),
+                toggle(
+                    |settings| settings.behaviour.prune_on_fetch,
+                    change::prune_on_fetch,
+                ),
+            )
+            .description(t!("settings.behaviour.prune_on_fetch_description").to_string()),
+        ]),
+    )
+    .groups(
+        card(t!("settings.behaviour.safety").to_string()).items([
+            SettingItem::new(
+                t!("settings.behaviour.confirm_destructive").to_string(),
+                toggle(
+                    |settings| settings.behaviour.confirm_destructive,
+                    change::confirm_destructive,
+                ),
+            )
+            .description(t!("settings.behaviour.confirm_destructive_description").to_string()),
+            SettingItem::new(
+                t!("settings.behaviour.summary_length_hint").to_string(),
+                number(
+                    change::SUMMARY_LENGTH,
+                    1.0,
+                    control,
+                    |settings| f64::from(settings.behaviour.summary_length_hint),
+                    change::summary_length_hint,
+                ),
+            )
+            .description(t!("settings.behaviour.summary_length_hint_description").to_string()),
+            SettingItem::new(
+                t!("settings.behaviour.restore_last_repository").to_string(),
+                toggle(
+                    |settings| settings.behaviour.restore_last_repository,
+                    change::restore_last_repository,
+                ),
+            )
+            .description(t!("settings.behaviour.restore_last_repository_description").to_string()),
+        ]),
+    )
 }
 
 fn tools(control: f32, design: &Design) -> SettingPage {
     shell(
         Section::Tools,
-        "Programs Strata runs on your behalf.",
+        t!("settings.tools.description").to_string(),
         design,
     )
-        .groups(
-            card("Git").item(
-                SettingItem::new("Git executable", git_field(control)).description(
-                    "Leave empty to use git from PATH. A changed path applies to repositories opened afterwards; a repository already open keeps the binary it started with.",
-                ),
-            ),
-        )
-        .groups(card("ghq").items([
+    .groups(
+        card("Git").item(
             SettingItem::new(
-                "Use ghq",
-                tool_toggle(
-                    |settings| settings.tools.ghq.enabled,
-                    change::ghq_enabled,
-                ),
+                t!("settings.tools.git_executable").to_string(),
+                git_field(control),
             )
-            .description(
-                "List ghq's repositories in the picker and default a clone into ghq's directory layout.",
-            ),
-            SettingItem::new("Status", SettingField::render(ghq_status)),
+            .description(t!("settings.tools.git_executable_description").to_string()),
+        ),
+    )
+    .groups(
+        card("ghq").items([
             SettingItem::new(
-                "Root override",
+                t!("settings.tools.use_ghq").to_string(),
+                tool_toggle(|settings| settings.tools.ghq.enabled, change::ghq_enabled),
+            )
+            .description(t!("settings.tools.use_ghq_description").to_string()),
+            SettingItem::new(
+                t!("settings.tools.status").to_string(),
+                SettingField::render(ghq_status),
+            ),
+            SettingItem::new(
+                t!("settings.tools.root_override").to_string(),
                 text_field(
                     "/path/to/ghq/root",
                     &[],
@@ -452,21 +473,24 @@ fn tools(control: f32, design: &Design) -> SettingPage {
                     change::ghq_root,
                 ),
             )
-            .description(
-                "Leave empty to use the root `ghq root` reports. Both `ghq list` and the clone destination follow this value.",
-            ),
-        ]))
-        .groups(card("GitHub CLI (gh)").items([
+            .description(t!("settings.tools.root_override_description").to_string()),
+        ]),
+    )
+    .groups(
+        card(t!("settings.tools.github_cli").to_string()).items([
             SettingItem::new(
-                "Use GitHub CLI",
+                t!("settings.tools.use_gh").to_string(),
                 tool_toggle(|settings| settings.tools.gh.enabled, change::gh_enabled),
             )
-            .description(
-                "Open files and commits on GitHub and create pull requests through `gh pr create --web`.",
+            .description(t!("settings.tools.use_gh_description").to_string()),
+            SettingItem::new(
+                t!("settings.tools.status").to_string(),
+                SettingField::render(gh_status),
             ),
-            SettingItem::new("Status", SettingField::render(gh_status)),
-        ]))
-        .groups(card("Repository").item(SettingItem::render(|_, _, cx| {
+        ]),
+    )
+    .groups(
+        card(t!("settings.tools.repository").to_string()).item(SettingItem::render(|_, _, cx| {
             let design = Design::new(cx.theme(), Settings::get(cx));
             let available = crate::git_config_view::has_repository(cx);
             v_flex()
@@ -476,197 +500,215 @@ fn tools(control: f32, design: &Design) -> SettingPage {
                         .gap_2()
                         .items_center()
                         .child(
-                            crate::ui::button("open-git-config", "Show Git config")
-                                .size(crate::ui::ButtonSize::Small)
-                                .disabled(!available)
-                                .on_click(|_, window, cx| {
-                                    window.dispatch_action(Box::new(OpenGitConfig), cx);
-                                }),
+                            crate::ui::button(
+                                "open-git-config",
+                                t!("settings.tools.show_git_config").to_string(),
+                            )
+                            .size(crate::ui::ButtonSize::Small)
+                            .disabled(!available)
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(OpenGitConfig), cx);
+                            }),
                         )
                         .child(
                             div()
                                 .text_size(px(design.tiny()))
                                 .text_color(design.muted)
                                 .child(if available {
-                                    "Every effective value and the file that set it."
+                                    t!("settings.tools.show_git_config_available").to_string()
                                 } else {
-                                    "Open a repository to inspect its configuration."
+                                    t!("settings.tools.show_git_config_unavailable").to_string()
                                 }),
                         ),
                 )
                 .into_any_element()
-        })))
-        .groups(
-            card("Editor and terminal").items([
-                SettingItem::new(
-                    "Editor command",
-                    text_field(
-                        "code --goto {path}:{line}",
-                        &[],
-                        control,
-                        |settings| settings.tools.editor.clone(),
-                        change::editor,
-                    ),
-                )
-                .description(
-                    "{path} and {line} are replaced inside each argument, so a path with spaces stays one argument. {line} is empty when the line is unknown. Leave empty to open the file with the system application.",
+        })),
+    )
+    .groups(
+        card(t!("settings.tools.editor_terminal").to_string()).items([
+            SettingItem::new(
+                t!("settings.tools.editor_command").to_string(),
+                text_field(
+                    "code --goto {path}:{line}",
+                    &[],
+                    control,
+                    |settings| settings.tools.editor.clone(),
+                    change::editor,
                 ),
-                SettingItem::new(
-                    "Terminal command",
-                    text_field(
-                        "alacritty --working-directory {path}",
-                        &[],
-                        control,
-                        |settings| settings.tools.terminal.clone(),
-                        change::terminal,
-                    ),
-                )
-                .description(
-                    "{path} is replaced with the repository's working directory, inside one argument. Leave empty to use the system terminal.",
+            )
+            .description(t!("settings.tools.editor_description").to_string()),
+            SettingItem::new(
+                t!("settings.tools.terminal_command").to_string(),
+                text_field(
+                    "alacritty --working-directory {path}",
+                    &[],
+                    control,
+                    |settings| settings.tools.terminal.clone(),
+                    change::terminal,
                 ),
-            ]),
-        )
+            )
+            .description(t!("settings.tools.terminal_description").to_string()),
+        ]),
+    )
 }
 
 fn privacy(_control: f32, design: &Design) -> SettingPage {
-    shell(Section::Privacy, "Only what leaves this machine.", design).groups(
-        card("Network").item(
+    shell(
+        Section::Privacy,
+        t!("settings.privacy.description").to_string(),
+        design,
+    )
+    .groups(
+        card(t!("settings.privacy.network").to_string()).item(
             SettingItem::new(
-                "Author pictures",
+                t!("settings.privacy.avatars").to_string(),
                 toggle(
                     |settings| settings.privacy.external_avatars,
                     change::external_avatars,
                 ),
             )
-            .description("Load avatars from an external service. This sends a hash of each author's email over the network, so it is off by default."),
-        ))
+            .description(t!("settings.privacy.avatars_description").to_string()),
+        ),
+    )
 }
 
 fn keyboard(design: &Design) -> SettingPage {
     shell_no_reset(
         Section::Keyboard,
-        "Every action the app can bind, the keys it answers to today, and where its entry lives. Edit records the next keystroke you press.",
+        t!("settings.keyboard.description").to_string(),
         design,
     )
-    .groups(card("Bindings").item(SettingItem::render(keyboard_table)))
+    .groups(
+        card(t!("settings.keyboard.bindings").to_string())
+            .item(SettingItem::render(keyboard_table)),
+    )
 }
 
 fn commands_page(design: &Design) -> SettingPage {
     shell_no_reset(
         Section::Commands,
-        "Commands from commands.json, next to settings.json. They appear in the command palette and in the context menu they name.",
+        t!("settings.commands.description").to_string(),
         design,
     )
+    .groups(card("File").item(SettingItem::render(|_, _, cx| {
+        let design = Design::new(cx.theme(), Settings::get(cx));
+        let state = crate::commands::CommandState::get(cx);
+        let path = state.path.as_ref().map_or_else(
+            || {
+                t!("settings.commands.no_config_directory")
+                    .to_string()
+                    .to_owned()
+            },
+            |path| path.display().to_string(),
+        );
+        v_flex()
+            .gap_2()
+            .w_full()
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        crate::ui::button(
+                            "open-commands-json",
+                            t!("settings.commands.open").to_string(),
+                        )
+                        .size(crate::ui::ButtonSize::Small)
+                        .on_click(|_, _, cx| {
+                            match crate::commands::ensure_file() {
+                                Ok(path) => cx.open_with_system(&path),
+                                Err(error) => log::warn!("{error}"),
+                            }
+                        }),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(design.tiny()))
+                            .text_color(design.muted)
+                            .child(path),
+                    ),
+            )
+            .when(
+                !state.errors.is_empty() || !state.warnings.is_empty(),
+                |this| {
+                    this.child(crate::ui::banner(
+                        crate::ui::BannerKind::Danger,
+                        state
+                            .errors
+                            .iter()
+                            .chain(state.warnings.iter())
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(" · "),
+                        &design,
+                    ))
+                },
+            )
+            .into_any_element()
+    })))
     .groups(
-        card("File").item(SettingItem::render(|_, _, cx| {
+        card(t!("settings.commands.loaded").to_string()).item(SettingItem::render(|_, _, cx| {
             let design = Design::new(cx.theme(), Settings::get(cx));
             let state = crate::commands::CommandState::get(cx);
-            let path = state
-                .path
-                .as_ref()
-                .map_or_else(|| "No configuration directory".to_owned(), |path| path.display().to_string());
+            let rows = crate::commands::rows(state);
+            if rows.is_empty() {
+                return crate::ui::empty_state(t!("settings.commands.empty").to_string(), &design)
+                    .into_any_element();
+            }
             v_flex()
-                .gap_2()
                 .w_full()
-                .child(
-                    h_flex()
-                        .items_center()
-                        .gap_2()
-                        .child(
-                            crate::ui::button("open-commands-json", "Open commands.json")
-                                .size(crate::ui::ButtonSize::Small)
-                                .on_click(|_, _, cx| {
-                                    match crate::commands::ensure_file() {
-                                        Ok(path) => cx.open_with_system(&path),
-                                        Err(error) => log::warn!("{error}"),
-                                    }
-                                }),
-                        )
-                        .child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .text_size(px(design.tiny()))
-                                .text_color(design.muted)
-                                .child(path),
-                        ),
-                )
-                .when(!state.errors.is_empty() || !state.warnings.is_empty(), |this| {
-                    this.child(
-                        crate::ui::banner(
-                            crate::ui::BannerKind::Danger,
-                            state
-                                .errors
-                                .iter()
-                                .chain(state.warnings.iter())
-                                .cloned()
-                                .collect::<Vec<_>>()
-                                .join(" · "),
-                            &design,
-                        ),
+                .children(rows.into_iter().enumerate().map(|(index, row)| {
+                    crate::ui::list_row(
+                        ("custom-command", index),
+                        crate::ui::RowState::NORMAL,
+                        &design,
                     )
-                })
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(180.0))
+                            .truncate()
+                            .child(row.title.to_owned()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(74.0))
+                            .text_size(px(design.tiny()))
+                            .text_color(design.muted)
+                            .child(row.context.to_owned()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .font_family(design.mono.clone())
+                            .text_size(px(design.tiny()))
+                            .text_color(design.muted)
+                            .child(row.line),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(design.tiny()))
+                            .text_color(design.muted)
+                            .child(if row.confirm {
+                                t!("settings.commands.asks").to_string()
+                            } else {
+                                String::new()
+                            }),
+                    )
+                    .when_some(row.key.map(str::to_owned), |this, key| {
+                        this.child(crate::ui::kbd(key, &design))
+                    })
+                    .into_any_element()
+                }))
                 .into_any_element()
         })),
     )
-    .groups(card("Loaded commands").item(SettingItem::render(|_, _, cx| {
-        let design = Design::new(cx.theme(), Settings::get(cx));
-        let state = crate::commands::CommandState::get(cx);
-        let rows = crate::commands::rows(state);
-        if rows.is_empty() {
-            return crate::ui::empty_state(
-                "No commands yet. Add one to commands.json and it appears here.",
-                &design,
-            )
-            .into_any_element();
-        }
-        v_flex()
-            .w_full()
-            .children(rows.into_iter().enumerate().map(|(index, row)| {
-                crate::ui::list_row(
-                    ("custom-command", index),
-                    crate::ui::RowState::NORMAL,
-                    &design,
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .w(px(180.0))
-                        .truncate()
-                        .child(row.title.to_owned()),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .w(px(74.0))
-                        .text_size(px(design.tiny()))
-                        .text_color(design.muted)
-                        .child(row.context.to_owned()),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .font_family(design.mono.clone())
-                        .text_size(px(design.tiny()))
-                        .text_color(design.muted)
-                        .child(row.line),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .text_size(px(design.tiny()))
-                        .text_color(design.muted)
-                        .child(if row.confirm { "asks" } else { "" }),
-                )
-                .when_some(row.key.map(str::to_owned), |this, key| {
-                    this.child(crate::ui::kbd(key, &design))
-                })
-                .into_any_element()
-            }))
-            .into_any_element()
-    })))
 }
 
 /// The keyboard page is a table over the action registry; the search field
@@ -691,7 +733,11 @@ fn keyboard_table(
     if let Some(spec) = pending {
         body = body.child(crate::ui::banner(
             crate::ui::BannerKind::Info,
-            format!("Press the new key for {} — Esc cancels.", spec.title),
+            t!(
+                "settings.keyboard.press_new_key",
+                title = crate::keymap::display_title(spec)
+            )
+            .to_string(),
             &design,
         ));
     }
@@ -714,19 +760,24 @@ fn keyboard_table(
                         .min_w_0(),
                 )
                 .child(
-                    crate::ui::button("open-keymap-json", "Open keymap.json")
-                        .size(crate::ui::ButtonSize::Small)
-                        .on_click(|_, _, cx| match crate::keymap::ensure_file() {
-                            Ok(path) => cx.open_with_system(&path),
-                            Err(error) => log::warn!("{error}"),
-                        }),
+                    crate::ui::button(
+                        "open-keymap-json",
+                        t!("settings.keyboard.open_keymap").to_string(),
+                    )
+                    .size(crate::ui::ButtonSize::Small)
+                    .on_click(|_, _, cx| match crate::keymap::ensure_file() {
+                        Ok(path) => cx.open_with_system(&path),
+                        Err(error) => log::warn!("{error}"),
+                    }),
                 ),
         )
         .child(table_header(&design));
 
     let mut visible = 0usize;
     for row in rows {
+        let title = crate::keymap::display_title(row.spec);
         if !query.trim().is_empty()
+            && crate::palette::score(&query, &title).is_none()
             && crate::palette::score(&query, row.title).is_none()
             && crate::palette::score(&query, row.name).is_none()
         {
@@ -736,7 +787,10 @@ fn keyboard_table(
         body = body.child(action_row(row, &design));
     }
     if visible == 0 {
-        body = body.child(crate::ui::empty_state("No action matches.", &design));
+        body = body.child(crate::ui::empty_state(
+            t!("settings.keyboard.no_action_matches").to_string(),
+            &design,
+        ));
     }
     body.into_any_element()
 }
@@ -748,7 +802,9 @@ struct KeyboardFilter {
 
 fn keyboard_filter(key: SharedString, window: &mut Window, cx: &mut App) -> Entity<KeyboardFilter> {
     window.use_keyed_state(key, cx, |window, cx| {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter actions"));
+        let input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(t!("settings.keyboard.filter").to_string())
+        });
         let subscription = cx.subscribe(&input, |_: &mut KeyboardFilter, _, event, cx| {
             if matches!(event, gpui_component::input::InputEvent::Change) {
                 cx.refresh_windows();
@@ -771,16 +827,37 @@ fn table_header(design: &Design) -> AnyElement {
         .text_size(px(design.tiny()))
         .text_color(design.muted)
         .w_full()
-        .child(div().flex_1().min_w_0().child("Action"))
-        .child(div().flex_none().w(px(130.0)).child("Keys"))
-        .child(div().flex_none().w(px(100.0)).child("Context"))
-        .child(div().flex_none().w(px(84.0)).child("Source"))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(t!("settings.keyboard.column_action").to_string()),
+        )
+        .child(
+            div()
+                .flex_none()
+                .w(px(130.0))
+                .child(t!("settings.keyboard.column_keys").to_string()),
+        )
+        .child(
+            div()
+                .flex_none()
+                .w(px(100.0))
+                .child(t!("settings.keyboard.column_context").to_string()),
+        )
+        .child(
+            div()
+                .flex_none()
+                .w(px(84.0))
+                .child(t!("settings.keyboard.column_source").to_string()),
+        )
         .child(div().flex_none().w(px(84.0)).child(""))
         .into_any_element()
 }
 
 fn action_row(row: crate::keymap::ActionRow, design: &Design) -> AnyElement {
     let spec = row.spec;
+    let title = crate::keymap::display_title(spec);
     let changed = row.changed;
     let conflict = row.conflict;
     let element = crate::ui::list_row(
@@ -796,7 +873,7 @@ fn action_row(row: crate::keymap::ActionRow, design: &Design) -> AnyElement {
             .flex_1()
             .min_w_0()
             .gap(px(1.0))
-            .child(div().truncate().child(row.title.to_owned()))
+            .child(div().truncate().child(title))
             .child(
                 div()
                     .truncate()
@@ -811,7 +888,7 @@ fn action_row(row: crate::keymap::ActionRow, design: &Design) -> AnyElement {
                         .truncate()
                         .text_size(px(design.tiny()))
                         .text_color(design.remove_text)
-                        .child(format!("⚠ {other} uses this key")),
+                        .child(t!("settings.keyboard.conflict", other = other).to_string()),
                 )
             }),
     )
@@ -827,7 +904,9 @@ fn action_row(row: crate::keymap::ActionRow, design: &Design) -> AnyElement {
                         .truncate()
                         .text_size(px(design.tiny()))
                         .text_color(design.muted)
-                        .child(format!("default {}", row.defaults)),
+                        .child(
+                            t!("settings.keyboard.default_keys", keys = row.defaults).to_string(),
+                        ),
                 )
             }),
     )
@@ -852,11 +931,11 @@ fn action_row(row: crate::keymap::ActionRow, design: &Design) -> AnyElement {
                 design.muted
             })
             .child(if row.unbound {
-                "User: unbound"
+                t!("settings.keyboard.source_unbound").to_string()
             } else if changed {
-                "User"
+                t!("settings.keyboard.source_user").to_string()
             } else {
-                "Default"
+                t!("settings.keyboard.source_default").to_string()
             })
             .when(changed, |this| {
                 this.child(
@@ -903,8 +982,8 @@ fn action_row(row: crate::keymap::ActionRow, design: &Design) -> AnyElement {
 /// untitled groups leave it a flat list of page names. The two groups are
 /// yielded together so a page lists its cards with `page.groups(card(..))`.
 struct Card {
-    title: &'static str,
-    description: Option<&'static str>,
+    title: String,
+    description: Option<String>,
     group: SettingGroup,
 }
 
@@ -920,8 +999,8 @@ impl Card {
     }
 
     /// Supporting text under the card's label, above its surface.
-    fn description(mut self, description: &'static str) -> Self {
-        self.description = Some(description);
+    fn description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
         self
     }
 }
@@ -942,9 +1021,9 @@ impl IntoIterator for Card {
 /// space above it. The label then sits the same [`CARD_LABEL_GAP`] over its
 /// surface, and two cards keep the same 32 px between them, as when the label
 /// was the group's title.
-fn card(title: &'static str) -> Card {
+fn card(title: impl Into<String>) -> Card {
     Card {
-        title,
+        title: title.into(),
         description: None,
         group: SettingGroup::new().mt(px(-CARD_LABEL_GAP)),
     }
@@ -954,7 +1033,7 @@ fn card(title: &'static str) -> Card {
 ///
 /// It draws the same element a group title does: muted text on a 1.25 line
 /// height, with the description as small muted text under it.
-fn card_label(title: &'static str, description: Option<&'static str>) -> SettingGroup {
+fn card_label(title: String, description: Option<String>) -> SettingGroup {
     SettingGroup::new()
         .variant(GroupBoxVariant::Normal)
         .mb(px(-PAGE_GUTTER))
@@ -962,18 +1041,16 @@ fn card_label(title: &'static str, description: Option<&'static str>) -> Setting
             div()
                 .text_color(cx.theme().muted_foreground)
                 .line_height(relative(1.25))
-                .child(
-                    v_flex()
-                        .gap_1()
-                        .child(title)
-                        .when_some(description, |this, description| {
-                            this.child(
-                                Label::new(description)
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground),
-                            )
-                        }),
-                )
+                .child(v_flex().gap_1().child(title.clone()).when_some(
+                    description.clone(),
+                    |this, description| {
+                        this.child(
+                            Label::new(description)
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground),
+                        )
+                    },
+                ))
         }))
 }
 
@@ -983,7 +1060,8 @@ fn card_label(title: &'static str, description: Option<&'static str>) -> Setting
 /// that header lays its title and suffix out in one left-aligned cluster, which
 /// leaves no way to put an action at the row's right end. Everything here sits
 /// on the same 32 px inset as the rows of the cards below it.
-fn heading(section: Section, description: &'static str, design: &Design) -> SettingGroup {
+fn heading(section: Section, description: impl Into<String>, design: &Design) -> SettingGroup {
+    let description = description.into();
     let design = design.clone();
     SettingGroup::new()
         .variant(GroupBoxVariant::Normal)
@@ -1006,11 +1084,8 @@ fn heading(section: Section, description: &'static str, design: &Design) -> Sett
                         )
                         .child(
                             crate::ui::button(
-                                SharedString::from(format!(
-                                    "reset-{}",
-                                    section.title().to_lowercase()
-                                )),
-                                "Reset section",
+                                SharedString::from(format!("reset-{}", section.id())),
+                                t!("settings.keyboard.reset_section").to_string(),
                             )
                             .size(crate::ui::ButtonSize::Small)
                             .ghost()
@@ -1026,14 +1101,14 @@ fn heading(section: Section, description: &'static str, design: &Design) -> Sett
                     div()
                         .text_size(px(design.ui))
                         .text_color(design.muted)
-                        .child(description),
+                        .child(description.clone()),
                 )
         }))
 }
 
 /// The page frame every section starts from: a heading, an icon for the
 /// sidebar, and the cards below the heading.
-fn shell(section: Section, description: &'static str, design: &Design) -> SettingPage {
+fn shell(section: Section, description: impl Into<String>, design: &Design) -> SettingPage {
     SettingPage::new(section.title())
         .icon(icon(section))
         .resettable(false)
@@ -1044,8 +1119,12 @@ fn shell(section: Section, description: &'static str, design: &Design) -> Settin
 }
 
 /// A page whose content is a file the page itself edits, so the settings
-/// "Reset section" button has nothing to restore.
-fn shell_no_reset(section: Section, description: &'static str, design: &Design) -> SettingPage {
+/// t!("settings.keyboard.reset_section").to_string() button has nothing to restore.
+fn shell_no_reset(
+    section: Section,
+    description: impl Into<String>,
+    design: &Design,
+) -> SettingPage {
     SettingPage::new(section.title())
         .icon(icon(section))
         .resettable(false)
@@ -1053,7 +1132,12 @@ fn shell_no_reset(section: Section, description: &'static str, design: &Design) 
         .group(heading_no_reset(section, description, design))
 }
 
-fn heading_no_reset(section: Section, description: &'static str, design: &Design) -> SettingGroup {
+fn heading_no_reset(
+    section: Section,
+    description: impl Into<String>,
+    design: &Design,
+) -> SettingGroup {
+    let description = description.into();
     let design = design.clone();
     SettingGroup::new()
         .variant(GroupBoxVariant::Normal)
@@ -1073,7 +1157,7 @@ fn heading_no_reset(section: Section, description: &'static str, design: &Design
                     div()
                         .text_size(px(design.ui))
                         .text_color(design.muted)
-                        .child(description),
+                        .child(description.clone()),
                 )
                 .into_any_element()
         }))
@@ -1082,9 +1166,9 @@ fn heading_no_reset(section: Section, description: &'static str, design: &Design
 fn theme_field(control: f32) -> SettingField<SharedString> {
     SettingField::dropdown(
         pairs(&[
-            ("system", "Follow the system"),
-            ("light", "Light"),
-            ("dark", "Dark"),
+            ("system", t!("settings.theme.follow_system").to_string()),
+            ("light", t!("settings.theme.light").to_string()),
+            ("dark", t!("settings.theme.dark").to_string()),
         ]),
         |cx| {
             match Settings::get(cx).appearance.theme {
@@ -1109,10 +1193,40 @@ fn theme_field(control: f32) -> SettingField<SharedString> {
     .w(px(control))
 }
 
-/// Value and label pairs for a dropdown.
-fn pairs(list: &[(&'static str, &'static str)]) -> Vec<(SharedString, SharedString)> {
+/// The language dropdown. A change is applied to every open window at once,
+/// rather than waiting for the next launch.
+fn language_field(control: f32) -> SettingField<SharedString> {
+    let labels: Vec<(SharedString, SharedString)> = crate::i18n::Language::ALL
+        .iter()
+        .map(|language| {
+            (
+                SharedString::from(language.id()),
+                SharedString::from(language.label()),
+            )
+        })
+        .collect();
+    SettingField::dropdown(
+        labels,
+        |cx| SharedString::from(Settings::get(cx).appearance.language.id()),
+        |value, cx| {
+            settings::update(cx, |settings| {
+                change::language(settings, crate::i18n::Language::from_id(&value));
+            });
+            crate::i18n::apply(cx);
+        },
+    )
+    .w(px(control))
+}
+
+/// Value and label pairs for a dropdown. Labels are translated by the caller.
+fn pairs<L: AsRef<str>>(list: &[(&'static str, L)]) -> Vec<(SharedString, SharedString)> {
     list.iter()
-        .map(|(value, label)| (SharedString::from(*value), SharedString::from(*label)))
+        .map(|(value, label)| {
+            (
+                SharedString::from(*value),
+                SharedString::from(label.as_ref()),
+            )
+        })
         .collect()
 }
 
@@ -1126,8 +1240,8 @@ fn toggle(get: fn(&Settings) -> bool, set: fn(&mut Settings, bool)) -> SettingFi
     )
 }
 
-fn choice(
-    list: &[(&'static str, &'static str)],
+fn choice<L: AsRef<str>>(
+    list: &[(&'static str, L)],
     control: f32,
     get: fn(&Settings) -> String,
     set: fn(&mut Settings, &str),
@@ -1175,15 +1289,16 @@ struct TextField {
 }
 
 fn text_field(
-    placeholder: &'static str,
+    placeholder: impl Into<SharedString>,
     suggestions: &'static [&'static str],
     control: f32,
     get: fn(&Settings) -> Option<String>,
     set: fn(&mut Settings, &str),
 ) -> SettingField<SharedString> {
+    let placeholder = placeholder.into();
     SettingField::render(move |options, window, cx| {
         let key = field_key(options, "text");
-        let state = text_state(key.clone(), placeholder, get, set, window, cx);
+        let state = text_state(key.clone(), placeholder.clone(), get, set, window, cx);
         let input = state.read(cx).input.clone();
 
         let mut field = v_flex().gap_1().w(px(control)).child(
@@ -1231,7 +1346,14 @@ fn git_field(control: f32) -> SettingField<SharedString> {
                 .map(|path| path.display().to_string())
         };
         let key = field_key(options, "git");
-        let state = text_state(key, "/usr/bin/git", get, change::git_executable, window, cx);
+        let state = text_state(
+            key,
+            "/usr/bin/git".into(),
+            get,
+            change::git_executable,
+            window,
+            cx,
+        );
         let input = state.read(cx).input.clone();
         let error = git_executable_error(Settings::get(cx).behaviour.git_executable.as_deref());
 
@@ -1247,30 +1369,37 @@ fn git_field(control: f32) -> SettingField<SharedString> {
                         .disabled(options.is_disabled()),
                 )
                 .child(
-                    crate::ui::button("git-executable-browse", "Browse…")
-                        .size(crate::ui::ButtonSize::Small)
-                        .disabled(options.is_disabled())
-                        .on_click(move |_, _, cx| {
-                            let paths = cx.prompt_for_paths(PathPromptOptions {
-                                files: true,
-                                directories: false,
-                                multiple: false,
-                                prompt: Some("Choose the git executable".into()),
-                            });
-                            cx.spawn(async move |cx| {
-                                if let Ok(Ok(Some(mut chosen))) = paths.await
-                                    && let Some(path) = chosen.pop()
-                                {
-                                    cx.update(|cx| {
-                                        settings::update(cx, |settings| {
-                                            change::git_executable_path(settings, path.clone());
-                                        });
-                                        cx.refresh_windows();
+                    crate::ui::button(
+                        "git-executable-browse",
+                        t!("settings.tools.browse").to_string(),
+                    )
+                    .size(crate::ui::ButtonSize::Small)
+                    .disabled(options.is_disabled())
+                    .on_click(move |_, _, cx| {
+                        let paths = cx.prompt_for_paths(PathPromptOptions {
+                            files: true,
+                            directories: false,
+                            multiple: false,
+                            prompt: Some(
+                                t!("settings.tools.choose_git_executable")
+                                    .to_string()
+                                    .into(),
+                            ),
+                        });
+                        cx.spawn(async move |cx| {
+                            if let Ok(Ok(Some(mut chosen))) = paths.await
+                                && let Some(path) = chosen.pop()
+                            {
+                                cx.update(|cx| {
+                                    settings::update(cx, |settings| {
+                                        change::git_executable_path(settings, path.clone());
                                     });
-                                }
-                            })
-                            .detach();
-                        }),
+                                    cx.refresh_windows();
+                                });
+                            }
+                        })
+                        .detach();
+                    }),
                 ),
         );
         if let Some(error) = error {
@@ -1287,8 +1416,8 @@ fn git_executable_error(path: Option<&Path>) -> Option<String> {
     let path = path?;
     match std::fs::metadata(path) {
         Ok(metadata) if metadata.is_file() => None,
-        Ok(_) => Some(format!("{} is not a file", path.display())),
-        Err(_) => Some(format!("{} does not exist", path.display())),
+        Ok(_) => Some(t!("settings.tools.git_not_a_file", path = path.display()).to_string()),
+        Err(_) => Some(t!("settings.tools.git_does_not_exist", path = path.display()).to_string()),
     }
 }
 
@@ -1315,17 +1444,24 @@ fn ghq_status(
     let design = Design::new(cx.theme(), Settings::get(cx));
     let settings_root = Settings::get(cx).tools.ghq.root.clone();
     let Some(tooling) = Tooling::get(cx) else {
-        return status_text("ghq is not installed.".to_owned(), false, &design);
+        return status_text(
+            t!("settings.tools.ghq_missing").to_string().to_owned(),
+            false,
+            &design,
+        );
     };
     match tooling.ghq() {
         Some(info) => {
-            let version = info.version.as_deref().unwrap_or("version unknown");
+            let version = info
+                .version
+                .clone()
+                .unwrap_or_else(|| t!("settings.tools.version_unknown").to_string());
             let root = settings_root.as_deref().unwrap_or(info.root.as_path());
             status_text(
                 format!(
-                    "{} · {version}\nRoot: {}",
+                    "{} · {version}\n{}",
                     info.binary.display(),
-                    root.display()
+                    t!("settings.tools.root_line", root = root.display())
                 ),
                 true,
                 &design,
@@ -1343,11 +1479,20 @@ fn gh_status(
 ) -> AnyElement {
     let design = Design::new(cx.theme(), Settings::get(cx));
     let Some(tooling) = Tooling::get(cx) else {
-        return status_text("gh is not installed.".to_owned(), false, &design);
+        return status_text(
+            t!("settings.tools.gh_missing").to_string().to_owned(),
+            false,
+            &design,
+        );
     };
     match tooling.gh() {
         Some(info) if info.logged_in => status_text(
-            format!("{} · {} · logged in", info.binary.display(), info.version),
+            format!(
+                "{} · {} · {}",
+                info.binary.display(),
+                info.version,
+                t!("settings.tools.gh_logged_in")
+            ),
             true,
             &design,
         ),
@@ -1385,7 +1530,7 @@ fn field_key(options: &gpui_component::setting::RenderOptions, prefix: &str) -> 
 
 fn text_state(
     key: SharedString,
-    placeholder: &'static str,
+    placeholder: SharedString,
     get: fn(&Settings) -> Option<String>,
     set: fn(&mut Settings, &str),
     window: &mut Window,

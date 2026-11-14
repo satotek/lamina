@@ -306,29 +306,36 @@ pub(crate) fn badge_label(pull_request: &PullRequestSummary) -> String {
 /// The badge's tooltip: what the pull request is, its review and its checks.
 pub(crate) fn badge_tooltip(pull_request: &PullRequestSummary, note: Option<&str>) -> String {
     let state = match pull_request.state {
-        PullRequestState::Open => "Open",
-        PullRequestState::Draft => "Draft",
-        PullRequestState::Merged => "Merged",
-        PullRequestState::Closed => "Closed",
+        PullRequestState::Open => &*t!("pr.state.open"),
+        PullRequestState::Draft => &*t!("pr.state.draft"),
+        PullRequestState::Merged => &*t!("pr.state.merged"),
+        PullRequestState::Closed => &*t!("pr.state.closed"),
     };
     let review = match pull_request.review {
-        ReviewState::Approved => "Approved",
-        ReviewState::ChangesRequested => "Changes requested",
-        ReviewState::ReviewRequired => "Review required",
-        ReviewState::None => "No review",
+        ReviewState::Approved => &*t!("pr.review.approved"),
+        ReviewState::ChangesRequested => &*t!("pr.review.changes_requested"),
+        ReviewState::ReviewRequired => &*t!("pr.review.required"),
+        ReviewState::None => &*t!("pr.review.none"),
     };
     let checks = match pull_request.checks.state {
-        ChecksState::None => "No checks".to_owned(),
-        _ => format!(
-            "Checks: {}/{} passing",
-            pull_request.checks.passing,
-            pull_request.checks.total()
-        ),
+        ChecksState::None => t!("pr.no_checks").to_string(),
+        _ => t!(
+            "pr.checks",
+            passing = pull_request.checks.passing,
+            total = pull_request.checks.total()
+        )
+        .to_string(),
     };
-    let mut tooltip = format!("{}\n{state} · {review}\n{checks}", pull_request.title);
+    let mut tooltip = t!(
+        "pr.tooltip",
+        title = pull_request.title,
+        state = state,
+        review = review,
+        checks = checks
+    )
+    .to_string();
     if let Some(note) = note {
-        tooltip.push_str("\nLast refresh failed: ");
-        tooltip.push_str(note);
+        tooltip.push_str(&t!("pr.tooltip_refresh_failed", reason = note));
     }
     tooltip
 }
@@ -459,12 +466,12 @@ impl RepoView {
     /// one says why it could not run.
     pub(crate) fn refresh_pull_requests_command(&mut self, cx: &mut Context<Self>) {
         let Some(remote) = crate::github::remote_for(self, cx) else {
-            self.status_note = Some("Pull requests need a GitHub remote.".to_owned());
+            self.status_note = Some(t!("pr.needs_github").to_string());
             cx.notify();
             return;
         };
         if let Err(reason) = crate::github::gh_for(&remote.host, cx) {
-            self.status_note = Some(format!("Pull requests: {reason}"));
+            self.status_note = Some(t!("pr.reason", reason = reason).to_string());
             cx.notify();
             return;
         }
@@ -494,16 +501,16 @@ impl RepoView {
     /// Opens the dialog listing the cache's open pull requests.
     pub(crate) fn open_checkout_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.is_busy() || self.pull_requests.checkout_running {
-            self.status_note = Some("An operation is already running.".to_owned());
+            self.status_note = Some(t!("pr.busy").to_string());
             cx.notify();
             return;
         }
         let items = self.pull_requests.open_items();
         if items.is_empty() {
             self.status_note = Some(if self.pull_requests.is_refreshing() {
-                "Refreshing pull requests…".to_owned()
+                t!("pr.refreshing").to_string()
             } else {
-                "No open pull requests in the cache; refreshing them now.".to_owned()
+                t!("pr.no_cache").to_string()
             });
             self.pull_requests.started = true;
             self.refresh_pull_requests(cx);
@@ -516,7 +523,7 @@ impl RepoView {
         let focus = dialog.read(cx).focus.clone();
         window.open_dialog(cx, move |card, _, _| {
             let content = dialog.clone();
-            card.title("Check out Pull Request")
+            card.title(t!("pr.checkout_title").to_string())
                 .w(px(DIALOG_WIDTH))
                 .close_button(false)
                 .on_ok(|_, _, _| false)
@@ -532,19 +539,17 @@ impl RepoView {
             return;
         }
         if self.is_busy() {
-            self.status_note = Some("An operation is already running.".to_owned());
+            self.status_note = Some(t!("pr.busy").to_string());
             cx.notify();
             return;
         }
         let Some(remote) = crate::github::remote_for(self, cx) else {
-            self.status_note = Some("Pull requests need a GitHub remote.".to_owned());
+            self.status_note = Some(t!("pr.needs_github").to_string());
             cx.notify();
             return;
         };
         let Ok(gh) = crate::github::gh_for(&remote.host, cx) else {
-            self.status_note = Some(format!(
-                "Check out pull request #{number}: gh is unavailable"
-            ));
+            self.status_note = Some(t!("pr.gh_unavailable", number = number).to_string());
             cx.notify();
             return;
         };
@@ -561,16 +566,14 @@ impl RepoView {
         if let Some(session) = &self.session
             && worktree_blocks_checkout(&session.snapshot().status)
         {
-            self.status_note = Some(format!(
-                "Check out pull request #{number}: commit or stash your changes first."
-            ));
+            self.status_note = Some(t!("pr.dirty", number = number).to_string());
             cx.notify();
             return;
         }
 
         self.pull_requests.checkout_running = true;
         self.status_error = None;
-        self.status_note = Some(format!("Checking out pull request #{number}…"));
+        self.status_note = Some(t!("pr.checking_out", number = number).to_string());
         cx.notify();
 
         let task = cx.background_executor().spawn(async move {
@@ -583,13 +586,14 @@ impl RepoView {
                 view.pull_requests.checkout_running = false;
                 match result {
                     Ok(()) => {
-                        view.status_note = Some(format!("Checked out pull request #{number}"));
+                        view.status_note = Some(t!("pr.checked_out", number = number).to_string());
                         view.pull_requests.started = true;
                         view.refresh_pull_requests(cx);
                     }
                     Err(error) => {
-                        view.status_error =
-                            Some(format!("Check out pull request #{number}: {error}"));
+                        view.status_error = Some(
+                            t!("pr.checkout_failed", number = number, error = error).to_string(),
+                        );
                     }
                 }
                 view.notify_if_active(cx);
@@ -618,7 +622,8 @@ impl CheckoutDialog {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter pull requests"));
+        let input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(t!("pr.filter").to_string()));
         let focus = input.focus_handle(cx);
         let _input_events =
             cx.subscribe(&input, |this, _input, event: &InputEvent, cx| match event {
@@ -741,7 +746,7 @@ impl Render for CheckoutDialog {
             .max_h(px(LIST_MAX_HEIGHT))
             .overflow_y_scroll();
         if filtered.is_empty() {
-            list = list.child(ui::empty_state("No pull request matches.", &design));
+            list = list.child(ui::empty_state(t!("pr.no_match").to_string(), &design));
         } else {
             list = list.children(
                 filtered
@@ -763,10 +768,7 @@ impl Render for CheckoutDialog {
                     .px_1()
                     .text_size(px(design.tiny()))
                     .text_color(design.muted)
-                    .child(format!(
-                        "Enter checks out the first match · {} open",
-                        self.pull_requests.len()
-                    )),
+                    .child(t!("pr.dialog_hint", count = self.pull_requests.len()).to_string()),
             )
             .child(list)
     }

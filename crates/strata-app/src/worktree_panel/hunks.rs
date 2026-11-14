@@ -193,7 +193,7 @@ impl WorktreePanel {
                     .flex_none()
                     .text_size(px(11.0))
                     .text_color(colors.muted_foreground)
-                    .child(side.map(Side::label).unwrap_or("")),
+                    .child(side.map(Side::label).unwrap_or_default()),
             );
 
         if let (Some(selected), Some(_)) = (&selected, self.diff.view()) {
@@ -216,18 +216,21 @@ impl WorktreePanel {
             let active = self.context.is_whole_file();
             let toggle_entity = entity.clone();
             header = header.child(
-                crate::ui::button("worktree-toggle-whole-file", "Whole file")
-                    .size(crate::ui::ButtonSize::Tiny)
-                    .ghost()
-                    .selected(active)
-                    .tooltip(if active {
-                        "Show only the changes"
-                    } else {
-                        "Show every line of the file"
-                    })
-                    .on_click(move |_event, _window, cx| {
-                        toggle_entity.update(cx, |this, cx| this.toggle_worktree_whole_file(cx));
-                    }),
+                crate::ui::button(
+                    "worktree-toggle-whole-file",
+                    t!("history.whole_file").to_string(),
+                )
+                .size(crate::ui::ButtonSize::Tiny)
+                .ghost()
+                .selected(active)
+                .tooltip(if active {
+                    "Show only the changes"
+                } else {
+                    "Show every line of the file"
+                })
+                .on_click(move |_event, _window, cx| {
+                    toggle_entity.update(cx, |this, cx| this.toggle_worktree_whole_file(cx));
+                }),
             );
         }
 
@@ -265,19 +268,22 @@ impl WorktreePanel {
                         let path = selected.path.clone();
                         let entity = entity.clone();
                         card = card.action(
-                            crate::ui::button("worktree-lfs-download", "Download")
-                                .size(crate::ui::ButtonSize::Tiny)
-                                .on_click(move |_, window, cx| {
-                                    let path = path.clone();
-                                    entity.update(cx, |this, cx| {
-                                        this.run_operation(
-                                            Operation::LfsPull { path },
-                                            "Download LFS object",
-                                            window,
-                                            cx,
-                                        );
-                                    });
-                                }),
+                            crate::ui::button(
+                                "worktree-lfs-download",
+                                t!("worktree.download").to_string(),
+                            )
+                            .size(crate::ui::ButtonSize::Tiny)
+                            .on_click(move |_, window, cx| {
+                                let path = path.clone();
+                                entity.update(cx, |this, cx| {
+                                    this.run_operation(
+                                        Operation::LfsPull { path },
+                                        "Download LFS object",
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }),
                         );
                     }
                     let body = if !self.rows.is_empty() {
@@ -363,14 +369,20 @@ impl WorktreePanel {
                 .flex_none()
                 .text_size(px(11.0))
                 .text_color(colors.muted_foreground)
-                .child("Click lines to pick · Shift-click for a range")
+                .child(t!("worktree.pick_hint").to_string())
                 .into_any_element();
         }
 
         let mut actions = div().flex().items_center().gap_1();
         let (label, action) = match selected.side {
-            Side::Unstaged => (format!("Stage {count} line(s)"), LineAction::Stage),
-            Side::Staged => (format!("Unstage {count} line(s)"), LineAction::Unstage),
+            Side::Unstaged => (
+                t!("worktree.stage_lines", count = count).to_string(),
+                LineAction::Stage,
+            ),
+            Side::Staged => (
+                t!("worktree.unstage_lines", count = count).to_string(),
+                LineAction::Unstage,
+            ),
             Side::Conflict => return div().into_any_element(),
         };
         let main_entity = entity.clone();
@@ -384,7 +396,7 @@ impl WorktreePanel {
         if selected.side == Side::Unstaged {
             let discard_entity = entity.clone();
             actions = actions.child(
-                crate::ui::button("line-action-discard", "Discard")
+                crate::ui::button("line-action-discard", t!("common.discard").to_string())
                     .danger()
                     .on_click(move |_, window, cx| {
                         discard_entity.update(cx, |this, cx| {
@@ -504,7 +516,7 @@ fn hunk_header_row(
                 .gap_1()
                 .pr_1()
                 .child(
-                    crate::ui::button(("hunk-stage", row), "Stage hunk")
+                    crate::ui::button(("hunk-stage", row), t!("worktree.stage_hunk").to_string())
                         .size(crate::ui::ButtonSize::Tiny)
                         .kind(crate::ui::ButtonKind::Normal)
                         .on_click(move |_, window, cx| {
@@ -514,7 +526,7 @@ fn hunk_header_row(
                         }),
                 )
                 .child(
-                    crate::ui::button(("hunk-discard", row), "Discard")
+                    crate::ui::button(("hunk-discard", row), t!("common.discard").to_string())
                         .size(crate::ui::ButtonSize::Tiny)
                         .danger()
                         .on_click(move |_, window, cx| {
@@ -527,14 +539,17 @@ fn hunk_header_row(
         Some(Side::Staged) => {
             let unstage_entity = entity.clone();
             div().flex().items_center().gap_1().pr_1().child(
-                crate::ui::button(("hunk-unstage", row), "Unstage hunk")
-                    .size(crate::ui::ButtonSize::Tiny)
-                    .kind(crate::ui::ButtonKind::Normal)
-                    .on_click(move |_, window, cx| {
-                        unstage_entity.update(cx, |this, cx| {
-                            this.hunk_operation(hunk, HunkAction::Unstage, window, cx)
-                        });
-                    }),
+                crate::ui::button(
+                    ("hunk-unstage", row),
+                    t!("worktree.unstage_hunk").to_string(),
+                )
+                .size(crate::ui::ButtonSize::Tiny)
+                .kind(crate::ui::ButtonKind::Normal)
+                .on_click(move |_, window, cx| {
+                    unstage_entity.update(cx, |this, cx| {
+                        this.hunk_operation(hunk, HunkAction::Unstage, window, cx)
+                    });
+                }),
             )
         }
         Some(Side::Conflict) => div(),

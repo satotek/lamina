@@ -35,18 +35,18 @@ impl RepoView {
         let source = self.source();
         let head = source.as_ref().and_then(Source::head);
         let repo = match &self.fake {
-            Some(_) => "synthetic".to_owned(),
+            Some(_) => t!("title_bar.synthetic_repo").to_string(),
             None => self.name.clone().unwrap_or_else(|| "strata".to_owned()),
         };
         let branch = match head {
             Some(HeadInfo::Branch { short_name, .. }) => short_name.clone(),
-            Some(HeadInfo::Detached { .. }) => "detached".to_owned(),
+            Some(HeadInfo::Detached { .. }) => t!("title_bar.detached").to_string(),
             // Synthetic history has no `HeadInfo`, but its sidebar names the
             // branch it pretends to be on.
             None => source
                 .as_ref()
                 .and_then(|source| source.sidebar().head_branch)
-                .unwrap_or_else(|| "loading".to_owned()),
+                .unwrap_or_else(|| t!("title_bar.loading").to_string()),
         };
         let upstream = match &source {
             Some(Source::Repo(snapshot)) => head
@@ -69,7 +69,12 @@ impl RepoView {
         let branch_pr = branch_prs.get(&branch).cloned();
         let branch_pr_note = branch_prs.note().map(str::to_owned);
         let back_button = self.parent_name.as_deref().map(|parent| {
-            let tooltip = format!("Back to {parent} ({})", back_key_label());
+            let tooltip = t!(
+                "title_bar.back_tooltip",
+                parent = parent,
+                key = back_key_label()
+            )
+            .to_string();
             crate::ui::content_button("back-to-parent")
                 .kind(crate::ui::ButtonKind::Ghost)
                 .size(crate::ui::ButtonSize::Small)
@@ -91,7 +96,7 @@ impl RepoView {
                                 div()
                                     .min_w_0()
                                     .truncate()
-                                    .child(format!("Back to {parent}")),
+                                    .child(t!("title_bar.back", parent = parent).to_string()),
                             )
                         }),
                 )
@@ -179,7 +184,7 @@ impl RepoView {
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .child("Search commits, authors, hashes")
+                .child(t!("title_bar.search_commits").to_string())
                 .into_any_element(),
         };
         let mode = self.search.mode();
@@ -207,16 +212,16 @@ impl RepoView {
                 search
                     .child(search_mode_button(
                         "title-search-content",
-                        "Content",
-                        "Search file contents (-S)",
+                        t!("title_bar.search_content").to_string(),
+                        t!("title_bar.search_content_tooltip").to_string(),
                         crate::search::SearchMode::Content,
                         mode == crate::search::SearchMode::Content,
                         entity,
                     ))
                     .child(search_mode_button(
                         "title-search-content-regex",
-                        "Regex",
-                        "Search file contents with regex (-G)",
+                        t!("title_bar.search_regex").to_string(),
+                        t!("title_bar.search_regex_tooltip").to_string(),
                         crate::search::SearchMode::ContentRegex,
                         mode == crate::search::SearchMode::ContentRegex,
                         entity_regex,
@@ -263,7 +268,7 @@ impl RepoView {
                     .w(px(32.0))
                     .h(px(32.0))
                     .text_color(design.muted)
-                    .tooltip("Settings")
+                    .tooltip(t!("title_bar.settings_tooltip").to_string())
                     .on_click(|_, window, cx| {
                         window.dispatch_action(Box::new(actions::OpenSettings), cx);
                     }),
@@ -361,7 +366,7 @@ const fn actions_width(remote: f32, stash: f32) -> f32 {
 }
 
 /// The actions at their full size.
-const ACTIONS_WIDTH: f32 = actions_width(REMOTE_ACTIONS_WIDTH, 52.0);
+const ACTIONS_WIDTH: f32 = actions_width(REMOTE_ACTIONS_WIDTH, 64.0);
 
 /// The same row with the stash action drawn as an icon only.
 const COMPACT_ACTIONS_WIDTH: f32 = actions_width(REMOTE_ACTIONS_WIDTH, 32.0);
@@ -511,7 +516,7 @@ impl TitleBarFit {
             (true, false) => ACTIONS_WIDTH,
             (false, false) => COMPACT_ACTIONS_WIDTH,
             (false, true) => NARROW_ACTIONS_WIDTH,
-            (true, true) => actions_width(COMPACT_REMOTE_ACTIONS_WIDTH, 52.0),
+            (true, true) => actions_width(COMPACT_REMOTE_ACTIONS_WIDTH, 64.0),
         }
     }
 
@@ -594,7 +599,7 @@ impl RepoView {
     /// Opens a terminal in the repository's working tree.
     pub(crate) fn open_terminal_here(&mut self, cx: &mut Context<Self>) {
         let Some(dir) = self.work_dir() else {
-            self.report_tool_error("open a repository first".to_owned(), cx);
+            self.report_tool_error(t!("title_bar.open_repository_first").to_string(), cx);
             return;
         };
         match crate::external_tools::open_terminal(&dir, Settings::get(cx)) {
@@ -611,7 +616,7 @@ impl RepoView {
         cx: &mut Context<Self>,
     ) {
         let Some(dir) = self.work_dir() else {
-            self.report_tool_error("open a repository first".to_owned(), cx);
+            self.report_tool_error(t!("title_bar.open_repository_first").to_string(), cx);
             return;
         };
         let file = dir.join(path);
@@ -634,7 +639,7 @@ impl RepoView {
         };
         match path {
             Some(path) => self.open_file_in_editor(&path, None, cx),
-            None => self.report_tool_error("select a file to open in the editor".to_owned(), cx),
+            None => self.report_tool_error(t!("title_bar.select_file_to_open").to_string(), cx),
         }
     }
 
@@ -656,7 +661,7 @@ fn terminal_button(
         .w(px(32.0))
         .h(px(32.0))
         .text_color(design.muted)
-        .tooltip("Open terminal here")
+        .tooltip(t!("action.open_terminal_here").to_string())
         .disabled(!enabled)
         .on_click(move |_, _, cx| {
             if let Some(entity) = entity.upgrade() {
@@ -672,9 +677,9 @@ fn terminal_button(
 fn stash_button(design: &Design, label: bool) -> AnyElement {
     crate::ui::content_button("stash-button")
         .ghost()
-        .w(px(if label { 52.0 } else { 32.0 }))
+        .w(px(if label { 64.0 } else { 32.0 }))
         .h(px(40.0))
-        .tooltip("Stash changes")
+        .tooltip(t!("action.stash_changes").to_string())
         .on_click(|_, window, cx| {
             window.dispatch_action(Box::new(actions::StashChanges), cx);
         })
@@ -688,15 +693,17 @@ fn stash_button(design: &Design, label: bool) -> AnyElement {
                 .gap(px(2.0))
                 .text_size(px(10.0))
                 .child(glyph(style::glyph::ARCHIVE, 16.0, design.text))
-                .when(label, |content| content.child("Stash")),
+                .when(label, |content| {
+                    content.child(t!("title_bar.stash").to_string())
+                }),
         )
         .into_any_element()
 }
 
 fn search_mode_button(
     id: &'static str,
-    label: &'static str,
-    tooltip: &'static str,
+    label: impl Into<gpui::SharedString>,
+    tooltip: impl Into<gpui::SharedString>,
     mode: crate::search::SearchMode,
     active: bool,
     entity: gpui::WeakEntity<RepoView>,

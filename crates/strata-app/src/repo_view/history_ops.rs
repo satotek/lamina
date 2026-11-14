@@ -133,28 +133,30 @@ impl MenuState {
     ///
     /// A tag can be created or deleted while another operation is in progress
     /// (it only writes a ref), but not while git is busy with one.
-    pub(crate) fn blocked(&self, action: HistoryAction) -> Option<&'static str> {
+    pub(crate) fn blocked(&self, action: HistoryAction) -> Option<String> {
         if self.busy {
-            return Some("an operation is running");
+            return Some(t!("branch.reason.busy").to_string());
         }
         match action {
             HistoryAction::CreateTag | HistoryAction::DeleteTag | HistoryAction::CreateBranch => {
                 None
             }
-            _ if self.pending => Some("finish the operation in progress first"),
-            _ if self.branch.is_none() && self.head.is_some() => Some("HEAD is detached"),
-            _ if self.branch.is_none() => Some("no branch to move"),
+            _ if self.pending => Some(t!("reflog.finish_first").to_string()),
+            _ if self.branch.is_none() && self.head.is_some() => {
+                Some(t!("reflog.head_detached").to_string())
+            }
+            _ if self.branch.is_none() => Some(t!("history_ops.no_branch_to_move").to_string()),
             _ => None,
         }
     }
 
     /// [`Self::blocked`] plus the commit-specific rule: picking or reverting
     /// HEAD itself has nothing to apply.
-    pub(crate) fn blocked_for(&self, action: HistoryAction, commit: Oid) -> Option<&'static str> {
+    pub(crate) fn blocked_for(&self, action: HistoryAction, commit: Oid) -> Option<String> {
         if matches!(action, HistoryAction::CherryPick | HistoryAction::Revert)
             && self.head == Some(commit)
         {
-            return Some("this is HEAD");
+            return Some(t!("history_ops.reason.is_head").to_string());
         }
         self.blocked(action)
     }
@@ -182,38 +184,40 @@ impl EditAction {
     ];
 
     /// The menu entry, without the reason a disabled one shows.
-    fn label(self) -> &'static str {
+    fn label(self) -> String {
         match self {
-            Self::Reword => "Reword…",
-            Self::Squash => "Squash into parent",
-            Self::Fixup => "Fixup into parent",
-            Self::Drop => "Drop commit…",
-            Self::MoveUp => "Move up",
-            Self::MoveDown => "Move down",
+            Self::Reword => t!("history_ops.menu.reword"),
+            Self::Squash => t!("history_ops.menu.squash"),
+            Self::Fixup => t!("history_ops.menu.fixup"),
+            Self::Drop => t!("history_ops.menu.drop"),
+            Self::MoveUp => t!("history_ops.menu.move_up"),
+            Self::MoveDown => t!("history_ops.menu.move_down"),
         }
+        .to_string()
     }
 
     /// What the status bar and the command log call the operation.
-    fn verb(self) -> &'static str {
+    fn verb(self) -> String {
         match self {
-            Self::Reword => "reword",
-            Self::Squash => "squash",
-            Self::Fixup => "fixup",
-            Self::Drop => "drop",
-            Self::MoveUp => "move up",
-            Self::MoveDown => "move down",
+            Self::Reword => t!("history_ops.op.reword"),
+            Self::Squash => t!("history_ops.op.squash"),
+            Self::Fixup => t!("history_ops.op.fixup"),
+            Self::Drop => t!("history_ops.op.drop"),
+            Self::MoveUp => t!("history_ops.op.move_up"),
+            Self::MoveDown => t!("history_ops.op.move_down"),
         }
+        .to_string()
     }
 
     /// The confirmation title; `short` is the commit id.
     fn title(self, short: &str) -> String {
         match self {
-            Self::Reword => format!("Reword {short}?"),
-            Self::Squash => format!("Squash {short} into its parent?"),
-            Self::Fixup => format!("Fix up {short} into its parent?"),
-            Self::Drop => format!("Drop commit {short}?"),
-            Self::MoveUp => format!("Move {short} up?"),
-            Self::MoveDown => format!("Move {short} down?"),
+            Self::Reword => t!("history_ops.confirm.reword", short = short).to_string(),
+            Self::Squash => t!("history_ops.confirm.squash", short = short).to_string(),
+            Self::Fixup => t!("history_ops.confirm.fixup", short = short).to_string(),
+            Self::Drop => t!("history_ops.confirm.drop", short = short).to_string(),
+            Self::MoveUp => t!("history_ops.confirm.move_up", short = short).to_string(),
+            Self::MoveDown => t!("history_ops.confirm.move_down", short = short).to_string(),
         }
     }
 }
@@ -421,44 +425,44 @@ fn blocked_on_line(
     line: &[LineCommit],
     distance: Option<usize>,
     action: EditAction,
-) -> Option<&'static str> {
+) -> Option<String> {
     let Some(distance) = distance else {
-        return Some("not on the current branch");
+        return Some(t!("history_ops.reason.not_on_branch").to_string());
     };
     let Some((_, parents)) = line.get(distance) else {
-        return Some("not on the current branch");
+        return Some(t!("history_ops.reason.not_on_branch").to_string());
     };
     if parents.is_empty() {
-        return Some("the root commit");
+        return Some(t!("history_ops.reason.root_commit").to_string());
     }
     match action {
         EditAction::Reword | EditAction::Drop => {
             if merge_within(line, distance) {
-                return Some("history has a merge");
+                return Some(t!("history_ops.reason.merge").to_string());
             }
         }
         EditAction::Squash | EditAction::Fixup => {
             if line.get(distance + 2).is_none() {
-                return Some("the parent is the root commit");
+                return Some(t!("history_ops.reason.parent_root").to_string());
             }
             if merge_within(line, distance + 1) {
-                return Some("history has a merge");
+                return Some(t!("history_ops.reason.merge").to_string());
             }
         }
         EditAction::MoveUp => {
             if distance == 0 {
-                return Some("already the newest commit");
+                return Some(t!("history_ops.reason.already_newest").to_string());
             }
             if merge_within(line, distance) {
-                return Some("history has a merge");
+                return Some(t!("history_ops.reason.merge").to_string());
             }
         }
         EditAction::MoveDown => {
             if line.get(distance + 2).is_none() {
-                return Some("already the oldest in the range");
+                return Some(t!("history_ops.reason.already_oldest").to_string());
             }
             if merge_within(line, distance + 1) {
-                return Some("history has a merge");
+                return Some(t!("history_ops.reason.merge").to_string());
             }
         }
     }
@@ -528,12 +532,12 @@ fn remotes_containing(
 ///
 /// The state checks come first because they decide the whole repository, then
 /// the line decides the commit, and the worktree comes last because the more
-/// specific reason is more useful than "commit or stash changes first".
+/// specific reason is more useful than t!("reflog.commit_or_stash").to_string().
 fn edit_blocked(
     state: &MenuState,
     edit: Option<&EditContext>,
     action: EditAction,
-) -> Option<&'static str> {
+) -> Option<String> {
     match edit {
         Some(edit) => edit_blocked_on_line(state, &edit.line, edit.distance, action),
         None => edit_blocked_on_line(state, &[], None, action),
@@ -545,21 +549,21 @@ fn edit_blocked_on_line(
     line: &[LineCommit],
     distance: Option<usize>,
     action: EditAction,
-) -> Option<&'static str> {
+) -> Option<String> {
     if state.busy {
-        return Some("an operation is running");
+        return Some(t!("branch.reason.busy").to_string());
     }
     if state.pending {
-        return Some("finish the operation in progress first");
+        return Some(t!("reflog.finish_first").to_string());
     }
     if state.branch.is_none() && state.head.is_some() {
-        return Some("HEAD is detached");
+        return Some(t!("reflog.head_detached").to_string());
     }
     if let Some(reason) = blocked_on_line(line, distance, action) {
         return Some(reason);
     }
     if state.dirty {
-        return Some("commit or stash changes first");
+        return Some(t!("reflog.commit_or_stash").to_string());
     }
     None
 }
@@ -596,7 +600,9 @@ fn fixup_steps(commits: &[Oid], commit: Oid) -> Result<Vec<RebaseStep>> {
     let position = commits
         .iter()
         .position(|candidate| *candidate == commit)
-        .ok_or_else(|| Error::other(format!("commit {commit} is not in the rebase range")))?;
+        .ok_or_else(|| {
+            Error::other(t!("history_ops.reason.not_in_range", commit = commit).to_string())
+        })?;
     let mut steps = commits
         .iter()
         .map(|commit| RebaseStep {
@@ -630,7 +636,7 @@ pub(crate) struct MultiPickContext {
     copy: String,
     count: usize,
     branch: String,
-    blocked: Option<&'static str>,
+    blocked: Option<String>,
 }
 
 /// The context menu for one commit row.
@@ -657,16 +663,20 @@ pub(crate) fn commit_menu(
         .map_or_else(|| target.short.clone(), |commit| commit.to_string());
     let copy_summary = target.summary.clone();
     menu = menu
-        .item(PopupMenuItem::new("Copy commit id").on_click(
-            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                cx.write_to_clipboard(ClipboardItem::new_string(copy_id.clone()));
-            },
-        ))
-        .item(PopupMenuItem::new("Copy summary").on_click(
-            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                cx.write_to_clipboard(ClipboardItem::new_string(copy_summary.clone()));
-            },
-        ));
+        .item(
+            PopupMenuItem::new(t!("history_ops.menu.copy_id").to_string()).on_click(
+                move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(copy_id.clone()));
+                },
+            ),
+        )
+        .item(
+            PopupMenuItem::new(t!("history_ops.menu.copy_summary").to_string()).on_click(
+                move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(copy_summary.clone()));
+                },
+            ),
+        );
 
     let (Some(commit), Some(state)) = (target.id, state) else {
         return menu;
@@ -686,9 +696,10 @@ pub(crate) fn commit_menu(
     let tag_blocked = state.blocked(HistoryAction::CreateTag);
     let delete_blocked = state.blocked(HistoryAction::DeleteTag);
     let branch_blocked = state.blocked(HistoryAction::CreateBranch);
-    let rebase = entity
-        .read(cx)
-        .rebase_target(commit, format!("commit {short}"));
+    let rebase = entity.read(cx).rebase_target(
+        commit,
+        t!("history_ops.menu.from_commit", short = short).to_string(),
+    );
 
     // A merge commit is picked or reverted against its first parent (`-m 1` in
     // `git_cli::history`), so these stay enabled for merges.
@@ -696,8 +707,8 @@ pub(crate) fn commit_menu(
         let entity = entity.clone();
         let short = short.clone();
         PopupMenuItem::new(menu_label(
-            format!("Cherry-pick onto {onto}"),
-            cherry_blocked,
+            t!("history_ops.menu.cherry_pick_onto", onto = onto).to_string(),
+            cherry_blocked.as_ref(),
         ))
         .disabled(cherry_blocked.is_some())
         .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
@@ -708,23 +719,31 @@ pub(crate) fn commit_menu(
     let revert = {
         let entity = entity.clone();
         let short = short.clone();
-        PopupMenuItem::new(menu_label("Revert commit", revert_blocked))
-            .disabled(revert_blocked.is_some())
-            .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                let short = short.clone();
-                entity.update(cx, |view, cx| {
-                    view.confirm_revert(commit, short, window, cx)
-                });
-            })
+        PopupMenuItem::new(menu_label(
+            t!("history_ops.menu.revert").to_string(),
+            revert_blocked.as_ref(),
+        ))
+        .disabled(revert_blocked.is_some())
+        .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+            let short = short.clone();
+            entity.update(cx, |view, cx| {
+                view.confirm_revert(commit, short, window, cx)
+            });
+        })
     };
 
     menu = menu.separator().item(cherry).item(revert);
     if let Some(target) = rebase {
-        menu = menu.item(rebase_menu_item(target, &onto, "here", entity.clone()));
+        menu = menu.item(rebase_menu_item(
+            target,
+            &onto,
+            t!("history_ops.menu.here").as_ref(),
+            entity.clone(),
+        ));
     }
     menu = menu.separator();
 
-    let reset_label = format!("Reset {onto} to here");
+    let reset_label = t!("history_ops.menu.reset_to_here", onto = onto).to_string();
     menu = match reset_blocked {
         // `PopupMenu` cannot mark the submenu entry itself disabled, so a
         // blocked reset is a plain disabled entry that names the reason.
@@ -735,7 +754,7 @@ pub(crate) fn commit_menu(
             let entity = entity.clone();
             let short = short.clone();
             menu.submenu(reset_label, window, cx, move |submenu, _, _| {
-                let entry = |mode: ResetMode, label: &'static str| {
+                let entry = |mode: ResetMode, label: String| {
                     let entity = entity.clone();
                     let short = short.clone();
                     PopupMenuItem::new(label).on_click(
@@ -748,9 +767,18 @@ pub(crate) fn commit_menu(
                     )
                 };
                 submenu
-                    .item(entry(ResetMode::Soft, "Soft — keep the changes staged"))
-                    .item(entry(ResetMode::Mixed, "Mixed — keep the changes unstaged"))
-                    .item(entry(ResetMode::Hard, "Hard — discard the changes"))
+                    .item(entry(
+                        ResetMode::Soft,
+                        t!("history_ops.menu.soft").to_string(),
+                    ))
+                    .item(entry(
+                        ResetMode::Mixed,
+                        t!("history_ops.menu.mixed").to_string(),
+                    ))
+                    .item(entry(
+                        ResetMode::Hard,
+                        t!("history_ops.menu.hard").to_string(),
+                    ))
             })
         }
     };
@@ -759,27 +787,33 @@ pub(crate) fn commit_menu(
         let entity = entity.clone();
         let point = commit.to_string();
         let from = format!("from commit {short}");
-        PopupMenuItem::new(menu_label("Create branch here…", branch_blocked))
-            .disabled(branch_blocked.is_some())
-            .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                let point = point.clone();
-                let from = from.clone();
-                entity.update(cx, |view, cx| {
-                    view.open_create_dialog(Some(point), from, window, cx);
-                });
-            })
+        PopupMenuItem::new(menu_label(
+            t!("history_ops.menu.create_branch").to_string(),
+            branch_blocked.as_ref(),
+        ))
+        .disabled(branch_blocked.is_some())
+        .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+            let point = point.clone();
+            let from = from.clone();
+            entity.update(cx, |view, cx| {
+                view.open_create_dialog(Some(point), from, window, cx);
+            });
+        })
     };
     let create_tag = {
         let entity = entity.clone();
         let short = short.clone();
-        PopupMenuItem::new(menu_label("Create tag here…", tag_blocked))
-            .disabled(tag_blocked.is_some())
-            .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                let short = short.clone();
-                entity.update(cx, |view, cx| {
-                    view.open_tag_dialog(commit, short, window, cx)
-                });
-            })
+        PopupMenuItem::new(menu_label(
+            t!("history_ops.menu.create_tag").to_string(),
+            tag_blocked.as_ref(),
+        ))
+        .disabled(tag_blocked.is_some())
+        .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+            let short = short.clone();
+            entity.update(cx, |view, cx| {
+                view.open_tag_dialog(commit, short, window, cx)
+            });
+        })
     };
 
     menu = menu.separator().item(create_branch).item(create_tag);
@@ -787,12 +821,15 @@ pub(crate) fn commit_menu(
         let entity = entity.clone();
         let name = tag.clone();
         menu = menu.item(
-            PopupMenuItem::new(menu_label(format!("Delete tag {tag}"), delete_blocked))
-                .disabled(delete_blocked.is_some())
-                .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                    let name = name.clone();
-                    entity.update(cx, |view, cx| view.confirm_delete_tag(name, window, cx));
-                }),
+            PopupMenuItem::new(menu_label(
+                t!("history_ops.menu.delete_tag", tag = tag).to_string(),
+                delete_blocked.as_ref(),
+            ))
+            .disabled(delete_blocked.is_some())
+            .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                let name = name.clone();
+                entity.update(cx, |view, cx| view.confirm_delete_tag(name, window, cx));
+            }),
         );
     }
     // One grouped entry rather than a submenu, so the compare view is one
@@ -801,16 +838,19 @@ pub(crate) fn commit_menu(
     // A menu only opens with a session, so the repository is there.
     let compare_blocked = super::compare::with_head_blocked(true, Some(commit), state.head);
     menu = menu.item(
-        PopupMenuItem::new(menu_label("Compare with HEAD", compare_blocked))
-            .disabled(compare_blocked.is_some())
-            .on_click({
-                let entity = entity.clone();
-                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                    entity.update(cx, |view, cx| {
-                        view.open_compare_with_head(commit, window, cx)
-                    });
-                }
-            }),
+        PopupMenuItem::new(menu_label(
+            t!("history_ops.menu.compare_head").to_string(),
+            compare_blocked.as_ref(),
+        ))
+        .disabled(compare_blocked.is_some())
+        .on_click({
+            let entity = entity.clone();
+            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                entity.update(cx, |view, cx| {
+                    view.open_compare_with_head(commit, window, cx)
+                });
+            }
+        }),
     );
 
     let edit = entity.read(cx).edit_context(commit);
@@ -829,11 +869,13 @@ fn multi_commit_menu(
 ) -> PopupMenu {
     let copy = multi.copy.clone();
     menu = menu
-        .item(PopupMenuItem::new("Copy commit ids").on_click(
-            move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
-            },
-        ))
+        .item(
+            PopupMenuItem::new(t!("history_ops.menu.copy_ids").to_string()).on_click(
+                move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
+                },
+            ),
+        )
         .separator();
 
     // Exactly two commits are a comparison; more would need a base to compare
@@ -844,20 +886,23 @@ fn multi_commit_menu(
         let (a, b) = (*a, *b);
         menu = menu
             .item(
-                PopupMenuItem::new(menu_label("Compare these commits", blocked))
-                    .disabled(blocked.is_some())
-                    .on_click({
-                        let entity = entity.clone();
-                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                            entity.update(cx, |view, cx| view.open_compare_pair(a, b, window, cx));
-                        }
-                    }),
+                PopupMenuItem::new(menu_label(
+                    t!("history_ops.menu.compare_commits").to_string(),
+                    blocked.as_ref(),
+                ))
+                .disabled(blocked.is_some())
+                .on_click({
+                    let entity = entity.clone();
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        entity.update(cx, |view, cx| view.open_compare_pair(a, b, window, cx));
+                    }
+                }),
             )
             .separator();
     }
     let label = menu_label(
         format!("Cherry-pick {} commits onto {}", multi.count, multi.branch),
-        multi.blocked,
+        multi.blocked.as_ref(),
     );
     let mut item = PopupMenuItem::new(label).disabled(multi.blocked.is_some());
     if multi.blocked.is_none() {
@@ -870,7 +915,7 @@ fn multi_commit_menu(
     menu.item(item)
 }
 
-/// The "Edit commit" group. Every entry says why it is disabled, because a
+/// The t!("history_ops.menu.edit_commit").to_string() group. Every entry says why it is disabled, because a
 /// popup item has no tooltip.
 fn edit_group(
     mut menu: PopupMenu,
@@ -880,11 +925,13 @@ fn edit_group(
     edit: Option<&EditContext>,
     entity: &Entity<RepoView>,
 ) -> PopupMenu {
-    menu = menu.item(PopupMenuItem::label("Edit commit"));
+    menu = menu.item(PopupMenuItem::label(
+        t!("history_ops.menu.edit_commit").to_string(),
+    ));
     for action in EditAction::ALL {
         let blocked = edit_blocked(state, edit, action);
-        let mut item =
-            PopupMenuItem::new(menu_label(action.label(), blocked)).disabled(blocked.is_some());
+        let mut item = PopupMenuItem::new(menu_label(action.label(), blocked.as_ref()))
+            .disabled(blocked.is_some());
         if blocked.is_none() {
             let entity = entity.clone();
             let summary = summary.to_owned();
@@ -899,8 +946,11 @@ fn edit_group(
     // The dialog edits `onto..HEAD` with `onto` at the commit's parent, which
     // is the range a reword of this commit replays, so it qualifies the same way.
     let blocked = edit_blocked(state, edit, EditAction::Reword);
-    let mut item = PopupMenuItem::new(menu_label("Edit history from here…", blocked))
-        .disabled(blocked.is_some());
+    let mut item = PopupMenuItem::new(menu_label(
+        t!("history_ops.menu.edit_history").to_string(),
+        blocked.as_ref(),
+    ))
+    .disabled(blocked.is_some());
     if blocked.is_none() {
         let entity = entity.clone();
         item = item.on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
@@ -922,22 +972,32 @@ fn reset_detail(
     unstaged: usize,
 ) -> String {
     match mode {
-        ResetMode::Soft => format!(
-            "{branch} moves back to {short}. The commits above it stay in the reflog, and their changes stay staged."
-        ),
-        ResetMode::Mixed => format!(
-            "{branch} moves back to {short}. The commits above it stay in the reflog, and their changes stay in the working tree, unstaged."
-        ),
+        ResetMode::Soft => t!(
+            "history_ops.reset.soft_detail",
+            branch = branch,
+            short = short
+        )
+        .to_string(),
+        ResetMode::Mixed => t!(
+            "history_ops.reset.mixed_detail",
+            branch = branch,
+            short = short
+        )
+        .to_string(),
         ResetMode::Hard => {
             let changes = staged + unstaged;
             let lost = match changes {
-                0 => "The working tree has no uncommitted changes to lose.".to_owned(),
-                1 => "1 uncommitted path is discarded as well.".to_owned(),
-                count => format!("{count} uncommitted paths are discarded as well."),
+                0 => t!("history_ops.reset.no_changes").to_string(),
+                1 => t!("history_ops.reset.one_path").to_string(),
+                count => t!("history_ops.reset.paths", count = count).to_string(),
             };
-            format!(
-                "{branch} moves back to {short}. The commits above it leave the branch (the reflog keeps them) and the working tree is reset. {lost}"
+            t!(
+                "history_ops.reset.hard_detail",
+                branch = branch,
+                short = short,
+                lost = lost
             )
+            .to_string()
         }
     }
 }
@@ -945,47 +1005,47 @@ fn reset_detail(
 /// git's `check-ref-format` rules for `refs/tags/<name>`, plus the two cases
 /// only the app can know: a leading `-` (which git would read as an option) and
 /// a name that is already taken.
-pub(crate) fn validate_tag_name(name: &str, existing: &[String]) -> Result<(), &'static str> {
+pub(crate) fn validate_tag_name(name: &str, existing: &[String]) -> Result<(), String> {
     if name.is_empty() {
-        return Err("Enter a tag name.");
+        return Err(t!("history_ops.tag.required").to_string());
     }
     if existing.iter().any(|tag| tag == name) {
-        return Err("A tag with that name already exists.");
+        return Err(t!("history_ops.tag.exists").to_string());
     }
     if name == "@" {
-        return Err("'@' is shorthand for HEAD, not a tag name.");
+        return Err(t!("history_ops.tag.shorthand").to_string());
     }
     if name.starts_with('-') {
-        return Err("A tag name must not start with '-'.");
+        return Err(t!("history_ops.tag.leading_dash").to_string());
     }
     if name.starts_with('/') || name.ends_with('/') {
-        return Err("A tag name must not start or end with '/'.");
+        return Err(t!("history_ops.tag.slash_edges").to_string());
     }
     if name.contains("//") {
-        return Err("A tag name must not contain '//'.");
+        return Err(t!("history_ops.tag.double_slash").to_string());
     }
     if name.contains("..") {
-        return Err("A tag name must not contain '..'.");
+        return Err(t!("history_ops.tag.dot_dot").to_string());
     }
     if name.contains("@{") {
-        return Err("A tag name must not contain '@{'.");
+        return Err(t!("history_ops.tag.at_brace").to_string());
     }
     if name
         .chars()
         .any(|character| character.is_whitespace() || character.is_control())
     {
-        return Err("A tag name must not contain spaces or control characters.");
+        return Err(t!("history_ops.tag.control").to_string());
     }
     if name.contains(['~', '^', ':', '?', '*', '[', '\\']) {
-        return Err("A tag name must not contain any of ~ ^ : ? * [ \\.");
+        return Err(t!("history_ops.tag.specials").to_string());
     }
     if name.ends_with('.') {
-        return Err("A tag name must not end with '.'.");
+        return Err(t!("history_ops.tag.trailing_dot").to_string());
     }
     if name.split('/').any(|part| {
         part.is_empty() || part.starts_with('.') || part.ends_with('.') || part.ends_with(".lock")
     }) {
-        return Err("Each part must not start with '.' or end with '.' or '.lock'.");
+        return Err(t!("history_ops.tag.part").to_string());
     }
     Ok(())
 }
@@ -1049,8 +1109,8 @@ impl RepoView {
                 state.pending,
                 state.branch.is_none() && state.head.is_some(),
             ),
-            Some(_) => Some("no commits to pick"),
-            None => Some("no repository is open"),
+            Some(_) => Some(t!("history_ops.no_commits_to_pick").to_string()),
+            None => Some(t!("history_ops.no_repository").to_string()),
         };
         Some(MultiPickContext {
             commits,
@@ -1075,7 +1135,12 @@ impl RepoView {
         let onto = self
             .history_menu_state()
             .map_or_else(|| "HEAD".to_owned(), |state| state.branch_label());
-        let label = format!("cherry-pick {count} commits onto {onto}");
+        let label = t!(
+            "history_ops.op.cherry_pick_many",
+            count = count,
+            onto = onto
+        )
+        .to_string();
         self.run_operation(Operation::CherryPickMany { commits }, label, window, cx);
     }
 
@@ -1096,7 +1161,7 @@ impl RepoView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let label = format!("cherry-pick {short}");
+        let label = t!("history_ops.op.cherry_pick", short = short).to_string();
         self.run_operation(Operation::CherryPick { commit }, label, window, cx);
     }
 
@@ -1115,19 +1180,20 @@ impl RepoView {
             return;
         }
         let branch = state.branch_label();
-        let detail = format!(
-            "A new commit on {branch} undoes {short}. If git stops on a conflict, resolve it from the conflict view and continue."
-        );
+        let detail = t!("history_ops.revert_detail", branch = branch, short = short).to_string();
         // Revert leaves its own commit behind and the reflog still has the
         // original, so OK is not painted as a destructive action.
-        let mut confirm =
-            ui::Confirm::new(format!("Revert commit {short}?"), detail).ok_label("Revert");
+        let mut confirm = ui::Confirm::new(
+            t!("history_ops.confirm.revert", short = short).to_string(),
+            detail,
+        )
+        .ok_label(t!("common.revert").to_string());
         confirm.danger = false;
         self.focus_root(window, cx);
         let entity = cx.weak_entity();
         ui::confirm(window, cx, confirm, move |window, cx| {
             let _ = entity.update(cx, |view, cx| {
-                let label = format!("revert {short}");
+                let label = t!("history_ops.op.revert", short = short).to_string();
                 view.run_operation(Operation::Revert { commit }, label, window, cx);
             });
         });
@@ -1152,15 +1218,30 @@ impl RepoView {
         let (staged, unstaged) = self.worktree_changes();
         let detail = reset_detail(&branch, &short, mode, staged, unstaged);
         let title = match mode {
-            ResetMode::Soft => format!("Soft reset {branch} to {short}?"),
-            ResetMode::Mixed => format!("Mixed reset {branch} to {short}?"),
-            ResetMode::Hard => format!("Hard reset {branch} to {short}?"),
+            ResetMode::Soft => t!(
+                "history_ops.confirm.soft_reset",
+                branch = branch,
+                short = short
+            )
+            .to_string(),
+            ResetMode::Mixed => t!(
+                "history_ops.confirm.mixed_reset",
+                branch = branch,
+                short = short
+            )
+            .to_string(),
+            ResetMode::Hard => t!(
+                "history_ops.confirm.hard_reset",
+                branch = branch,
+                short = short
+            )
+            .to_string(),
         };
         let confirm = match mode {
             // Only a hard reset deletes work: the other two keep the changes in
             // the index or the working tree, and the reflog keeps the commits.
             ResetMode::Hard => ui::Confirm::new(title, detail)
-                .ok_label("Hard reset")
+                .ok_label(t!("history_ops.hard_reset").to_string())
                 .always_ask(),
             ResetMode::Soft | ResetMode::Mixed => {
                 let mut confirm = ui::Confirm::new(title, detail).ok_label("Reset");
@@ -1228,18 +1309,18 @@ impl RepoView {
             let content = content.clone();
             let footer = footer.clone();
             let confirm = confirm.clone();
-            card.title("Create tag")
+            card.title(t!("history_ops.tag.dialog").to_string())
                 .w(px(440.0))
                 .content(move |body, _, _| body.child(content.clone()))
                 .footer(
                     DialogFooter::new()
                         .child(
-                            ui::button("tag-cancel", "Cancel")
+                            ui::button("tag-cancel", t!("common.cancel").to_string())
                                 .size(ui::ButtonSize::Medium)
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
-                            ui::button("tag-create", "Create tag")
+                            ui::button("tag-create", t!("history_ops.tag.dialog").to_string())
                                 .size(ui::ButtonSize::Medium)
                                 .on_click(move |_, window, cx| {
                                     footer.update(cx, |dialog, cx| dialog.submit(window, cx));
@@ -1266,9 +1347,9 @@ impl RepoView {
         cx: &mut Context<Self>,
     ) {
         let label = if message.is_some() {
-            format!("create annotated tag {name}")
+            t!("history_ops.tag.op_annotated", name = name).to_string()
         } else {
-            format!("create tag {name}")
+            t!("history_ops.tag.op", name = name).to_string()
         };
         self.run_operation(
             Operation::CreateTag {
@@ -1298,14 +1379,14 @@ impl RepoView {
             window,
             cx,
             ui::Confirm::new(
-                format!("Delete tag {name}?"),
-                "The tag is removed. The commit it points at stays in the repository.",
+                t!("history_ops.tag.delete_title", name = name).to_string(),
+                t!("history_ops.tag.delete_detail").to_string(),
             )
             .ok_label("Delete tag"),
             move |window, cx| {
                 let name = name.clone();
                 let _ = entity.update(cx, |view, cx| {
-                    let label = format!("delete tag {name}");
+                    let label = t!("history_ops.tag.delete_op", name = name).to_string();
                     view.run_operation(Operation::DeleteTag { name }, label, window, cx);
                 });
             },
@@ -1643,7 +1724,7 @@ impl TagDialog {
     fn submit(&mut self, window: &mut Window, cx: &mut App) {
         let name = self.name.read(cx).value().trim().to_owned();
         if let Err(message) = validate_tag_name(&name, &self.existing) {
-            self.error = Some(message.to_owned());
+            self.error = Some(message);
             cx.notify(self.entity);
             return;
         }
@@ -1722,7 +1803,7 @@ mod tests {
         ] {
             assert_eq!(
                 state.blocked(action),
-                Some("HEAD is detached"),
+                Some(t!("reflog.head_detached").to_string()),
                 "{action:?} needs a branch"
             );
         }
@@ -1741,7 +1822,7 @@ mod tests {
         let pending = MenuState::read(Some(&head), RepoState::Merging, false);
         assert_eq!(
             pending.blocked(HistoryAction::Reset),
-            Some("finish the operation in progress first")
+            Some(t!("reflog.finish_first").to_string())
         );
         assert_eq!(
             pending.blocked(HistoryAction::CreateTag),
@@ -1760,7 +1841,7 @@ mod tests {
         ] {
             assert_eq!(
                 busy.blocked(action),
-                Some("an operation is running"),
+                Some(t!("branch.reason.busy").to_string()),
                 "{action:?} must wait for the worker"
             );
         }
@@ -1772,11 +1853,11 @@ mod tests {
         let state = MenuState::read(Some(&head), RepoState::Normal, false);
         assert_eq!(
             state.blocked_for(HistoryAction::CherryPick, oid(2)),
-            Some("this is HEAD")
+            Some(t!("history_ops.reason.is_head").to_string())
         );
         assert_eq!(
             state.blocked_for(HistoryAction::Revert, oid(2)),
-            Some("this is HEAD")
+            Some(t!("history_ops.reason.is_head").to_string())
         );
         assert_eq!(
             state.blocked_for(HistoryAction::Reset, oid(2)),
@@ -1792,15 +1873,21 @@ mod tests {
         let state = MenuState::read(None, RepoState::Normal, false);
         assert_eq!(
             state.blocked(HistoryAction::Reset),
-            Some("no branch to move")
+            Some(t!("history_ops.no_branch_to_move").to_string())
         );
     }
 
     #[test]
     fn a_disabled_entry_says_why() {
-        assert_eq!(menu_label("Revert commit", None), "Revert commit");
         assert_eq!(
-            menu_label("Revert commit", Some("this is HEAD")),
+            menu_label(t!("history_ops.menu.revert").to_string(), None::<&str>),
+            t!("history_ops.menu.revert").to_string()
+        );
+        assert_eq!(
+            menu_label(
+                t!("history_ops.menu.revert").to_string(),
+                Some(t!("history_ops.reason.is_head").to_string())
+            ),
             "Revert commit (this is HEAD)"
         );
     }
@@ -1846,7 +1933,7 @@ mod tests {
 
         assert_eq!(
             validate_tag_name("v1.0.0", &["v1.0.0".to_owned()]),
-            Err("A tag with that name already exists."),
+            Err(t!("history_ops.tag.exists").to_string()),
             "a tag name has to be free"
         );
     }
@@ -1963,25 +2050,25 @@ mod tests {
 
         assert_eq!(
             blocked_on_line(&line, None, EditAction::Reword),
-            Some("not on the current branch")
+            Some(t!("history_ops.reason.not_on_branch").to_string())
         );
         assert_eq!(
             blocked_on_line(&line, Some(3), EditAction::Reword),
-            Some("the root commit"),
+            Some(t!("history_ops.reason.root_commit").to_string()),
             "a root has no parent to rebase onto"
         );
         assert_eq!(
             blocked_on_line(&line, Some(0), EditAction::MoveUp),
-            Some("already the newest commit")
+            Some(t!("history_ops.reason.already_newest").to_string())
         );
         assert_eq!(
             blocked_on_line(&line, Some(2), EditAction::Squash),
-            Some("the parent is the root commit"),
+            Some(t!("history_ops.reason.parent_root").to_string()),
             "squashing into the root would need an onto before it"
         );
         assert_eq!(
             blocked_on_line(&line, Some(2), EditAction::MoveDown),
-            Some("already the oldest in the range")
+            Some(t!("history_ops.reason.already_oldest").to_string())
         );
         assert_eq!(blocked_on_line(&line, Some(2), EditAction::Reword), None);
 
@@ -1990,11 +2077,11 @@ mod tests {
         merged[0].1.push(oid(9));
         assert_eq!(
             blocked_on_line(&merged, Some(0), EditAction::Reword),
-            Some("history has a merge")
+            Some(t!("history_ops.reason.merge").to_string())
         );
         assert_eq!(
             blocked_on_line(&merged, Some(1), EditAction::Drop),
-            Some("history has a merge")
+            Some(t!("history_ops.reason.merge").to_string())
         );
 
         // A merge at the parent is outside a reword's range but inside a
@@ -2007,7 +2094,7 @@ mod tests {
         );
         assert_eq!(
             blocked_on_line(&merged_parent, Some(0), EditAction::Squash),
-            Some("history has a merge")
+            Some(t!("history_ops.reason.merge").to_string())
         );
     }
 
@@ -2019,13 +2106,13 @@ mod tests {
         let pending = MenuState::read(Some(&head), RepoState::Rebasing, false);
         assert_eq!(
             edit_blocked_on_line(&pending, &line, Some(0), EditAction::Reword),
-            Some("finish the operation in progress first")
+            Some(t!("reflog.finish_first").to_string())
         );
 
         let busy = MenuState::read(Some(&head), RepoState::Normal, true);
         assert_eq!(
             edit_blocked_on_line(&busy, &line, Some(0), EditAction::Reword),
-            Some("an operation is running")
+            Some(t!("branch.reason.busy").to_string())
         );
 
         let detached = MenuState::read(
@@ -2035,7 +2122,7 @@ mod tests {
         );
         assert_eq!(
             edit_blocked_on_line(&detached, &line, Some(0), EditAction::Reword),
-            Some("HEAD is detached")
+            Some(t!("reflog.head_detached").to_string())
         );
     }
 
@@ -2061,7 +2148,7 @@ mod tests {
         assert!(staged.dirty);
         assert_eq!(
             edit_blocked_on_line(&staged, &line, Some(0), EditAction::Reword),
-            Some("commit or stash changes first")
+            Some(t!("reflog.commit_or_stash").to_string())
         );
 
         let edited = read(worktree(strata_core::ChangeKind::Modified, false));

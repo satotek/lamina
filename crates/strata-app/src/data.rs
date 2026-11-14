@@ -305,11 +305,11 @@ pub fn short_oid(oid: Oid) -> String {
 pub fn window_title(repo: &str, head: Option<&HeadInfo>) -> String {
     let branch = match head {
         Some(HeadInfo::Branch { short_name, .. }) => short_name.as_str(),
-        Some(HeadInfo::Detached { .. }) => "detached",
+        Some(HeadInfo::Detached { .. }) => &*t!("title_bar.detached"),
         // The first snapshot has not been published yet.
-        None => "loading",
+        None => &*t!("title_bar.loading"),
     };
-    format!("Strata — {repo} ({branch})")
+    t!("app.window_title", repo = repo, branch = branch).to_string()
 }
 
 /// The widest graph row seen so far.

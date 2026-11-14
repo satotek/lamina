@@ -43,7 +43,7 @@ impl Confirm {
         Self {
             title: title.into(),
             detail: Some(detail.into()),
-            ok_label: "Delete".into(),
+            ok_label: t!("common.delete").to_string().into(),
             cancel_label: None,
             danger: true,
             always_ask: false,
@@ -69,7 +69,9 @@ impl Confirm {
 
     /// The Cancel button's text.
     fn cancel_text(&self) -> SharedString {
-        self.cancel_label.clone().unwrap_or_else(|| "Cancel".into())
+        self.cancel_label
+            .clone()
+            .unwrap_or_else(|| t!("common.cancel").to_string().into())
     }
 }
 

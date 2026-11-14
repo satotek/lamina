@@ -30,50 +30,46 @@ pub(crate) struct RebaseTarget {
     /// "origin/main".
     onto_label: String,
     /// Why the entry is disabled, or `None` when it can run.
-    blocked: Option<&'static str>,
+    blocked: Option<String>,
 }
 
 /// Why a plain rebase cannot start, or `None` when it can.
 ///
 /// `up_to_date` is whether the target is already reachable from HEAD; `None`
 /// means git could not answer, which leaves the entry disabled too.
-pub(crate) fn rebase_blocked(state: &MenuState, up_to_date: Option<bool>) -> Option<&'static str> {
+pub(crate) fn rebase_blocked(state: &MenuState, up_to_date: Option<bool>) -> Option<String> {
     if state.busy() {
-        return Some("an operation is running");
+        return Some(t!("branch.reason.busy").to_string());
     }
     if state.pending() {
-        return Some("finish the operation in progress first");
+        return Some(t!("reflog.finish_first").to_string());
     }
     if state.detached() {
-        return Some("HEAD is detached");
+        return Some(t!("reflog.head_detached").to_string());
     }
     if state.branch().is_none() {
-        return Some("no branch to move");
+        return Some(t!("history_ops.no_branch_to_move").to_string());
     }
     match up_to_date {
-        Some(true) => Some("already up to date"),
+        Some(true) => Some(t!("rebase.already_up_to_date").to_string()),
         Some(false) => None,
-        None => Some("cannot read the branch"),
+        None => Some(t!("rebase.cannot_read_branch").to_string()),
     }
 }
 
 /// The confirmation's count line.
 pub(crate) fn replay_detail(count: usize, onto_label: &str) -> String {
     match count {
-        0 => format!("No commits will be replayed onto {onto_label}; the branch moves to it."),
-        1 => format!("1 commit will be replayed onto {onto_label}."),
-        count => format!("{count} commits will be replayed onto {onto_label}."),
+        0 => t!("rebase.no_commits", onto = onto_label).to_string(),
+        1 => t!("rebase.one_commit", onto = onto_label).to_string(),
+        count => t!("rebase.commits", count = count, onto = onto_label).to_string(),
     }
 }
 
 /// The warning a confirmation adds when a remote already has the range.
 pub(crate) fn pushed_warning(remotes: &[String]) -> Option<String> {
-    (!remotes.is_empty()).then(|| {
-        format!(
-            "These commits are already pushed to {}. Rewriting them needs a force push, and anyone who pulled them will have to reset.",
-            remotes.join(", ")
-        )
-    })
+    (!remotes.is_empty())
+        .then(|| t!("history_ops.force_push_note", remote = remotes.join(", ")).to_string())
 }
 
 /// One menu entry for a rebase, disabled with its reason when it cannot run.
@@ -84,8 +80,13 @@ pub(crate) fn rebase_menu_item(
     entity: Entity<RepoView>,
 ) -> PopupMenuItem {
     let label = menu_label(
-        format!("Rebase {branch} onto {entry_target}…"),
-        target.blocked,
+        t!(
+            "history_ops.menu.rebase",
+            branch = branch,
+            target = entry_target
+        )
+        .to_string(),
+        target.blocked.as_deref(),
     );
     let mut item = PopupMenuItem::new(label).disabled(target.blocked.is_some());
     if target.blocked.is_none() {
@@ -166,14 +167,14 @@ impl RepoView {
             return;
         };
         let Some((commits, up_to_date)) = self.replay_range(onto) else {
-            self.status_error = Some("cannot read the commits to rebase".to_owned());
+            self.status_error = Some(t!("rebase.cannot_read_commits").to_string());
             cx.notify();
             return;
         };
         // The menu already disabled this entry; the check keeps a stale click
         // from rewriting a branch that moved while the menu was open.
         if let Some(reason) = rebase_blocked(&state, Some(up_to_date)) {
-            self.status_error = Some(format!("cannot rebase: {reason}"));
+            self.status_error = Some(t!("rebase.cannot_rebase", reason = reason).to_string());
             cx.notify();
             return;
         }
@@ -185,8 +186,9 @@ impl RepoView {
             detail.push(' ');
             detail.push_str(&warning);
         }
-        let title = format!("Rebase {branch} onto {onto_label}?");
-        let mut confirm = ui::Confirm::new(title, detail).ok_label("Rebase");
+        let title = t!("rebase.confirm_title", branch = branch, onto = onto_label).to_string();
+        let mut confirm = ui::Confirm::new(title, detail)
+            .ok_label(t!("history_ops.menu.rebase_button").to_string());
         // Rewriting a range a remote already has has to be asked about even
         // when the settings turned confirmations off.
         if !pushed.is_empty() {
@@ -246,7 +248,7 @@ impl RepoView {
         // The tip is rewritten, so the selection follows it back once the
         // snapshot that carries the result arrives.
         self.edit_selection = Some(PendingSelection::at(old_head, 0));
-        let label = format!("rebase onto {onto_label} (from {})", short_oid(old_head));
+        let label = t!("rebase.op", onto = onto_label, short = short_oid(old_head)).to_string();
         self.run_operation(
             Operation::Rebase {
                 onto,
@@ -286,7 +288,7 @@ impl Render for AutostashOption {
         });
         Checkbox::new("rebase-autostash")
             .checked(self.checked)
-            .label("Autostash local changes")
+            .label(t!("rebase.autostash").to_string())
             .on_change(on_change)
     }
 }
@@ -320,12 +322,12 @@ mod tests {
         let on_branch = state(Some(&head), RepoState::Normal, false);
         assert_eq!(rebase_blocked(&on_branch, Some(false)), None);
         assert_eq!(
-            rebase_blocked(&on_branch, Some(true)),
+            rebase_blocked(&on_branch, Some(true)).as_deref(),
             Some("already up to date"),
             "the target is already reachable from HEAD"
         );
         assert_eq!(
-            rebase_blocked(&on_branch, None),
+            rebase_blocked(&on_branch, None).as_deref(),
             Some("cannot read the branch")
         );
     }
@@ -338,26 +340,26 @@ mod tests {
             false,
         );
         assert_eq!(
-            rebase_blocked(&detached, Some(false)),
+            rebase_blocked(&detached, Some(false)).as_deref(),
             Some("HEAD is detached")
         );
 
         let no_head = state(None, RepoState::Normal, false);
         assert_eq!(
-            rebase_blocked(&no_head, Some(false)),
+            rebase_blocked(&no_head, Some(false)).as_deref(),
             Some("no branch to move")
         );
 
         let head = branch("topic", oid(1));
         let merging = state(Some(&head), RepoState::Merging, false);
         assert_eq!(
-            rebase_blocked(&merging, Some(false)),
+            rebase_blocked(&merging, Some(false)).as_deref(),
             Some("finish the operation in progress first")
         );
 
         let busy = state(Some(&head), RepoState::Normal, true);
         assert_eq!(
-            rebase_blocked(&busy, Some(false)),
+            rebase_blocked(&busy, Some(false)).as_deref(),
             Some("an operation is running")
         );
     }

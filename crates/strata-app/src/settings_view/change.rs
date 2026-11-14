@@ -37,16 +37,31 @@ impl Section {
         Section::Commands,
     ];
 
-    pub fn title(self) -> &'static str {
+    /// The stable id, which element ids and the reset button's name use.
+    pub fn id(self) -> &'static str {
         match self {
-            Section::Appearance => "Appearance",
-            Section::Diff => "Diff",
-            Section::History => "History",
-            Section::Behaviour => "Behaviour",
-            Section::Tools => "Tools",
-            Section::Privacy => "Privacy",
-            Section::Keyboard => "Keyboard",
-            Section::Commands => "Commands",
+            Section::Appearance => "appearance",
+            Section::Diff => "diff",
+            Section::History => "history",
+            Section::Behaviour => "behaviour",
+            Section::Tools => "tools",
+            Section::Privacy => "privacy",
+            Section::Keyboard => "keyboard",
+            Section::Commands => "commands",
+        }
+    }
+
+    /// The translated page name.
+    pub fn title(self) -> String {
+        match self {
+            Section::Appearance => t!("settings.appearance.title").into_owned(),
+            Section::Diff => t!("settings.diff.title").into_owned(),
+            Section::History => t!("settings.history.title").into_owned(),
+            Section::Behaviour => t!("settings.behaviour.title").into_owned(),
+            Section::Tools => t!("settings.tools.title").into_owned(),
+            Section::Privacy => t!("settings.privacy.title").into_owned(),
+            Section::Keyboard => t!("settings.keyboard.title").into_owned(),
+            Section::Commands => t!("settings.commands.title").into_owned(),
         }
     }
 }
@@ -92,6 +107,10 @@ fn optional_text(value: &str) -> Option<String> {
 
 pub fn theme(settings: &mut Settings, theme: ThemeMode) {
     settings.appearance.theme = theme;
+}
+
+pub fn language(settings: &mut Settings, language: crate::i18n::Language) {
+    settings.appearance.language = language;
 }
 
 pub fn ui_font(settings: &mut Settings, font: &str) {

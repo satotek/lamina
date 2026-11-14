@@ -113,8 +113,8 @@ pub(crate) fn body(
     // One side means the file was added or deleted: there is nothing to
     // compare, so no mode applies.
     let single = match (&diff.old, &diff.new) {
-        (Some(side), None) => Some(("Deleted", side)),
-        (None, Some(side)) => Some(("Added", side)),
+        (Some(side), None) => Some((t!("image_diff.deleted").to_string(), side)),
+        (None, Some(side)) => Some((t!("image_diff.added").to_string(), side)),
         _ => None,
     };
     if let Some((label, side)) = single {
@@ -157,9 +157,9 @@ pub(crate) fn svg_toggle(
             .ghost()
             .selected(rendered)
             .tooltip(if rendered {
-                "Show the text diff"
+                t!("image_diff.show_text").to_string()
             } else {
-                "Show the drawing"
+                t!("image_diff.show_drawing").to_string()
             })
             .on_click(move |_event, _window, cx| {
                 let cell = cell.clone();
@@ -231,9 +231,9 @@ impl State {
                 .ghost()
                 .selected(self.actual.get())
                 .tooltip(if self.actual.get() {
-                    "Fit the picture to the pane"
+                    t!("image_diff.fit_tooltip").to_string()
                 } else {
-                    "Show the picture at its own pixel size"
+                    t!("image_diff.actual_tooltip").to_string()
                 })
                 .on_click(move |_event, _window, cx| {
                     let actual = actual.clone();
@@ -255,10 +255,13 @@ impl State {
             .items_center()
             .gap_2()
             .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(design.muted)
-                    .child(format!("Opacity {:.0}%", value * 100.0)),
+                div().text_size(px(11.0)).text_color(design.muted).child(
+                    t!(
+                        "image_diff.opacity",
+                        percent = format!("{:.0}", value * 100.0)
+                    )
+                    .to_string(),
+                ),
             )
             .child(
                 div()
@@ -368,7 +371,7 @@ pub(crate) fn fitted_size(image: (u32, u32), area: (f32, f32)) -> (f32, f32) {
 fn picture(
     state: &State,
     side: &ImageSide,
-    label: &str,
+    label: gpui::SharedString,
     design: &Design,
     missing: bool,
 ) -> AnyElement {
@@ -391,7 +394,7 @@ fn picture(
         .flex_1()
         .min_w_0()
         .min_h_0()
-        .child(side_label(label, side, design))
+        .child(side_label(&label, side, design))
         .child(frame)
         .into_any_element()
 }
@@ -401,20 +404,32 @@ fn side_by_side(state: &State, diff: &ImageDiff, design: &Design, missing: bool)
     let new = diff.new.as_ref();
     let mut row = div().flex().flex_1().min_h_0().w_full();
     if let Some(old) = old {
-        row = row.child(picture(state, old, "Old", design, missing));
+        row = row.child(picture(
+            state,
+            old,
+            t!("image_diff.old").into_owned().into(),
+            design,
+            missing,
+        ));
     }
     if old.is_some() && new.is_some() {
         row = row.child(div().flex_none().w(px(1.0)).h_full().bg(design.border));
     }
     if let Some(new) = new {
-        row = row.child(picture(state, new, "New", design, missing));
+        row = row.child(picture(
+            state,
+            new,
+            t!("image_diff.new").into_owned().into(),
+            design,
+            missing,
+        ));
     }
     row.into_any_element()
 }
 
 fn single_image(
     state: &State,
-    label: &str,
+    label: impl Into<gpui::SharedString>,
     side: &ImageSide,
     design: &Design,
     missing: bool,
@@ -424,7 +439,7 @@ fn single_image(
         .flex_1()
         .min_h_0()
         .w_full()
-        .child(picture(state, side, label, design, missing))
+        .child(picture(state, side, label.into(), design, missing))
         .into_any_element()
 }
 
@@ -437,8 +452,8 @@ fn swipe(
 ) -> AnyElement {
     let (Some(old), Some(new)) = (diff.old.as_ref(), diff.new.as_ref()) else {
         let (label, side) = match (&diff.old, &diff.new) {
-            (Some(side), None) => ("Deleted", side),
-            (None, Some(side)) => ("Added", side),
+            (Some(side), None) => (t!("image_diff.deleted").to_string(), side),
+            (None, Some(side)) => (t!("image_diff.added").to_string(), side),
             _ => return div().into_any_element(),
         };
         return single_image(state, label, side, design, missing);
@@ -554,9 +569,9 @@ fn swipe(
                 .flex_none()
                 .text_size(px(11.0))
                 .text_color(design.muted)
-                .child(side_label("Old", old, design))
-                .child("Drag the divider")
-                .child(side_label("New", new, design)),
+                .child(side_label(&t!("image_diff.old"), old, design))
+                .child(t!("image_diff.drag_divider").to_string())
+                .child(side_label(&t!("image_diff.new"), new, design)),
         )
         .child(area_element)
         .into_any_element()
@@ -565,8 +580,8 @@ fn swipe(
 fn onion(state: &State, diff: &ImageDiff, design: &Design, missing: bool) -> AnyElement {
     let (Some(old), Some(new)) = (diff.old.as_ref(), diff.new.as_ref()) else {
         let (label, side) = match (&diff.old, &diff.new) {
-            (Some(side), None) => ("Deleted", side),
-            (None, Some(side)) => ("Added", side),
+            (Some(side), None) => (t!("image_diff.deleted").to_string(), side),
+            (None, Some(side)) => (t!("image_diff.added").to_string(), side),
             _ => return div().into_any_element(),
         };
         return single_image(state, label, side, design, missing);
@@ -619,9 +634,15 @@ fn onion(state: &State, diff: &ImageDiff, design: &Design, missing: bool) -> Any
                 .flex_none()
                 .text_size(px(11.0))
                 .text_color(design.muted)
-                .child(side_label("Old", old, design))
-                .child(format!("New at {:.0}%", alpha * 100.0))
-                .child(side_label("New", new, design)),
+                .child(side_label(&t!("image_diff.old"), old, design))
+                .child(
+                    t!(
+                        "image_diff.new_at",
+                        percent = format!("{:.0}", alpha * 100.0)
+                    )
+                    .to_string(),
+                )
+                .child(side_label(&t!("image_diff.new"), new, design)),
         )
         .child(stack)
         .into_any_element()
@@ -682,7 +703,7 @@ fn positioned_image(
                 .object_fit(ObjectFit::Contain)
                 .with_fallback({
                     let color = design.muted;
-                    move || centered_fallback("Cannot decode this image", color)
+                    move || centered_fallback(t!("image_diff.cannot_decode").to_string(), color)
                 }),
         )
         .into_any_element()
@@ -712,12 +733,12 @@ fn drawn_image(state: &State, source: Arc<Image>, side: &ImageSide, design: &Des
         .object_fit(ObjectFit::Contain)
         .with_fallback({
             let color = design.muted;
-            move || centered_fallback("Cannot decode this image", color)
+            move || centered_fallback(t!("image_diff.cannot_decode").to_string(), color)
         })
         .into_any_element()
 }
 
-fn centered_fallback(text: &'static str, color: Hsla) -> AnyElement {
+fn centered_fallback(text: impl Into<gpui::SharedString>, color: Hsla) -> AnyElement {
     div()
         .size_full()
         .flex()
@@ -725,11 +746,11 @@ fn centered_fallback(text: &'static str, color: Hsla) -> AnyElement {
         .justify_center()
         .text_size(px(12.0))
         .text_color(color)
-        .child(text)
+        .child(text.into())
         .into_any_element()
 }
 
-fn centered_message(text: &'static str, design: &Design) -> AnyElement {
+fn centered_message(text: impl Into<gpui::SharedString>, design: &Design) -> AnyElement {
     div()
         .absolute()
         .inset_0()
@@ -739,26 +760,26 @@ fn centered_message(text: &'static str, design: &Design) -> AnyElement {
         .p_4()
         .text_size(px(12.0))
         .text_color(design.muted)
-        .child(text)
+        .child(text.into())
         .into_any_element()
 }
 
-fn placeholder(side: &ImageSide, missing: bool) -> &'static str {
+fn placeholder(side: &ImageSide, missing: bool) -> String {
     if missing {
-        "The object is not downloaded"
+        t!("image_diff.not_downloaded").to_string()
     } else if side.bytes.is_none() {
-        "This image is too large to preview (20 MiB limit)."
+        t!("image_diff.too_large").to_string()
     } else {
-        "This image cannot be shown here."
+        t!("image_diff.cannot_show").to_string()
     }
 }
 
 fn side_label(label: &str, side: &ImageSide, design: &Design) -> AnyElement {
     let mut text = String::from(label);
     if let (Some(width), Some(height)) = (side.width, side.height) {
-        text.push_str(&format!(" · {width} × {height}"));
+        text.push_str(&t!("image_diff.dimensions", width = width, height = height));
     }
-    text.push_str(&format!(" · {}", format_size(side.size)));
+    text.push_str(&t!("image_diff.size", size = format_size(side.size)));
     div()
         .flex_none()
         .h(px(24.0))

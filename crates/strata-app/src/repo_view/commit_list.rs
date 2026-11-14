@@ -113,11 +113,11 @@ impl RepoView {
         width: f32,
     ) -> AnyElement {
         let Some(source) = self.source() else {
-            return empty_pane("No repository", design);
+            return empty_pane(&t!("history.empty.no_repository"), design);
         };
         let len = source.len();
         if len == 0 {
-            return empty_pane("No commits yet", design);
+            return empty_pane(&t!("history.empty.no_commits"), design);
         }
 
         // The decision uses the widest graph in the list, not the row's own:
@@ -294,9 +294,9 @@ impl RepoView {
 
         let body: AnyElement = if count == 0 {
             if self.search.is_scanning() {
-                empty_pane("Searching commit contents…", design)
+                empty_pane(&t!("history.searching"), design)
             } else {
-                empty_pane("No commits match the search", design)
+                empty_pane(&t!("history.no_match"), design)
             }
         } else {
             list.into_any_element()
@@ -318,7 +318,7 @@ impl RepoView {
                     .px_3()
                     .text_size(px(10.0))
                     .text_color(design.muted)
-                    .child(format!("loading {len} commits")),
+                    .child(t!("history.loading", count = len).to_string()),
             );
         }
         column.into_any_element()
@@ -345,10 +345,11 @@ impl RepoView {
                     .flex_none()
                     .text_size(px(10.5))
                     .text_color(design.muted)
-                    .child("Filters"),
+                    .child(t!("history.filters").to_string()),
             )
             .child(search_chip(
                 "summary",
+                t!("history.filter.summary"),
                 Field::Summary,
                 mode,
                 self.search.fields(),
@@ -356,6 +357,7 @@ impl RepoView {
             ))
             .child(search_chip(
                 "author",
+                t!("history.filter.author"),
                 Field::Author,
                 mode,
                 self.search.fields(),
@@ -363,6 +365,7 @@ impl RepoView {
             ))
             .child(search_chip(
                 "hash",
+                t!("history.filter.hash"),
                 Field::Hash,
                 mode,
                 self.search.fields(),
@@ -370,17 +373,19 @@ impl RepoView {
             ))
             .child(div().w(px(1.0)).h(px(14.0)).mx_0p5().bg(design.border))
             .child(search_mode_chip(
-                "Content",
+                "content",
+                t!("history.search.content"),
                 SearchMode::Content,
                 mode,
-                "Match commits changing substring count (-S)",
+                t!("history.search.content_tooltip"),
                 entity.clone(),
             ))
             .child(search_mode_chip(
-                "Content (regex)",
+                "content-regex",
+                t!("history.search.regex"),
                 SearchMode::ContentRegex,
                 mode,
-                "Match commits whose diff adds or removes a regex-matching line (-G)",
+                t!("history.search.regex_tooltip"),
                 entity,
             ));
 
@@ -446,14 +451,34 @@ fn commit_header(design: &Design, columns: CommitColumns) -> AnyElement {
         .text_size(px(design.tiny()))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(design.muted)
-        .child(div().flex_1().min_w_0().child("Description"))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(t!("history.column.description").to_string()),
+        )
         .when(columns.author, |header| {
-            header.child(div().w(px(AUTHOR_WIDTH)).flex_none().child("Author"))
+            header.child(
+                div()
+                    .w(px(AUTHOR_WIDTH))
+                    .flex_none()
+                    .child(t!("history.column.author").to_string()),
+            )
         })
         .when(columns.date, |header| {
-            header.child(div().w(px(DATE_WIDTH)).flex_none().child("Date"))
+            header.child(
+                div()
+                    .w(px(DATE_WIDTH))
+                    .flex_none()
+                    .child(t!("history.column.date").to_string()),
+            )
         })
-        .child(div().w(px(COMMIT_WIDTH)).flex_none().child("Commit"))
+        .child(
+            div()
+                .w(px(COMMIT_WIDTH))
+                .flex_none()
+                .child(t!("history.column.commit").to_string()),
+        )
         .into_any_element()
 }
 
@@ -535,7 +560,7 @@ fn commit_row(
                             .flex_none()
                             .text_size(px(design.tiny()))
                             .text_color(design.muted)
-                            .child("⋯ history not fetched"),
+                            .child(t!("history.shallow_boundary").to_string()),
                     )
                 }),
         )
@@ -641,7 +666,7 @@ fn filtered_commit_row(
                             .flex_none()
                             .text_size(px(design.tiny()))
                             .text_color(design.muted)
-                            .child("⋯ history not fetched"),
+                            .child(t!("history.shallow_boundary").to_string()),
                     )
                 }),
         )
@@ -689,21 +714,23 @@ fn filtered_commit_row(
 
 /// One of the three match toggles above the commit list.
 fn search_chip(
-    label: &'static str,
+    id: &'static str,
+    label: impl Into<gpui::SharedString>,
     field: Field,
     mode: SearchMode,
     fields: crate::search::Fields,
     entity: gpui::Entity<RepoView>,
 ) -> AnyElement {
     let on = !mode.is_content() && fields.enabled(field);
-    crate::ui::button(format!("search-chip-{label}"), label)
+    let label = label.into();
+    crate::ui::button(format!("search-chip-{id}"), label.clone())
         .size(crate::ui::ButtonSize::Tiny)
         .kind(if on {
             crate::ui::ButtonKind::Primary
         } else {
             crate::ui::ButtonKind::Ghost
         })
-        .tooltip(format!("Match {label}"))
+        .tooltip(t!("history.filter.match", field = label))
         .on_click(move |_event, _window, cx| {
             entity.update(cx, |this, cx| this.toggle_search_field(field, cx));
         })
@@ -712,14 +739,15 @@ fn search_chip(
 
 /// Content / regex-content search mode toggle above the commit list.
 fn search_mode_chip(
-    label: &'static str,
+    id: &'static str,
+    label: impl Into<gpui::SharedString>,
     target: SearchMode,
     current: SearchMode,
-    tooltip: &'static str,
+    tooltip: impl Into<gpui::SharedString>,
     entity: gpui::Entity<RepoView>,
 ) -> AnyElement {
     let on = current == target;
-    crate::ui::button(format!("search-mode-{label}"), label)
+    crate::ui::button(format!("search-mode-{id}"), label)
         .size(crate::ui::ButtonSize::Tiny)
         .kind(if on {
             crate::ui::ButtonKind::Primary

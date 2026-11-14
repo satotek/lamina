@@ -40,7 +40,11 @@ pub fn askpass_prompt(
     let prompt = prompt.into();
     let input = cx.new(|cx| {
         InputState::new(window, cx)
-            .placeholder(if secret { "Password" } else { "Answer" })
+            .placeholder(if secret {
+                t!("askpass.password").to_string()
+            } else {
+                t!("askpass.answer").to_string()
+            })
             .masked(secret)
     });
     let input_focus = input.focus_handle(cx);
@@ -81,7 +85,7 @@ pub fn askpass_prompt(
                 .footer(
                     DialogFooter::new()
                         .child(
-                            button("askpass-cancel", "Cancel")
+                            button("askpass-cancel", t!("common.cancel").to_string())
                                 .kind(ButtonKind::Normal)
                                 .size(ButtonSize::Medium)
                                 .on_click(move |_, window, cx| {

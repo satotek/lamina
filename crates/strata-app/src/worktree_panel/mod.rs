@@ -92,12 +92,13 @@ impl Side {
         }
     }
 
-    fn label(self) -> &'static str {
+    fn label(self) -> String {
         match self {
-            Side::Unstaged => "unstaged",
-            Side::Staged => "staged",
-            Side::Conflict => "conflict",
+            Side::Unstaged => t!("worktree.side.unstaged"),
+            Side::Staged => t!("worktree.side.staged"),
+            Side::Conflict => t!("worktree.side.conflict"),
         }
+        .to_string()
     }
 }
 
@@ -398,14 +399,15 @@ enum PendingKind {
 }
 
 impl PendingKind {
-    fn notice(self) -> &'static str {
+    fn notice(self) -> String {
         match self {
-            PendingKind::Stage => "Staged",
-            PendingKind::Unstage => "Unstaged",
-            PendingKind::Discard => "Changes discarded",
-            PendingKind::Delete => "Untracked file deleted",
-            PendingKind::Commit => "Committed",
+            PendingKind::Stage => t!("worktree.pending.staged"),
+            PendingKind::Unstage => t!("worktree.pending.unstaged"),
+            PendingKind::Discard => t!("worktree.pending.discarded"),
+            PendingKind::Delete => t!("worktree.pending.deleted"),
+            PendingKind::Commit => t!("worktree.pending.committed"),
         }
+        .to_string()
     }
 }
 
@@ -478,7 +480,7 @@ impl WorktreePanel {
         }
         let input = cx.new(|cx| {
             let mut state = TextareaState::new(window, cx);
-            state.set_placeholder("Summary\n\nOptional description", window, cx);
+            state.set_placeholder(t!("worktree.summary_placeholder").to_string(), window, cx);
             state
         });
         self._message_events = Some(cx.subscribe(
@@ -1195,10 +1197,10 @@ impl RepoView {
         let discards = !tracked.is_empty();
         let deletes = !untracked.is_empty();
         let title = match paths.as_slice() {
-            [only] if !deletes => format!("Discard changes to {only}?"),
-            [only] => format!("Delete {only}?"),
-            _ if discards => format!("Discard changes to {} files?", paths.len()),
-            _ => format!("Delete {} files?", paths.len()),
+            [only] if !deletes => t!("worktree.discard_path", path = only).to_string(),
+            [only] => t!("worktree.delete_path", path = only).to_string(),
+            _ if discards => t!("worktree.discard_files", count = paths.len()).to_string(),
+            _ => t!("worktree.delete_files", count = paths.len()).to_string(),
         };
         let mut operations = Vec::new();
         if discards {
@@ -1215,8 +1217,13 @@ impl RepoView {
         self.ask_destructive(
             window,
             cx,
-            crate::ui::Confirm::new(title, discard_detail(&paths, discards, deletes))
-                .ok_label(if discards { "Discard" } else { "Delete" }),
+            crate::ui::Confirm::new(title, discard_detail(&paths, discards, deletes)).ok_label(
+                if discards {
+                    t!("common.discard").to_string()
+                } else {
+                    t!("common.delete").to_string()
+                },
+            ),
             kind,
             operations,
         );
@@ -1234,14 +1241,14 @@ impl RepoView {
             return;
         }
         let title = match paths.as_slice() {
-            [only] => format!("Discard all changes to {only}?"),
-            _ => format!("Discard staged changes to {} files?", paths.len()),
+            [only] => t!("worktree.discard_staged_path", path = only).to_string(),
+            _ => t!("worktree.discard_staged_files", count = paths.len()).to_string(),
         };
         self.ask_destructive(
             window,
             cx,
             crate::ui::Confirm::new(title, discard_staged_detail(&paths))
-                .ok_label("Discard")
+                .ok_label(t!("common.discard").to_string())
                 .always_ask(),
             PendingKind::Discard,
             vec![Operation::DiscardStagedPaths { paths }],
@@ -1369,10 +1376,10 @@ impl RepoView {
                     window,
                     cx,
                     crate::ui::Confirm::new(
-                        "Discard selected lines?",
-                        "The selected changes are removed from the working tree.",
+                        t!("worktree.discard_lines").to_string(),
+                        t!("worktree.discard_lines_detail").to_string(),
                     )
-                    .ok_label("Discard"),
+                    .ok_label(t!("common.discard").to_string()),
                     PendingKind::Discard,
                     vec![Operation::DiscardLines { path, selection }],
                 );
@@ -1600,7 +1607,7 @@ fn listed_names(paths: &[String]) -> String {
         .checked_sub(DISCARD_NAMES)
         .filter(|rest| *rest > 0)
     {
-        text.push_str(&format!(" and {rest} more"));
+        text.push_str(&t!("worktree.and_more", count = rest));
     }
     text
 }
@@ -1609,16 +1616,13 @@ fn listed_names(paths: &[String]) -> String {
 /// files it happens to.
 fn discard_detail(paths: &[String], discards: bool, deletes: bool) -> String {
     let mut detail = match (discards, deletes) {
-        (true, true) => {
-            "The working-tree changes are lost and the untracked files are removed from disk; \
-             this cannot be undone."
-        }
-        (false, true) => "The untracked files are removed from disk; this cannot be undone.",
-        _ => "The working-tree changes are lost; this cannot be undone.",
+        (true, true) => t!("worktree.discard_detail.both"),
+        (false, true) => t!("worktree.discard_detail.untracked"),
+        _ => t!("worktree.discard_detail.changes"),
     }
-    .to_owned();
+    .to_string();
     if !paths.is_empty() {
-        detail.push_str(" Files: ");
+        detail.push_str(&t!("worktree.files_prefix"));
         detail.push_str(&listed_names(paths));
     }
     detail
@@ -1627,12 +1631,9 @@ fn discard_detail(paths: &[String], discards: bool, deletes: bool) -> String {
 /// The body of the staged discard confirmation. Unlike the unstaged one this
 /// drops both sides at once, which needs saying.
 fn discard_staged_detail(paths: &[String]) -> String {
-    let mut detail = String::from(
-        "The staged changes and any further edits in the working tree are lost, \
-         and files that are only in the index are deleted. This cannot be undone.",
-    );
+    let mut detail = t!("worktree.discard_staged_detail").to_string();
     if !paths.is_empty() {
-        detail.push_str(" Files: ");
+        detail.push_str(&t!("worktree.files_prefix"));
         detail.push_str(&listed_names(paths));
     }
     detail
@@ -1689,11 +1690,14 @@ fn synthetic_state(
 ) -> AnyElement {
     let back = {
         let entity = entity.clone();
-        crate::ui::button("show-history-synthetic", "← History")
-            .ghost()
-            .on_click(move |_, window, cx| {
-                entity.update(cx, |this, cx| this.close_worktree(window, cx));
-            })
+        crate::ui::button(
+            "show-history-synthetic",
+            t!("worktree.history_button").to_string(),
+        )
+        .ghost()
+        .on_click(move |_, window, cx| {
+            entity.update(cx, |this, cx| this.close_worktree(window, cx));
+        })
     };
     let mut root = div()
         .flex()
@@ -1720,7 +1724,7 @@ fn synthetic_state(
             .child(back),
     )
     .child(crate::ui::empty_state(
-        "No working tree in synthetic mode",
+        t!("worktree.synthetic_empty").to_string(),
         &colors.design,
     ))
     .into_any_element()

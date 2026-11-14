@@ -76,7 +76,9 @@ fn open(cx: &mut App) {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             // The same client-side title bar as the main window, so both read
             // as one app on every platform.
-            titlebar: Some(crate::style::window_titlebar("Strata Settings")),
+            titlebar: Some(crate::style::window_titlebar(
+                t!("app.settings_title").to_string(),
+            )),
             window_decorations: Some(WindowDecorations::Client),
             window_min_size: Some(size(px(MIN_WIDTH), px(MIN_HEIGHT))),
             focus: true,
@@ -141,14 +143,18 @@ impl SettingsView {
                             .child(style::wordmark(style::BRAND_WORDMARK, design.text)),
                     )
                     .child(div().w(px(1.0)).h(px(18.0)).mx_1().bg(design.border))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Settings")),
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(t!("settings.window_name").to_string()),
+                    ),
             )
     }
 
     fn footer(&self, design: &Design) -> impl IntoElement {
         let path = settings::settings_file();
         let label = path.as_ref().map_or_else(
-            || "No settings file: the configuration directory is unknown".to_owned(),
+            || t!("settings.file_unknown").to_string(),
             |path| path.display().to_string(),
         );
 
@@ -172,16 +178,19 @@ impl SettingsView {
                     .child(label),
             )
             .child(
-                crate::ui::button("open-settings-folder", "Open folder")
-                    .size(crate::ui::ButtonSize::Tiny)
-                    .disabled(path.is_none())
-                    .on_click(move |_, _, cx| {
-                        if let Some(folder) =
-                            settings::settings_file().as_deref().and_then(Path::parent)
-                        {
-                            cx.open_with_system(folder);
-                        }
-                    }),
+                crate::ui::button(
+                    "open-settings-folder",
+                    t!("settings.open_folder").to_string(),
+                )
+                .size(crate::ui::ButtonSize::Tiny)
+                .disabled(path.is_none())
+                .on_click(move |_, _, cx| {
+                    if let Some(folder) =
+                        settings::settings_file().as_deref().and_then(Path::parent)
+                    {
+                        cx.open_with_system(folder);
+                    }
+                }),
             )
     }
 }

@@ -78,22 +78,22 @@ const MAX_HIGHLIGHT_BYTES: usize = 1024 * 1024;
 // ---------------------------------------------------------------------------
 
 /// The kind in the words `git status` prints next to an unmerged path.
-pub(crate) fn kind_label(kind: ConflictKind) -> &'static str {
+pub(crate) fn kind_label(kind: ConflictKind) -> String {
     match kind {
-        ConflictKind::BothModified => "both modified",
-        ConflictKind::BothAdded => "both added",
-        ConflictKind::BothDeleted => "both deleted",
-        ConflictKind::AddedByUs => "added by us",
-        ConflictKind::AddedByThem => "added by them",
-        ConflictKind::DeletedByUs => "deleted by us",
-        ConflictKind::DeletedByThem => "deleted by them",
+        ConflictKind::BothModified => t!("conflict.kind.both_modified").to_string(),
+        ConflictKind::BothAdded => t!("conflict.kind.both_added").to_string(),
+        ConflictKind::BothDeleted => t!("conflict.kind.both_deleted").to_string(),
+        ConflictKind::AddedByUs => t!("conflict.kind.added_by_us").to_string(),
+        ConflictKind::AddedByThem => t!("conflict.kind.added_by_them").to_string(),
+        ConflictKind::DeletedByUs => t!("conflict.kind.deleted_by_us").to_string(),
+        ConflictKind::DeletedByThem => t!("conflict.kind.deleted_by_them").to_string(),
     }
 }
 
 /// One whole-file choice the resolution offers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FileChoice {
-    pub label: &'static str,
+    pub label: String,
     pub side: ConflictSide,
     /// The choice removes the path, so it is painted as a destructive action.
     pub destructive: bool,
@@ -103,35 +103,35 @@ pub(crate) struct FileChoice {
 ///
 /// A side that deleted the path has no version to check out; core resolves that
 /// by removing the path from the index, which is exactly "delete file". So every
-/// kind except "both deleted" (which has no sides at all) offers two choices.
+/// kind except t!("conflict.kind.both_deleted").to_string() (which has no sides at all) offers two choices.
 pub(crate) fn choices(kind: ConflictKind) -> Vec<FileChoice> {
     let ours = FileChoice {
-        label: "Use ours",
+        label: t!("conflict.use_ours").to_string(),
         side: ConflictSide::Ours,
         destructive: false,
     };
     let theirs = FileChoice {
-        label: "Use theirs",
+        label: t!("conflict.use_theirs").to_string(),
         side: ConflictSide::Theirs,
         destructive: false,
     };
     let keep_ours = FileChoice {
-        label: "Keep file",
+        label: t!("conflict.keep_file").to_string(),
         side: ConflictSide::Ours,
         destructive: false,
     };
     let keep_theirs = FileChoice {
-        label: "Keep file",
+        label: t!("conflict.keep_file").to_string(),
         side: ConflictSide::Theirs,
         destructive: false,
     };
     let delete_theirs = FileChoice {
-        label: "Delete file",
+        label: t!("conflict.delete_file").to_string(),
         side: ConflictSide::Theirs,
         destructive: true,
     };
     let delete_ours = FileChoice {
-        label: "Delete file",
+        label: t!("conflict.delete_file").to_string(),
         side: ConflictSide::Ours,
         destructive: true,
     };
@@ -209,7 +209,7 @@ fn sizes_line(data: &ConflictData) -> String {
         if present {
             format_size(bytes)
         } else {
-            "deleted".to_owned()
+            t!("conflict.deleted").to_string().to_owned()
         }
     };
     format!(
@@ -390,11 +390,11 @@ enum PendingAction {
 }
 
 impl PendingAction {
-    fn notice(self) -> &'static str {
+    fn notice(self) -> String {
         match self {
-            PendingAction::Resolve => "Conflict resolved",
-            PendingAction::MarkResolved => "Marked as resolved",
-            PendingAction::Mergetool => "Merge tool finished",
+            PendingAction::Resolve => t!("conflict.resolved_title").to_string(),
+            PendingAction::MarkResolved => t!("conflict.marked_resolved").to_string(),
+            PendingAction::Mergetool => t!("conflict.merge_tool_finished").to_string(),
         }
     }
 }
@@ -562,37 +562,31 @@ impl Conflicts {
             .map(|editor| &editor.model)
         else {
             return (
-                "This file still contains conflict markers".to_owned(),
-                "Edit it in another tool, then mark it resolved".to_owned(),
+                t!("conflict.still_markers").to_string(),
+                t!("conflict.edit_elsewhere").to_string(),
             );
         };
         let unresolved = model.unresolved_count();
         match (unresolved, model.has_markers()) {
             (0, true) => (
-                "The result still contains conflict markers".to_owned(),
-                "Remove them, or mark resolved with them on purpose".to_owned(),
+                t!("conflict.result_has_markers").to_string(),
+                t!("conflict.remove_or_mark").to_string(),
             ),
             (count, true) => (
-                format!(
-                    "{count} {} still unresolved",
-                    if count == 1 {
-                        "conflict is"
-                    } else {
-                        "conflicts are"
-                    }
-                ),
-                "The result still contains conflict markers".to_owned(),
+                if count == 1 {
+                    t!("conflict.count_unresolved.one", count = count).to_string()
+                } else {
+                    t!("conflict.count_unresolved.other", count = count).to_string()
+                },
+                t!("conflict.result_has_markers").to_string(),
             ),
             (count, false) => (
-                format!(
-                    "{count} {} still unresolved",
-                    if count == 1 {
-                        "conflict is"
-                    } else {
-                        "conflicts are"
-                    }
-                ),
-                "Their marker blocks were edited away".to_owned(),
+                if count == 1 {
+                    t!("conflict.count_unresolved.one", count = count).to_string()
+                } else {
+                    t!("conflict.count_unresolved.other", count = count).to_string()
+                },
+                t!("conflict.markers_edited").to_string(),
             ),
         }
     }
@@ -1092,7 +1086,7 @@ impl Conflicts {
                             .text_size(px(11.0))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(colors.danger)
-                            .child(format!("CONFLICTS · {}", conflicts.len())),
+                            .child(t!("conflict.header", count = conflicts.len()).to_string()),
                     ),
             )
             .child(list)
@@ -1151,9 +1145,10 @@ impl Conflicts {
                             .flex_none()
                             .text_size(px(10.0))
                             .text_color(colors.warning)
-                            .child(
-                                loaded.map_or("conflict", |loaded| kind_label(loaded.data.kind)),
-                            ),
+                            .child(loaded.map_or_else(
+                                || "conflict".to_owned(),
+                                |loaded| kind_label(loaded.data.kind),
+                            )),
                     ),
             );
         if let Some(loaded) = loaded {
@@ -1192,7 +1187,7 @@ impl Conflicts {
             }
             toolbar = toolbar
                 .child(
-                    crate::ui::button("conflict-mergetool", "Open in merge tool")
+                    crate::ui::button("conflict-mergetool", t!("conflict.merge_tool").to_string())
                         .disabled(!ready)
                         .on_click({
                             let entity = entity.clone();
@@ -1202,14 +1197,17 @@ impl Conflicts {
                         }),
                 )
                 .child(
-                    crate::ui::button("conflict-mark-resolved", "Mark resolved")
-                        .disabled(!ready)
-                        .on_click({
-                            let entity = entity.clone();
-                            move |_, _, cx| {
-                                entity.update(cx, |this, cx| this.mark_conflict_resolved(cx));
-                            }
-                        }),
+                    crate::ui::button(
+                        "conflict-mark-resolved",
+                        t!("conflict.mark_resolved").to_string(),
+                    )
+                    .disabled(!ready)
+                    .on_click({
+                        let entity = entity.clone();
+                        move |_, _, cx| {
+                            entity.update(cx, |this, cx| this.mark_conflict_resolved(cx));
+                        }
+                    }),
                 );
         }
 
@@ -1228,7 +1226,7 @@ impl Conflicts {
         {
             column = column.child(crate::ui::banner(
                 crate::ui::BannerKind::Warning,
-                "The file on disk still has conflict markers; edit it, then mark it resolved.",
+                t!("conflict.on_disk_markers").to_string(),
                 &colors.design,
             ));
         }
@@ -1237,10 +1235,12 @@ impl Conflicts {
             (Some(error), _) => {
                 crate::ui::message(error, colors.danger, &colors.design).into_any_element()
             }
-            (None, None) => {
-                crate::ui::message("reading conflict…", colors.muted_foreground, &colors.design)
-                    .into_any_element()
-            }
+            (None, None) => crate::ui::message(
+                t!("conflict.reading").to_string(),
+                colors.muted_foreground,
+                &colors.design,
+            )
+            .into_any_element(),
             (None, Some(loaded)) => editor_body(
                 loaded,
                 &entity,
@@ -1280,13 +1280,15 @@ impl Conflicts {
     fn marker_warning_bar(&self, entity: Entity<RepoView>, colors: &Colors) -> AnyElement {
         let cancel = {
             let entity = entity.clone();
-            crate::ui::button("marker-cancel", "Cancel").on_click(move |_, _, cx| {
-                entity.update(cx, |this, cx| this.dismiss_marker_warning(cx));
-            })
+            crate::ui::button("marker-cancel", t!("common.cancel").to_string()).on_click(
+                move |_, _, cx| {
+                    entity.update(cx, |this, cx| this.dismiss_marker_warning(cx));
+                },
+            )
         };
         let resolve = {
             let entity = entity.clone();
-            crate::ui::button("marker-confirm", "Mark resolved anyway")
+            crate::ui::button("marker-confirm", t!("conflict.mark_anyway").to_string())
                 .danger()
                 .on_click(move |_, _, cx| {
                     entity.update(cx, |this, cx| this.stage_resolved_conflict(cx));
@@ -1313,7 +1315,7 @@ fn editor_body(
     let data = &loaded.data;
     if data.binary {
         return crate::ui::message(
-            "Binary conflict — choose a whole version above.",
+            t!("conflict.binary").to_string(),
             colors.muted_foreground,
             &colors.design,
         )
@@ -1321,7 +1323,7 @@ fn editor_body(
     }
     if !data.text {
         return crate::ui::message(
-            "Not UTF-8 text — choose a whole version or use the merge tool above.",
+            t!("conflict.not_utf8").to_string(),
             colors.muted_foreground,
             &colors.design,
         )
@@ -1329,7 +1331,7 @@ fn editor_body(
     }
     if !kind_has_editor(data.kind) {
         return crate::ui::message(
-            "This conflict is resolved by keeping or deleting the file.",
+            t!("conflict.whole_file").to_string(),
             colors.muted_foreground,
             &colors.design,
         )
@@ -1337,7 +1339,7 @@ fn editor_body(
     }
     if data.too_large {
         return crate::ui::message(
-            "This file is too large for the merge editor — use a whole version or the merge tool above.",
+            t!("conflict.too_large").to_string(),
             colors.muted_foreground,
             &colors.design,
         )
@@ -1345,7 +1347,7 @@ fn editor_body(
     }
     let Some(editor) = &loaded.editor else {
         return crate::ui::message(
-            "No textual differences between the sides.",
+            t!("conflict.no_text_diff").to_string(),
             colors.muted_foreground,
             &colors.design,
         )
@@ -1402,7 +1404,7 @@ fn conflict_bar(
             );
             bar = bar
                 .child(
-                    crate::ui::button("conflict-previous", "Previous")
+                    crate::ui::button("conflict-previous", t!("conflict.previous").to_string())
                         .size(crate::ui::ButtonSize::Tiny)
                         .disabled(busy || model.conflict_count() < 2)
                         .on_click({
@@ -1413,7 +1415,7 @@ fn conflict_bar(
                         }),
                 )
                 .child(
-                    crate::ui::button("conflict-next", "Next")
+                    crate::ui::button("conflict-next", t!("conflict.next").to_string())
                         .size(crate::ui::ButtonSize::Tiny)
                         .disabled(busy || model.conflict_count() < 2)
                         .on_click({
@@ -1430,7 +1432,7 @@ fn conflict_bar(
                     .flex_none()
                     .text_size(px(11.0))
                     .text_color(colors.success)
-                    .child("No conflicts left"),
+                    .child(t!("conflict.none_left").to_string()),
             );
         }
     }
@@ -1451,7 +1453,7 @@ fn conflict_bar(
     }
     let entity_reset = entity.clone();
     bar.child(
-        crate::ui::button("conflict-reset", "Reset")
+        crate::ui::button("conflict-reset", t!("common.reset").to_string())
             .size(crate::ui::ButtonSize::Tiny)
             .disabled(
                 busy || model.conflict_count() == 0
@@ -1549,8 +1551,8 @@ fn side_panes(
     .flex_1()
     .min_h_0();
 
-    let ours_header = pane_header("OURS (HEAD)", &design);
-    let theirs_header = pane_header("THEIRS (incoming)", &design);
+    let ours_header = pane_header(t!("conflict.ours_header").to_string(), &design);
+    let theirs_header = pane_header(t!("conflict.theirs_header").to_string(), &design);
     div()
         .flex()
         .flex_col()
@@ -1580,7 +1582,7 @@ fn side_panes(
         .into_any_element()
 }
 
-fn pane_header(title: &'static str, design: &Design) -> AnyElement {
+fn pane_header(title: impl Into<gpui::SharedString>, design: &Design) -> AnyElement {
     div()
         .flex()
         .items_center()
@@ -1590,7 +1592,7 @@ fn pane_header(title: &'static str, design: &Design) -> AnyElement {
         .bg(design.field)
         .text_size(px(9.5))
         .text_color(design.muted)
-        .child(title)
+        .child(title.into())
         .into_any_element()
 }
 
@@ -1672,13 +1674,18 @@ fn result_pane(editor: &MergeEditor, colors: &Colors, style: &DiffStyle, busy: b
     let model = &editor.model;
     let status = match model.counter() {
         Some(_) if model.all_resolved() && !model.has_markers() => {
-            "all conflicts resolved".to_owned()
+            t!("conflict.all_resolved").to_string()
         }
         Some(counter) => {
             let unresolved = model.unresolved_count();
-            format!("{counter} · {unresolved} unresolved",)
+            t!(
+                "conflict.unresolved_count",
+                counter = counter,
+                count = unresolved
+            )
+            .to_string()
         }
-        None => "automatic merge".to_owned(),
+        None => t!("conflict.automatic").to_string(),
     };
     div()
         .flex()
@@ -1697,9 +1704,9 @@ fn result_pane(editor: &MergeEditor, colors: &Colors, style: &DiffStyle, busy: b
                 .bg(colors.muted.opacity(0.4))
                 .text_size(px(9.5))
                 .text_color(colors.muted_foreground)
-                .child("RESULT")
+                .child(t!("conflict.result").to_string())
                 .child(div().flex_1().min_w_0().truncate().child(status))
-                .child("edit to resolve manually"),
+                .child(t!("conflict.edit_manually").to_string()),
         )
         .child(
             div().flex_1().min_h_0().w_full().p_1p5().child(
@@ -1732,13 +1739,34 @@ mod tests {
 
     #[test]
     fn every_kind_has_plain_words() {
-        assert_eq!(kind_label(ConflictKind::BothModified), "both modified");
-        assert_eq!(kind_label(ConflictKind::BothAdded), "both added");
-        assert_eq!(kind_label(ConflictKind::BothDeleted), "both deleted");
-        assert_eq!(kind_label(ConflictKind::AddedByUs), "added by us");
-        assert_eq!(kind_label(ConflictKind::AddedByThem), "added by them");
-        assert_eq!(kind_label(ConflictKind::DeletedByUs), "deleted by us");
-        assert_eq!(kind_label(ConflictKind::DeletedByThem), "deleted by them");
+        assert_eq!(
+            kind_label(ConflictKind::BothModified),
+            t!("conflict.kind.both_modified").to_string()
+        );
+        assert_eq!(
+            kind_label(ConflictKind::BothAdded),
+            t!("conflict.kind.both_added").to_string()
+        );
+        assert_eq!(
+            kind_label(ConflictKind::BothDeleted),
+            t!("conflict.kind.both_deleted").to_string()
+        );
+        assert_eq!(
+            kind_label(ConflictKind::AddedByUs),
+            t!("conflict.kind.added_by_us").to_string()
+        );
+        assert_eq!(
+            kind_label(ConflictKind::AddedByThem),
+            t!("conflict.kind.added_by_them").to_string()
+        );
+        assert_eq!(
+            kind_label(ConflictKind::DeletedByUs),
+            t!("conflict.kind.deleted_by_us").to_string()
+        );
+        assert_eq!(
+            kind_label(ConflictKind::DeletedByThem),
+            t!("conflict.kind.deleted_by_them").to_string()
+        );
     }
 
     #[test]

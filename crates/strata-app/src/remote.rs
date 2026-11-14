@@ -41,17 +41,25 @@ pub(crate) const LABELLED_BUTTON_WIDTH: f32 = 52.0;
 /// narrowest title bar uses this form.
 pub(crate) const ICON_BUTTON_WIDTH: f32 = 32.0;
 
-const DETACHED_HEAD: &str = "Detached HEAD: check out a branch to pull or push.";
-const BUSY: &str = "An operation is already running.";
-const NO_SESSION: &str =
-    "Remote operations need an open repository; `--fake` renders synthetic data.";
+/// These are read on the UI thread, so they go through the catalogue instead
+/// of being constants.
+fn detached_head() -> String {
+    t!("remote.detached_head").to_string()
+}
+
+fn busy_reason() -> String {
+    t!("remote.busy").to_string()
+}
+
+fn no_session() -> String {
+    t!("remote.no_session").to_string()
+}
 
 /// Shown with an authentication failure. Strata did ask for credentials, so
 /// the fix is either correcting them or letting a helper store them.
-const AUTH_HINT: &str = concat!(
-    "Check the username and password, or configure a credential helper ",
-    "or load your key into ssh-agent."
-);
+fn auth_hint() -> String {
+    t!("remote.auth_hint").to_string()
+}
 
 actions!(strata, [FetchRemotes, PullBranch, PushBranch]);
 
@@ -85,20 +93,20 @@ enum Kind {
 }
 
 impl Kind {
-    fn label(self) -> &'static str {
+    fn label(self) -> String {
         match self {
-            Kind::Fetch => "Fetch",
-            Kind::Pull => "Pull",
-            Kind::Push => "Push",
+            Kind::Fetch => t!("remote.kind.fetch").to_string(),
+            Kind::Pull => t!("remote.kind.pull").to_string(),
+            Kind::Push => t!("remote.kind.push").to_string(),
         }
     }
 
     /// Title of a failure notification.
-    fn failed(self) -> &'static str {
+    fn failed(self) -> String {
         match self {
-            Kind::Fetch => "Fetch failed",
-            Kind::Pull => "Pull failed",
-            Kind::Push => "Push failed",
+            Kind::Fetch => t!("remote.failed.fetch").to_string(),
+            Kind::Pull => t!("remote.failed.pull").to_string(),
+            Kind::Push => t!("remote.failed.push").to_string(),
         }
     }
 }
@@ -139,14 +147,14 @@ impl Targets {
     }
 
     /// The branch the buttons act on, or why there is none.
-    fn branch(&self) -> Result<&str, &'static str> {
+    fn branch(&self) -> Result<&str, String> {
         if !self.ready {
-            return Err(NO_SESSION);
+            return Err(no_session());
         }
         match &self.branch {
             Some(branch) => Ok(branch),
-            None if self.detached => Err(DETACHED_HEAD),
-            None => Err("This branch has no commits yet."),
+            None if self.detached => Err(detached_head()),
+            None => Err(t!("remote.no_commits").to_string()),
         }
     }
 }
@@ -187,7 +195,7 @@ enum PushPlan {
     Publish { branch: String },
 }
 
-fn push_plan(targets: &Targets) -> Result<PushPlan, &'static str> {
+fn push_plan(targets: &Targets) -> Result<PushPlan, String> {
     let branch = targets.branch()?.to_owned();
     match &targets.upstream {
         // A gone upstream behaves like no upstream: pushing recreates it, and
@@ -202,19 +210,23 @@ fn push_plan(targets: &Targets) -> Result<PushPlan, &'static str> {
 
 /// `Pushed feat/x to origin`.
 fn push_message(branch: &str, remote: &str) -> String {
-    format!("Pushed {branch} to {remote}")
+    t!("remote.pushed", branch = branch, remote = remote).to_string()
 }
 
 /// `Pulled origin/main`: the upstream is git's own name for what arrived.
 fn pull_message(upstream: Option<&str>) -> String {
     match upstream {
-        Some(upstream) => format!("Pulled {upstream}"),
-        None => "Pulled the current branch".to_owned(),
+        Some(upstream) => t!("remote.pulled", upstream = upstream).to_string(),
+        None => t!("remote.pulled_current").to_string(),
     }
 }
 
 fn commits(count: u32) -> String {
-    format!("{count} commit{}", if count == 1 { "" } else { "s" })
+    if count == 1 {
+        t!("remote.commit.one", count = count).to_string()
+    } else {
+        t!("remote.commit.other", count = count).to_string()
+    }
 }
 
 /// What git's failure means for the UI.
@@ -279,7 +291,7 @@ fn first_error_line(error: &str) -> String {
     }
     lines()
         .find(|line| !line.starts_with("hint:"))
-        .map_or_else(|| "git failed".to_owned(), squash)
+        .map_or_else(|| t!("remote.git_failed").to_string(), squash)
 }
 
 /// git pads the rejected-ref line into columns; a notification has one line.
@@ -290,8 +302,10 @@ fn squash(line: &str) -> String {
 /// The notification text for a failed operation.
 fn failure_message(failure: Failure, line: &str) -> String {
     match failure {
-        Failure::Auth => format!("{line} — {AUTH_HINT}"),
-        Failure::NoUpstream => format!("{line} — publish the branch to create the upstream."),
+        Failure::Auth => format!("{line} — {}", auth_hint()),
+        Failure::NoUpstream => {
+            format!("{line} — {}", t!("remote.no_upstream_hint"))
+        }
         Failure::NonFastForward | Failure::Other => line.to_owned(),
     }
 }
@@ -503,13 +517,15 @@ fn open_force_dialog(
         window,
         cx,
         crate::ui::Confirm::new(
-            "Push rejected",
-            format!(
-                "{} has commits that {} does not have. Force pushing with lease replaces only what you have already fetched.",
-                offer.remote, offer.branch
-            ),
+            t!("remote.push_rejected").to_string(),
+            t!(
+                "remote.force_detail",
+                remote = offer.remote,
+                branch = offer.branch
+            )
+            .to_string(),
         )
-        .ok_label("Force push (with lease)"),
+        .ok_label(t!("remote.force_push").to_string()),
         move |_, cx| {
             let confirmed = offer.clone();
             let _ = entity.update(cx, |view, cx| view.force_push(confirmed, cx));
@@ -540,14 +556,14 @@ impl RepoView {
         // the button's top-right corner so it cannot shift the label.
         let button = |id: &'static str,
                       icon_name: IconName,
-                      label: &'static str,
+                      label: gpui::SharedString,
                       tooltip: String,
                       enabled: bool,
                       badge: Option<String>,
                       command: Command| {
             let entity = entity.clone();
             let tooltip = if compact {
-                named_tooltip(label, tooltip)
+                named_tooltip(&label, tooltip)
             } else {
                 tooltip
             };
@@ -562,7 +578,7 @@ impl RepoView {
                 .text_size(px(10.0))
                 .child(Icon::new(icon_name).with_size(px(16.0)));
             if !compact {
-                content = content.child(label);
+                content = content.child(label.clone());
             }
             if let Some(count) = badge {
                 // An icon-only button has no label under the icon, so its
@@ -617,11 +633,14 @@ impl RepoView {
         let behind = tracked.and_then(|upstream| badge(upstream.behind));
         let ahead = tracked.and_then(|upstream| badge(upstream.ahead));
 
+        let fetch_label = t!("remote.kind.fetch").to_string();
+        let pull_label = t!("remote.kind.pull").to_string();
+        let push_label = t!("remote.kind.push").to_string();
         let fetch = button(
             "remote-fetch",
             IconName::RefreshCw,
-            "Fetch",
-            fetch_tooltip(blocked),
+            fetch_label.clone().into(),
+            fetch_tooltip(blocked.as_deref()),
             blocked.is_none(),
             None,
             Command::Fetch,
@@ -630,8 +649,8 @@ impl RepoView {
         let pull = button(
             "remote-pull",
             IconName::ArrowDown,
-            "Pull",
-            pull_tooltip(&targets, blocked),
+            pull_label.clone().into(),
+            pull_tooltip(&targets, blocked.as_deref()),
             blocked.is_none() && targets.branch().is_ok(),
             behind,
             Command::Pull,
@@ -640,8 +659,8 @@ impl RepoView {
         let push = button(
             "remote-push",
             IconName::ArrowUp,
-            "Push",
-            push_tooltip(&targets, blocked),
+            push_label.clone().into(),
+            push_tooltip(&targets, blocked.as_deref()),
             blocked.is_none() && push_plan(&targets).is_ok(),
             ahead,
             Command::Push,
@@ -664,9 +683,9 @@ impl RepoView {
     }
 
     /// Why a remote command cannot run right now, if it cannot.
-    fn remote_blocked(&self) -> Option<&'static str> {
+    fn remote_blocked(&self) -> Option<String> {
         if self.session.is_none() {
-            return Some(NO_SESSION);
+            return Some(no_session());
         }
         if self.remote.is_running()
             || self.branches.is_running()
@@ -675,7 +694,7 @@ impl RepoView {
                 .as_ref()
                 .is_some_and(|session| session.snapshot().busy.is_some())
         {
-            return Some(BUSY);
+            return Some(busy_reason());
         }
         None
     }
@@ -710,7 +729,7 @@ impl RepoView {
                 prune: crate::settings::Settings::get(cx).behaviour.prune_on_fetch,
             },
             Kind::Fetch,
-            "Fetched all remotes".to_owned(),
+            t!("remote.fetched_all").to_string(),
             None,
             None,
             cx,
@@ -728,7 +747,7 @@ impl RepoView {
         self.start_remote(
             Operation::FetchUnshallow,
             Kind::Fetch,
-            "Fetched the full history".to_owned(),
+            t!("remote.fetched_full").to_string(),
             None,
             None,
             cx,
@@ -772,7 +791,10 @@ impl RepoView {
                             set_upstream: false,
                         }),
                     ),
-                    None => (format!("Pushed {branch}"), None),
+                    None => (
+                        t!("remote.pushed_branch", branch = branch).to_string(),
+                        None,
+                    ),
                 };
                 self.start_remote(
                     Operation::Push {
@@ -813,7 +835,7 @@ impl RepoView {
         let entity = cx.weak_entity();
         window.open_alert_dialog(cx, move |dialog, _, _| {
             let mut footer = DialogFooter::new().child(
-                crate::ui::button("publish-cancel", "Cancel")
+                crate::ui::button("publish-cancel", t!("common.cancel").to_string())
                     .size(crate::ui::ButtonSize::Medium)
                     .on_click(|_, window, cx| window.close_dialog(cx)),
             );
@@ -822,26 +844,29 @@ impl RepoView {
                 let branch = branch.clone();
                 let target = remote.clone();
                 footer = footer.child(
-                    crate::ui::button(format!("publish-{remote}"), format!("Push to {remote}"))
-                        .size(crate::ui::ButtonSize::Medium)
-                        .kind(if remote == "origin" {
-                            crate::ui::ButtonKind::Primary
-                        } else {
-                            crate::ui::ButtonKind::Normal
-                        })
-                        .on_click(move |_, window, cx| {
-                            window.close_dialog(cx);
-                            let remote = target.clone();
-                            let branch = branch.clone();
-                            let _ = entity.update(cx, |view, cx| {
-                                view.publish_branch(remote, branch, cx);
-                            });
-                        }),
+                    crate::ui::button(
+                        format!("publish-{remote}"),
+                        t!("remote.push_to", remote = remote).to_string(),
+                    )
+                    .size(crate::ui::ButtonSize::Medium)
+                    .kind(if remote == "origin" {
+                        crate::ui::ButtonKind::Primary
+                    } else {
+                        crate::ui::ButtonKind::Normal
+                    })
+                    .on_click(move |_, window, cx| {
+                        window.close_dialog(cx);
+                        let remote = target.clone();
+                        let branch = branch.clone();
+                        let _ = entity.update(cx, |view, cx| {
+                            view.publish_branch(remote, branch, cx);
+                        });
+                    }),
                 );
             }
             dialog
-                .title(format!("Publish {branch}"))
-                .description("This branch has no upstream. Choose the remote that should track it.")
+                .title(t!("remote.publish_title", branch = branch).to_string())
+                .description(t!("remote.publish_detail").to_string())
                 .footer(footer)
         });
     }
@@ -935,23 +960,18 @@ fn named_tooltip(label: &str, tooltip: String) -> String {
     if tooltip.starts_with(label) {
         tooltip
     } else {
-        format!("{label} · {tooltip}")
+        t!("remote.tooltip.named", label = label, tooltip = tooltip).to_string()
     }
 }
 
-fn fetch_tooltip(blocked: Option<&'static str>) -> String {
+fn fetch_tooltip(blocked: Option<&str>) -> String {
     blocked.map_or_else(
-        || {
-            format!(
-                "Fetch every remote and prune branches deleted on them · {}",
-                shortcut('F')
-            )
-        },
+        || t!("remote.tooltip.fetch", key = shortcut('F')).to_string(),
         str::to_owned,
     )
 }
 
-fn pull_tooltip(targets: &Targets, blocked: Option<&'static str>) -> String {
+fn pull_tooltip(targets: &Targets, blocked: Option<&str>) -> String {
     if let Some(blocked) = blocked {
         return blocked.to_owned();
     }
@@ -960,17 +980,17 @@ fn pull_tooltip(targets: &Targets, blocked: Option<&'static str>) -> String {
     }
     let mut tip = match &targets.upstream {
         Some(upstream) if !upstream.gone => {
-            format!("Pull {} (merge or rebase per git config)", upstream.name)
+            t!("remote.tooltip.pull", upstream = upstream.name).to_string()
         }
-        Some(_) => "Pull the current branch (its upstream is gone)".to_owned(),
-        None => "Pull the current branch".to_owned(),
+        Some(_) => t!("remote.tooltip.pull_gone").to_string(),
+        None => t!("remote.tooltip.pull_current").to_string(),
     };
     if let Some(upstream) = targets.upstream.as_ref().filter(|upstream| !upstream.gone) {
         match upstream.behind {
             Some(behind) if behind > 0 => {
-                tip.push_str(&format!(" · {} behind", commits(behind)));
+                tip.push_str(&t!("remote.tooltip.behind", commits = commits(behind)));
             }
-            None => tip.push_str(" · counts unavailable: history is shallow"),
+            None => tip.push_str(&t!("remote.tooltip.shallow")),
             Some(_) => {}
         }
     }
@@ -978,7 +998,7 @@ fn pull_tooltip(targets: &Targets, blocked: Option<&'static str>) -> String {
     tip
 }
 
-fn push_tooltip(targets: &Targets, blocked: Option<&'static str>) -> String {
+fn push_tooltip(targets: &Targets, blocked: Option<&str>) -> String {
     if let Some(blocked) = blocked {
         return blocked.to_owned();
     }
@@ -986,25 +1006,29 @@ fn push_tooltip(targets: &Targets, blocked: Option<&'static str>) -> String {
         Err(reason) => reason.to_owned(),
         Ok(PushPlan::Upstream { branch, remote }) => {
             let mut tip = match remote {
-                Some(remote) => format!("Push {branch} to {remote}"),
-                None => format!("Push {branch} to its upstream"),
+                Some(remote) => {
+                    t!("remote.tooltip.push_to", branch = branch, remote = remote).to_string()
+                }
+                None => t!("remote.tooltip.push_upstream", branch = branch).to_string(),
             };
             if let Some(upstream) = targets.upstream.as_ref().filter(|upstream| !upstream.gone) {
                 match upstream.ahead {
                     Some(ahead) if ahead > 0 => {
-                        tip.push_str(&format!(" · {} ahead", commits(ahead)));
+                        tip.push_str(&t!("remote.tooltip.ahead", commits = commits(ahead)));
                     }
-                    None => tip.push_str(" · counts unavailable: history is shallow"),
+                    None => tip.push_str(&t!("remote.tooltip.shallow")),
                     Some(_) => {}
                 }
             }
             tip.push_str(&format!(" · {}", shortcut('P')));
             tip
         }
-        Ok(PushPlan::Publish { branch }) => format!(
-            "Publish {branch}: choose a remote and set its upstream · {}",
-            shortcut('P')
-        ),
+        Ok(PushPlan::Publish { branch }) => t!(
+            "remote.tooltip.publish",
+            branch = branch,
+            key = shortcut('P')
+        )
+        .to_string(),
     }
 }
 
@@ -1201,8 +1225,8 @@ mod tests {
     #[test]
     fn a_detached_head_blocks_pull_and_push() {
         let targets = Targets::read(&snapshot(Some(HeadInfo::Detached { target: oid(3) }), &[]));
-        assert_eq!(targets.branch(), Err(DETACHED_HEAD));
-        assert_eq!(push_plan(&targets), Err(DETACHED_HEAD));
+        assert_eq!(targets.branch(), Err(detached_head()));
+        assert_eq!(push_plan(&targets), Err(detached_head()));
         assert!(pull_tooltip(&targets, None).contains("Detached HEAD"));
         assert!(push_tooltip(&targets, None).contains("Detached HEAD"));
     }
@@ -1210,7 +1234,7 @@ mod tests {
     #[test]
     fn a_fake_or_loading_view_cannot_run_remotes() {
         let targets = Targets::default();
-        assert_eq!(targets.branch(), Err(NO_SESSION));
+        assert_eq!(targets.branch(), Err(no_session()));
         assert!(push_plan(&targets).is_err());
         assert!(pull_tooltip(&Targets::default(), None).contains("--fake"));
 
@@ -1287,20 +1311,22 @@ mod tests {
             "a tooltip that already opens with the verb needs no prefix"
         );
         assert_eq!(
-            named_tooltip("Pull", BUSY.to_owned()),
-            format!("Pull · {BUSY}"),
+            named_tooltip("Pull", busy_reason()),
+            format!("Pull · {}", busy_reason()),
             "a blocked button still says which command it is"
         );
         assert_eq!(
             named_tooltip("Push", push_tooltip(&Targets::default(), None)),
-            format!("Push · {NO_SESSION}")
+            format!("Push · {}", no_session())
         );
     }
 
     #[test]
     fn one_running_operation_blocks_another() {
-        assert!(fetch_tooltip(Some(BUSY)).contains("already running"));
-        assert!(push_tooltip(&Targets::default(), Some(BUSY)).contains("already running"));
+        assert!(fetch_tooltip(Some(&busy_reason())).contains("already running"));
+        assert!(
+            push_tooltip(&Targets::default(), Some(&busy_reason())).contains("already running")
+        );
         assert!(
             fetch_tooltip(None).contains(&shortcut('F')),
             "an enabled button names its key"

@@ -520,28 +520,33 @@ pub fn initials(name: &str) -> String {
 pub fn relative_time(epoch: i64, now: i64) -> String {
     let seconds = now.saturating_sub(epoch);
     if seconds < 60 {
-        return "just now".to_owned();
+        return t!("time.just_now").to_string();
     }
     let minutes = seconds / 60;
     if minutes < 60 {
-        return format!("{minutes} min ago");
+        return counted_time(minutes, "minutes");
     }
     let hours = minutes / 60;
     if hours < 24 {
-        return plural(hours, "hour");
+        return counted_time(hours, "hours");
     }
     let days = hours / 24;
     if days < 7 {
-        return plural(days, "day");
+        return counted_time(days, "days");
     }
     date_part(epoch)
 }
 
-fn plural(count: i64, unit: &str) -> String {
-    if count == 1 {
-        format!("1 {unit} ago")
-    } else {
-        format!("{count} {unit}s ago")
+/// English needs the singular for one minute, hour and day; the catalogue
+/// carries both forms under `.one` and `.other`.
+fn counted_time(count: i64, unit: &str) -> String {
+    match (count, unit) {
+        (1, "minutes") => t!("time.minutes.one", count = count).to_string(),
+        (_, "minutes") => t!("time.minutes.other", count = count).to_string(),
+        (1, "hours") => t!("time.hours.one", count = count).to_string(),
+        (_, "hours") => t!("time.hours.other", count = count).to_string(),
+        (1, "days") => t!("time.days.one", count = count).to_string(),
+        _ => t!("time.days.other", count = count).to_string(),
     }
 }
 

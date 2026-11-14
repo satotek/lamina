@@ -67,9 +67,9 @@ pub fn signature_details(
 
     let (status_label, format_label, summary_line, missing_hint, raw_message) = match state {
         CommitSignatureState::Detected(format) => (
-            "Checking signature…".to_owned(),
+            t!("signature.checking").to_string(),
             format.label(),
-            format!("{} signature detected", format.label()),
+            t!("signature.detected", format = format.label()).to_string(),
             None,
             None,
         ),
@@ -80,7 +80,7 @@ pub fn signature_details(
             let summary_line = signed_by_line(sig);
             let raw_message = (!sig.message.trim().is_empty()).then(|| sig.message.clone());
             (
-                sig.validity.label().to_owned(),
+                validity_label(sig.validity),
                 sig.format.label(),
                 summary_line,
                 sig.missing_hint.clone(),
@@ -187,11 +187,31 @@ pub fn signature_details(
 /// did not report a signer name or key id.
 pub fn signed_by_line(sig: &CommitSignature) -> String {
     match (&sig.signer, &sig.key) {
-        (Some(signer), Some(key)) => format!("Signed by {signer} ({key})"),
-        (Some(signer), None) => format!("Signed by {signer}"),
-        (None, Some(key)) => format!("Signed with key {key}"),
-        (None, None) => format!("{} signature", sig.format.label()),
+        (Some(signer), Some(key)) => {
+            t!("signature.signed_by_key", signer = signer, key = key).to_string()
+        }
+        (Some(signer), None) => t!("signature.signed_by", signer = signer).to_string(),
+        (None, Some(key)) => t!("signature.signed_with_key", key = key).to_string(),
+        (None, None) => t!("signature.format", format = sig.format.label()).to_string(),
     }
+}
+
+/// The verification outcome in the interface language. The core crate names
+/// the states; the app owns the wording.
+fn validity_label(validity: SignatureValidity) -> String {
+    use SignatureValidity as Validity;
+
+    match validity {
+        Validity::Good => t!("signature.validity.good"),
+        Validity::Bad => t!("signature.validity.bad"),
+        Validity::UnknownValidity => t!("signature.validity.unknown"),
+        Validity::Expired => t!("signature.validity.expired"),
+        Validity::ExpiredKey => t!("signature.validity.expired_key"),
+        Validity::RevokedKey => t!("signature.validity.revoked_key"),
+        Validity::CannotCheck => t!("signature.validity.cannot_check"),
+        Validity::None => t!("signature.validity.none"),
+    }
+    .to_string()
 }
 
 fn badge_visual(
@@ -203,7 +223,9 @@ fn badge_visual(
             IconName::Shield,
             design.field,
             design.muted,
-            SharedString::from(format!("Checking {} signature…", format.label())),
+            SharedString::from(
+                t!("signature.checking_format", format = format.label()).to_string(),
+            ),
         )),
         CommitSignatureState::Verified(sig) => {
             let fmt = sig.format.label();
@@ -213,7 +235,7 @@ fn badge_visual(
                     IconName::ShieldCheck,
                     design.add_background,
                     design.add_text,
-                    format!("Verified {fmt} signature — {who}"),
+                    t!("signature.verified", format = fmt, who = who).to_string(),
                 ),
                 SignatureValidity::UnknownValidity
                 | SignatureValidity::Expired
@@ -222,24 +244,30 @@ fn badge_visual(
                     IconName::ShieldAlert,
                     design.tag_background,
                     design.tag_text,
-                    format!("{} ({fmt}) — {who}", sig.validity.label()),
+                    t!(
+                        "signature.validity_line",
+                        validity = validity_label(sig.validity),
+                        format = fmt,
+                        who = who
+                    )
+                    .to_string(),
                 ),
                 SignatureValidity::Bad => (
                     IconName::ShieldX,
                     design.remove_background,
                     design.remove_text,
-                    format!("Bad {fmt} signature — {who}"),
+                    t!("signature.bad", format = fmt, who = who).to_string(),
                 ),
                 SignatureValidity::CannotCheck => {
                     let reason = sig
                         .missing_hint
-                        .as_deref()
-                        .unwrap_or("Unable to verify signature");
+                        .clone()
+                        .unwrap_or_else(|| t!("signature.unable").to_string());
                     (
                         IconName::ShieldQuestionMark,
                         design.field,
                         design.muted,
-                        format!("Cannot verify {fmt} signature — {reason}"),
+                        t!("signature.cannot_verify", format = fmt, reason = reason).to_string(),
                     )
                 }
                 SignatureValidity::None => return None,

@@ -130,32 +130,32 @@ pub(crate) fn blocked_reason(
     entry: Option<&ReflogEntry>,
     gate: UndoGate,
     head_branch: Option<&str>,
-) -> Option<&'static str> {
+) -> Option<String> {
     if gate.busy {
-        return Some("an operation is running");
+        return Some(t!("branch.reason.busy").to_string());
     }
     if gate.pending {
-        return Some("finish the operation in progress first");
+        return Some(t!("reflog.finish_first").to_string());
     }
     let Some(entry) = entry else {
-        return Some("nothing to undo");
+        return Some(t!("reflog.nothing_to_undo").to_string());
     };
     if !entry.kind.can_restore() {
-        return Some("this entry cannot be undone");
+        return Some(t!("reflog.cannot_undo_entry").to_string());
     }
     // A branch's own reflog can only be restored while that branch is checked
     // out; resetting another branch needs a checkout first.
     if entry.reference != "HEAD" && Some(entry.reference.as_str()) != head_branch {
-        return Some("switch to that branch first");
+        return Some(t!("reflog.switch_branch_first").to_string());
     }
     if entry.kind.moves_branch() && gate.detached {
-        return Some("HEAD is detached");
+        return Some(t!("reflog.head_detached").to_string());
     }
     if gate.dirty {
-        return Some("commit or stash changes first");
+        return Some(t!("reflog.commit_or_stash").to_string());
     }
     if entry.kind.moves_branch() && gate.pushed {
-        return Some("already pushed");
+        return Some(t!("reflog.already_pushed").to_string());
     }
     None
 }
@@ -321,7 +321,7 @@ impl RepoView {
         if let Some(reason) = blocked_reason(None, gate, self.head_branch().as_deref())
             .filter(|_| gate.busy || gate.pending)
         {
-            self.status_note = Some(format!("cannot undo: {reason}"));
+            self.status_note = Some(t!("reflog.cannot_undo", reason = reason).to_string());
             cx.notify();
             return;
         }
@@ -339,7 +339,7 @@ impl RepoView {
         let entry = self.reflog.newest_restorable().cloned();
         let gate = self.undo_gate();
         if let Some(reason) = blocked_reason(entry.as_ref(), gate, self.head_branch().as_deref()) {
-            self.status_note = Some(format!("cannot undo: {reason}"));
+            self.status_note = Some(t!("reflog.cannot_undo", reason = reason).to_string());
             cx.notify();
             return;
         }
@@ -347,7 +347,7 @@ impl RepoView {
             return;
         };
         let note = undo_note(&entry);
-        let label = format!("undo {}", kind_label(entry.kind).to_lowercase());
+        let label = t!("reflog.undo_op", action = kind_label(entry.kind)).to_string();
         if let Some(id) = self.run_operation(
             Operation::UndoReflog { entry: Some(entry) },
             label,
@@ -371,7 +371,7 @@ impl RepoView {
         }
         let gate = self.undo_gate();
         if let Some(reason) = blocked_reason(Some(&entry), gate, self.head_branch().as_deref()) {
-            self.status_note = Some(format!("cannot restore: {reason}"));
+            self.status_note = Some(t!("reflog.cannot_restore", reason = reason).to_string());
             cx.notify();
             return;
         }
@@ -382,8 +382,8 @@ impl RepoView {
         ui::confirm(
             window,
             cx,
-            ui::Confirm::new("Restore to this point?", detail)
-                .ok_label("Restore")
+            ui::Confirm::new(t!("reflog.restore_title").to_string(), detail)
+                .ok_label(t!("reflog.restore_button").to_string())
                 // Restoring is a history rewrite, so the question is never
                 // skipped by the "do not ask" setting.
                 .always_ask(),
@@ -391,7 +391,7 @@ impl RepoView {
                 let entry = entry.clone();
                 let note = note.clone();
                 let _ = entity.update(cx, |view, cx| {
-                    let label = format!("restore before {}", kind_label(entry.kind).to_lowercase());
+                    let label = t!("reflog.restore_op", id = kind_label(entry.kind)).to_string();
                     if let Some(id) = view.run_operation(
                         Operation::UndoReflog { entry: Some(entry) },
                         label,
@@ -457,8 +457,12 @@ impl RepoView {
             .border_b_1()
             .border_color(design.border)
             .child(
-                ui::section_header("reflog-header", "Recent actions", design)
-                    .count(self.reflog.entries.len()),
+                ui::section_header(
+                    "reflog-header",
+                    t!("reflog.recent_actions").to_string(),
+                    design,
+                )
+                .count(self.reflog.entries.len()),
             )
             .child(self.reflog_list(entity, design));
         div()
@@ -485,7 +489,7 @@ impl RepoView {
             return ui::message(error.clone(), design.remove_text, design).into_any_element();
         }
         if self.reflog.entries.is_empty() {
-            return ui::empty_state("No reflog entries", design).into_any_element();
+            return ui::empty_state(t!("reflog.empty").to_string(), design).into_any_element();
         }
 
         let rows = Arc::clone(&self.reflog.entries);
@@ -523,8 +527,8 @@ impl RepoView {
                                 };
                             menu.item(
                                 PopupMenuItem::new(ui::menu_label(
-                                    "Restore to this point…",
-                                    reason,
+                                    t!("reflog.restore_menu").to_string(),
+                                    reason.as_ref(),
                                 ))
                                 .disabled(reason.is_some())
                                 .on_click(handler),
@@ -541,7 +545,7 @@ impl RepoView {
         .into_any_element()
     }
 
-    fn restore_blocked(&self, entry: &ReflogEntry) -> Option<&'static str> {
+    fn restore_blocked(&self, entry: &ReflogEntry) -> Option<String> {
         blocked_reason(Some(entry), self.undo_gate(), self.head_branch().as_deref())
     }
 
@@ -590,15 +594,15 @@ impl RepoView {
                     .child(id_span(entry.new_id)),
             )
             .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(design.muted)
-                    .child(format!(
-                        "{} · {} · {}",
-                        entry.reference,
-                        entry.committer_name,
-                        style::relative_time(entry.time, style::now_epoch())
-                    )),
+                div().text_size(px(11.0)).text_color(design.muted).child(
+                    t!(
+                        "reflog.entry_detail",
+                        reference = entry.reference,
+                        author = entry.committer_name,
+                        time = style::relative_time(entry.time, style::now_epoch())
+                    )
+                    .to_string(),
+                ),
             )
             .into_any_element()
     }
@@ -612,10 +616,12 @@ fn restore_detail(
     if entry.kind == ReflogKind::Checkout
         && let Some(source) = checkout_source(&entry.message)
     {
-        return format!(
-            "Switch back to {source}, the branch checked out before \"{}\".",
-            entry.message
-        );
+        return t!(
+            "reflog.restore_switch",
+            source = source,
+            message = entry.message
+        )
+        .to_string();
     }
     let branch = snapshot
         .as_deref()
@@ -623,17 +629,20 @@ fn restore_detail(
             Some(HeadInfo::Branch { short_name, .. }) => Some(short_name.clone()),
             _ => None,
         })
-        .unwrap_or_else(|| "the current branch".to_owned());
+        .unwrap_or_else(|| t!("reflog.current_branch").to_string());
     let current = snapshot
         .as_deref()
         .and_then(|snapshot| head_target(snapshot.head.as_ref()))
         .map(data::short_oid)
         .unwrap_or_else(|| "HEAD".to_owned());
-    format!(
-        "{branch} moves from {current} to {}, the state before \"{}\".",
-        data::short_oid(entry.old_id),
-        entry.message
+    t!(
+        "reflog.move_detail",
+        branch = branch,
+        current = current,
+        target = data::short_oid(entry.old_id),
+        message = entry.message
     )
+    .to_string()
 }
 
 fn checkout_source(message: &str) -> Option<&str> {
@@ -651,14 +660,15 @@ fn undo_note(entry: &ReflogEntry) -> String {
     if entry.kind == ReflogKind::Checkout
         && let Some(source) = checkout_source(&entry.message)
     {
-        return format!("Undid checkout: back on {source}");
+        return t!("reflog.undid_checkout", source = source).to_string();
     }
-    format!(
-        "Undid {}: {} now at {}",
-        kind_label(entry.kind).to_lowercase(),
-        entry.reference,
-        data::short_oid(entry.old_id)
+    t!(
+        "reflog.undid",
+        action = kind_label(entry.kind).to_lowercase(),
+        reference = entry.reference,
+        id = data::short_oid(entry.old_id)
     )
+    .to_string()
 }
 
 /// Whether the worktree status has changes to tracked files. Untracked files
@@ -746,21 +756,22 @@ fn id_span(id: Oid) -> AnyElement {
 }
 
 /// The badge word for one kind.
-pub(crate) fn kind_label(kind: ReflogKind) -> &'static str {
+pub(crate) fn kind_label(kind: ReflogKind) -> String {
     match kind {
-        ReflogKind::Commit => "Commit",
-        ReflogKind::Amend => "Amend",
-        ReflogKind::Checkout => "Checkout",
-        ReflogKind::Reset => "Reset",
-        ReflogKind::RebaseStart => "Rebase",
-        ReflogKind::RebaseFinish => "Rebase done",
-        ReflogKind::Merge => "Merge",
-        ReflogKind::CherryPick => "Cherry-pick",
-        ReflogKind::Pull => "Pull",
-        ReflogKind::BranchCreate => "Branch",
-        ReflogKind::BranchRename => "Rename",
-        ReflogKind::Other => "Action",
+        ReflogKind::Commit => t!("reflog.kind.commit"),
+        ReflogKind::Amend => t!("reflog.kind.amend"),
+        ReflogKind::Checkout => t!("reflog.kind.checkout"),
+        ReflogKind::Reset => t!("reflog.kind.reset"),
+        ReflogKind::RebaseStart => t!("reflog.kind.rebase"),
+        ReflogKind::RebaseFinish => t!("reflog.kind.rebase_done"),
+        ReflogKind::Merge => t!("reflog.kind.merge"),
+        ReflogKind::CherryPick => t!("reflog.kind.cherry_pick"),
+        ReflogKind::Pull => t!("reflog.kind.pull"),
+        ReflogKind::BranchCreate => t!("reflog.kind.branch"),
+        ReflogKind::BranchRename => t!("reflog.kind.rename"),
+        ReflogKind::Other => t!("reflog.kind.other"),
     }
+    .to_string()
 }
 
 fn kind_tone(kind: ReflogKind) -> ui::BadgeTone {
@@ -823,7 +834,7 @@ mod tests {
         };
         assert_eq!(
             blocked_reason(Some(&entry(ReflogKind::Commit)), gate, Some("main")),
-            Some("an operation is running")
+            Some(t!("branch.reason.busy").to_string())
         );
     }
 
@@ -835,11 +846,11 @@ mod tests {
         };
         assert_eq!(
             blocked_reason(Some(&entry(ReflogKind::Commit)), gate, Some("main")),
-            Some("finish the operation in progress first")
+            Some(t!("reflog.finish_first").to_string())
         );
         assert_eq!(
             blocked_reason(Some(&entry(ReflogKind::Checkout)), gate, Some("main")),
-            Some("finish the operation in progress first")
+            Some(t!("reflog.finish_first").to_string())
         );
     }
 
@@ -847,7 +858,7 @@ mod tests {
     fn nothing_restorable_says_nothing_to_undo() {
         assert_eq!(
             blocked_reason(None, UndoGate::default(), Some("main")),
-            Some("nothing to undo")
+            Some(t!("reflog.nothing_to_undo").to_string())
         );
         assert_eq!(
             blocked_reason(
@@ -855,7 +866,7 @@ mod tests {
                 UndoGate::default(),
                 Some("main")
             ),
-            Some("this entry cannot be undone")
+            Some(t!("reflog.cannot_undo_entry").to_string())
         );
         assert_eq!(
             blocked_reason(
@@ -863,7 +874,7 @@ mod tests {
                 UndoGate::default(),
                 Some("main")
             ),
-            Some("this entry cannot be undone")
+            Some(t!("reflog.cannot_undo_entry").to_string())
         );
     }
 
@@ -875,7 +886,7 @@ mod tests {
         };
         assert_eq!(
             blocked_reason(Some(&entry(ReflogKind::Commit)), detached, Some("main")),
-            Some("HEAD is detached")
+            Some(t!("reflog.head_detached").to_string())
         );
         // A checkout can still be undone from a detached HEAD: undoing it
         // switches back to the branch it left.
@@ -889,7 +900,7 @@ mod tests {
         };
         assert_eq!(
             blocked_reason(Some(&entry(ReflogKind::Commit)), dirty, Some("main")),
-            Some("commit or stash changes first")
+            Some(t!("reflog.commit_or_stash").to_string())
         );
     }
 
@@ -901,7 +912,7 @@ mod tests {
         };
         assert_eq!(
             blocked_reason(Some(&entry(ReflogKind::Commit)), pushed, Some("main")),
-            Some("already pushed")
+            Some(t!("reflog.already_pushed").to_string())
         );
         assert_eq!(
             blocked_reason(Some(&entry(ReflogKind::Checkout)), pushed, Some("main")),
@@ -916,7 +927,7 @@ mod tests {
         branch.reference = "topic".into();
         assert_eq!(
             blocked_reason(Some(&branch), UndoGate::default(), Some("main")),
-            Some("switch to that branch first")
+            Some(t!("reflog.switch_branch_first").to_string())
         );
         assert_eq!(
             blocked_reason(Some(&branch), UndoGate::default(), Some("topic")),

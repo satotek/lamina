@@ -1051,6 +1051,13 @@ pub fn short_name(full: &str) -> &str {
     full.rsplit("::").next().unwrap_or(full)
 }
 
+/// The action's title as the palette and the settings table show it. The
+/// registry keeps the English title for the keymap snapshot and for
+/// `commands.json`; the catalogue is consulted when the text is drawn.
+pub fn display_title(spec: &ActionSpec) -> String {
+    crate::i18n::action_title(spec.name, spec.title)
+}
+
 fn context_predicate(context: Option<&str>) -> Option<Rc<KeyBindingContextPredicate>> {
     context.map(|context| {
         KeyBindingContextPredicate::parse(context)

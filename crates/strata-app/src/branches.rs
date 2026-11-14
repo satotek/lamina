@@ -113,14 +113,14 @@ impl Section {
         }
     }
 
-    fn title(self) -> &'static str {
+    fn title(self) -> String {
         match self {
-            Section::Local => "BRANCHES",
-            Section::Remote => "REMOTES",
-            Section::Tags => "TAGS",
-            Section::Stashes => "STASHES",
-            Section::Submodules => "SUBMODULES",
-            Section::Worktrees => "WORKTREES",
+            Section::Local => t!("branch.section.branches").to_string(),
+            Section::Remote => t!("branch.section.remotes").to_string(),
+            Section::Tags => t!("branch.section.tags").to_string(),
+            Section::Stashes => t!("branch.section.stashes").to_string(),
+            Section::Submodules => t!("branch.section.submodules").to_string(),
+            Section::Worktrees => t!("branch.section.worktrees").to_string(),
         }
     }
 
@@ -135,14 +135,14 @@ impl Section {
         }
     }
 
-    fn empty_label(self) -> &'static str {
+    fn empty_label(self) -> String {
         match self {
-            Section::Local => "no local branches",
-            Section::Remote => "no remotes",
-            Section::Tags => "no tags",
-            Section::Stashes => "no stashes",
-            Section::Submodules => "no submodules",
-            Section::Worktrees => "no linked worktrees",
+            Section::Local => t!("branch.empty.local").to_string(),
+            Section::Remote => t!("branch.empty.remotes").to_string(),
+            Section::Tags => t!("branch.empty.tags").to_string(),
+            Section::Stashes => t!("branch.empty.stashes").to_string(),
+            Section::Submodules => t!("branch.empty.submodules").to_string(),
+            Section::Worktrees => t!("branch.empty.worktrees").to_string(),
         }
     }
 
@@ -161,7 +161,7 @@ impl Section {
     ///
     /// The submodule and worktree sections have no empty state: a repository
     /// without submodules, or with nothing but its main worktree, hides them
-    /// instead of saying "none".
+    /// instead of saying t!("branch.detail.none").to_string().
     fn present(self, extras: &SidebarExtras<'_>) -> bool {
         match self {
             Section::Submodules => !extras.submodules.is_empty(),
@@ -264,7 +264,7 @@ enum SidebarItem {
         /// `↑2 ↓1`, `?`, `gone`, or nothing when level with the upstream.
         upstream: Option<String>,
         /// Why the label is `?`, for the label's tooltip.
-        upstream_note: Option<&'static str>,
+        upstream_note: Option<String>,
     },
     RemoteBranch {
         name: String,
@@ -301,7 +301,7 @@ enum SidebarItem {
         path: String,
         /// Path and lock reason, for the row's tooltip.
         detail: String,
-        /// The lock reason alone, for the "locked" badge's tooltip.
+        /// The lock reason alone, for the t!("branch.worktree.locked").to_string() badge's tooltip.
         lock_reason: Option<String>,
         is_main: bool,
         locked: bool,
@@ -309,9 +309,9 @@ enum SidebarItem {
         /// This window's own worktree, drawn like the HEAD branch.
         current: bool,
     },
-    /// "no tags", "no branches fetched yet", ...
+    /// t!("branch.empty.tags").to_string(), t!("branch.empty.no_branches_fetched").to_string(), ...
     Placeholder {
-        text: &'static str,
+        text: String,
         place: PlaceholderPlace,
     },
 }
@@ -628,9 +628,9 @@ impl RenameRequest {
     ) -> Result<Self, String> {
         let new_name = typed.trim();
         if new_name == name {
-            return Err("Enter a different branch name.".to_owned());
+            return Err(t!("branch.validation.name_differs").to_string().to_owned());
         }
-        validate_branch_name(new_name).map_err(str::to_owned)?;
+        validate_branch_name(new_name)?;
         Ok(Self {
             name: name.to_owned(),
             new_name: new_name.to_owned(),
@@ -654,8 +654,8 @@ pub(crate) struct AddRemoteRequest {
 impl AddRemoteRequest {
     fn parse(typed_name: &str, typed_url: &str, fetch: bool) -> Result<Self, String> {
         let name = typed_name.trim();
-        validate_remote_name(name).map_err(str::to_owned)?;
-        let url = validate_remote_url(typed_url).map_err(str::to_owned)?;
+        validate_remote_name(name)?;
+        let url = validate_remote_url(typed_url)?;
         Ok(Self {
             name: name.to_owned(),
             url: url.to_owned(),
@@ -674,11 +674,11 @@ pub(crate) struct EditRemoteUrlRequest {
 
 impl EditRemoteUrlRequest {
     fn parse(name: &str, typed_fetch: &str, typed_push: Option<&str>) -> Result<Self, String> {
-        let fetch_url = validate_remote_url(typed_fetch).map_err(str::to_owned)?;
+        let fetch_url = validate_remote_url(typed_fetch)?;
         let push_url = match typed_push {
             Some(push) => Some(
                 validate_remote_url(push)
-                    .map_err(|_| "Enter a push URL, or clear it to use the fetch URL.".to_owned())?
+                    .map_err(|_| t!("branch.validation.push_url_hint").to_string().to_owned())?
                     .to_owned(),
             ),
             None => None,
@@ -990,7 +990,7 @@ impl Branches {
                         }
                         if group.branches.is_empty() {
                             items.push(SidebarItem::Placeholder {
-                                text: "no branches fetched yet",
+                                text: t!("branch.empty.no_branches_fetched").to_string(),
                                 place: PlaceholderPlace::Remote(group.name.clone()),
                             });
                             continue;
@@ -1405,7 +1405,7 @@ impl Branches {
                     remote,
                     remote_branch,
                 }),
-                None => Err("Fetch a remote and choose its branch first.".to_owned()),
+                None => Err(t!("branch.placeholder.fetch_first").to_string().to_owned()),
             },
             DialogKind::AddRemote(form) => {
                 let name = form.name.read(cx).value().to_string();
@@ -1416,7 +1416,9 @@ impl Branches {
                 let typed = form.input.read(cx).value().to_string();
                 let new_name = typed.trim();
                 if new_name == form.name {
-                    return Some(Err("Enter a different remote name.".to_owned()));
+                    return Some(Err(t!("branch.validation.remote_name_differs")
+                        .to_string()
+                        .to_owned()));
                 }
                 match validate_remote_name(new_name) {
                     Ok(()) => Ok(DialogRequest::RenameRemote {
@@ -1497,7 +1499,7 @@ fn item_element(
             *index,
             head == Some(name.as_str()),
             upstream.as_deref(),
-            *upstream_note,
+            upstream_note.clone(),
             pull_requests.get(name),
             pull_requests.note(),
             reveal.is_ref(RefKind::LocalBranch, name),
@@ -1630,7 +1632,7 @@ fn section_header(
                 .flex_none()
                 .text_size(px(9.0))
                 .font_weight(FontWeight::NORMAL)
-                .child("working…"),
+                .child(t!("branch.working").to_string()),
         );
     }
 
@@ -1666,11 +1668,14 @@ fn section_menu(
                     entity.update(cx, |view, cx| view.open_add_remote(window, cx));
                 }
             };
-            let blocked = busy.then_some("an operation is running");
+            let blocked = busy.then_some(t!("branch.reason.busy").to_string());
             menu.item(
-                PopupMenuItem::new(crate::ui::menu_label("Add Remote…", blocked))
-                    .disabled(blocked.is_some())
-                    .on_click(add),
+                PopupMenuItem::new(crate::ui::menu_label(
+                    t!("branch.menu.add_remote").to_string(),
+                    blocked.as_ref(),
+                ))
+                .disabled(blocked.is_some())
+                .on_click(add),
             )
         }
         Section::Submodules => {
@@ -1680,11 +1685,18 @@ fn section_menu(
                     entity.update(cx, |view, cx| view.update_all_submodules(window, cx));
                 }
             };
-            let blocked = blocked_section(busy, !entity.read(cx).has_submodules(), "no submodules");
+            let blocked = blocked_section(
+                busy,
+                !entity.read(cx).has_submodules(),
+                t!("branch.empty.submodules").to_string(),
+            );
             menu.item(
-                PopupMenuItem::new(crate::ui::menu_label("Update all", blocked))
-                    .disabled(blocked.is_some())
-                    .on_click(update),
+                PopupMenuItem::new(crate::ui::menu_label(
+                    t!("branch.menu.update_all").to_string(),
+                    blocked.as_ref(),
+                ))
+                .disabled(blocked.is_some())
+                .on_click(update),
             )
         }
         Section::Worktrees => {
@@ -1700,21 +1712,27 @@ fn section_menu(
                     entity.update(cx, |view, cx| view.prune_worktrees(window, cx));
                 }
             };
-            let add_blocked = busy.then_some("an operation is running");
+            let add_blocked = busy.then_some(t!("branch.reason.busy").to_string());
             let prune_blocked = blocked_section(
                 busy,
                 !entity.read(cx).has_prunable_worktree(),
-                "no missing worktrees",
+                t!("branch.reason.no_missing_worktrees").to_string(),
             );
             menu.item(
-                PopupMenuItem::new(crate::ui::menu_label("Add worktree…", add_blocked))
-                    .disabled(add_blocked.is_some())
-                    .on_click(add),
+                PopupMenuItem::new(crate::ui::menu_label(
+                    t!("branch.menu.add_worktree").to_string(),
+                    add_blocked.as_ref(),
+                ))
+                .disabled(add_blocked.is_some())
+                .on_click(add),
             )
             .item(
-                PopupMenuItem::new(crate::ui::menu_label("Prune", prune_blocked))
-                    .disabled(prune_blocked.is_some())
-                    .on_click(prune),
+                PopupMenuItem::new(crate::ui::menu_label(
+                    t!("branch.menu.prune").to_string(),
+                    prune_blocked.as_ref(),
+                ))
+                .disabled(prune_blocked.is_some())
+                .on_click(prune),
             )
         }
         _ => menu,
@@ -1723,11 +1741,11 @@ fn section_menu(
 
 /// Why a section action is disabled: the list's own state says something
 /// permanent, so it wins over a running operation.
-fn blocked_section(busy: bool, empty: bool, empty_reason: &'static str) -> Option<&'static str> {
+fn blocked_section(busy: bool, empty: bool, empty_reason: impl Into<String>) -> Option<String> {
     if empty {
-        Some(empty_reason)
+        Some(empty_reason.into())
     } else if busy {
-        Some("an operation is running")
+        Some(t!("branch.reason.busy").to_string())
     } else {
         None
     }
@@ -1775,7 +1793,7 @@ fn remote_group_header(
         &colors.design,
         header,
         move |menu, _window, _cx| {
-            let blocked = busy.then_some("an operation is running");
+            let blocked = busy.then_some(t!("branch.reason.busy").to_string());
             let fetch = {
                 let entity = menu_entity.clone();
                 let name = menu_name.clone();
@@ -1809,26 +1827,38 @@ fn remote_group_header(
                 }
             };
             menu.item(
-                PopupMenuItem::new(crate::ui::menu_label("Fetch", blocked))
-                    .disabled(blocked.is_some())
-                    .on_click(fetch),
+                PopupMenuItem::new(crate::ui::menu_label(
+                    t!("branch.menu.fetch").to_string(),
+                    blocked.as_ref(),
+                ))
+                .disabled(blocked.is_some())
+                .on_click(fetch),
             )
             .separator()
             .item(
-                PopupMenuItem::new(crate::ui::menu_label("Rename…", blocked))
-                    .disabled(blocked.is_some())
-                    .on_click(rename),
+                PopupMenuItem::new(crate::ui::menu_label(
+                    t!("branch.menu.rename").to_string(),
+                    blocked.as_ref(),
+                ))
+                .disabled(blocked.is_some())
+                .on_click(rename),
             )
             .item(
-                PopupMenuItem::new(crate::ui::menu_label("Edit URL…", blocked))
-                    .disabled(blocked.is_some())
-                    .on_click(edit_url),
+                PopupMenuItem::new(crate::ui::menu_label(
+                    t!("branch.menu.edit_url").to_string(),
+                    blocked.as_ref(),
+                ))
+                .disabled(blocked.is_some())
+                .on_click(edit_url),
             )
             .separator()
             .item(
-                PopupMenuItem::new(crate::ui::menu_label("Remove…", blocked))
-                    .disabled(blocked.is_some())
-                    .on_click(remove),
+                PopupMenuItem::new(crate::ui::menu_label(
+                    t!("branch.menu.remove").to_string(),
+                    blocked.as_ref(),
+                ))
+                .disabled(blocked.is_some())
+                .on_click(remove),
             )
         },
     )
@@ -1858,7 +1888,7 @@ fn local_row(
     index: usize,
     active: bool,
     upstream: Option<&str>,
-    upstream_note: Option<&'static str>,
+    upstream_note: Option<String>,
     pull_request: Option<&strata_core::forge::PullRequestSummary>,
     pull_request_note: Option<&str>,
     revealed: bool,
@@ -1882,8 +1912,9 @@ fn local_row(
             .text_size(px(colors.design.tiny()))
             .text_color(colors.muted_foreground)
             .child(label.to_owned());
-        if let Some(note) = upstream_note {
-            label = label.row_tooltip(move |window, cx| Tooltip::new(note).build(window, cx));
+        if let Some(note) = upstream_note.clone() {
+            label =
+                label.row_tooltip(move |window, cx| Tooltip::new(note.clone()).build(window, cx));
         }
         row = row.child(label);
     }
@@ -1909,7 +1940,7 @@ fn local_row(
             if event.click_count() < 2 {
                 view.reveal_ref(RefKind::LocalBranch, &branch, window, cx);
             } else if !busy && !active {
-                let label = format!("check out {branch}");
+                let label = t!("branch.op.checkout", branch = branch).to_string();
                 view.run_operation(Operation::Checkout { branch }, label, window, cx);
             }
         });
@@ -1927,27 +1958,30 @@ fn local_row(
             // `${branch}` is the branch this menu acts on, which need not be
             // the checked-out one.
             variables.branch = Some(branch.clone());
-            let checkout_blocked = branch_blocked(active, "already checked out", busy);
-            let merge_blocked = branch_blocked(active, "this is the current branch", busy);
-            let create_blocked = busy.then_some("an operation is running");
-            let delete_blocked = branch_blocked(active, "this is the current branch", busy);
+            let checkout_blocked =
+                branch_blocked(active, t!("branch.reason.checked_out").to_string(), busy);
+            let merge_blocked =
+                branch_blocked(active, t!("branch.reason.current").to_string(), busy);
+            let create_blocked = busy.then_some(t!("branch.reason.busy").to_string());
+            let delete_blocked =
+                branch_blocked(active, t!("branch.reason.current").to_string(), busy);
             let rebase = entity_menu
                 .read(cx)
                 .branch_rebase_target(RefKind::LocalBranch, &branch);
-            let rename_blocked = busy.then_some("an operation is running");
+            let rename_blocked = busy.then_some(t!("branch.reason.busy").to_string());
             let view = entity_menu.read(cx);
             let upstream = view.branch_upstream(&branch);
             let has_upstream = upstream.is_some();
             let has_remote_branches = !view.upstream_choices().is_empty();
             let set_blocked = if !has_remote_branches {
-                Some("no remote branches")
+                Some(t!("branch.empty.no_remote_branches").to_string())
             } else {
-                busy.then_some("an operation is running")
+                busy.then_some(t!("branch.reason.busy").to_string())
             };
             let unset_blocked = if !has_upstream {
-                Some("no upstream")
+                Some(t!("branch.reason.no_upstream").to_string())
             } else {
-                busy.then_some("an operation is running")
+                busy.then_some(t!("branch.reason.busy").to_string())
             };
             let head = view.compare_head();
             let compare_blocked = crate::repo_view::compare::with_current_branch_blocked(
@@ -1960,8 +1994,8 @@ fn local_row(
                 let entity = entity_menu.clone();
                 let branch = branch.clone();
                 PopupMenuItem::new(crate::ui::menu_label(
-                    "Compare with current branch",
-                    compare_blocked,
+                    t!("branch.menu.compare").to_string(),
+                    compare_blocked.as_ref(),
                 ))
                 .disabled(compare_blocked.is_some())
                 .on_click(
@@ -1975,41 +2009,46 @@ fn local_row(
             };
             let menu = menu
                 .item(
-                    PopupMenuItem::new(crate::ui::menu_label("Checkout", checkout_blocked))
-                        .disabled(checkout_blocked.is_some())
-                        .on_click({
-                            let entity = entity_menu.clone();
-                            let branch = branch.clone();
-                            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                                let branch = branch.clone();
-                                entity.update(cx, |view, cx| {
-                                    let label = format!("check out {branch}");
-                                    view.run_operation(
-                                        Operation::Checkout { branch },
-                                        label,
-                                        window,
-                                        cx,
-                                    );
-                                });
-                            }
-                        }),
-                )
-                .item(PopupMenuItem::new("Show only this branch").on_click({
-                    let entity = entity_menu.clone();
-                    let branch = branch.clone();
-                    move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                    PopupMenuItem::new(crate::ui::menu_label(
+                        t!("branch.menu.checkout").to_string(),
+                        checkout_blocked.as_ref(),
+                    ))
+                    .disabled(checkout_blocked.is_some())
+                    .on_click({
+                        let entity = entity_menu.clone();
                         let branch = branch.clone();
-                        entity.update(cx, |view, cx| {
-                            view.show_only_ref(RefKind::LocalBranch, &branch, cx)
-                        });
-                    }
-                }))
+                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                            let branch = branch.clone();
+                            entity.update(cx, |view, cx| {
+                                let label = t!("branch.op.checkout", branch = branch).to_string();
+                                view.run_operation(
+                                    Operation::Checkout { branch },
+                                    label,
+                                    window,
+                                    cx,
+                                );
+                            });
+                        }
+                    }),
+                )
+                .item(
+                    PopupMenuItem::new(t!("branch.menu.show_only").to_string()).on_click({
+                        let entity = entity_menu.clone();
+                        let branch = branch.clone();
+                        move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                            let branch = branch.clone();
+                            entity.update(cx, |view, cx| {
+                                view.show_only_ref(RefKind::LocalBranch, &branch, cx)
+                            });
+                        }
+                    }),
+                )
                 .separator()
                 .item(compare)
                 .item(
                     PopupMenuItem::new(crate::ui::menu_label(
-                        "Merge into current branch",
-                        merge_blocked,
+                        t!("branch.menu.merge_into_current").to_string(),
+                        merge_blocked.as_ref(),
                     ))
                     .disabled(merge_blocked.is_some())
                     .on_click({
@@ -2018,7 +2057,7 @@ fn local_row(
                         move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                             let branch = branch.clone();
                             entity.update(cx, |view, cx| {
-                                let label = format!("merge {branch} into the current branch");
+                                let label = t!("branch.op.merge", branch = branch).to_string();
                                 view.run_operation(
                                     Operation::Merge {
                                         branch,
@@ -2044,14 +2083,14 @@ fn local_row(
                 })
                 .item(
                     PopupMenuItem::new(crate::ui::menu_label(
-                        "Create branch from here…",
-                        create_blocked,
+                        t!("branch.menu.create_from_here").to_string(),
+                        create_blocked.as_ref(),
                     ))
                     .disabled(create_blocked.is_some())
                     .on_click({
                         let entity = entity_menu.clone();
                         let point = branch.clone();
-                        let from = format!("from {branch}");
+                        let from = t!("branch.op.from", branch = branch).to_string();
                         move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                             let point = point.clone();
                             let from = from.clone();
@@ -2063,61 +2102,73 @@ fn local_row(
                 )
                 .separator()
                 .item(
-                    PopupMenuItem::new(crate::ui::menu_label("Rename…", rename_blocked))
-                        .disabled(rename_blocked.is_some())
-                        .on_click({
-                            let entity = entity_menu.clone();
+                    PopupMenuItem::new(crate::ui::menu_label(
+                        t!("branch.menu.rename").to_string(),
+                        rename_blocked.as_ref(),
+                    ))
+                    .disabled(rename_blocked.is_some())
+                    .on_click({
+                        let entity = entity_menu.clone();
+                        let branch = branch.clone();
+                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                             let branch = branch.clone();
-                            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                                let branch = branch.clone();
-                                entity.update(cx, |view, cx| {
-                                    view.open_rename_branch(branch, window, cx);
-                                });
-                            }
-                        }),
+                            entity.update(cx, |view, cx| {
+                                view.open_rename_branch(branch, window, cx);
+                            });
+                        }
+                    }),
                 )
                 .item(
-                    PopupMenuItem::new(crate::ui::menu_label("Set Upstream…", set_blocked))
-                        .disabled(set_blocked.is_some())
-                        .on_click({
-                            let entity = entity_menu.clone();
+                    PopupMenuItem::new(crate::ui::menu_label(
+                        t!("branch.menu.set_upstream").to_string(),
+                        set_blocked.as_ref(),
+                    ))
+                    .disabled(set_blocked.is_some())
+                    .on_click({
+                        let entity = entity_menu.clone();
+                        let branch = branch.clone();
+                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                             let branch = branch.clone();
-                            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                                let branch = branch.clone();
-                                entity.update(cx, |view, cx| {
-                                    view.open_set_upstream(branch, window, cx);
-                                });
-                            }
-                        }),
+                            entity.update(cx, |view, cx| {
+                                view.open_set_upstream(branch, window, cx);
+                            });
+                        }
+                    }),
                 )
                 .item(
-                    PopupMenuItem::new(crate::ui::menu_label("Unset Upstream", unset_blocked))
-                        .disabled(unset_blocked.is_some())
-                        .on_click({
-                            let entity = entity_menu.clone();
+                    PopupMenuItem::new(crate::ui::menu_label(
+                        t!("branch.menu.unset_upstream").to_string(),
+                        unset_blocked.as_ref(),
+                    ))
+                    .disabled(unset_blocked.is_some())
+                    .on_click({
+                        let entity = entity_menu.clone();
+                        let branch = branch.clone();
+                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                             let branch = branch.clone();
-                            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                                let branch = branch.clone();
-                                entity.update(cx, |view, cx| {
-                                    view.unset_branch_upstream(branch, window, cx);
-                                });
-                            }
-                        }),
+                            entity.update(cx, |view, cx| {
+                                view.unset_branch_upstream(branch, window, cx);
+                            });
+                        }
+                    }),
                 )
                 .separator()
                 .item(
-                    PopupMenuItem::new(crate::ui::menu_label("Delete…", delete_blocked))
-                        .disabled(delete_blocked.is_some())
-                        .on_click({
-                            let entity = entity_menu.clone();
+                    PopupMenuItem::new(crate::ui::menu_label(
+                        t!("branch.menu.delete").to_string(),
+                        delete_blocked.as_ref(),
+                    ))
+                    .disabled(delete_blocked.is_some())
+                    .on_click({
+                        let entity = entity_menu.clone();
+                        let branch = branch.clone();
+                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                             let branch = branch.clone();
-                            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                                let branch = branch.clone();
-                                entity.update(cx, |view, cx| {
-                                    view.confirm_delete_branch(branch, window, cx);
-                                });
-                            }
-                        }),
+                            entity.update(cx, |view, cx| {
+                                view.confirm_delete_branch(branch, window, cx);
+                            });
+                        }
+                    }),
                 )
                 .separator();
             crate::commands::submenu(
@@ -2145,11 +2196,11 @@ fn local_row(
 
 /// Why a branch action is disabled: the branch's own state is permanent, so it
 /// wins over an operation that is only running for now.
-fn branch_blocked(active: bool, active_reason: &'static str, busy: bool) -> Option<&'static str> {
+fn branch_blocked(active: bool, active_reason: impl Into<String>, busy: bool) -> Option<String> {
     if active {
-        Some(active_reason)
+        Some(active_reason.into())
     } else if busy {
-        Some("an operation is running")
+        Some(t!("branch.reason.busy").to_string())
     } else {
         None
     }
@@ -2210,58 +2261,66 @@ fn remote_row(
         &colors.design,
         row_element,
         move |menu, _window, cx| {
-            let blocked = busy.then_some("an operation is running");
+            let blocked = busy.then_some(t!("branch.reason.busy").to_string());
             let rebase = entity_menu
                 .read(cx)
                 .branch_rebase_target(RefKind::RemoteBranch, &remote);
             menu.item(
-                PopupMenuItem::new(crate::ui::menu_label("Checkout", blocked))
-                    .disabled(blocked.is_some())
-                    .on_click({
-                        let entity = entity_menu.clone();
-                        let remote = remote.clone();
-                        let target = local_name.clone();
-                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                            let remote = remote.clone();
-                            let target = target.clone();
-                            entity.update(cx, |view, cx| {
-                                checkout_remote(view, &remote, &target, existing, window, cx)
-                            });
-                        }
-                    }),
-            )
-            .item(PopupMenuItem::new("Show only this branch").on_click({
-                let entity = entity_menu.clone();
-                let remote = remote.clone();
-                move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                PopupMenuItem::new(crate::ui::menu_label(
+                    t!("branch.menu.checkout").to_string(),
+                    blocked.as_ref(),
+                ))
+                .disabled(blocked.is_some())
+                .on_click({
+                    let entity = entity_menu.clone();
                     let remote = remote.clone();
-                    entity.update(cx, |view, cx| {
-                        view.show_only_ref(RefKind::RemoteBranch, &remote, cx)
-                    });
-                }
-            }))
-            .item(
-                PopupMenuItem::new(crate::ui::menu_label("Merge into current branch", blocked))
-                    .disabled(blocked.is_some())
-                    .on_click({
-                        let entity = entity_menu.clone();
+                    let target = local_name.clone();
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                         let remote = remote.clone();
-                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                            let remote = remote.clone();
-                            entity.update(cx, |view, cx| {
-                                let label = format!("merge {remote} into the current branch");
-                                view.run_operation(
-                                    Operation::Merge {
-                                        branch: remote,
-                                        no_ff: false,
-                                    },
-                                    label,
-                                    window,
-                                    cx,
-                                );
-                            });
-                        }
-                    }),
+                        let target = target.clone();
+                        entity.update(cx, |view, cx| {
+                            checkout_remote(view, &remote, &target, existing, window, cx)
+                        });
+                    }
+                }),
+            )
+            .item(
+                PopupMenuItem::new(t!("branch.menu.show_only").to_string()).on_click({
+                    let entity = entity_menu.clone();
+                    let remote = remote.clone();
+                    move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                        let remote = remote.clone();
+                        entity.update(cx, |view, cx| {
+                            view.show_only_ref(RefKind::RemoteBranch, &remote, cx)
+                        });
+                    }
+                }),
+            )
+            .item(
+                PopupMenuItem::new(crate::ui::menu_label(
+                    t!("branch.menu.merge_into_current").to_string(),
+                    blocked.as_ref(),
+                ))
+                .disabled(blocked.is_some())
+                .on_click({
+                    let entity = entity_menu.clone();
+                    let remote = remote.clone();
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        let remote = remote.clone();
+                        entity.update(cx, |view, cx| {
+                            let label = t!("branch.op.merge", branch = remote).to_string();
+                            view.run_operation(
+                                Operation::Merge {
+                                    branch: remote,
+                                    no_ff: false,
+                                },
+                                label,
+                                window,
+                                cx,
+                            );
+                        });
+                    }
+                }),
             )
             .when_some(rebase, |menu, (current, target)| {
                 menu.item(rebase_menu_item(
@@ -2272,20 +2331,23 @@ fn remote_row(
                 ))
             })
             .item(
-                PopupMenuItem::new(crate::ui::menu_label("Create branch from here…", blocked))
-                    .disabled(blocked.is_some())
-                    .on_click({
-                        let entity = entity_menu.clone();
+                PopupMenuItem::new(crate::ui::menu_label(
+                    t!("branch.menu.create_from_here").to_string(),
+                    blocked.as_ref(),
+                ))
+                .disabled(blocked.is_some())
+                .on_click({
+                    let entity = entity_menu.clone();
+                    let remote = remote.clone();
+                    let from = t!("branch.op.from", branch = remote).to_string();
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                         let remote = remote.clone();
-                        let from = format!("from {remote}");
-                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                            let remote = remote.clone();
-                            let from = from.clone();
-                            entity.update(cx, |view, cx| {
-                                view.open_create_dialog(Some(remote), from, window, cx);
-                            });
-                        }
-                    }),
+                        let from = from.clone();
+                        entity.update(cx, |view, cx| {
+                            view.open_create_dialog(Some(remote), from, window, cx);
+                        });
+                    }
+                }),
             )
             .when_some(
                 crate::github::remote_branch_item(&entity_menu, &remote, cx),
@@ -2330,19 +2392,21 @@ fn tag_row(
         &colors.design,
         row_element,
         move |menu, _window, _cx| {
-            let blocked = busy.then_some("an operation is running");
+            let blocked = busy.then_some(t!("branch.reason.busy").to_string());
             menu.item(
-                PopupMenuItem::new(crate::ui::menu_label("Show only this tag", blocked))
-                    .disabled(blocked.is_some())
-                    .on_click({
-                        let entity = menu_entity.clone();
-                        let tag = menu_tag.clone();
-                        move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
-                            let tag = tag.clone();
-                            entity
-                                .update(cx, |view, cx| view.show_only_ref(RefKind::Tag, &tag, cx));
-                        }
-                    }),
+                PopupMenuItem::new(crate::ui::menu_label(
+                    t!("branch.menu.show_only_tag").to_string(),
+                    blocked.as_ref(),
+                ))
+                .disabled(blocked.is_some())
+                .on_click({
+                    let entity = menu_entity.clone();
+                    let tag = menu_tag.clone();
+                    move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                        let tag = tag.clone();
+                        entity.update(cx, |view, cx| view.show_only_ref(RefKind::Tag, &tag, cx));
+                    }
+                }),
             )
         },
     )
@@ -2415,14 +2479,14 @@ fn submodule_row(
         &colors.design,
         row_element,
         move |menu, _window, _cx| {
-            let open_blocked =
-                (status == SubmoduleStatus::Uninitialised).then_some("not initialised");
+            let open_blocked = (status == SubmoduleStatus::Uninitialised)
+                .then_some(t!("branch.submodule.not_initialised").to_string());
             let update_blocked = if status == SubmoduleStatus::Uninitialised {
-                Some("not initialised")
+                Some(t!("branch.submodule.not_initialised").to_string())
             } else {
-                busy.then_some("an operation is running")
+                busy.then_some(t!("branch.reason.busy").to_string())
             };
-            let init_blocked = busy.then_some("an operation is running");
+            let init_blocked = busy.then_some(t!("branch.reason.busy").to_string());
             let open = {
                 let entity = menu_entity.clone();
                 let path = menu_path.clone();
@@ -2470,31 +2534,43 @@ fn submodule_row(
             };
             let menu = menu
                 .item(
-                    PopupMenuItem::new(crate::ui::menu_label("Open", open_blocked))
-                        .disabled(open_blocked.is_some())
-                        .on_click(open),
+                    PopupMenuItem::new(crate::ui::menu_label(
+                        t!("branch.menu.open").to_string(),
+                        open_blocked.as_ref(),
+                    ))
+                    .disabled(open_blocked.is_some())
+                    .on_click(open),
                 )
                 .item(
-                    PopupMenuItem::new(crate::ui::menu_label("Open in New Tab", open_blocked))
-                        .disabled(open_blocked.is_some())
-                        .on_click(open_new_tab),
+                    PopupMenuItem::new(crate::ui::menu_label(
+                        t!("branch.menu.open_new_tab").to_string(),
+                        open_blocked.as_ref(),
+                    ))
+                    .disabled(open_blocked.is_some())
+                    .on_click(open_new_tab),
                 )
                 .item(
-                    PopupMenuItem::new(crate::ui::menu_label("Open in New Window", open_blocked))
-                        .disabled(open_blocked.is_some())
-                        .on_click(open_new_window),
+                    PopupMenuItem::new(crate::ui::menu_label(
+                        t!("branch.menu.open_new_window").to_string(),
+                        open_blocked.as_ref(),
+                    ))
+                    .disabled(open_blocked.is_some())
+                    .on_click(open_new_window),
                 )
                 .separator()
                 .item(
-                    PopupMenuItem::new(crate::ui::menu_label("Update", update_blocked))
-                        .disabled(update_blocked.is_some())
-                        .on_click(update),
+                    PopupMenuItem::new(crate::ui::menu_label(
+                        t!("branch.menu.update").to_string(),
+                        update_blocked.as_ref(),
+                    ))
+                    .disabled(update_blocked.is_some())
+                    .on_click(update),
                 );
             let menu = if status == SubmoduleStatus::Uninitialised {
                 menu.item(
                     PopupMenuItem::new(crate::ui::menu_label(
-                        "Initialise and update",
-                        init_blocked,
+                        t!("branch.menu.initialise").to_string(),
+                        init_blocked.as_ref(),
                     ))
                     .disabled(init_blocked.is_some())
                     .on_click(init),
@@ -2503,12 +2579,13 @@ fn submodule_row(
                 menu
             };
             let copy_path = menu_path.clone();
-            menu.separator()
-                .item(PopupMenuItem::new("Copy path").on_click(
+            menu.separator().item(
+                PopupMenuItem::new(t!("branch.menu.copy_path").to_string()).on_click(
                     move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
                         cx.write_to_clipboard(ClipboardItem::new_string(copy_path.clone()));
                     },
-                ))
+                ),
+            )
         },
     )
     .w_full()
@@ -2538,7 +2615,7 @@ fn worktree_row(
     let mut row_element = crate::ui::list_row(
         ("worktree", index),
         // The checkout the window is showing reads like the HEAD branch; the
-        // badge says "main" rather than the tint, because a linked worktree can
+        // badge says t!("branch.worktree.main").to_string() rather than the tint, because a linked worktree can
         // be the one on screen.
         crate::ui::RowState::NORMAL.head(current).selected(selected),
         &colors.design,
@@ -2553,14 +2630,17 @@ fn worktree_row(
     .row_tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx));
     if is_main {
         row_element = row_element.child(crate::ui::status_badge(
-            "main",
+            t!("branch.worktree.main").to_string(),
             crate::ui::BadgeTone::Accent,
             &colors.design,
         ));
     }
     if locked {
-        let badge =
-            crate::ui::status_badge("locked", crate::ui::BadgeTone::Warning, &colors.design);
+        let badge = crate::ui::status_badge(
+            t!("branch.worktree.locked").to_string(),
+            crate::ui::BadgeTone::Warning,
+            &colors.design,
+        );
         let reason = lock_reason.map(str::to_owned);
         let wrapper = div().id(("worktree-lock", index)).flex_none();
         row_element = row_element.child(match reason {
@@ -2572,7 +2652,7 @@ fn worktree_row(
     }
     if prunable {
         row_element = row_element.child(crate::ui::status_badge(
-            "missing",
+            t!("branch.worktree.missing").to_string(),
             crate::ui::BadgeTone::Danger,
             &colors.design,
         ));
@@ -2611,21 +2691,22 @@ fn worktree_row(
         row_element,
         move |menu, _window, _cx| {
             let open_in_window_blocked = if prunable {
-                Some("this worktree is missing")
+                Some(t!("branch.reason.missing_worktree").to_string())
             } else if current {
-                Some("already open")
+                Some(t!("branch.reason.already_open").to_string())
             } else {
                 None
             };
-            let open_new_window_blocked = prunable.then_some("this worktree is missing");
+            let open_new_window_blocked =
+                prunable.then_some(t!("branch.reason.missing_worktree").to_string());
             let remove_blocked = if is_main {
-                Some("this is the main worktree")
+                Some(t!("branch.reason.main_worktree").to_string())
             } else if locked {
-                Some("this worktree is locked")
+                Some(t!("branch.reason.locked_worktree").to_string())
             } else if prunable {
-                Some("this worktree is missing")
+                Some(t!("branch.reason.missing_worktree").to_string())
             } else {
-                busy.then_some("an operation is running")
+                busy.then_some(t!("branch.reason.busy").to_string())
             };
             let open = {
                 let entity = menu_entity.clone();
@@ -2666,22 +2747,25 @@ fn worktree_row(
             };
             let copy_path = copy_path.clone();
             menu.item(
-                PopupMenuItem::new(crate::ui::menu_label("Open", open_in_window_blocked))
-                    .disabled(open_in_window_blocked.is_some())
-                    .on_click(open),
+                PopupMenuItem::new(crate::ui::menu_label(
+                    t!("branch.menu.open").to_string(),
+                    open_in_window_blocked.as_ref(),
+                ))
+                .disabled(open_in_window_blocked.is_some())
+                .on_click(open),
             )
             .item(
                 PopupMenuItem::new(crate::ui::menu_label(
-                    "Open in New Tab",
-                    open_in_window_blocked,
+                    t!("branch.menu.open_new_tab").to_string(),
+                    open_in_window_blocked.as_ref(),
                 ))
                 .disabled(open_in_window_blocked.is_some())
                 .on_click(open_new_tab),
             )
             .item(
                 PopupMenuItem::new(crate::ui::menu_label(
-                    "Open in New Window",
-                    open_new_window_blocked,
+                    t!("branch.menu.open_new_window").to_string(),
+                    open_new_window_blocked.as_ref(),
                 ))
                 .disabled(open_new_window_blocked.is_some())
                 .on_click(open_new_window),
@@ -2691,16 +2775,21 @@ fn worktree_row(
                 // The main worktree, a locked one and a missing checkout all
                 // refuse `git worktree remove`; offering it would only
                 // report the refusal.
-                PopupMenuItem::new(crate::ui::menu_label("Remove…", remove_blocked))
-                    .disabled(remove_blocked.is_some())
-                    .on_click(remove),
+                PopupMenuItem::new(crate::ui::menu_label(
+                    t!("branch.menu.remove").to_string(),
+                    remove_blocked.as_ref(),
+                ))
+                .disabled(remove_blocked.is_some())
+                .on_click(remove),
             )
             .separator()
-            .item(PopupMenuItem::new("Copy path").on_click(
-                move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(copy_path.clone()));
-                },
-            ))
+            .item(
+                PopupMenuItem::new(t!("branch.menu.copy_path").to_string()).on_click(
+                    move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(copy_path.clone()));
+                    },
+                ),
+            )
         },
     )
     .w_full()
@@ -2708,11 +2797,20 @@ fn worktree_row(
 }
 
 /// The badge a submodule's state deserves, or nothing when it is up to date.
-fn submodule_badge(status: SubmoduleStatus) -> Option<(&'static str, crate::ui::BadgeTone)> {
+fn submodule_badge(status: SubmoduleStatus) -> Option<(String, crate::ui::BadgeTone)> {
     match status {
-        SubmoduleStatus::Uninitialised => Some(("not initialised", crate::ui::BadgeTone::Neutral)),
-        SubmoduleStatus::CommitDiffers => Some(("changed", crate::ui::BadgeTone::Accent)),
-        SubmoduleStatus::Modified => Some(("modified", crate::ui::BadgeTone::Warning)),
+        SubmoduleStatus::Uninitialised => Some((
+            t!("branch.submodule.not_initialised").to_string(),
+            crate::ui::BadgeTone::Neutral,
+        )),
+        SubmoduleStatus::CommitDiffers => Some((
+            t!("branch.worktree.changed").to_string(),
+            crate::ui::BadgeTone::Accent,
+        )),
+        SubmoduleStatus::Modified => Some((
+            t!("branch.worktree.modified").to_string(),
+            crate::ui::BadgeTone::Warning,
+        )),
         SubmoduleStatus::UpToDate => None,
     }
 }
@@ -2725,15 +2823,22 @@ fn submodule_detail(submodule: &SubmoduleInfo) -> String {
         detail.push('\n');
         detail.push_str(url);
     }
-    detail.push_str("\nrecorded ");
-    detail.push_str(&commit_label(submodule.recorded_commit));
-    detail.push_str(" · checked out ");
-    detail.push_str(&commit_label(submodule.checked_out_commit));
+    detail.push_str(&t!(
+        "branch.detail.recorded",
+        oid = commit_label(submodule.recorded_commit)
+    ));
+    detail.push_str(&t!(
+        "branch.detail.checked_out",
+        oid = commit_label(submodule.checked_out_commit)
+    ));
     detail
 }
 
 fn commit_label(commit: Option<strata_core::Oid>) -> String {
-    commit.map_or_else(|| "none".to_owned(), crate::data::short_oid)
+    commit.map_or_else(
+        || t!("branch.detail.none").to_string().to_owned(),
+        crate::data::short_oid,
+    )
 }
 
 /// A worktree row's label: the branch it has checked out, or the commit a
@@ -2741,10 +2846,12 @@ fn commit_label(commit: Option<strata_core::Oid>) -> String {
 fn worktree_label(worktree: &WorktreeInfo) -> String {
     match &worktree.head {
         Some(HeadInfo::Branch { short_name, .. }) => short_name.clone(),
-        Some(HeadInfo::Detached { target }) => {
-            format!("detached {}", crate::data::short_oid(*target))
-        }
-        None => "unknown HEAD".to_owned(),
+        Some(HeadInfo::Detached { target }) => t!(
+            "branch.detail.detached",
+            oid = crate::data::short_oid(*target)
+        )
+        .to_string(),
+        None => t!("branch.detail.unknown_head").to_string().to_owned(),
     }
 }
 
@@ -2754,13 +2861,13 @@ fn worktree_detail(worktree: &WorktreeInfo) -> String {
     let mut detail = worktree.path.display().to_string();
     if worktree.locked {
         let line = match &worktree.lock_reason {
-            Some(reason) => format!("\nlocked: {reason}"),
-            None => "\nlocked".to_owned(),
+            Some(reason) => t!("branch.detail.locked_reason", reason = reason).to_string(),
+            None => t!("branch.detail.locked").to_string(),
         };
         detail.push_str(&line);
     }
     if worktree.prunable {
-        detail.push_str("\nthe checkout directory is missing; Prune drops the registration");
+        detail.push_str(&t!("branch.detail.missing_checkout"));
     }
     detail
 }
@@ -2826,7 +2933,8 @@ impl RepoView {
         self.branches.set_viewport(window.viewport_size());
         let value = branch.clone();
         let input = cx.new(|cx| {
-            let mut state = InputState::new(window, cx).placeholder("branch name");
+            let mut state =
+                InputState::new(window, cx).placeholder(t!("branch.placeholder.name").to_string());
             state.set_value(value, window, cx);
             state
         });
@@ -2878,7 +2986,7 @@ impl RepoView {
         self.branches.set_viewport(window.viewport_size());
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("origin"));
         let url = cx.new(|cx| {
-            InputState::new(window, cx).placeholder("https://example.com/repo.git or a path")
+            InputState::new(window, cx).placeholder(t!("branch.placeholder.url").to_string())
         });
         let handle = name.focus_handle(cx);
         self.branches.open_add_remote(name, url);
@@ -2898,7 +3006,8 @@ impl RepoView {
         self.branches.set_viewport(window.viewport_size());
         let value = name.clone();
         let input = cx.new(|cx| {
-            let mut state = InputState::new(window, cx).placeholder("remote name");
+            let mut state = InputState::new(window, cx)
+                .placeholder(t!("branch.placeholder.remote_name").to_string());
             state.set_value(value, window, cx);
             state
         });
@@ -2920,13 +3029,15 @@ impl RepoView {
         self.branches.set_viewport(window.viewport_size());
         let fetch_value = remote.fetch_url.clone().unwrap_or_default();
         let fetch = cx.new(|cx| {
-            let mut state = InputState::new(window, cx).placeholder("fetch URL");
+            let mut state = InputState::new(window, cx)
+                .placeholder(t!("branch.placeholder.fetch_url").to_string());
             state.set_value(fetch_value, window, cx);
             state
         });
         let push = remote.push_url.clone().map(|value| {
             cx.new(|cx| {
-                let mut state = InputState::new(window, cx).placeholder("push URL");
+                let mut state = InputState::new(window, cx)
+                    .placeholder(t!("branch.placeholder.push_url").to_string());
                 state.set_value(value, window, cx);
                 state
             })
@@ -2953,10 +3064,10 @@ impl RepoView {
             window,
             cx,
             crate::ui::Confirm::new(
-                format!("Remove remote {name}?"),
-                "Its remote-tracking branches are removed too. The branches on the server stay.",
+                t!("branch.confirm.remove_remote", name = name).to_string(),
+                t!("branch.confirm.remove_remote_detail").to_string(),
             )
-            .ok_label("Remove remote"),
+            .ok_label(t!("branch.confirm.remove_remote_button").to_string()),
             move |window, cx| {
                 let name = name.clone();
                 let _ = entity.update(cx, |view, cx| view.remove_remote(name, window, cx));
@@ -2970,7 +3081,7 @@ impl RepoView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let label = format!("remove remote {name}");
+        let label = t!("branch.op.remove_remote", name = name).to_string();
         self.run_operation(Operation::RemoveRemote { name }, label, window, cx);
     }
 
@@ -2981,7 +3092,7 @@ impl RepoView {
         cx: &mut Context<Self>,
     ) {
         let prune = crate::settings::Settings::get(cx).behaviour.prune_on_fetch;
-        let label = format!("fetch {name}");
+        let label = t!("branch.op.fetch", name = name).to_string();
         self.run_operation(
             Operation::Fetch {
                 remote: Some(name),
@@ -2999,7 +3110,7 @@ impl RepoView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let label = format!("unset upstream of {branch}");
+        let label = t!("branch.op.unset_upstream", branch = branch).to_string();
         self.run_operation(Operation::UnsetBranchUpstream { branch }, label, window, cx);
     }
 
@@ -3059,7 +3170,7 @@ pub(crate) fn checkout_remote(
     cx: &mut Context<RepoView>,
 ) {
     if existing {
-        let label = format!("check out {local}");
+        let label = t!("branch.op.checkout", branch = local).to_string();
         view.run_operation(
             Operation::Checkout {
                 branch: local.to_owned(),
@@ -3069,7 +3180,12 @@ pub(crate) fn checkout_remote(
             cx,
         );
     } else {
-        let label = format!("create branch {local} from {remote}");
+        let label = t!(
+            "branch.op.create_from_remote",
+            local = local,
+            remote = remote
+        )
+        .to_string();
         view.run_operation(
             Operation::CreateBranch {
                 name: local.to_owned(),
@@ -3298,7 +3414,7 @@ fn create_card(
             div()
                 .text_size(px(13.0))
                 .font_weight(FontWeight::SEMIBOLD)
-                .child("Create branch"),
+                .child(t!("branch.dialog.create").to_string()),
         )
         .child(
             div()
@@ -3310,7 +3426,7 @@ fn create_card(
         .child(
             Checkbox::new("branch-create-checkout")
                 .checked(form.checkout)
-                .label("Check out after creating")
+                .label(t!("branch.dialog.checkout_after").to_string())
                 .on_change(toggle),
         );
     if let Some(error) = &form.error {
@@ -3328,12 +3444,12 @@ fn create_card(
             .gap_2()
             .pt_1()
             .child(
-                crate::ui::button("branch-create-cancel", "Cancel")
+                crate::ui::button("branch-create-cancel", t!("common.cancel").to_string())
                     .size(crate::ui::ButtonSize::Medium)
                     .on_click(cancel),
             )
             .child(
-                crate::ui::button("branch-create-ok", "Create branch")
+                crate::ui::button("branch-create-ok", t!("branch.dialog.create").to_string())
                     .size(crate::ui::ButtonSize::Medium)
                     .on_click(confirm),
             ),
@@ -3381,7 +3497,7 @@ fn dialog_card(colors: &Colors, entity: &Entity<RepoView>, focus: Option<&FocusH
 fn dialog_buttons(
     entity: &Entity<RepoView>,
     ok_id: &'static str,
-    ok_label: &'static str,
+    ok_label: impl Into<gpui::SharedString>,
     enabled: bool,
 ) -> Div {
     let confirm = {
@@ -3406,7 +3522,7 @@ fn dialog_buttons(
         .gap_2()
         .pt_1()
         .child(
-            crate::ui::button("branch-dialog-cancel", "Cancel")
+            crate::ui::button("branch-dialog-cancel", t!("common.cancel").to_string())
                 .size(crate::ui::ButtonSize::Medium)
                 .on_click(cancel),
         )
@@ -3440,7 +3556,7 @@ fn rename_card(
             div()
                 .text_size(px(13.0))
                 .font_weight(FontWeight::SEMIBOLD)
-                .child("Rename branch"),
+                .child(t!("branch.dialog.rename").to_string()),
         )
         .child(
             div()
@@ -3462,7 +3578,7 @@ fn rename_card(
                     .child(
                         Checkbox::new("branch-rename-remote")
                             .checked(form.rename_remote)
-                            .label("Rename the branch on the remote too")
+                            .label(t!("branch.dialog.rename_remote_too").to_string())
                             .on_change(toggle),
                     )
                     .child(
@@ -3481,7 +3597,7 @@ fn rename_card(
                 div()
                     .text_size(px(11.0))
                     .text_color(colors.muted_foreground)
-                    .child("This branch has no upstream."),
+                    .child(t!("branch.dialog.no_upstream").to_string()),
             );
         }
     }
@@ -3496,7 +3612,7 @@ fn rename_card(
     card.child(dialog_buttons(
         entity,
         "branch-rename-ok",
-        "Rename branch",
+        t!("branch.dialog.rename").to_string(),
         true,
     ))
     .into_any_element()
@@ -3513,7 +3629,7 @@ fn upstream_card(
             div()
                 .text_size(px(13.0))
                 .font_weight(FontWeight::SEMIBOLD)
-                .child("Set upstream"),
+                .child(t!("branch.dialog.set_upstream").to_string()),
         )
         .child(
             div()
@@ -3530,7 +3646,7 @@ fn upstream_card(
             div()
                 .text_size(px(11.0))
                 .text_color(colors.muted_foreground)
-                .child("No remote branches. Fetch a remote first."),
+                .child(t!("branch.dialog.no_remote_branches").to_string()),
         );
     } else {
         let rows = form
@@ -3586,7 +3702,7 @@ fn upstream_card(
     card.child(dialog_buttons(
         entity,
         "branch-upstream-ok",
-        "Set upstream",
+        t!("branch.dialog.set_upstream").to_string(),
         form.selected.is_some(),
     ))
     .into_any_element()
@@ -3613,32 +3729,32 @@ fn add_remote_card(
             div()
                 .text_size(px(13.0))
                 .font_weight(FontWeight::SEMIBOLD)
-                .child("Add remote"),
+                .child(t!("branch.dialog.add_remote").to_string()),
         )
         .child(
             div()
                 .text_size(px(11.0))
                 .text_color(colors.muted_foreground)
-                .child("A remote is a name for a repository URL."),
+                .child(t!("branch.dialog.add_remote_detail").to_string()),
         )
         .child(
             div()
                 .text_size(px(11.0))
                 .font_weight(FontWeight::MEDIUM)
-                .child("Name"),
+                .child(t!("branch.dialog.name").to_string()),
         )
         .child(Input::new(&form.name).w_full())
         .child(
             div()
                 .text_size(px(11.0))
                 .font_weight(FontWeight::MEDIUM)
-                .child("URL"),
+                .child(t!("branch.dialog.url").to_string()),
         )
         .child(Input::new(&form.url).w_full())
         .child(
             Checkbox::new("remote-add-fetch")
                 .checked(form.fetch)
-                .label("Fetch it now")
+                .label(t!("branch.dialog.fetch_now").to_string())
                 .on_change(toggle),
         );
     if let Some(error) = &form.error {
@@ -3649,8 +3765,13 @@ fn add_remote_card(
                 .child(error.clone()),
         );
     }
-    card.child(dialog_buttons(entity, "remote-add-ok", "Add remote", true))
-        .into_any_element()
+    card.child(dialog_buttons(
+        entity,
+        "remote-add-ok",
+        t!("branch.dialog.add_remote").to_string(),
+        true,
+    ))
+    .into_any_element()
 }
 
 fn rename_remote_card(
@@ -3664,16 +3785,13 @@ fn rename_remote_card(
             div()
                 .text_size(px(13.0))
                 .font_weight(FontWeight::SEMIBOLD)
-                .child("Rename remote"),
+                .child(t!("branch.dialog.rename_remote").to_string()),
         )
         .child(
             div()
                 .text_size(px(11.0))
                 .text_color(colors.muted_foreground)
-                .child(format!(
-                    "Renaming {}. Its URLs and remote-tracking branches follow the new name.",
-                    form.name
-                )),
+                .child(t!("branch.dialog.renaming_remote", name = form.name).to_string()),
         )
         .child(Input::new(&form.input).w_full());
     if let Some(error) = &form.error {
@@ -3687,7 +3805,7 @@ fn rename_remote_card(
     card.child(dialog_buttons(
         entity,
         "remote-rename-ok",
-        "Rename remote",
+        t!("branch.dialog.rename_remote").to_string(),
         true,
     ))
     .into_any_element()
@@ -3710,7 +3828,7 @@ fn edit_remote_card(
             div()
                 .text_size(px(11.0))
                 .font_weight(FontWeight::MEDIUM)
-                .child("Fetch URL"),
+                .child(t!("branch.dialog.fetch_url").to_string()),
         )
         .child(Input::new(&form.fetch).w_full());
     match &form.push {
@@ -3720,7 +3838,7 @@ fn edit_remote_card(
                     div()
                         .text_size(px(11.0))
                         .font_weight(FontWeight::MEDIUM)
-                        .child("Push URL"),
+                        .child(t!("branch.dialog.push_url").to_string()),
                 )
                 .child(Input::new(push).w_full());
         }
@@ -3729,7 +3847,7 @@ fn edit_remote_card(
                 div()
                     .text_size(px(11.0))
                     .text_color(colors.muted_foreground)
-                    .child("Pushes use the fetch URL."),
+                    .child(t!("branch.dialog.push_uses_fetch").to_string()),
             );
         }
     }
@@ -3741,8 +3859,13 @@ fn edit_remote_card(
                 .child(error.clone()),
         );
     }
-    card.child(dialog_buttons(entity, "remote-url-ok", "Save URL", true))
-        .into_any_element()
+    card.child(dialog_buttons(
+        entity,
+        "remote-url-ok",
+        t!("branch.dialog.save_url").to_string(),
+        true,
+    ))
+    .into_any_element()
 }
 
 /// Offers the force form of an operation git refused.
@@ -3763,15 +3886,15 @@ pub(crate) fn offer_force(entity: Entity<RepoView>, retry: Retry, cx: &mut App) 
     let _ = handle.update(cx, |_, window, cx| {
         let confirm = match &retry {
             Retry::DeleteBranch { name, .. } => crate::ui::Confirm::new(
-                format!("Delete branch {name}?"),
-                "The branch is not fully merged. Forcing the delete loses the commits it points at.",
+                t!("history.delete_branch", name = name).to_string(),
+                t!("branch.confirm.force_delete_detail").to_string(),
             )
-            .ok_label("Force delete"),
+            .ok_label(t!("branch.confirm.force_delete").to_string()),
             Retry::RemoveWorktree { path, .. } => crate::ui::Confirm::new(
-                format!("Remove worktree {}?", worktree_name(path)),
-                "The worktree has modified or untracked files. Forcing the removal deletes them.",
+                t!("branch.confirm.remove_worktree", path = worktree_name(path)).to_string(),
+                t!("branch.confirm.remove_worktree_detail").to_string(),
             )
-            .ok_label("Force remove"),
+            .ok_label(t!("branch.confirm.force_remove").to_string()),
         }
         .always_ask();
         crate::ui::confirm(window, cx, confirm, move |window, cx| {
@@ -3790,44 +3913,44 @@ pub(crate) fn worktree_name(path: &Path) -> String {
 
 /// `git check-ref-format` rules that apply to `refs/heads/<name>`, plus the one
 /// rule the CLI enforces by accident: a leading `-` would parse as an option.
-pub(crate) fn validate_branch_name(name: &str) -> Result<(), &'static str> {
+pub(crate) fn validate_branch_name(name: &str) -> Result<(), String> {
     if name.is_empty() {
-        return Err("Enter a branch name.");
+        return Err(t!("branch.validation.name_required").to_string());
     }
     if name == "@" {
-        return Err("'@' is shorthand for HEAD, not a branch name.");
+        return Err(t!("branch.validation.name_shorthand").to_string());
     }
     if name.starts_with('-') {
-        return Err("A branch name must not start with '-'.");
+        return Err(t!("branch.validation.leading_dash").to_string());
     }
     if name.starts_with('/') || name.ends_with('/') {
-        return Err("A branch name must not start or end with '/'.");
+        return Err(t!("branch.validation.slash_edges").to_string());
     }
     if name.contains("//") {
-        return Err("A branch name must not contain '//'.");
+        return Err(t!("branch.validation.double_slash").to_string());
     }
     if name.contains("..") {
-        return Err("A branch name must not contain '..'.");
+        return Err(t!("branch.validation.dot_dot").to_string());
     }
     if name.contains("@{") {
-        return Err("A branch name must not contain '@{'.");
+        return Err(t!("branch.validation.at_brace").to_string());
     }
     if name
         .chars()
         .any(|character| character.is_whitespace() || character.is_control())
     {
-        return Err("A branch name must not contain spaces or control characters.");
+        return Err(t!("branch.validation.control").to_string());
     }
     if name.contains(['~', '^', ':', '?', '*', '[', '\\']) {
-        return Err("A branch name must not contain any of ~ ^ : ? * [ \\.");
+        return Err(t!("branch.validation.specials").to_string());
     }
     if name.ends_with('.') {
-        return Err("A branch name must not end with '.'.");
+        return Err(t!("branch.validation.trailing_dot").to_string());
     }
     if name.split('/').any(|part| {
         part.is_empty() || part.starts_with('.') || part.ends_with('.') || part.ends_with(".lock")
     }) {
-        return Err("Each part must not start with '.' or end with '.' or '.lock'.");
+        return Err(t!("branch.validation.remote_part").to_string());
     }
     Ok(())
 }
@@ -3839,55 +3962,55 @@ pub(crate) fn validate_branch_name(name: &str) -> Result<(), &'static str> {
 /// the message naming a remote instead. Unlike a branch, a remote name may
 /// contain `/` (git stores the tracking refs below it), so parts are only
 /// checked for the forbidden forms.
-pub(crate) fn validate_remote_name(name: &str) -> Result<(), &'static str> {
+pub(crate) fn validate_remote_name(name: &str) -> Result<(), String> {
     let name = name.trim();
     if name.is_empty() {
-        return Err("Enter a name for the remote.");
+        return Err(t!("branch.validation.remote_required").to_string());
     }
     if name.starts_with('-') {
-        return Err("A remote name must not start with '-'.");
+        return Err(t!("branch.validation.remote_leading_dash").to_string());
     }
     if name.starts_with('/') || name.ends_with('/') {
-        return Err("A remote name must not start or end with '/'.");
+        return Err(t!("branch.validation.remote_slash_edges").to_string());
     }
     if name.contains("//") {
-        return Err("A remote name must not contain '//'.");
+        return Err(t!("branch.validation.remote_double_slash").to_string());
     }
     if name.contains("..") {
-        return Err("A remote name must not contain '..'.");
+        return Err(t!("branch.validation.remote_dot_dot").to_string());
     }
     if name.contains("@{") {
-        return Err("A remote name must not contain '@{'.");
+        return Err(t!("branch.validation.remote_at_brace").to_string());
     }
     if name
         .chars()
         .any(|character| character.is_whitespace() || character.is_control())
     {
-        return Err("A remote name must not contain spaces or control characters.");
+        return Err(t!("branch.validation.remote_control").to_string());
     }
     if name.contains(['~', '^', ':', '?', '*', '[', '\\']) {
-        return Err("A remote name must not contain any of ~ ^ : ? * [ \\.");
+        return Err(t!("branch.validation.remote_specials").to_string());
     }
     if name.ends_with('.') {
-        return Err("A remote name must not end with '.'.");
+        return Err(t!("branch.validation.remote_trailing_dot").to_string());
     }
     if name.split('/').any(|part| {
         part.is_empty() || part.starts_with('.') || part.ends_with('.') || part.ends_with(".lock")
     }) {
-        return Err("Each part must not start with '.' or end with '.' or '.lock'.");
+        return Err(t!("branch.validation.remote_part").to_string());
     }
     Ok(())
 }
 
 /// The URL a remote command receives: non-empty, and not something git would
 /// read as an option.
-pub(crate) fn validate_remote_url(url: &str) -> Result<&str, &'static str> {
+pub(crate) fn validate_remote_url(url: &str) -> Result<&str, String> {
     let url = url.trim();
     if url.is_empty() {
-        return Err("Enter a URL for the remote.");
+        return Err(t!("branch.validation.url_required").to_string());
     }
     if url.starts_with('-') {
-        return Err("A URL must not start with '-'.");
+        return Err(t!("branch.validation.url_leading_dash").to_string());
     }
     Ok(url)
 }
@@ -3896,31 +4019,28 @@ pub(crate) fn validate_remote_url(url: &str) -> Result<&str, &'static str> {
 /// `gone`, or nothing when the branch is level with its upstream.
 pub(crate) fn upstream_label(upstream: &UpstreamInfo) -> Option<String> {
     if upstream.gone {
-        return Some("gone".to_owned());
+        return Some(t!("branch.upstream.gone").to_string().to_owned());
     }
     let (Some(ahead), Some(behind)) = (upstream.ahead, upstream.behind) else {
         return Some("?".to_owned());
     };
     let mut label = String::new();
     if ahead > 0 {
-        label.push_str(&format!("↑{ahead}"));
+        label.push_str(&t!("branch.upstream.ahead", count = ahead));
     }
     if behind > 0 {
         if !label.is_empty() {
             label.push(' ');
         }
-        label.push_str(&format!("↓{behind}"));
+        label.push_str(&t!("branch.upstream.behind", count = behind));
     }
     (!label.is_empty()).then_some(label)
 }
 
-/// Tooltip text explaining a `?` upstream label.
-pub(crate) const UPSTREAM_UNKNOWN_TOOLTIP: &str = "Counts unavailable: history is shallow";
-
 /// Why an upstream label is `?`, when it is.
-pub(crate) fn upstream_note(upstream: &UpstreamInfo) -> Option<&'static str> {
+pub(crate) fn upstream_note(upstream: &UpstreamInfo) -> Option<String> {
     (!upstream.gone && (upstream.ahead.is_none() || upstream.behind.is_none()))
-        .then_some(UPSTREAM_UNKNOWN_TOOLTIP)
+        .then(|| t!("branch.upstream.shallow").to_string())
 }
 
 /// `origin/feature/login` -> `feature/login`. The remote name is the first path
@@ -4057,7 +4177,7 @@ mod tests {
         let unknown = unknown_upstream("origin/main");
         assert_eq!(upstream_label(&unknown).as_deref(), Some("?"));
         assert_eq!(
-            upstream_note(&unknown),
+            upstream_note(&unknown).as_deref(),
             Some("Counts unavailable: history is shallow")
         );
         assert_eq!(
@@ -4691,7 +4811,7 @@ mod tests {
                     open: true,
                 },
                 SidebarItem::Placeholder {
-                    text: "no remotes",
+                    text: "no remotes".to_string(),
                     place: PlaceholderPlace::Section(Section::Remote),
                 },
                 SidebarItem::SectionHeader {
@@ -4700,7 +4820,7 @@ mod tests {
                     open: true,
                 },
                 SidebarItem::Placeholder {
-                    text: "no tags",
+                    text: "no tags".to_string(),
                     place: PlaceholderPlace::Section(Section::Tags),
                 },
                 SidebarItem::SectionHeader {
@@ -4709,7 +4829,7 @@ mod tests {
                     open: true,
                 },
                 SidebarItem::Placeholder {
-                    text: "no stashes",
+                    text: "no stashes".to_string(),
                     place: PlaceholderPlace::Section(Section::Stashes),
                 },
             ]
@@ -4835,7 +4955,7 @@ mod tests {
                     collapsed: false,
                 },
                 &SidebarItem::Placeholder {
-                    text: "no branches fetched yet",
+                    text: "no branches fetched yet".to_string(),
                     place: PlaceholderPlace::Remote("backup".into()),
                 },
                 &SidebarItem::RemoteGroup {
@@ -5150,15 +5270,21 @@ mod tests {
             "an up-to-date checkout needs no label"
         );
         assert_eq!(
-            submodule_badge(SubmoduleStatus::Uninitialised).map(|(label, _)| label),
+            submodule_badge(SubmoduleStatus::Uninitialised)
+                .map(|(label, _)| label)
+                .as_deref(),
             Some("not initialised")
         );
         assert_eq!(
-            submodule_badge(SubmoduleStatus::CommitDiffers).map(|(label, _)| label),
+            submodule_badge(SubmoduleStatus::CommitDiffers)
+                .map(|(label, _)| label)
+                .as_deref(),
             Some("changed")
         );
         assert_eq!(
-            submodule_badge(SubmoduleStatus::Modified).map(|(label, _)| label),
+            submodule_badge(SubmoduleStatus::Modified)
+                .map(|(label, _)| label)
+                .as_deref(),
             Some("modified")
         );
     }

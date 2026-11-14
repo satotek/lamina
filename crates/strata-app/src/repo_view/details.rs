@@ -171,10 +171,9 @@ impl RepoView {
                     )
                     .when(!parents.is_empty(), |row| {
                         row.child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .child(format!("parent {}", parents.join(" · "))),
+                            div().min_w_0().truncate().child(
+                                t!("history.parent", parents = parents.join(" · ")).to_string(),
+                            ),
                         )
                     }),
             );
@@ -201,7 +200,7 @@ impl RepoView {
                 div()
                     .text_size(px(11.0))
                     .text_color(design.muted)
-                    .child("synthetic diff"),
+                    .child(t!("history.synthetic_diff").to_string()),
             );
         } else if self.session.is_some() {
             if commit.is_some_and(|commit| commit.shallow_boundary) {
@@ -217,21 +216,24 @@ impl RepoView {
                                 .min_w_0()
                                 .text_size(px(11.0))
                                 .text_color(design.muted)
-                                .child("Shallow clone: earlier history was not fetched"),
+                                .child(t!("history.shallow_note").to_string()),
                         )
                         .child(
-                            crate::ui::button("fetch-full-history", "Fetch full history")
-                                .size(crate::ui::ButtonSize::Small)
-                                .on_click(move |_, _window, cx| {
-                                    entity.update(cx, |this, cx| this.fetch_full_history(cx));
-                                }),
+                            crate::ui::button(
+                                "fetch-full-history",
+                                t!("history.fetch_full").to_string(),
+                            )
+                            .size(crate::ui::ButtonSize::Small)
+                            .on_click(move |_, _window, cx| {
+                                entity.update(cx, |this, cx| this.fetch_full_history(cx));
+                            }),
                         ),
                 );
             }
             let entity = self.entity();
             block = block.child(
                 div().flex().items_center().gap_2().child(
-                    crate::ui::button("browse-files", "Browse files")
+                    crate::ui::button("browse-files", t!("history.browse_files").to_string())
                         .icon(IconName::Folder)
                         .size(crate::ui::ButtonSize::Small)
                         .on_click(move |_, window, cx| {
@@ -286,7 +288,7 @@ impl RepoView {
                 div()
                     .font_weight(FontWeight::SEMIBOLD)
                     .line_height(gpui::relative(1.35))
-                    .child(format!("{} commits selected", summary.count)),
+                    .child(t!("history.commits_selected", count = summary.count).to_string()),
             )
             .child(
                 div()
@@ -306,7 +308,7 @@ impl RepoView {
                 div()
                     .text_size(px(11.0))
                     .text_color(design.muted)
-                    .child("Right-click the selection to cherry-pick it onto this branch."),
+                    .child(t!("history.cherry_pick_hint").to_string()),
             )
             .into_any_element()
     }
@@ -330,7 +332,7 @@ impl RepoView {
                     div()
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(design.muted)
-                        .child("0 files"),
+                        .child(t!("history.files_changed.other", count = 0).to_string()),
                 )
                 .into_any_element();
         }
@@ -338,7 +340,11 @@ impl RepoView {
             div()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(design.muted)
-                .child(format!("{files} file{}", if files == 1 { "" } else { "s" })),
+                .child(if files == 1 {
+                    t!("history.files_changed.one", count = files).to_string()
+                } else {
+                    t!("history.files_changed.other", count = files).to_string()
+                }),
         );
         if let Some((added, removed)) = self
             .stat
@@ -478,26 +484,31 @@ impl RepoView {
                             );
                             let entity = menu_entity.clone();
                             let path = menu_path.clone();
-                            menu = menu.item(PopupMenuItem::new("Show file history").on_click(
-                                move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                                    let path = path.clone();
-                                    entity.update(cx, |this, cx| {
-                                        this.open_file_history(path, window, cx);
-                                    });
-                                },
-                            ));
+                            menu = menu.item(
+                                PopupMenuItem::new(t!("history.show_file_history").to_string())
+                                    .on_click(
+                                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                                            let path = path.clone();
+                                            entity.update(cx, |this, cx| {
+                                                this.open_file_history(path, window, cx);
+                                            });
+                                        },
+                                    ),
+                            );
                             if let Some(commit) = blame_commit {
                                 let entity = menu_entity.clone();
                                 let path = menu_path.clone();
-                                menu =
-                                    menu.item(PopupMenuItem::new("Blame at this commit").on_click(
+                                menu = menu.item(
+                                    PopupMenuItem::new(t!("history.blame_at_commit").to_string())
+                                        .on_click(
                                         move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                                             let path = path.clone();
                                             entity.update(cx, |this, cx| {
                                                 this.open_blame(commit, path, window, cx);
                                             });
                                         },
-                                    ));
+                                    ),
+                                );
                                 if let Some(item) = crate::github::file_item(
                                     &menu_entity,
                                     commit,
@@ -550,13 +561,14 @@ pub(super) fn in_working_tree(root: Option<&Path>, path: &str) -> bool {
 
 /// The editor entry's label. The editor opens the working copy, so a commit
 /// other than HEAD says so, and a missing path names the reason it is disabled.
-fn editor_entry_label(at_head: bool, in_working_tree: bool) -> &'static str {
+fn editor_entry_label(at_head: bool, in_working_tree: bool) -> String {
     match (at_head, in_working_tree) {
-        (true, true) => "Open in Editor",
-        (true, false) => "Open in Editor (not in working tree)",
-        (false, true) => "Open Working Copy in Editor",
-        (false, false) => "Open Working Copy in Editor (not in working tree)",
+        (true, true) => t!("history.open_in_editor"),
+        (true, false) => t!("history.open_in_editor_missing"),
+        (false, true) => t!("history.open_working_copy"),
+        (false, false) => t!("history.open_working_copy_missing"),
     }
+    .to_string()
 }
 
 /// The counts one changed file shows, or "bin" when git reports it as binary.
@@ -566,7 +578,7 @@ pub(super) fn file_stat_label(file: &FileStat, design: &Design) -> AnyElement {
             .flex_none()
             .text_size(px(10.5))
             .text_color(design.muted)
-            .child("bin")
+            .child(t!("history.binary").to_string())
             .into_any_element();
     }
     let mut label = div().flex().flex_none().gap_1().text_size(px(10.5));

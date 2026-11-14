@@ -70,7 +70,7 @@ pub(crate) fn remote_for(view: &RepoView, cx: &App) -> Option<GitHubRemote> {
     None
 }
 
-/// "Open on GitHub" for a commit.
+/// t!("github.open_on_github").to_string() for a commit.
 pub(crate) fn commit_item(
     entity: &Entity<RepoView>,
     commit: Oid,
@@ -80,7 +80,7 @@ pub(crate) fn commit_item(
     Some(open_item(remote.commit_url(&commit.to_string())))
 }
 
-/// "Open on GitHub" for a file at a commit, optionally highlighting a line
+/// t!("github.open_on_github").to_string() for a file at a commit, optionally highlighting a line
 /// range.
 pub(crate) fn file_item(
     entity: &Entity<RepoView>,
@@ -119,7 +119,7 @@ pub(crate) fn branch_items(
     })
 }
 
-/// "Open on GitHub" for a remote-tracking branch, using its branch name on the
+/// t!("github.open_on_github").to_string() for a remote-tracking branch, using its branch name on the
 /// remote rather than the `origin/` prefix.
 pub(crate) fn remote_branch_item(
     entity: &Entity<RepoView>,
@@ -171,7 +171,7 @@ pub(crate) fn with_create_pr(
         let workdir = workdir.clone();
         let branch = branch.clone();
         Button::new("notification-create-pr")
-            .label("Create Pull Request…")
+            .label(t!("github.create_pr").to_string())
             .on_click(move |_, window, cx| {
                 create_pull_request(gh.clone(), workdir.clone(), branch.clone(), window, cx);
             })
@@ -179,7 +179,7 @@ pub(crate) fn with_create_pr(
 }
 
 fn open_item(url: String) -> PopupMenuItem {
-    PopupMenuItem::new("Open on GitHub").on_click(
+    PopupMenuItem::new(t!("github.open_on_github").to_string()).on_click(
         move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
             cx.open_with_system(std::path::Path::new(&url));
         },
@@ -190,7 +190,7 @@ fn create_pr_item(entity: &Entity<RepoView>, branch: &str, cx: &App) -> PopupMen
     let blocked = gh_blocked(cx);
     let label = match &blocked {
         Some(reason) => format!("Create Pull Request… ({reason})"),
-        None => "Create Pull Request…".to_owned(),
+        None => t!("github.create_pr").to_string().to_owned(),
     };
     let mut item = PopupMenuItem::new(label).disabled(blocked.is_some());
     if blocked.is_some() {
@@ -222,7 +222,7 @@ fn checkout_pr_item(entity: &Entity<RepoView>, remote: &GitHubRemote, cx: &App) 
     });
     let label = match &blocked {
         Some(reason) => format!("Check out Pull Request… ({reason})"),
-        None => "Check out Pull Request…".to_owned(),
+        None => t!("github.checkout_pr").to_string().to_owned(),
     };
     let mut item = PopupMenuItem::new(label).disabled(blocked.is_some());
     if blocked.is_some() {
@@ -247,10 +247,10 @@ fn gh_blocked(cx: &App) -> Option<String> {
 /// not logged in would otherwise get a list call that always fails.
 pub(crate) fn gh_for(host: &str, cx: &App) -> Result<PathBuf, String> {
     if !Settings::get(cx).tools.gh.enabled {
-        return Err("GitHub CLI integration is off".to_owned());
+        return Err(t!("github.integration_off").to_string().to_owned());
     }
     let Some(tooling) = Tooling::get(cx) else {
-        return Err("gh is not installed.".to_owned());
+        return Err(t!("github.gh_missing").to_string().to_owned());
     };
     match tooling.gh() {
         Some(gh)
@@ -262,7 +262,7 @@ pub(crate) fn gh_for(host: &str, cx: &App) -> Result<PathBuf, String> {
         {
             Ok(gh.binary.clone())
         }
-        Some(gh) if !gh.logged_in => Err("gh is not logged in: run gh auth login".to_owned()),
+        Some(gh) if !gh.logged_in => Err(t!("github.gh_not_logged_in").to_string().to_owned()),
         Some(_) => Err(format!("gh is not logged in to {host}")),
         None => Err(tooling.gh_reason()),
     }

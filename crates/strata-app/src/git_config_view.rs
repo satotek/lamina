@@ -136,7 +136,9 @@ fn open(cx: &mut App) {
     let opened = cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: Some(crate::style::window_titlebar("Strata Git Config")),
+            titlebar: Some(crate::style::window_titlebar(
+                t!("git_config.window_title").to_string(),
+            )),
             window_decorations: Some(WindowDecorations::Client),
             window_min_size: Some(size(px(MIN_WIDTH), px(MIN_HEIGHT))),
             focus: true,
@@ -195,8 +197,8 @@ impl GitConfigView {
     ) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        let input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Filter keys, values or files"));
+        let input = cx
+            .new(|cx| InputState::new(window, cx).placeholder(t!("git_config.filter").to_string()));
         let input_events = cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
             if let InputEvent::Change = event {
                 this.query = input.read(cx).value().to_string();
@@ -370,7 +372,7 @@ impl GitConfigView {
                 .footer(
                     DialogFooter::new()
                         .child(
-                            ui::button("config-editor-cancel", "Cancel")
+                            ui::button("config-editor-cancel", t!("git_config.cancel").to_string())
                                 .size(ui::ButtonSize::Medium)
                                 .on_click(move |_, window, cx| {
                                     // A preview is one step; Cancel there goes
@@ -387,25 +389,31 @@ impl GitConfigView {
                         .when(previewing, |footer| {
                             let back = state_for_back.clone();
                             footer.child(
-                                ui::button("config-editor-write", "Write")
-                                    .size(ui::ButtonSize::Medium)
-                                    .on_click(move |_, window, cx| {
-                                        back.update(cx, |dialog, cx| {
-                                            dialog.apply(window, cx);
-                                        });
-                                    }),
+                                ui::button(
+                                    "config-editor-write",
+                                    t!("git_config.write").to_string(),
+                                )
+                                .size(ui::ButtonSize::Medium)
+                                .on_click(move |_, window, cx| {
+                                    back.update(cx, |dialog, cx| {
+                                        dialog.apply(window, cx);
+                                    });
+                                }),
                             )
                         })
                         .when(!previewing, |footer| {
                             footer.child(
-                                ui::button("config-editor-preview", "Preview write")
-                                    .size(ui::ButtonSize::Medium)
-                                    .disabled(!valid)
-                                    .on_click(move |_, _, cx| {
-                                        state_for_ok.update(cx, |dialog, cx| {
-                                            dialog.preview(cx);
-                                        });
-                                    }),
+                                ui::button(
+                                    "config-editor-preview",
+                                    t!("git_config.preview_write").to_string(),
+                                )
+                                .size(ui::ButtonSize::Medium)
+                                .disabled(!valid)
+                                .on_click(move |_, _, cx| {
+                                    state_for_ok.update(cx, |dialog, cx| {
+                                        dialog.preview(cx);
+                                    });
+                                }),
                             )
                         }),
                 )
@@ -443,7 +451,11 @@ impl GitConfigView {
                             .child(style::wordmark(style::BRAND_WORDMARK, design.text)),
                     )
                     .child(div().w(px(1.0)).h(px(18.0)).mx_1().bg(design.border))
-                    .child(div().font_weight(FontWeight::SEMIBOLD).child("Git config")),
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(t!("git_config.title").to_string()),
+                    ),
             )
     }
 
@@ -466,7 +478,7 @@ impl GitConfigView {
                     .text_size(px(design.tiny()))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(design.muted)
-                    .child("IDENTITY"),
+                    .child(t!("git_config.identity").to_string()),
             )
             .children([
                 identity_row("user.name", &config.identity.name, design),
@@ -481,19 +493,21 @@ impl GitConfigView {
                     .child(
                         ui::button(
                             "identity-local-override",
-                            "Set user.email for this repository…",
+                            t!("git_config.set_local_email").to_string(),
                         )
                         .size(ui::ButtonSize::Tiny)
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_editor(
-                                "user.email".to_owned(),
-                                ConfigChange::Set(value.value.clone()),
-                                false,
-                                Some(ConfigLayer::Local),
-                                window,
-                                cx,
-                            );
-                        })),
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.open_editor(
+                                    "user.email".to_owned(),
+                                    ConfigChange::Set(value.value.clone()),
+                                    false,
+                                    Some(ConfigLayer::Local),
+                                    window,
+                                    cx,
+                                );
+                            },
+                        )),
                     )
                     .child(
                         div()
@@ -502,10 +516,10 @@ impl GitConfigView {
                             .truncate()
                             .text_size(px(design.tiny()))
                             .text_color(design.muted)
-                            .child(format!(
-                                "user.email comes from {}; a local value overrides it for this repository only.",
-                                value.origin.label()
-                            )),
+                            .child(
+                                t!("git_config.local_email_note", source = value.origin.label())
+                                    .to_string(),
+                            ),
                     ),
             );
         }
@@ -522,7 +536,7 @@ impl GitConfigView {
             .border_color(design.border)
             .child(div().flex_1().min_w_0().child(Input::new(&self.input)))
             .child(
-                ui::button("config-add-key", "Add key…")
+                ui::button("config-add-key", t!("git_config.add_key").to_string())
                     .size(ui::ButtonSize::Small)
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.open_editor(
@@ -543,7 +557,7 @@ impl GitConfigView {
                         div()
                             .text_size(px(design.small()))
                             .text_color(design.muted)
-                            .child("All keys"),
+                            .child(t!("git_config.all_keys").to_string()),
                     )
                     .child(
                         Switch::new("all-config-keys")
@@ -605,14 +619,14 @@ impl GitConfigView {
         }
         if entry.values.len() > 1 {
             row = row.child(crate::ui::status_badge(
-                format!("{} values", entry.values.len()),
+                t!("git_config.values_count", count = entry.values.len()).to_string(),
                 BadgeTone::Neutral,
                 design,
             ));
         }
         if entry.warning.is_some() {
             row = row.child(crate::ui::status_badge(
-                "invalid",
+                t!("git_config.invalid").to_string(),
                 BadgeTone::Warning,
                 design,
             ));
@@ -652,67 +666,83 @@ impl GitConfigView {
             .gap_2()
             .pl(px(150.0))
             .child(
-                ui::button(format!("config-edit-{}", entry.key), "Edit value…")
-                    .size(ui::ButtonSize::Tiny)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_editor(
-                            edit_key.clone(),
-                            ConfigChange::Set(current.clone()),
-                            false,
-                            None,
-                            window,
-                            cx,
-                        );
-                    })),
+                ui::button(
+                    format!("config-edit-{}", entry.key),
+                    t!("git_config.edit_value").to_string(),
+                )
+                .size(ui::ButtonSize::Tiny)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.open_editor(
+                        edit_key.clone(),
+                        ConfigChange::Set(current.clone()),
+                        false,
+                        None,
+                        window,
+                        cx,
+                    );
+                })),
             )
             .child(
-                ui::button(format!("config-unset-{}", entry.key), "Unset…")
-                    .kind(ui::ButtonKind::Normal)
-                    .size(ui::ButtonSize::Tiny)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_editor(key.clone(), ConfigChange::Unset, false, None, window, cx);
-                    })),
+                ui::button(
+                    format!("config-unset-{}", entry.key),
+                    t!("git_config.unset").to_string(),
+                )
+                .kind(ui::ButtonKind::Normal)
+                .size(ui::ButtonSize::Tiny)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.open_editor(key.clone(), ConfigChange::Unset, false, None, window, cx);
+                })),
             );
         if entry.multivalued {
             let key = entry.key.clone();
             actions = actions.child(
-                ui::button(format!("config-add-value-{}", entry.key), "Add value…")
-                    .kind(ui::ButtonKind::Normal)
-                    .size(ui::ButtonSize::Tiny)
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.open_editor(
-                            key.clone(),
-                            ConfigChange::Add(String::new()),
-                            false,
-                            None,
-                            window,
-                            cx,
-                        );
-                    })),
+                ui::button(
+                    format!("config-add-value-{}", entry.key),
+                    t!("git_config.add_value").to_string(),
+                )
+                .kind(ui::ButtonKind::Normal)
+                .size(ui::ButtonSize::Tiny)
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.open_editor(
+                        key.clone(),
+                        ConfigChange::Add(String::new()),
+                        false,
+                        None,
+                        window,
+                        cx,
+                    );
+                })),
             );
         }
         details = details.child(actions);
 
         for (index, value) in entry.values.iter().enumerate() {
-            let mut row =
-                value_detail(format!("{}:{index}", entry.key), "Effective", value, design);
+            let mut row = value_detail(
+                format!("{}:{index}", entry.key),
+                &t!("git_config.effective"),
+                value,
+                design,
+            );
             if entry.multivalued {
                 let key = entry.key.clone();
                 let removed = value.value.clone();
                 row = row.child(
-                    ui::button(format!("config-remove-{}-{index}", entry.key), "Remove")
-                        .kind(ui::ButtonKind::Normal)
-                        .size(ui::ButtonSize::Tiny)
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_editor(
-                                key.clone(),
-                                ConfigChange::UnsetValue(removed.clone()),
-                                false,
-                                None,
-                                window,
-                                cx,
-                            );
-                        })),
+                    ui::button(
+                        format!("config-remove-{}-{index}", entry.key),
+                        t!("git_config.remove").to_string(),
+                    )
+                    .kind(ui::ButtonKind::Normal)
+                    .size(ui::ButtonSize::Tiny)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.open_editor(
+                            key.clone(),
+                            ConfigChange::UnsetValue(removed.clone()),
+                            false,
+                            None,
+                            window,
+                            cx,
+                        );
+                    })),
                 );
             }
             details = details.child(row);
@@ -724,7 +754,7 @@ impl GitConfigView {
         for (index, value) in entry.overridden.iter().enumerate() {
             details = details.child(value_detail(
                 format!("{}:overridden:{index}", entry.key),
-                &format!("Overridden by {overridden_by}"),
+                &t!("git_config.overridden_by", by = overridden_by),
                 value,
                 design,
             ));
@@ -747,7 +777,7 @@ impl GitConfigView {
                     .text_size(px(design.tiny()))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(design.muted)
-                    .child(format!("INCLUDES ({})", config.includes.len())),
+                    .child(t!("git_config.includes", count = config.includes.len()).to_string()),
             );
         if config.includes.is_empty() {
             section = section.child(
@@ -756,7 +786,7 @@ impl GitConfigView {
                     .pb_2()
                     .text_size(px(design.tiny()))
                     .text_color(design.muted)
-                    .child("No include or includeIf directives were found."),
+                    .child(t!("git_config.no_includes").to_string()),
             );
             return section;
         }
@@ -809,7 +839,7 @@ fn identity_row(
                     .flex_1()
                     .text_size(px(design.small()))
                     .text_color(design.muted)
-                    .child("not set"),
+                    .child(t!("git_config.not_set").to_string()),
             );
         }
     }
@@ -855,14 +885,17 @@ fn value_detail(
                 .child(value.origin.label()),
         )
         .child(
-            crate::ui::button(format!("reveal-{id}"), "Reveal file")
-                .size(crate::ui::ButtonSize::Tiny)
-                .disabled(path.is_none())
-                .on_click(move |_, _, cx| {
-                    if let Some(folder) = path.as_deref().and_then(Path::parent) {
-                        cx.open_with_system(folder);
-                    }
-                }),
+            crate::ui::button(
+                format!("reveal-{id}"),
+                t!("git_config.reveal_file").to_string(),
+            )
+            .size(crate::ui::ButtonSize::Tiny)
+            .disabled(path.is_none())
+            .on_click(move |_, _, cx| {
+                if let Some(folder) = path.as_deref().and_then(Path::parent) {
+                    cx.open_with_system(folder);
+                }
+            }),
         )
 }
 
@@ -873,9 +906,9 @@ fn include_row(index: usize, include: &ConfigInclude, design: &Design) -> impl I
         BadgeTone::Neutral
     };
     let status = if include.matched {
-        "matched"
+        t!("git_config.matched").to_string()
     } else {
-        "not matched"
+        t!("git_config.not_matched").to_string()
     };
     let mut row = list_row(("config-include", index), RowState::NORMAL, design)
         .h(px(30.0))
@@ -900,7 +933,7 @@ fn include_row(index: usize, include: &ConfigInclude, design: &Design) -> impl I
                         .path
                         .as_ref()
                         .map(|path| path.display().to_string())
-                        .unwrap_or_else(|| "(unresolved)".to_owned()),
+                        .unwrap_or_else(|| t!("git_config.unresolved").to_string()),
                 ),
         )
         .child(layer_badge(include.layer, design));
@@ -910,12 +943,16 @@ fn include_row(index: usize, include: &ConfigInclude, design: &Design) -> impl I
                 .flex_none()
                 .text_size(px(design.tiny()))
                 .text_color(design.muted)
-                .child(format!("{} values", include.values)),
+                .child(t!("git_config.values_count", count = include.values).to_string()),
         );
     }
     if let Some(error) = &include.error {
         row = row
-            .child(crate::ui::status_badge("error", BadgeTone::Danger, design))
+            .child(crate::ui::status_badge(
+                t!("git_config.error").to_string(),
+                BadgeTone::Danger,
+                design,
+            ))
             .child(
                 div()
                     .flex_none()
@@ -933,7 +970,22 @@ fn layer_badge(layer: ConfigLayer, design: &Design) -> impl IntoElement {
         ConfigLayer::System => BadgeTone::Neutral,
         _ => BadgeTone::Neutral,
     };
-    crate::ui::status_badge(layer.label(), tone, design)
+    crate::ui::status_badge(layer_label(layer), tone, design)
+}
+
+/// The badge text for a layer. `ConfigLayer::label` lives in the core crate,
+/// which has no catalogue of its own, so the app maps it here.
+fn layer_label(layer: ConfigLayer) -> String {
+    match layer {
+        ConfigLayer::System => t!("git_config.layer.system"),
+        ConfigLayer::Xdg => t!("git_config.layer.xdg"),
+        ConfigLayer::Global => t!("git_config.layer.global"),
+        ConfigLayer::Local => t!("git_config.layer.local"),
+        ConfigLayer::Worktree => t!("git_config.layer.worktree"),
+        ConfigLayer::Environment => t!("git_config.layer.environment"),
+        ConfigLayer::CommandLine => t!("git_config.layer.command_line"),
+    }
+    .to_string()
 }
 
 fn line(value: &ConfigValue) -> String {
@@ -1011,7 +1063,8 @@ impl Render for GitConfigView {
             .unwrap_or_default();
 
         let content: gpui::AnyElement = if self.loading {
-            crate::ui::message("Reading git config…", design.muted, &design).into_any_element()
+            crate::ui::message(t!("git_config.reading").to_string(), design.muted, &design)
+                .into_any_element()
         } else if let Some(error) = &self.error {
             crate::ui::message(error.clone(), design.remove_text, &design).into_any_element()
         } else {
@@ -1027,9 +1080,9 @@ impl Render for GitConfigView {
                         .text_size(px(design.small()))
                         .text_color(design.muted)
                         .child(if self.all_keys {
-                            "No configuration keys match the filter."
+                            t!("git_config.no_match").to_string()
                         } else {
-                            "No well-known keys match the filter. Turn on All keys to see every key."
+                            t!("git_config.no_well_known").to_string()
                         }),
                 );
             }
@@ -1091,7 +1144,11 @@ impl Render for GitConfigView {
                                     .unwrap_or_else(|| self.repository.display().to_string()),
                             ),
                     )
-                    .child(div().flex_none().child(format!("{} keys", entries.len()))),
+                    .child(
+                        div()
+                            .flex_none()
+                            .child(t!("git_config.keys_count", count = entries.len()).to_string()),
+                    ),
             )
     }
 }
@@ -1099,7 +1156,7 @@ impl Render for GitConfigView {
 /// One file the editor can write, with the reason when it cannot.
 struct TargetChoice {
     target: ConfigTarget,
-    label: &'static str,
+    label: String,
     detail: String,
     disabled: bool,
 }
@@ -1126,10 +1183,11 @@ fn target_choices(config: &GitConfig, current: Option<&ConfigValue>) -> (Vec<Tar
             &mut seen,
             ConfigTarget::new(worktree.clone(), ConfigLayer::Worktree),
             "worktree",
-            format!(
-                "{} (enabled by extensions.worktreeConfig)",
-                worktree.display()
-            ),
+            t!(
+                "git_config.layer.worktree_detail",
+                path = worktree.display()
+            )
+            .to_string(),
         );
     }
     if let Some(global) = &files.global {
@@ -1150,8 +1208,8 @@ fn target_choices(config: &GitConfig, current: Option<&ConfigValue>) -> (Vec<Tar
             || files.system.as_deref() == Some(path.as_path())
         {
             (
-                "system",
-                format!("{} — needs administrator rights", path.display()),
+                t!("git_config.layer.system").to_string(),
+                t!("git_config.layer.system_detail", path = path.display()).to_string(),
             )
         } else if value.origin.include.is_some() {
             let condition = value
@@ -1160,9 +1218,17 @@ fn target_choices(config: &GitConfig, current: Option<&ConfigValue>) -> (Vec<Tar
                 .and_then(|index| config.includes.get(index))
                 .map(|include| include.condition.clone())
                 .unwrap_or_else(|| "include".to_owned());
-            ("include file", format!("{condition} · {}", path.display()))
+            (
+                t!("git_config.include_file").to_string(),
+                t!(
+                    "git_config.include_detail",
+                    condition = condition,
+                    path = path.display()
+                )
+                .to_string(),
+            )
         } else {
-            (value.layer.label(), path.display().to_string())
+            (layer_label(value.layer), path.display().to_string())
         };
         push_target(
             &mut choices,
@@ -1181,7 +1247,7 @@ fn target_choices(config: &GitConfig, current: Option<&ConfigValue>) -> (Vec<Tar
             &mut seen,
             ConfigTarget::new(system.clone(), ConfigLayer::System),
             "system",
-            format!("{} — needs administrator rights", system.display()),
+            t!("git_config.layer.system_detail", path = system.display()).to_string(),
         );
     }
 
@@ -1208,7 +1274,7 @@ fn push_target(
     choices: &mut Vec<TargetChoice>,
     seen: &mut HashSet<PathBuf>,
     target: ConfigTarget,
-    label: &'static str,
+    label: impl Into<String>,
     detail: String,
 ) {
     if !seen.insert(target.path.clone()) {
@@ -1217,7 +1283,7 @@ fn push_target(
     let disabled = !target.writable();
     choices.push(TargetChoice {
         target,
-        label,
+        label: label.into(),
         detail,
         disabled,
     });
@@ -1348,16 +1414,16 @@ impl ConfigEditor {
 
     fn title(&self) -> String {
         let key = if self.new_key && self.key.trim().is_empty() {
-            "new key".to_owned()
+            t!("git_config.new_key").to_string()
         } else {
             self.key.clone()
         };
         match self.kind {
-            WriteKind::Set if self.new_key => format!("Add {key}"),
-            WriteKind::Set => format!("Edit {key}"),
-            WriteKind::Add => format!("Add a value to {key}"),
-            WriteKind::Unset => format!("Unset {key}"),
-            WriteKind::UnsetValue => format!("Remove a value from {key}"),
+            WriteKind::Set if self.new_key => t!("git_config.add_key_title", key = key).to_string(),
+            WriteKind::Set => t!("git_config.edit_key_title", key = key).to_string(),
+            WriteKind::Add => t!("git_config.add_value_title", key = key).to_string(),
+            WriteKind::Unset => t!("git_config.unset_title", key = key).to_string(),
+            WriteKind::UnsetValue => t!("git_config.remove_value_title", key = key).to_string(),
         }
     }
 
@@ -1479,10 +1545,9 @@ impl ConfigEditor {
             }
             Err(error) => {
                 self.preview = None;
-                self.error = Some(format!(
-                    "{} The file was not changed; preview the write again.",
-                    error_text(error)
-                ));
+                self.error = Some(
+                    t!("git_config.not_changed_again", reason = error_text(error)).to_string(),
+                );
                 cx.notify();
             }
         }
@@ -1495,14 +1560,18 @@ impl ConfigEditor {
         }
 
         if self.new_key {
-            form = form.child(field("Key", &self.key_input, design));
+            form = form.child(field(
+                t!("git_config.key_placeholder").to_string(),
+                &self.key_input,
+                design,
+            ));
         }
 
         let mut chooser = h_flex().flex_wrap().gap_2();
         for (index, choice) in self.targets.iter().enumerate() {
             let selected = self.target == index;
             chooser = chooser.child(
-                ui::button(format!("config-target-{index}"), choice.label)
+                ui::button(format!("config-target-{index}"), choice.label.clone())
                     .kind(ui::ButtonKind::Normal)
                     .size(ui::ButtonSize::Tiny)
                     .selected(selected)
@@ -1515,7 +1584,7 @@ impl ConfigEditor {
             );
         }
         form = form
-            .child(label("Target file", design))
+            .child(label(t!("git_config.target_file").to_string(), design))
             .child(chooser)
             .child(
                 div()
@@ -1525,7 +1594,7 @@ impl ConfigEditor {
                         self.targets
                             .get(self.target)
                             .map(|choice| choice.detail.clone())
-                            .unwrap_or_else(|| "no writable file".to_owned()),
+                            .unwrap_or_else(|| t!("git_config.no_writable_file").to_string()),
                     ),
             );
 
@@ -1540,7 +1609,7 @@ impl ConfigEditor {
 
         if self.kind.needs_value() {
             let picker = self.picker_values();
-            form = form.child(label("Value", design));
+            form = form.child(label(t!("git_config.value").to_string(), design));
             if picker.is_empty() {
                 form = form.child(Input::new(&self.value_input).w_full().bg(design.field));
             } else {
@@ -1567,10 +1636,7 @@ impl ConfigEditor {
                         div()
                             .text_size(px(design.tiny()))
                             .text_color(design.remove_text)
-                            .child(format!(
-                                "`{}` is not one of the accepted values.",
-                                self.value
-                            )),
+                            .child(t!("git_config.not_accepted", value = self.value).to_string()),
                     );
                 }
             }
@@ -1579,7 +1645,7 @@ impl ConfigEditor {
         if let Some(error) = self.validation_error() {
             form = form.child(ui::banner(
                 ui::BannerKind::Warning,
-                format!("Cannot save: {error}"),
+                t!("git_config.cannot_save", error = error).to_string(),
                 design,
             ));
         } else if self.kind.needs_value()
@@ -1590,7 +1656,7 @@ impl ConfigEditor {
                 div()
                     .text_size(px(design.tiny()))
                     .text_color(design.muted)
-                    .child("An empty value is written as an empty string."),
+                    .child(t!("git_config.empty_value").to_string()),
             );
         }
 
@@ -1600,19 +1666,19 @@ impl ConfigEditor {
     fn preview_body(&self, design: &Design) -> gpui::AnyElement {
         let Some(preview) = &self.preview else {
             return v_flex()
-                .child("No preview is available.")
+                .child(t!("git_config.no_preview").to_string())
                 .into_any_element();
         };
         let mut body = v_flex().gap_2().w_full();
         body = body
-            .child(label("File", design))
+            .child(label(t!("git_config.file").to_string(), design))
             .child(
                 div()
                     .font_family(design.mono.clone())
                     .text_size(px(design.small()))
                     .child(preview.write.target.path.display().to_string()),
             )
-            .child(label("Command", design))
+            .child(label(t!("git_config.command").to_string(), design))
             .child(
                 div()
                     .w_full()
@@ -1623,14 +1689,14 @@ impl ConfigEditor {
                     .text_size(px(design.tiny()))
                     .child(preview.command.clone()),
             )
-            .child(label("Changes", design));
+            .child(label(t!("git_config.changes").to_string(), design));
 
         if !preview.changed() {
             body = body.child(
                 div()
                     .text_size(px(design.small()))
                     .text_color(design.muted)
-                    .child("The command would not change this file."),
+                    .child(t!("git_config.no_change").to_string()),
             );
             return body.into_any_element();
         }
@@ -1684,16 +1750,20 @@ fn error_text(error: strata_core::Error) -> String {
     }
 }
 
-fn label(text: &'static str, design: &Design) -> impl IntoElement {
+fn label(text: impl Into<gpui::SharedString>, design: &Design) -> impl IntoElement {
     div()
         .text_size(px(design.tiny()))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(design.muted)
-        .child(text)
+        .child(text.into())
 }
 
 /// A labelled text field, the same two-line shape the clone dialogs draw.
-fn field(text: &'static str, input: &Entity<InputState>, design: &Design) -> impl IntoElement {
+fn field(
+    text: impl Into<gpui::SharedString>,
+    input: &Entity<InputState>,
+    design: &Design,
+) -> impl IntoElement {
     v_flex()
         .gap_1()
         .w_full()
@@ -1827,7 +1897,7 @@ mod tests {
         assert_eq!(
             choices
                 .iter()
-                .map(|choice| choice.label)
+                .map(|choice| choice.label.clone())
                 .collect::<Vec<_>>(),
             ["local", "worktree", "global", "system"]
         );

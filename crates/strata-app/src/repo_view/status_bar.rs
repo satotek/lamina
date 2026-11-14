@@ -12,7 +12,7 @@ impl RepoView {
         let command = self
             .last_command
             .clone()
-            .unwrap_or_else(|| "no git commands yet".to_owned());
+            .unwrap_or_else(|| t!("status.no_commands").to_string());
         // The status line is one row; a command with hundreds of path
         // arguments would otherwise build a string many screens wide. The
         // truncation counts display columns, so a Japanese path is not cut
@@ -81,7 +81,7 @@ impl RepoView {
                 .child(
                     error
                         .or(note)
-                        .unwrap_or_else(|| "Watching for changes".to_owned()),
+                        .unwrap_or_else(|| t!("status.watching").to_string()),
                 ),
         )
         .into_any_element()

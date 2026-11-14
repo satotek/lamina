@@ -235,9 +235,11 @@ fn banner_state(
     let tooltip = details.map(|details| format_banner_tooltip(details, conflicts));
     let can_continue = (state != RepoState::Bisecting).then_some(conflicts == 0 && !busy);
     let continue_tooltip = match (can_continue, conflicts, busy) {
-        (Some(false), 1, _) => Some("1 conflict left to resolve".to_owned()),
-        (Some(false), count, _) if count > 1 => Some(format!("{count} conflicts left to resolve")),
-        (Some(false), _, _) => Some("An operation is already running".to_owned()),
+        (Some(false), 1, _) => Some(t!("progress.conflicts_left.one", count = 1).to_string()),
+        (Some(false), count, _) if count > 1 => {
+            Some(t!("progress.conflicts_left.other", count = count).to_string())
+        }
+        (Some(false), _, _) => Some(t!("progress.busy").to_string()),
         _ => None,
     };
     Some(BannerState {
@@ -264,7 +266,7 @@ fn format_banner_text(
             total_steps,
             current_commit,
         }) => {
-            let mut head = String::from("Rebasing");
+            let mut head = t!("progress.rebasing").to_string();
             if let Some(branch) = branch {
                 head.push(' ');
                 head.push_str(branch);
@@ -272,53 +274,76 @@ fn format_banner_text(
             if let Some(onto) = onto {
                 match &onto.ref_name {
                     Some(ref_name) => {
-                        head.push_str(&format!(" onto {ref_name} ({})", onto.short_id));
+                        head.push_str(&t!(
+                            "progress.onto_named",
+                            name = ref_name,
+                            short = onto.short_id
+                        ));
                     }
                     None => {
-                        head.push_str(&format!(" onto {}", onto.short_id));
+                        head.push_str(&t!("progress.onto", short = onto.short_id));
                     }
                 }
             }
             let mut parts = vec![head];
             match (step, total_steps) {
-                (Some(step), Some(total)) => parts.push(format!("step {step}/{total}")),
-                (Some(step), None) => parts.push(format!("step {step}")),
+                (Some(step), Some(total)) => {
+                    parts.push(t!("progress.step_of", step = step, total = total).to_string())
+                }
+                (Some(step), None) => parts.push(t!("progress.step", step = step).to_string()),
                 _ => {}
             }
             if let Some(commit) = current_commit {
-                parts.push(format!("applying {}", format_commit_brief(commit)));
+                parts.push(
+                    t!("progress.applying", commit = format_commit_brief(commit)).to_string(),
+                );
             }
             parts
         }
         Some(InProgressDetails::Merge { heads, source }) => {
             let ids: Vec<&str> = heads.iter().map(|head| head.short_id.as_str()).collect();
             let head = match (source.as_deref(), ids.is_empty()) {
-                (Some(source), false) => format!("Merging {source} ({})", ids.join(", ")),
-                (Some(source), true) => format!("Merging {source}"),
-                (None, false) => format!("Merging {}", ids.join(", ")),
-                (None, true) => "Merging".to_owned(),
+                (Some(source), false) => t!(
+                    "progress.merging_source",
+                    source = source,
+                    ids = ids.join(", ")
+                )
+                .to_string(),
+                (Some(source), true) => {
+                    t!("progress.merging_source_only", source = source).to_string()
+                }
+                (None, false) => t!("progress.merging_ids", ids = ids.join(", ")).to_string(),
+                (None, true) => t!("progress.merging").to_string(),
             };
             vec![head]
         }
         Some(InProgressDetails::CherryPick { commit, remaining }) => {
             let head = match commit {
-                Some(commit) => format!("Cherry-picking {}", format_commit_brief(commit)),
-                None => "Cherry-picking".to_owned(),
+                Some(commit) => t!(
+                    "progress.cherry_picking_commit",
+                    commit = format_commit_brief(commit)
+                )
+                .to_string(),
+                None => t!("progress.cherry_picking").to_string(),
             };
             let mut parts = vec![head];
             if let Some(remaining) = remaining {
-                parts.push(format!("{remaining} remaining"));
+                parts.push(t!("progress.remaining", count = remaining).to_string());
             }
             parts
         }
         Some(InProgressDetails::Revert { commit, remaining }) => {
             let head = match commit {
-                Some(commit) => format!("Reverting {}", format_commit_brief(commit)),
-                None => "Reverting".to_owned(),
+                Some(commit) => t!(
+                    "progress.reverting_commit",
+                    commit = format_commit_brief(commit)
+                )
+                .to_string(),
+                None => t!("progress.reverting").to_string(),
             };
             let mut parts = vec![head];
             if let Some(remaining) = remaining {
-                parts.push(format!("{remaining} remaining"));
+                parts.push(t!("progress.remaining", count = remaining).to_string());
             }
             parts
         }
@@ -327,15 +352,17 @@ fn format_banner_text(
             bad_count,
             current_commit,
         }) => {
-            let mut parts = vec!["Bisecting".to_owned()];
+            let mut parts = vec![t!("progress.bisecting").to_string()];
             match (good_count, bad_count) {
-                (Some(good), Some(bad)) => parts.push(format!("{good} good, {bad} bad")),
-                (Some(good), None) => parts.push(format!("{good} good")),
-                (None, Some(bad)) => parts.push(format!("{bad} bad")),
+                (Some(good), Some(bad)) => {
+                    parts.push(t!("progress.good_bad", good = good, bad = bad).to_string())
+                }
+                (Some(good), None) => parts.push(t!("progress.good", good = good).to_string()),
+                (None, Some(bad)) => parts.push(t!("progress.bad", bad = bad).to_string()),
                 (None, None) => {}
             }
             if let Some(commit) = current_commit {
-                parts.push(format!("at {}", format_commit_brief(commit)));
+                parts.push(t!("progress.at", commit = format_commit_brief(commit)).to_string());
             }
             parts
         }
@@ -358,12 +385,12 @@ fn format_banner_text(
         None => {
             let name = match state {
                 RepoState::Normal => return String::new(),
-                RepoState::Merging => "Merging",
-                RepoState::Rebasing => "Rebasing",
-                RepoState::CherryPicking => "Cherry-picking",
-                RepoState::Reverting => "Reverting",
-                RepoState::ApplyingPatches => "Applying patches",
-                RepoState::Bisecting => "Bisecting",
+                RepoState::Merging => &*t!("progress.merging"),
+                RepoState::Rebasing => &*t!("progress.rebasing"),
+                RepoState::CherryPicking => &*t!("progress.cherry_picking"),
+                RepoState::Reverting => &*t!("progress.reverting"),
+                RepoState::ApplyingPatches => &*t!("progress.applying_patches"),
+                RepoState::Bisecting => &*t!("progress.bisecting"),
             };
             vec![name.to_owned()]
         }
@@ -371,8 +398,8 @@ fn format_banner_text(
 
     match conflicts {
         0 => {}
-        1 => parts.push("1 conflict to resolve".to_owned()),
-        count => parts.push(format!("{count} conflicts to resolve")),
+        1 => parts.push(t!("progress.conflict_to_resolve.one", count = 1).to_string()),
+        count => parts.push(t!("progress.conflict_to_resolve.other", count = count).to_string()),
     }
     parts.join(" · ")
 }
@@ -405,9 +432,9 @@ fn format_banner_tooltip(details: &InProgressDetails, conflicts: usize) -> Strin
             total_steps,
             current_commit,
         } => {
-            lines.push("Operation: Rebase".to_owned());
+            lines.push(t!("progress.operation.rebase").to_string());
             if let Some(branch) = branch {
-                lines.push(format!("Branch: {branch}"));
+                lines.push(t!("progress.branch", branch = branch).to_string());
             }
             if let Some(onto) = onto {
                 let hash = onto
@@ -415,44 +442,60 @@ fn format_banner_tooltip(details: &InProgressDetails, conflicts: usize) -> Strin
                     .map(|id| id.to_hex().to_string())
                     .unwrap_or_else(|| onto.short_id.clone());
                 match &onto.ref_name {
-                    Some(ref_name) => lines.push(format!("Onto: {ref_name} ({hash})")),
-                    None => lines.push(format!("Onto: {hash}")),
+                    Some(ref_name) => lines.push(
+                        t!(
+                            "progress.onto_line",
+                            target = format!("{ref_name} ({hash})")
+                        )
+                        .to_string(),
+                    ),
+                    None => lines.push(t!("progress.onto_line", target = hash).to_string()),
                 }
             }
             match (step, total_steps) {
-                (Some(step), Some(total)) => lines.push(format!("Step: {step} of {total}")),
-                (Some(step), None) => lines.push(format!("Step: {step}")),
+                (Some(step), Some(total)) => {
+                    lines.push(t!("progress.step_line", step = step, total = total).to_string())
+                }
+                (Some(step), None) => {
+                    lines.push(t!("progress.step_line_single", step = step).to_string())
+                }
                 _ => {}
             }
             if let Some(commit) = current_commit {
-                lines.push(format!("Applying: {}", format_commit_full(commit)));
+                lines.push(
+                    t!(
+                        "progress.applying_line",
+                        commit = format_commit_full(commit)
+                    )
+                    .to_string(),
+                );
             }
         }
         InProgressDetails::Merge { heads, source } => {
-            lines.push("Operation: Merge".to_owned());
+            lines.push(t!("progress.operation.merge").to_string());
             if let Some(source) = source {
-                lines.push(format!("Source: {source}"));
+                lines.push(t!("progress.source", source = source).to_string());
             }
             for head in heads {
-                lines.push(format!("Commit: {}", format_commit_full(head)));
+                lines.push(t!("progress.commit", commit = format_commit_full(head)).to_string());
             }
         }
         InProgressDetails::CherryPick { commit, remaining } => {
-            lines.push("Operation: Cherry-pick".to_owned());
+            lines.push(t!("progress.operation.cherry_pick").to_string());
             if let Some(commit) = commit {
-                lines.push(format!("Commit: {}", format_commit_full(commit)));
+                lines.push(t!("progress.commit", commit = format_commit_full(commit)).to_string());
             }
             if let Some(remaining) = remaining {
-                lines.push(format!("Remaining: {remaining}"));
+                lines.push(t!("progress.remaining_line", count = remaining).to_string());
             }
         }
         InProgressDetails::Revert { commit, remaining } => {
-            lines.push("Operation: Revert".to_owned());
+            lines.push(t!("progress.operation.revert").to_string());
             if let Some(commit) = commit {
-                lines.push(format!("Commit: {}", format_commit_full(commit)));
+                lines.push(t!("progress.commit", commit = format_commit_full(commit)).to_string());
             }
             if let Some(remaining) = remaining {
-                lines.push(format!("Remaining: {remaining}"));
+                lines.push(t!("progress.remaining_line", count = remaining).to_string());
             }
         }
         InProgressDetails::Bisect {
@@ -460,12 +503,12 @@ fn format_banner_tooltip(details: &InProgressDetails, conflicts: usize) -> Strin
             bad_count,
             current_commit,
         } => {
-            lines.push("Operation: Bisect".to_owned());
+            lines.push(t!("progress.operation.bisect").to_string());
             if let Some(good) = good_count {
-                lines.push(format!("Good: {good}"));
+                lines.push(t!("progress.good_line", count = good).to_string());
             }
             if let Some(bad) = bad_count {
-                lines.push(format!("Bad: {bad}"));
+                lines.push(t!("progress.bad_line", count = bad).to_string());
             }
             if let Some(commit) = current_commit {
                 lines.push(format!("Current: {}", format_commit_full(commit)));
@@ -476,55 +519,59 @@ fn format_banner_tooltip(details: &InProgressDetails, conflicts: usize) -> Strin
             total_steps,
             subject,
         } => {
-            lines.push("Operation: Applying patches (git am)".to_owned());
+            lines.push(t!("progress.operation.am").to_string());
             match (step, total_steps) {
-                (Some(step), Some(total)) => lines.push(format!("Patch: {step} of {total}")),
-                (Some(step), None) => lines.push(format!("Patch: {step}")),
+                (Some(step), Some(total)) => {
+                    lines.push(t!("progress.patch_line", step = step, total = total).to_string())
+                }
+                (Some(step), None) => {
+                    lines.push(t!("progress.patch_line_single", step = step).to_string())
+                }
                 _ => {}
             }
             if let Some(subject) = subject {
-                lines.push(format!("Subject: {subject}"));
+                lines.push(t!("progress.subject", subject = subject).to_string());
             }
         }
     }
     if conflicts > 0 {
-        lines.push(format!("Conflicts: {conflicts}"));
+        lines.push(t!("progress.conflicts", count = conflicts).to_string());
     }
     lines.join("\n")
 }
 
-fn abort_text(state: RepoState) -> Option<(&'static str, &'static str, &'static str)> {
+fn abort_text(state: RepoState) -> Option<(String, String, String)> {
     Some(match state {
         RepoState::Normal => return None,
         RepoState::Merging => (
-            "Abort the merge?",
-            "Git restores HEAD and the working tree from before the merge. Conflicts resolved so far are lost.",
-            "Abort merge",
+            t!("progress.abort_merge").to_string(),
+            t!("progress.abort_merge_detail").to_string(),
+            t!("progress.abort_merge_button").to_string(),
         ),
         RepoState::Rebasing => (
-            "Abort the rebase?",
-            "Git returns the branch to where it was before the rebase. Commits already replayed and conflicts resolved so far are lost.",
-            "Abort rebase",
+            t!("progress.abort_rebase").to_string(),
+            t!("progress.abort_rebase_detail").to_string(),
+            t!("progress.abort_rebase_button").to_string(),
         ),
         RepoState::CherryPicking => (
-            "Abort the cherry-pick?",
-            "Git returns the branch and working tree to before the cherry-pick. Conflicts resolved so far are lost.",
-            "Abort cherry-pick",
+            t!("progress.abort_cherry_pick").to_string(),
+            t!("progress.abort_cherry_pick_detail").to_string(),
+            t!("progress.abort_cherry_pick_button").to_string(),
         ),
         RepoState::Reverting => (
-            "Abort the revert?",
-            "Git returns the branch and working tree to before the revert. Conflicts resolved so far are lost.",
-            "Abort revert",
+            t!("progress.abort_revert").to_string(),
+            t!("progress.abort_revert_detail").to_string(),
+            t!("progress.abort_revert_button").to_string(),
         ),
         RepoState::ApplyingPatches => (
-            "Abort applying patches?",
-            "Git returns the branch and working tree to before the first patch. Conflicts resolved so far are lost.",
-            "Abort",
+            t!("progress.abort_am").to_string(),
+            t!("progress.abort_am_detail").to_string(),
+            t!("progress.abort_button").to_string(),
         ),
         RepoState::Bisecting => (
-            "Reset the bisect?",
-            "Git ends the bisect and returns to the branch it started from. The commits tested so far are forgotten.",
-            "Reset bisect",
+            t!("progress.reset_bisect_title").to_string(),
+            t!("progress.reset_bisect_detail").to_string(),
+            t!("progress.reset_bisect_button").to_string(),
         ),
     })
 }
@@ -579,17 +626,20 @@ impl RepoView {
         if state.conflicts > 0 {
             let resolve = entity.clone();
             banner = banner.action(
-                crate::ui::button("in-progress-resolve", "Resolve conflicts").on_click(
-                    move |_, window, cx| {
-                        resolve.update(cx, |this, cx| this.open_conflicts(window, cx));
-                    },
-                ),
+                crate::ui::button(
+                    "in-progress-resolve",
+                    t!("progress.resolve_conflicts").to_string(),
+                )
+                .on_click(move |_, window, cx| {
+                    resolve.update(cx, |this, cx| this.open_conflicts(window, cx));
+                }),
             );
         }
 
         if let Some(enabled) = state.can_continue {
             let mut button =
-                crate::ui::button("in-progress-continue", "Continue").disabled(!enabled);
+                crate::ui::button("in-progress-continue", t!("progress.continue").to_string())
+                    .disabled(!enabled);
             if let Some(tooltip) = state.continue_tooltip {
                 button = button.tooltip(tooltip);
             }
@@ -601,9 +651,9 @@ impl RepoView {
 
         let abort = entity;
         let label = if state.bisecting {
-            "Reset bisect"
+            t!("progress.reset_bisect_button").to_string()
         } else {
-            "Abort…"
+            t!("progress.abort_ellipsis").to_string()
         };
         banner = banner.action(
             crate::ui::button("in-progress-abort", label)
@@ -631,11 +681,11 @@ impl RepoView {
         };
         let snapshot = session.snapshot();
         let label = match snapshot.state {
-            RepoState::Merging => "continue the merge",
-            RepoState::Rebasing => "continue the rebase",
-            RepoState::CherryPicking => "continue the cherry-pick",
-            RepoState::Reverting => "continue the revert",
-            RepoState::ApplyingPatches => "continue applying patches",
+            RepoState::Merging => t!("progress.continue_merge").to_string(),
+            RepoState::Rebasing => t!("progress.continue_rebase").to_string(),
+            RepoState::CherryPicking => t!("progress.continue_cherry_pick").to_string(),
+            RepoState::Reverting => t!("progress.continue_revert").to_string(),
+            RepoState::ApplyingPatches => t!("progress.continue_am").to_string(),
             // A bisect is ended with `git bisect reset`, not continued.
             RepoState::Bisecting | RepoState::Normal => return,
         };
@@ -676,12 +726,12 @@ impl RepoView {
         };
         let label = match session.snapshot().state {
             RepoState::Normal => return,
-            RepoState::Bisecting => "reset the bisect",
-            RepoState::Merging => "abort the merge",
-            RepoState::Rebasing => "abort the rebase",
-            RepoState::CherryPicking => "abort the cherry-pick",
-            RepoState::Reverting => "abort the revert",
-            RepoState::ApplyingPatches => "abort applying patches",
+            RepoState::Bisecting => t!("progress.reset_bisect_op").to_string(),
+            RepoState::Merging => t!("progress.abort_merge_op").to_string(),
+            RepoState::Rebasing => t!("progress.abort_rebase_op").to_string(),
+            RepoState::CherryPicking => t!("progress.abort_cherry_pick_op").to_string(),
+            RepoState::Reverting => t!("progress.abort_revert_op").to_string(),
+            RepoState::ApplyingPatches => t!("progress.abort_am_op").to_string(),
         };
         self.run_operation(Operation::AbortInProgress, label, window, cx);
     }

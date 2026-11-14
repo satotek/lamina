@@ -282,7 +282,7 @@ impl SearchState {
     pub(crate) fn init_input(&mut self, window: &mut Window, cx: &mut Context<RepoView>) {
         if self.input.is_none() {
             let input = cx.new(|cx| {
-                InputState::new(window, cx).placeholder("Search commits, authors, hashes")
+                InputState::new(window, cx).placeholder(t!("title_bar.search_commits").to_string())
             });
             self._events = Some(
                 cx.subscribe(&input, |view, _input, event: &InputEvent, cx| {
@@ -294,8 +294,9 @@ impl SearchState {
             self.input = Some(input);
         }
         if self.path_input.is_none() {
-            let path_input =
-                cx.new(|cx| InputState::new(window, cx).placeholder("Path filter (optional)"));
+            let path_input = cx.new(|cx| {
+                InputState::new(window, cx).placeholder(t!("search.path_filter").to_string())
+            });
             self._path_events = Some(cx.subscribe(
                 &path_input,
                 |view, _input, event: &InputEvent, cx| {
@@ -587,29 +588,41 @@ impl SearchState {
                 .map_or(self.content_matches.len(), |rows| rows.len());
             if self.slot.is_pending() {
                 if self.content_total == 0 {
-                    return "scanning commits…".to_owned();
+                    return t!("search.scanning").to_string();
                 }
                 if matches == 0 {
-                    return format!(
-                        "{} of {} commits scanned",
-                        self.content_scanned, self.content_total
-                    );
+                    return t!(
+                        "search.scanned",
+                        scanned = self.content_scanned,
+                        total = self.content_total
+                    )
+                    .to_string();
                 }
-                return format!(
-                    "{matches} · {} of {} commits scanned",
-                    self.content_scanned, self.content_total
-                );
+                return t!(
+                    "search.matches_scanned_running",
+                    matches = matches,
+                    scanned = self.content_scanned,
+                    total = self.content_total
+                )
+                .to_string();
             }
             if self.content_total > 0 {
-                return format!("{matches} of {} commits scanned", self.content_total);
+                return t!(
+                    "search.matches_scanned",
+                    matches = matches,
+                    total = self.content_total
+                )
+                .to_string();
             }
-            return format!("{matches} of {total}");
+            return t!("search.matches_of", matches = matches, total = total).to_string();
         }
         if self.slot.is_pending() {
-            return "searching…".to_owned();
+            return t!("search.searching").to_string();
         }
         match &self.filter {
-            Some(rows) => format!("{} of {total}", rows.len()),
+            Some(rows) => {
+                t!("search.count_of_total", count = rows.len(), total = total).to_string()
+            }
             None => String::new(),
         }
     }

@@ -71,7 +71,7 @@ impl RepoView {
     fn scope_banner(&self, name: &str, cx: &mut Context<Self>, design: &Design) -> AnyElement {
         crate::ui::banner(
             crate::ui::BannerKind::Info,
-            format!("Showing {name} only"),
+            t!("sidebar.showing_only", name = name).to_string(),
             design,
         )
         .rounded(px(6.0))
@@ -81,7 +81,7 @@ impl RepoView {
         .gap_1()
         .text_size(px(design.tiny()))
         .action(
-            crate::ui::button("show-all-refs", "Show all")
+            crate::ui::button("show-all-refs", t!("sidebar.show_all").to_string())
                 .size(crate::ui::ButtonSize::Tiny)
                 .kind(crate::ui::ButtonKind::Ghost)
                 .on_click(cx.listener(|this, _, _, cx| this.show_all_refs(cx))),
@@ -115,7 +115,13 @@ impl RepoView {
                 cx.listener(|this, _: &ClickEvent, window, cx| this.open_worktree(window, cx)),
             )
             .child(icon(IconName::FileText, 15.0, design.text))
-            .child(div().flex_1().min_w_0().truncate().child("Working tree"))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(t!("sidebar.working_tree").to_string()),
+            )
             .when(changes > 0, |row| {
                 row.child(
                     div()
@@ -162,7 +168,7 @@ impl RepoView {
                     .min_w_0()
                     .truncate()
                     .when(history, |row| row.font_weight(FontWeight::MEDIUM))
-                    .child("History"),
+                    .child(t!("sidebar.history").to_string()),
             );
 
         let reflog_entry = div()
@@ -193,7 +199,7 @@ impl RepoView {
                     .min_w_0()
                     .truncate()
                     .when(reflog, |row| row.font_weight(FontWeight::MEDIUM))
-                    .child("Reflog"),
+                    .child(t!("sidebar.reflog").to_string()),
             );
 
         div()

@@ -34,14 +34,15 @@ impl Choice {
         Choice::Base,
     ];
 
-    pub(crate) fn label(self) -> &'static str {
+    pub(crate) fn label(self) -> String {
         match self {
-            Choice::Ours => "Take ours",
-            Choice::Theirs => "Take theirs",
-            Choice::OursThenTheirs => "Ours then theirs",
-            Choice::TheirsThenOurs => "Theirs then ours",
-            Choice::Base => "Take base",
+            Choice::Ours => t!("merge.choice.ours"),
+            Choice::Theirs => t!("merge.choice.theirs"),
+            Choice::OursThenTheirs => t!("merge.choice.ours_then_theirs"),
+            Choice::TheirsThenOurs => t!("merge.choice.theirs_then_ours"),
+            Choice::Base => t!("merge.choice.base"),
         }
+        .to_string()
     }
 
     /// The key that applies this choice to the selected conflict.
@@ -235,8 +236,14 @@ impl MergeModel {
 
     /// "Conflict 2 of 5", or `None` when the merge has no conflicts.
     pub(crate) fn counter(&self) -> Option<String> {
-        (self.conflicts > 0)
-            .then(|| format!("Conflict {} of {}", self.selected + 1, self.conflicts))
+        (self.conflicts > 0).then(|| {
+            t!(
+                "merge.counter",
+                index = self.selected + 1,
+                count = self.conflicts
+            )
+            .to_string()
+        })
     }
 
     /// Moves to the next conflict, wrapping around.
