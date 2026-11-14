@@ -9,6 +9,7 @@
 //! a process command line at roughly 32 KiB.
 
 mod blame;
+mod clone;
 mod command_log;
 mod history;
 mod merge;
@@ -16,6 +17,7 @@ mod ops;
 mod progress;
 mod rebase;
 
+pub use clone::{CloneOptions, CloneOutcome, clone_repository, init_repository};
 pub use command_log::{CommandLog, CommandRecord, MAX_CAPTURE_BYTES, MAX_LOG_ENTRIES, StreamLine};
 pub use history::CherryPickOutcome;
 pub use ops::{ApplyMode, CommitOptions, StashEntry};

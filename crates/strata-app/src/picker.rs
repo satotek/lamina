@@ -354,6 +354,40 @@ impl Picker {
         self.open_native_in(self.target, window, cx);
     }
 
+    /// Opens the clone dialog with this picker's target, so a clone started
+    /// from a new-tab picker lands in a new tab.
+    ///
+    /// The picker's own dialog closes first: two stacked dialogs would leave
+    /// the older one behind once the repository opens.
+    pub(crate) fn open_clone(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_creator(window, cx, |workspace, target, window, cx| {
+            crate::clone_dialog::open_clone(workspace, target, window, cx);
+        });
+    }
+
+    /// Opens the init dialog with this picker's target.
+    pub(crate) fn open_init(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_creator(window, cx, |workspace, target, window, cx| {
+            crate::clone_dialog::open_init(workspace, target, window, cx);
+        });
+    }
+
+    fn open_creator(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        open: impl FnOnce(Entity<Workspace>, OpenTarget, &mut Window, &mut App) + 'static,
+    ) {
+        let workspace = self.workspace.clone();
+        let target = self.target;
+        if self.mode == Mode::Dialog {
+            window.close_dialog(cx);
+            window.defer(cx, move |window, cx| open(workspace, target, window, cx));
+        } else {
+            open(workspace, target, window, cx);
+        }
+    }
+
     /// Opens the platform's directory chooser and opens the result in `target`.
     /// Its answer arrives on a later frame, so the picker stays as it is until then.
     pub(crate) fn open_native_in(&mut self, target: OpenTarget, window: &mut Window, cx: &mut App) {
@@ -481,6 +515,8 @@ impl Picker {
                             .gap_2()
                             .pt_1()
                             .child(open_native_button(&self.entity, self.mode))
+                            .child(clone_button(&self.entity, self.mode))
+                            .child(init_button(&self.entity, self.mode))
                             .child(path_toggle_button(&self.entity, self.mode, self.path_mode)),
                     );
         }
@@ -593,6 +629,26 @@ fn open_native_button(entity: &Entity<Picker>, mode: Mode) -> ui::UiButton {
             entity.update(cx, |picker, cx| picker.open_native(window, cx));
         },
     )
+}
+
+/// A button that starts a clone, keeping the picker's target.
+fn clone_button(entity: &Entity<Picker>, mode: Mode) -> ui::UiButton {
+    let entity = entity.clone();
+    ui::button(format!("picker-clone-{mode:?}"), "Clone repository…")
+        .kind(ui::ButtonKind::Normal)
+        .on_click(move |_, window, cx| {
+            entity.update(cx, |picker, cx| picker.open_clone(window, cx));
+        })
+}
+
+/// A button that creates a new repository, keeping the picker's target.
+fn init_button(entity: &Entity<Picker>, mode: Mode) -> ui::UiButton {
+    let entity = entity.clone();
+    ui::button(format!("picker-init-{mode:?}"), "New repository…")
+        .kind(ui::ButtonKind::Normal)
+        .on_click(move |_, window, cx| {
+            entity.update(cx, |picker, cx| picker.open_init(window, cx));
+        })
 }
 
 /// Switches the text field between filtering the list and taking a path.

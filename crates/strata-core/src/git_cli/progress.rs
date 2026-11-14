@@ -134,7 +134,7 @@ impl Git {
 /// `Writing objects: 100% (3/3), done.`, so the number directly before the first
 /// `%` is the value the UI wants. Remote-side lines keep their `remote: ` prefix,
 /// which does not affect the lookup.
-fn progress_percent(line: &str) -> Option<u8> {
+pub(super) fn progress_percent(line: &str) -> Option<u8> {
     let percent = line.find('%')?;
     let digits = &line[..percent];
     let start = digits

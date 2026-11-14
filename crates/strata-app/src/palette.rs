@@ -28,10 +28,10 @@ use gpui_component::dialog::DialogEntrance;
 use gpui_component::input::{Input, InputEvent, InputState};
 
 use crate::actions::{
-    CloseTab, NavigateBack, NewTab, NextTab, OpenInEditor, OpenRepository, OpenSettings,
-    OpenTerminalHere, PreviousTab, Quit, SelectTab1, SelectTab2, SelectTab3, SelectTab4,
-    SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9, StashChanges, ToggleFrameStats,
-    TogglePalette,
+    CloneRepository, CloseTab, NavigateBack, NewRepository, NewTab, NextTab, OpenInEditor,
+    OpenRepository, OpenSettings, OpenTerminalHere, PreviousTab, Quit, SelectTab1, SelectTab2,
+    SelectTab3, SelectTab4, SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9,
+    StashChanges, ToggleFrameStats, TogglePalette,
 };
 use crate::branches::CreateBranchFromHead;
 use crate::remote::{FetchRemotes, PullBranch, PushBranch};
@@ -108,6 +108,16 @@ const COMMANDS: &[Command] = &[
     Command {
         label: "Open in new tab…",
         action: || Box::new(NewTab),
+        needs_repo: false,
+    },
+    Command {
+        label: "Clone Repository…",
+        action: || Box::new(CloneRepository),
+        needs_repo: false,
+    },
+    Command {
+        label: "New Repository…",
+        action: || Box::new(NewRepository),
         needs_repo: false,
     },
     Command {

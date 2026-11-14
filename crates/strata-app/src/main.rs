@@ -12,6 +12,7 @@
 mod actions;
 mod autofetch;
 mod branches;
+mod clone_dialog;
 mod component_theme;
 mod conflicts;
 mod data;

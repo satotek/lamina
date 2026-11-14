@@ -26,8 +26,9 @@ use gpui_component::{Root, TitleBar, WindowExt as _};
 use strata_core::session::Session;
 
 use crate::actions::{
-    CloseTab, NewTab, NextTab, OpenRepository, PreviousTab, SelectTab1, SelectTab2, SelectTab3,
-    SelectTab4, SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9, WORKSPACE,
+    CloneRepository, CloseTab, NewRepository, NewTab, NextTab, OpenRepository, PreviousTab,
+    SelectTab1, SelectTab2, SelectTab3, SelectTab4, SelectTab5, SelectTab6, SelectTab7, SelectTab8,
+    SelectTab9, WORKSPACE,
 };
 use crate::debug_launch::{self, DebugDialog, DebugLaunch};
 use crate::picker::{Mode, OpenTarget, Picker};
@@ -926,6 +927,8 @@ impl Workspace {
         window.open_dialog(cx, move |dialog, _, _| {
             let content_picker = picker.clone();
             let footer_picker = picker.clone();
+            let clone_footer_picker = picker.clone();
+            let init_footer_picker = picker.clone();
             let new_tab_footer_picker = picker.clone();
             let confirm_picker = picker.clone();
             let footer = DialogFooter::new()
@@ -934,6 +937,24 @@ impl Workspace {
                         .size(crate::ui::ButtonSize::Medium)
                         .on_click(move |_, window, cx| {
                             footer_picker.update(cx, |picker, cx| picker.open_native(window, cx));
+                        }),
+                )
+                .child(
+                    crate::ui::button("picker-dialog-clone", "Clone repository…")
+                        .kind(crate::ui::ButtonKind::Normal)
+                        .size(crate::ui::ButtonSize::Medium)
+                        .on_click(move |_, window, cx| {
+                            clone_footer_picker
+                                .update(cx, |picker, cx| picker.open_clone(window, cx));
+                        }),
+                )
+                .child(
+                    crate::ui::button("picker-dialog-init", "New repository…")
+                        .kind(crate::ui::ButtonKind::Normal)
+                        .size(crate::ui::ButtonSize::Medium)
+                        .on_click(move |_, window, cx| {
+                            init_footer_picker
+                                .update(cx, |picker, cx| picker.open_init(window, cx));
                         }),
                 )
                 .when(target == OpenTarget::Current && has_open_repo, |footer| {
@@ -954,7 +975,7 @@ impl Workspace {
                 );
             dialog
                 .title(title)
-                .w(px(600.0))
+                .w(px(720.0))
                 .content(move |content, _, _| content.child(content_picker.clone()))
                 .footer(footer)
                 .on_ok(move |_, window, cx| {
@@ -985,6 +1006,12 @@ impl Render for Workspace {
             .key_context(WORKSPACE)
             .on_action(cx.listener(|this, _: &OpenRepository, window, cx| {
                 this.open_picker_for(OpenTarget::Current, window, cx);
+            }))
+            .on_action(cx.listener(|_, _: &CloneRepository, window, cx| {
+                crate::clone_dialog::open_clone(cx.entity(), OpenTarget::Current, window, cx);
+            }))
+            .on_action(cx.listener(|_, _: &NewRepository, window, cx| {
+                crate::clone_dialog::open_init(cx.entity(), OpenTarget::Current, window, cx);
             }))
             .on_action(cx.listener(|this, _: &NewTab, window, cx| {
                 this.open_picker_for(OpenTarget::NewTab, window, cx);
