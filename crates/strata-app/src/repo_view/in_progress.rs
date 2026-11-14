@@ -35,6 +35,7 @@ pub(crate) enum FinishedOperation {
     CherryPick,
     Revert,
     Stash,
+    Rebase,
     Continue,
     /// A job another module submitted. The session reports the id only, so this
     /// view cannot name it: today that is a pull from the title bar and the
@@ -52,6 +53,7 @@ impl FinishedOperation {
             Operation::Pull { .. } => Self::Pull,
             Operation::CherryPick { .. } | Operation::CherryPickMany { .. } => Self::CherryPick,
             Operation::Revert { .. } => Self::Revert,
+            Operation::Rebase { .. } => Self::Rebase,
             Operation::StashApply { .. } | Operation::StashPop { .. } => Self::Stash,
             Operation::ContinueInProgress => Self::Continue,
             _ => Self::Other,
@@ -918,6 +920,7 @@ mod tests {
             FinishedOperation::CherryPick,
             FinishedOperation::Revert,
             FinishedOperation::Stash,
+            FinishedOperation::Rebase,
             FinishedOperation::Continue,
             FinishedOperation::Unreported,
         ] {
@@ -957,6 +960,16 @@ mod tests {
         assert_eq!(
             FinishedOperation::of(&Operation::StashPop { index: 0 }),
             FinishedOperation::Stash
+        );
+        assert_eq!(
+            FinishedOperation::of(&Operation::Rebase {
+                onto: "a1b2c3d000000000000000000000000000000000"
+                    .parse()
+                    .expect("oid"),
+                upstream: None,
+                autostash: false,
+            }),
+            FinishedOperation::Rebase
         );
         assert_eq!(
             FinishedOperation::of(&Operation::ContinueInProgress),

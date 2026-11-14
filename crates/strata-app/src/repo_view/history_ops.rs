@@ -36,6 +36,7 @@ use super::RepoView;
 use super::commit_selection::{self, MultiPickRow};
 use super::edit_dialog;
 use super::rebase_dialog::{self, RebaseRequest};
+use super::rebase_onto::rebase_menu_item;
 use crate::data::short_oid;
 use crate::settings::Settings;
 use crate::style::Design;
@@ -100,6 +101,32 @@ impl MenuState {
     /// is no branch to move.
     pub(crate) fn branch_label(&self) -> String {
         self.branch.clone().unwrap_or_else(|| "HEAD".to_owned())
+    }
+
+    /// The branch HEAD is on, or `None` when it is detached or there is no
+    /// commit yet.
+    pub(crate) fn branch(&self) -> Option<&str> {
+        self.branch.as_deref()
+    }
+
+    /// A merge, rebase, cherry-pick or revert git left half-done.
+    pub(crate) fn pending(&self) -> bool {
+        self.pending
+    }
+
+    /// Another operation is running.
+    pub(crate) fn busy(&self) -> bool {
+        self.busy
+    }
+
+    /// Tracked staged or worktree changes.
+    pub(crate) fn dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// HEAD has a commit but is not on a branch.
+    pub(crate) fn detached(&self) -> bool {
+        self.branch.is_none() && self.head.is_some()
     }
 
     /// Why `action` cannot run, or `None` when it can.
@@ -203,7 +230,7 @@ const LINE_LIMIT: usize = 10_000;
 /// remote on an unrelated history from walking the whole repository.
 const REMOTE_WALK_LIMIT: usize = 20_000;
 
-fn head_target(head: Option<&HeadInfo>) -> Option<Oid> {
+pub(super) fn head_target(head: Option<&HeadInfo>) -> Option<Oid> {
     match head? {
         HeadInfo::Branch { target, .. } => *target,
         HeadInfo::Detached { target } => Some(*target),
@@ -345,7 +372,13 @@ impl EditContext {
         let Some((_, commits)) = self.plan(action) else {
             return Vec::new();
         };
-        remotes_containing(&commits, &self.remotes, |commit, tip| {
+        self.pushed_remotes_in(&commits)
+    }
+
+    /// Remote-tracking branches that already contain one of `commits`, for a
+    /// range another action builds, such as a rebase onto another ref.
+    fn pushed_remotes_in(&self, commits: &[Oid]) -> Vec<String> {
+        remotes_containing(commits, &self.remotes, |commit, tip| {
             self.reachable(commit, tip)
         })
     }
@@ -649,6 +682,9 @@ pub(crate) fn commit_menu(
     let tag_blocked = state.blocked(HistoryAction::CreateTag);
     let delete_blocked = state.blocked(HistoryAction::DeleteTag);
     let branch_blocked = state.blocked(HistoryAction::CreateBranch);
+    let rebase = entity
+        .read(cx)
+        .rebase_target(commit, format!("commit {short}"));
 
     // A merge commit is picked or reverted against its first parent (`-m 1` in
     // `git_cli::history`), so these stay enabled for merges.
@@ -678,7 +714,11 @@ pub(crate) fn commit_menu(
             })
     };
 
-    menu = menu.separator().item(cherry).item(revert).separator();
+    menu = menu.separator().item(cherry).item(revert);
+    if let Some(target) = rebase {
+        menu = menu.item(rebase_menu_item(target, &onto, "here", entity.clone()));
+    }
+    menu = menu.separator();
 
     let reset_label = format!("Reset {onto} to here");
     menu = match reset_blocked {
@@ -1233,6 +1273,22 @@ impl RepoView {
     /// What the edit entries may do to `commit`, or `None` without a session.
     fn edit_context(&self, commit: Oid) -> Option<EditContext> {
         EditContext::read(self.session.as_ref()?, commit)
+    }
+
+    /// Remote-tracking branches that already contain one of `commits`.
+    ///
+    /// This is the same check that warns before a history edit; a rebase onto
+    /// another ref builds its range without an edit action, so it asks here.
+    pub(super) fn pushed_remotes_for(&self, commits: &[Oid]) -> Vec<String> {
+        let Some(session) = self.session.as_ref() else {
+            return Vec::new();
+        };
+        // The walk only needs HEAD's own context (remote tips and parents), so
+        // it starts at HEAD and stops two commits down.
+        let head = head_target(session.snapshot().head.as_ref());
+        head.and_then(|head| self.edit_context(head))
+            .map(|edit| edit.pushed_remotes_in(commits))
+            .unwrap_or_default()
     }
 
     /// Runs one menu pick: an editor for a reword, a confirmation for a drop,

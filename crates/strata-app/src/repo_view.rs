@@ -19,6 +19,7 @@ mod editor;
 mod history_ops;
 mod in_progress;
 mod rebase_dialog;
+pub(crate) mod rebase_onto;
 mod rebase_plan;
 mod sidebar;
 mod status_bar;

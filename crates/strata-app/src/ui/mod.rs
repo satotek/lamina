@@ -25,7 +25,7 @@ mod text;
 pub use badge::{BadgeTone, avatar, change_badge, count_pill, kbd, ref_badge, status_badge};
 pub use banner::{BannerKind, banner};
 pub use button::{ButtonKind, ButtonSize, UiButton, button, content_button, icon_button};
-pub use confirm::{Confirm, confirm};
+pub use confirm::{Confirm, confirm, confirm_with};
 pub(crate) use focus::focus_input;
 pub use menu::{context_menu, menu_label};
 pub use row::{RowState, RowTipExt, list_row, row_surface};

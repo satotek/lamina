@@ -188,6 +188,7 @@ fn changes_refs(operation: &Operation) -> bool {
             | Operation::CherryPickMany { .. }
             | Operation::Revert { .. }
             | Operation::RebaseEdit { .. }
+            | Operation::Rebase { .. }
             | Operation::Reset { .. }
             | Operation::CreateTag { .. }
             | Operation::DeleteTag { .. }
@@ -311,6 +312,11 @@ fn execute(shared: &Shared, id: OperationId, operation: &Operation) -> Result<()
         }
         Operation::Revert { commit } => git.revert(*commit),
         Operation::RebaseEdit { onto, steps } => git.rebase_edit(*onto, steps),
+        Operation::Rebase {
+            onto,
+            upstream,
+            autostash,
+        } => git.rebase(*onto, *upstream, *autostash),
         Operation::Reset { target, mode } => git.reset(*target, *mode),
         Operation::CreateTag {
             name,

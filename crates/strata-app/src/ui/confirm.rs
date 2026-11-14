@@ -17,7 +17,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
-use gpui::{App, ParentElement as _, SharedString, Window};
+use gpui::{AnyElement, App, ParentElement as _, SharedString, Window};
 use gpui_component::WindowExt as _;
 use gpui_component::dialog::DialogFooter;
 
@@ -92,6 +92,35 @@ pub fn confirm(
     confirm: Confirm,
     on_ok: impl Fn(&mut Window, &mut App) + 'static,
 ) {
+    show(window, cx, confirm, None, on_ok);
+}
+
+/// [`confirm`] with one extra element under the description, such as a
+/// checkbox that decides how the action runs.
+///
+/// `content` is a factory rather than an element because the dialog rebuilds
+/// its layer; it has to render the same control every time it is called.
+pub fn confirm_with(
+    window: &mut Window,
+    cx: &mut App,
+    confirm: Confirm,
+    content: impl Fn(&mut Window, &mut App) -> AnyElement + 'static,
+    on_ok: impl Fn(&mut Window, &mut App) + 'static,
+) {
+    show(window, cx, confirm, Some(Rc::new(content)), on_ok);
+}
+
+/// The extra control a confirmation shows under its description. It is a
+/// factory because the dialog rebuilds its layer and cannot reuse an element.
+type ContentFactory = Rc<dyn Fn(&mut Window, &mut App) -> AnyElement>;
+
+fn show(
+    window: &mut Window,
+    cx: &mut App,
+    confirm: Confirm,
+    content: Option<ContentFactory>,
+    on_ok: impl Fn(&mut Window, &mut App) + 'static,
+) {
     if !should_ask(
         Settings::get(cx).behaviour.confirm_destructive,
         confirm.always_ask,
@@ -137,9 +166,14 @@ pub fn confirm(
         let ok_click = on_ok.clone();
         let ok_enter = on_ok.clone();
         let ok_has_focus = ok_focus.clone();
-        dialog
+        let dialog = dialog
             .title(title.clone())
-            .when_some(detail.clone(), |dialog, detail| dialog.description(detail))
+            .when_some(detail.clone(), |dialog, detail| dialog.description(detail));
+        let dialog = match &content {
+            Some(content) => dialog.child((*content)(window, cx)),
+            None => dialog,
+        };
+        dialog
             .footer(
                 DialogFooter::new()
                     .child(

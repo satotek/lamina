@@ -39,6 +39,7 @@ use strata_core::{HeadInfo, RefKind, RemoteInfo, UpstreamInfo};
 use crate::actions::REPO_VIEW;
 use crate::data::SidebarData;
 use crate::repo_view::RepoView;
+use crate::repo_view::rebase_onto::rebase_menu_item;
 use crate::scrollbar::WithScrollbar as _;
 use crate::style::{self, Design};
 use crate::ui::RowTipExt as _;
@@ -1457,12 +1458,15 @@ fn local_row(
         ("local-branch-menu", index),
         &colors.design,
         row,
-        move |menu, _window, _cx| {
+        move |menu, _window, cx| {
             // A disabled entry says why, the way the commit menu's entries do.
             let checkout_blocked = branch_blocked(active, "already checked out", busy);
             let merge_blocked = branch_blocked(active, "this is the current branch", busy);
             let create_blocked = busy.then_some("an operation is running");
             let delete_blocked = branch_blocked(active, "this is the current branch", busy);
+            let rebase = entity_menu
+                .read(cx)
+                .branch_rebase_target(RefKind::LocalBranch, &branch);
             menu.item(
                 PopupMenuItem::new(crate::ui::menu_label("Checkout", checkout_blocked))
                     .disabled(checkout_blocked.is_some())
@@ -1519,6 +1523,16 @@ fn local_row(
                     }
                 }),
             )
+            // One entry rather than a submenu, so the actions around it stay
+            // in the same list.
+            .when_some(rebase, |menu, (current, target)| {
+                menu.item(rebase_menu_item(
+                    target,
+                    &current,
+                    &branch,
+                    entity_menu.clone(),
+                ))
+            })
             .item(
                 PopupMenuItem::new(crate::ui::menu_label(
                     "Create branch from here…",
@@ -1625,8 +1639,11 @@ fn remote_row(
         ("remote-branch-menu", index),
         &colors.design,
         row_element,
-        move |menu, _window, _cx| {
+        move |menu, _window, cx| {
             let blocked = busy.then_some("an operation is running");
+            let rebase = entity_menu
+                .read(cx)
+                .branch_rebase_target(RefKind::RemoteBranch, &remote);
             menu.item(
                 PopupMenuItem::new(crate::ui::menu_label("Checkout", blocked))
                     .disabled(blocked.is_some())
@@ -1676,6 +1693,14 @@ fn remote_row(
                         }
                     }),
             )
+            .when_some(rebase, |menu, (current, target)| {
+                menu.item(rebase_menu_item(
+                    target,
+                    &current,
+                    &remote,
+                    entity_menu.clone(),
+                ))
+            })
             .item(
                 PopupMenuItem::new(crate::ui::menu_label("Create branch from here…", blocked))
                     .disabled(blocked.is_some())

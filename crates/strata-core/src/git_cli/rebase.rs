@@ -12,10 +12,13 @@
 //! `GIT_EDITOR=true` accepts git's prepared message for a squash, which is the
 //! same combination git produces when the editor leaves the buffer untouched.
 //!
-//! Uncommitted changes are refused rather than autostashed: a conflict during
-//! the rebase would then be indistinguishable from an autostash pop conflict,
-//! and the user's work would move between commands. Untracked files are
-//! allowed because they do not block a rebase.
+//! The scripted edit refuses uncommitted changes rather than autostashing them:
+//! a conflict during the rebase would then be indistinguishable from an
+//! autostash pop conflict, and the user's work would move between commands.
+//! Untracked files are allowed because they do not block a rebase.
+//!
+//! [`Git::rebase`] is the plain form; it autostashes only when asked to, since
+//! the caller shows that as an explicit choice.
 
 use std::collections::HashSet;
 use std::fs;
@@ -109,6 +112,82 @@ impl Git {
             }
             Err(error) => Err(error),
         }
+    }
+
+    /// Rebase the current branch onto `onto`: `git rebase <onto>` when
+    /// `upstream` is `None`, `git rebase --onto <onto> <upstream>` otherwise.
+    ///
+    /// A conflict stops the rebase and leaves [`RepoState::Rebasing`] behind,
+    /// like [`Git::rebase_edit`]; [`Git::continue_in_progress`] and
+    /// [`Git::abort_in_progress`] finish it. `autostash` keeps a dirty working
+    /// tree in a stash for the duration instead of refusing it.
+    pub fn rebase(&self, onto: Oid, upstream: Option<Oid>, autostash: bool) -> Result<()> {
+        self.ensure_can_rebase_onto(autostash)?;
+
+        let mut args = vec!["rebase".to_owned()];
+        if autostash {
+            args.push("--autostash".to_owned());
+        }
+        match upstream {
+            Some(upstream) => {
+                args.push("--onto".to_owned());
+                args.push(onto.to_string());
+                args.push(upstream.to_string());
+            }
+            None => args.push(onto.to_string()),
+        }
+
+        match self.run_unit(&args, None) {
+            Ok(()) => Ok(()),
+            // A conflict is a resumable stop: the rebase state is the signal,
+            // not exit code 1 alone.
+            Err(error @ Error::GitCommand { code: Some(1), .. }) => {
+                if self.state()? == RepoState::Rebasing {
+                    Ok(())
+                } else {
+                    Err(error)
+                }
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Refuse every situation in which `git rebase` would fail with a message
+    /// that does not name the real problem.
+    fn ensure_can_rebase_onto(&self, autostash: bool) -> Result<()> {
+        let state = self.state()?;
+        if state != RepoState::Normal {
+            return Err(Error::other(format!(
+                "cannot rebase: {} is in progress; finish or abort it first",
+                state_name(state)
+            )));
+        }
+
+        let repo = crate::repo::Repo::open(self.workdir())?;
+        match repo.head()? {
+            HeadInfo::Detached { .. } => {
+                return Err(Error::other(
+                    "cannot rebase: HEAD is detached; check out a branch first",
+                ));
+            }
+            HeadInfo::Branch { target: None, .. } => {
+                return Err(Error::other("cannot rebase: the branch has no commits"));
+            }
+            HeadInfo::Branch { .. } => {}
+        }
+
+        // With `--autostash` a dirty tree is the point; without it git refuses
+        // in the middle of its own output, which the caller cannot explain.
+        if !autostash {
+            let status = self.run(&["status", "--porcelain", "--untracked-files=no"], None)?;
+            if !status.stdout.iter().all(u8::is_ascii_whitespace) {
+                return Err(Error::other(
+                    "cannot rebase: the working tree has uncommitted changes; \
+                     commit or stash them first",
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Refuse every situation in which `git rebase -i` would either fail with a
@@ -375,7 +454,7 @@ impl Drop for Scratch {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::repo::Repo;
+    use crate::repo::{InProgressDetails, Repo};
     use crate::test_support::TestRepo;
 
     /// Base commit plus `count` commits that each add their own file, so a
@@ -654,5 +733,248 @@ mod tests {
             squashed.is_err(),
             "the oldest commit has no parent to squash into"
         );
+    }
+
+    /// `main` has one commit of its own while `topic` starts at `base`, so a
+    /// rebase either way replays a single commit.
+    fn two_branches() -> (TestRepo, Oid, Oid, Oid) {
+        let repo = TestRepo::new();
+        repo.write("base.txt", "base\n");
+        let base = repo.commit("base");
+        repo.write("main.txt", "main\n");
+        let main_tip = repo.commit("main work");
+        repo.git(&["checkout", "-q", "-b", "topic", &base.to_string()]);
+        repo.write("topic.txt", "topic\n");
+        let topic_tip = repo.commit("topic work");
+        (repo, base, main_tip, topic_tip)
+    }
+
+    #[test]
+    fn rebases_the_current_branch_onto_another_branch() {
+        let (repo, base, main_tip, topic_tip) = two_branches();
+
+        repo.git_handle()
+            .rebase(main_tip, None, false)
+            .expect("rebase succeeds");
+
+        assert_eq!(messages(&repo), ["topic work", "main work", "base"]);
+        assert!(repo.path().join("main.txt").is_file());
+        assert!(repo.path().join("topic.txt").is_file());
+        assert_ne!(repo.head(), topic_tip, "the commit is replayed");
+        assert_eq!(
+            repo.git(&["rev-parse", "--abbrev-ref", "HEAD"]).trim(),
+            "topic",
+            "the checked-out branch moves, not HEAD detached"
+        );
+        assert_ne!(repo.head(), base);
+    }
+
+    #[test]
+    fn a_branch_behind_its_target_moves_forward_without_replaying() {
+        let repo = TestRepo::new();
+        repo.write("base.txt", "base\n");
+        let base = repo.commit("base");
+        repo.write("main.txt", "main\n");
+        let main_tip = repo.commit("main work");
+        repo.git(&["checkout", "-q", "-b", "stale", &base.to_string()]);
+
+        repo.git_handle()
+            .rebase(main_tip, None, false)
+            .expect("an empty range still moves the branch");
+
+        assert_eq!(
+            repo.head(),
+            main_tip,
+            "the branch fast-forwards to the target"
+        );
+        assert_eq!(messages(&repo), ["main work", "base"]);
+    }
+
+    #[test]
+    fn rebase_onto_drops_the_commits_before_the_upstream() {
+        let repo = TestRepo::new();
+        repo.write("base.txt", "base\n");
+        let base = repo.commit("base");
+        repo.write("one.txt", "one\n");
+        let one = repo.commit("one");
+        repo.write("two.txt", "two\n");
+        repo.commit("two");
+
+        repo.git_handle()
+            .rebase(base, Some(one), false)
+            .expect("rebase --onto succeeds");
+
+        assert_eq!(
+            messages(&repo),
+            ["two", "base"],
+            "only the commit after the upstream is replayed"
+        );
+        assert!(!repo.path().join("one.txt").exists());
+        assert!(repo.path().join("two.txt").is_file());
+    }
+
+    /// Two branches change the same line, so replaying one onto the other
+    /// stops on a conflict.
+    fn conflicting_branches() -> (TestRepo, Oid) {
+        let repo = TestRepo::new();
+        repo.write("conflict.txt", "base\n");
+        let base = repo.commit("base");
+        repo.write("conflict.txt", "main\n");
+        let main_tip = repo.commit("main work");
+        repo.git(&["checkout", "-q", "-b", "topic", &base.to_string()]);
+        repo.write("conflict.txt", "topic\n");
+        repo.commit("topic work");
+        repo.git(&["checkout", "-q", "main"]);
+        (repo, main_tip)
+    }
+
+    #[test]
+    fn a_conflict_stops_the_rebase_and_continue_finishes_it() {
+        let (repo, main_tip) = conflicting_branches();
+        let topic_tip = repo.rev("topic");
+        repo.git(&["checkout", "-q", "topic"]);
+
+        repo.git_handle()
+            .rebase(main_tip, None, false)
+            .expect("a conflict is a resumable stop, not an error");
+
+        assert_eq!(
+            Repo::open(repo.path())
+                .expect("open")
+                .state()
+                .expect("state"),
+            RepoState::Rebasing
+        );
+        assert!(
+            repo.open()
+                .conflicts()
+                .expect("conflicts")
+                .iter()
+                .any(|entry| entry.path == "conflict.txt")
+        );
+
+        repo.write("conflict.txt", "resolved\n");
+        repo.git(&["add", "conflict.txt"]);
+        repo.git_handle()
+            .continue_in_progress()
+            .expect("continue succeeds");
+
+        assert_eq!(
+            Repo::open(repo.path())
+                .expect("open")
+                .state()
+                .expect("state"),
+            RepoState::Normal
+        );
+        assert_eq!(messages(&repo), ["topic work", "main work", "base"]);
+        assert_eq!(
+            repo.git(&["show", "HEAD:conflict.txt"]),
+            "resolved\n",
+            "the resolution is committed"
+        );
+        assert_ne!(repo.head(), topic_tip, "the commit is replayed");
+    }
+
+    #[test]
+    fn abort_restores_the_branch_a_conflict_stopped() {
+        let (repo, main_tip) = conflicting_branches();
+        let topic_tip = repo.rev("topic");
+        repo.git(&["checkout", "-q", "topic"]);
+
+        repo.git_handle()
+            .rebase(main_tip, None, false)
+            .expect("a conflict is a resumable stop");
+
+        repo.git_handle()
+            .abort_in_progress()
+            .expect("abort succeeds");
+
+        assert_eq!(
+            Repo::open(repo.path())
+                .expect("open")
+                .state()
+                .expect("state"),
+            RepoState::Normal
+        );
+        assert_eq!(repo.head(), topic_tip, "the branch is back where it was");
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("conflict.txt")).expect("worktree file"),
+            "topic\n"
+        );
+    }
+
+    #[test]
+    fn autostash_carries_a_dirty_worktree_through_the_rebase() {
+        let (repo, base, main_tip, _topic_tip) = two_branches();
+        repo.write("base.txt", "dirty\n");
+
+        repo.git_handle()
+            .rebase(main_tip, None, true)
+            .expect("autostash accepts a dirty worktree");
+
+        assert_eq!(messages(&repo), ["topic work", "main work", "base"]);
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("base.txt")).expect("worktree file"),
+            "dirty\n",
+            "the uncommitted change is back after the rebase"
+        );
+        assert_ne!(repo.head(), base);
+    }
+
+    #[test]
+    fn a_dirty_worktree_is_refused_without_autostash() {
+        let (repo, _base, main_tip, topic_tip) = two_branches();
+        repo.write("base.txt", "dirty\n");
+
+        let error = repo
+            .git_handle()
+            .rebase(main_tip, None, false)
+            .expect_err("dirty worktree is refused");
+        assert!(error.to_string().contains("uncommitted changes"), "{error}");
+        assert_eq!(repo.head(), topic_tip, "nothing was rewritten");
+    }
+
+    #[test]
+    fn in_progress_details_describe_a_stopped_plain_rebase() {
+        let (repo, main_tip) = conflicting_branches();
+        let topic_tip = repo.rev("topic");
+        repo.git(&["checkout", "-q", "topic"]);
+
+        repo.git_handle()
+            .rebase(main_tip, None, false)
+            .expect("a conflict is a resumable stop");
+
+        let details = repo
+            .open()
+            .in_progress_details()
+            .expect("details readable")
+            .expect("a rebase is in progress");
+        let InProgressDetails::Rebase {
+            branch,
+            onto,
+            step,
+            total_steps,
+            current_commit,
+        } = details
+        else {
+            panic!("expected rebase details, got {details:?}");
+        };
+        assert_eq!(branch.as_deref(), Some("topic"));
+        let onto = onto.expect("the onto commit");
+        assert_eq!(onto.id, Some(main_tip));
+        assert_eq!(
+            onto.ref_name.as_deref(),
+            Some("main"),
+            "the tip is named by the branch that points at it"
+        );
+        assert_eq!(step, Some(1));
+        assert_eq!(total_steps, Some(1));
+        let current = current_commit.expect("the stopped commit");
+        assert_eq!(
+            current.id,
+            Some(topic_tip),
+            "the commit being replayed is the one that conflicted"
+        );
+        assert_eq!(current.summary.as_deref(), Some("topic work"));
     }
 }

@@ -83,6 +83,34 @@ impl Repo {
         Ok(commit.parent_ids().map(|id| id.detach()).collect())
     }
 
+    /// Commits reachable from `tip` but not from `base`, newest first.
+    ///
+    /// This is what `git rev-list base..tip` lists, so its length is how many
+    /// commits a rebase onto `base` would replay. Zero commits means the branch
+    /// only moves to `base` (or is already there), which
+    /// [`is_ancestor`](Self::is_ancestor) tells apart.
+    pub fn commits_between(&self, base: Oid, tip: Oid) -> Result<Vec<Oid>> {
+        let repo = self.local();
+        let walk = repo
+            .rev_walk([tip])
+            .with_hidden([base])
+            .all()
+            .map_err(Error::gix)?;
+        let mut commits = Vec::new();
+        for step in walk {
+            commits.push(step.map_err(Error::gix)?.id().detach());
+        }
+        Ok(commits)
+    }
+
+    /// Whether `ancestor` is reachable from `descendant`, as
+    /// `git merge-base --is-ancestor` answers it. A commit is its own ancestor.
+    pub fn is_ancestor(&self, ancestor: Oid, descendant: Oid) -> Result<bool> {
+        let repo = self.local();
+        let base = repo.merge_base(ancestor, descendant).map_err(Error::gix)?;
+        Ok(base.is_some_and(|base| base.detach() == ancestor))
+    }
+
     /// Stash entries, newest (`stash@{0}`) first. Empty when nothing is stashed.
     pub fn stashes(&self) -> Result<Vec<StashInfo>> {
         let repo = self.local();
@@ -489,4 +517,44 @@ fn first_line(message: &gix::bstr::BStr) -> String {
         .next()
         .unwrap_or_default();
     String::from_utf8_lossy(line.strip_suffix(b"\r").unwrap_or(line)).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::test_support::TestRepo;
+
+    #[test]
+    fn commits_between_lists_the_range_a_rebase_would_replay() {
+        let repo = TestRepo::new();
+        repo.write("base.txt", "base\n");
+        let base = repo.commit("base");
+        repo.write("one.txt", "one\n");
+        let one = repo.commit("one");
+        repo.write("two.txt", "two\n");
+        let two = repo.commit("two");
+
+        let opened = repo.open();
+        assert_eq!(
+            opened.commits_between(base, two).expect("range"),
+            [two, one],
+            "newest first and the base is excluded"
+        );
+        assert!(
+            opened.commits_between(two, two).expect("range").is_empty(),
+            "a branch is up to date with itself"
+        );
+        assert!(
+            opened.commits_between(one, base).expect("range").is_empty(),
+            "a tip behind the base replays nothing"
+        );
+        assert!(opened.is_ancestor(base, two).expect("ancestry"));
+        assert!(
+            opened.is_ancestor(two, two).expect("ancestry"),
+            "a commit is its own ancestor"
+        );
+        assert!(
+            !opened.is_ancestor(two, base).expect("ancestry"),
+            "a descendant is not an ancestor"
+        );
+    }
 }

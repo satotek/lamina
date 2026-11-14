@@ -373,6 +373,15 @@ pub enum Operation {
         onto: Oid,
         steps: Vec<RebaseStep>,
     },
+    /// Replay the current branch onto `onto`: `git rebase <onto>`, or
+    /// `git rebase --onto <onto> <upstream>` when an upstream is given.
+    /// Conflicts stop it with `state == Rebasing`, like a merge.
+    Rebase {
+        onto: Oid,
+        upstream: Option<Oid>,
+        /// Keep a dirty working tree in a stash for the duration.
+        autostash: bool,
+    },
     /// `git reset --<mode> <target>` on the current branch.
     Reset {
         target: Oid,
