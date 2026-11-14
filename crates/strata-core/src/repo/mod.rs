@@ -27,6 +27,7 @@ mod message;
 mod reflog;
 mod remotes;
 mod renames;
+mod signature;
 mod stat;
 mod status;
 mod submodules;
@@ -52,6 +53,10 @@ pub use content_search::{
 pub use history::{PathHistory, PathHistoryEntries, PathHistoryEntry};
 pub use in_progress::{InProgressCommit, InProgressDetails, RebaseOnto};
 pub use log::CommitWalk;
+pub use signature::{
+    CommitSignature, SignatureConfigHints, SignatureFormat, SignatureValidity,
+    classify_signature_armor,
+};
 pub use status::MAX_INCREMENTAL_PATHS;
 pub use submodules::{SubmoduleInfo, SubmoduleStatus};
 pub use upstream::UpstreamTarget;

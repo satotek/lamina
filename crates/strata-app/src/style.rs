@@ -91,6 +91,8 @@ pub struct Design {
     pub show_tags: bool,
     /// `history.show_stashes`; hides the sidebar section.
     pub show_stashes: bool,
+    /// `history.show_commit_signatures`; hides signature badges and verification.
+    pub show_commit_signatures: bool,
     /// `behaviour.summary_length_hint`, the commit box's counter target.
     pub summary_hint: u32,
     /// UI text size, from `appearance.ui_font_size`.
@@ -175,6 +177,7 @@ impl Design {
             show_remote_branches: settings.history.show_remote_branches,
             show_tags: settings.history.show_tags,
             show_stashes: settings.history.show_stashes,
+            show_commit_signatures: settings.history.show_commit_signatures,
             summary_hint: settings.behaviour.summary_length_hint,
             ui: settings.appearance.ui_font_size,
             code: settings

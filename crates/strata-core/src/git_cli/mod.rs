@@ -23,6 +23,7 @@ mod ops;
 mod progress;
 mod rebase;
 mod reflog;
+mod signature;
 
 pub use clone::{CloneOptions, CloneOutcome, clone_repository, init_repository};
 pub use command_log::{CommandLog, CommandRecord, MAX_CAPTURE_BYTES, MAX_LOG_ENTRIES, StreamLine};
@@ -212,6 +213,140 @@ impl Git {
         let output = child.wait_with_output()?;
         self.log_output(args, started_at, &output);
         Ok(output)
+    }
+
+    /// Like `run_output`, but kills the child process if `cancelled()` becomes
+    /// true while it is running. Returns `Ok(None)` when cancelled.
+    pub(crate) fn run_output_cancellable<S: AsRef<str>>(
+        &self,
+        args: &[S],
+        stdin: Option<&[u8]>,
+        cancelled: &(impl Fn() -> bool + Send + Sync),
+    ) -> Result<Option<Output>> {
+        if cancelled() {
+            return Ok(None);
+        }
+        let args = to_args(args);
+        let started_at = SystemTime::now();
+        let (mut command, _askpass) = match self.prepared(&args) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.log_spawn_failure(&args, started_at, &error);
+                return Err(error);
+            }
+        };
+        if stdin.is_some() {
+            command.stdin(Stdio::piped());
+        }
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                let error = Error::from(error);
+                self.log_spawn_failure(&args, started_at, &error);
+                return Err(error);
+            }
+        };
+        let stdin_pipe = child.stdin.take();
+        let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(Error::other("git output pipes are unavailable"));
+        };
+
+        struct WatchState {
+            child: Mutex<Option<Child>>,
+            done: (Mutex<bool>, Condvar),
+            killed: AtomicBool,
+        }
+
+        let state = WatchState {
+            child: Mutex::new(Some(child)),
+            done: (Mutex::new(false), Condvar::new()),
+            killed: AtomicBool::new(false),
+        };
+
+        let (stdout_bytes, stderr_bytes, status) = thread::scope(|scope| {
+            let stdin_writer = stdin.zip(stdin_pipe).map(|(data, mut pipe)| {
+                scope.spawn(move || {
+                    let _ = pipe.write_all(data);
+                })
+            });
+            let stdout_reader = scope.spawn(|| {
+                let mut buffer = Vec::new();
+                let mut stdout = stdout;
+                let _ = stdout.read_to_end(&mut buffer);
+                buffer
+            });
+            let stderr_reader = scope.spawn(|| {
+                let mut buffer = Vec::new();
+                let mut stderr = stderr;
+                let _ = stderr.read_to_end(&mut buffer);
+                buffer
+            });
+            let cancel_watcher = scope.spawn(|| {
+                loop {
+                    if cancelled() {
+                        state.killed.store(true, Ordering::SeqCst);
+                        if let Some(child) = state
+                            .child
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner)
+                            .as_mut()
+                        {
+                            let _ = child.kill();
+                        }
+                        break;
+                    }
+                    let done = state.done.0.lock().unwrap_or_else(PoisonError::into_inner);
+                    if *done {
+                        break;
+                    }
+                    let (guard, _) = state
+                        .done
+                        .1
+                        .wait_timeout(done, Duration::from_millis(25))
+                        .unwrap_or_else(PoisonError::into_inner);
+                    if *guard {
+                        break;
+                    }
+                }
+            });
+
+            let stdout_bytes = stdout_reader.join().unwrap_or_default();
+            let stderr_bytes = stderr_reader.join().unwrap_or_default();
+            if let Some(writer) = stdin_writer {
+                let _ = writer.join();
+            }
+
+            *state.done.0.lock().unwrap_or_else(PoisonError::into_inner) = true;
+            state.done.1.notify_all();
+            let _ = cancel_watcher.join();
+
+            let mut child = state
+                .child
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .take()
+                .expect("child handle present");
+            if cancelled() {
+                let _ = child.kill();
+            }
+            let status = child.wait();
+            (stdout_bytes, stderr_bytes, status)
+        });
+
+        let status = status?;
+        let output = Output {
+            status,
+            stdout: stdout_bytes,
+            stderr: stderr_bytes,
+        };
+        self.log_output(&args, started_at, &output);
+
+        if state.killed.load(Ordering::SeqCst) || cancelled() {
+            return Ok(None);
+        }
+        Ok(Some(output))
     }
 
     /// Like [`run`](Self::run), but reports stderr lines as they arrive.

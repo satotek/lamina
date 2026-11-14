@@ -317,6 +317,20 @@ fn history(control: f32, design: &Design) -> SettingPage {
             .description("Relative says \"2 hours ago\"; absolute says 2026-11-13 14:05."),
         ),
     )
+    .groups(
+        card("Signatures").item(
+            SettingItem::new(
+                "Commit signatures",
+                toggle(
+                    |settings| settings.history.show_commit_signatures,
+                    change::show_commit_signatures,
+                ),
+            )
+            .description(
+                "Show signature status badges and verify visible signed commits in the background.",
+            ),
+        ),
+    )
 }
 
 fn behaviour(control: f32, design: &Design) -> SettingPage {

@@ -18,6 +18,7 @@ mod operations;
 mod publish;
 mod queries;
 mod refresh;
+mod signatures;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -41,9 +42,9 @@ use crate::{
 
 pub use crate::diff::DiffOptions;
 pub use crate::repo::{
-    Blame, BlameCommit, BlameHunk, CompareFile, CompareMode, Comparison, ContentSearchEntry,
-    ContentSearchMode, ContentSearchProgress, ContentSearchQuery, InProgressCommit,
-    InProgressDetails, RebaseOnto,
+    Blame, BlameCommit, BlameHunk, CommitSignature, CompareFile, CompareMode, Comparison,
+    ContentSearchEntry, ContentSearchMode, ContentSearchProgress, ContentSearchQuery,
+    InProgressCommit, InProgressDetails, RebaseOnto, SignatureFormat, SignatureValidity,
 };
 
 use blame::BlameJob;
@@ -55,6 +56,7 @@ use operations::OperationJob;
 use publish::{EventSink, Shared};
 use queries::QueryJob;
 use refresh::RefreshStatus;
+use signatures::{SignatureCache, SignatureJob};
 
 /// Commits are published in chunks so a growing list can be shared with the UI
 /// without copying it on every append.
@@ -716,6 +718,21 @@ pub enum SessionEvent {
     CommitGraphSuggested {
         advice: CommitGraphAdvice,
     },
+    /// Cheap `gix` detection found signature headers for uncached commits in a
+    /// [`Session::request_commit_signatures`] batch while `git` verification runs.
+    CommitSignaturesDetected {
+        ticket: QueryTicket,
+        formats: Arc<HashMap<Oid, SignatureFormat>>,
+    },
+    /// Verified signatures (from `git log` or the session cache) for a
+    /// [`Session::request_commit_signatures`] batch. Unsigned commits are omitted.
+    CommitSignaturesReady {
+        ticket: QueryTicket,
+        signatures: Arc<HashMap<Oid, CommitSignature>>,
+    },
+    /// Cached signature verification results were cleared (e.g. after a config
+    /// change or reload); visible commits should be re-requested.
+    SignaturesInvalidated,
 }
 
 /// How a session talks to `git`.
@@ -744,6 +761,8 @@ struct Senders {
     queries: Sender<QueryJob>,
     blame: Sender<BlameJob>,
     content_search: Sender<ContentSearchJob>,
+    signatures: Sender<SignatureJob>,
+    signature_cache: Arc<SignatureCache>,
     /// Ticket counter and cancellation set shared with the query workers.
     query_state: Arc<queries::QueryState>,
 }
@@ -797,6 +816,8 @@ impl Session {
         let (query_tx, query_rx) = mpsc::channel();
         let (blame_tx, blame_rx) = mpsc::channel();
         let (content_search_tx, content_search_rx) = mpsc::channel();
+        let (sig_tx, sig_rx) = mpsc::channel();
+        let signature_cache = Arc::new(SignatureCache::new());
         let query_state = Arc::new(queries::QueryState::new());
 
         let shared = Arc::new(Shared::new(repo, git, events, empty_snapshot()));
@@ -811,11 +832,12 @@ impl Session {
                 let shared = Arc::clone(&shared);
                 let load = load_tx.clone();
                 let status = status_tx.clone();
-                move |changes| on_watch(&shared, &load, &status, &changes)
+                let signature_cache = Arc::clone(&signature_cache);
+                move |changes| on_watch(&shared, &load, &status, &signature_cache, &changes)
             },
         )?;
 
-        let mut threads = Vec::with_capacity(6 + DIFF_WORKERS);
+        let mut threads = Vec::with_capacity(7 + DIFF_WORKERS);
         threads.push(spawn("strata-session-history", {
             let shared = Arc::clone(&shared);
             move || history::run(shared, load_rx)
@@ -858,6 +880,14 @@ impl Session {
             let state = Arc::clone(&query_state);
             move || content_search::run(shared, state, content_search_rx)
         })?);
+        // One signature worker caps git CLI verification concurrency at 1 so
+        // fast scrolling through a large history never floods git processes.
+        threads.push(spawn("strata-session-signatures", {
+            let shared = Arc::clone(&shared);
+            let state = Arc::clone(&query_state);
+            let cache = Arc::clone(&signature_cache);
+            move || signatures::run(shared, state, cache, sig_rx)
+        })?);
 
         let session = Self {
             shared,
@@ -869,6 +899,8 @@ impl Session {
                 queries: query_tx,
                 blame: blame_tx,
                 content_search: content_search_tx,
+                signatures: sig_tx,
+                signature_cache,
                 query_state,
             }),
             watcher: Some(watcher),
@@ -1045,6 +1077,23 @@ impl Session {
         ticket
     }
 
+    /// Detects signatures cheaply via `gix` and verifies signed commits on
+    /// demand via the `git` CLI off the UI thread.
+    ///
+    /// Answers with [`SessionEvent::CommitSignaturesDetected`] (for uncached
+    /// signed commits) followed by [`SessionEvent::CommitSignaturesReady`], or
+    /// [`SessionEvent::QueryFailed`] on error. Cached results for already-checked
+    /// commits return without spawning `git`. Cancelling the returned ticket
+    /// stops any in-flight `git` process and suppresses remaining events.
+    pub fn request_commit_signatures(&self, commits: Vec<Oid>) -> QueryTicket {
+        let Some(senders) = &self.senders else {
+            return QueryTicket(0);
+        };
+        let ticket = senders.query_state.next_ticket();
+        let _ = senders.signatures.send(SignatureJob { ticket, commits });
+        ticket
+    }
+
     pub fn cancel_query(&self, ticket: QueryTicket) {
         if let Some(senders) = &self.senders {
             senders.query_state.cancel(ticket);
@@ -1065,6 +1114,9 @@ impl Session {
     /// Forces a full reload (refs, history, status).
     pub fn reload(&self) {
         if let Some(senders) = &self.senders {
+            if senders.signature_cache.invalidate() {
+                self.shared.emit(SessionEvent::SignaturesInvalidated);
+            }
             let generation = self.shared.begin_reload();
             let _ = senders.load.send(LoadCommand { generation });
             let _ = senders.status.send(RefreshStatus::default());
@@ -1175,6 +1227,7 @@ fn on_watch(
     shared: &Shared,
     load: &Sender<LoadCommand>,
     status: &Sender<RefreshStatus>,
+    signature_cache: &SignatureCache,
     changes: &crate::watch::Changes,
 ) {
     // Our own git commands write the index and refs; refreshing mid-operation
@@ -1182,6 +1235,10 @@ fn on_watch(
     if shared.operation_running() {
         shared.hold_refresh(changes);
         return;
+    }
+
+    if changes.config && signature_cache.invalidate() {
+        shared.emit(SessionEvent::SignaturesInvalidated);
     }
 
     if changes.refs || changes.head {

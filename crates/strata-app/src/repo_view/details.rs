@@ -179,6 +179,23 @@ impl RepoView {
                     }),
             );
 
+        if design.show_commit_signatures
+            && let Some(commit_id) = commit.map(|c| c.id).or(self.selection_commit)
+            && let Some(sig_state) = self.commit_signature_state(commit_id)
+        {
+            let entity = self.entity();
+            if let Some(details) = crate::ui::signature_details(
+                &sig_state,
+                self.signatures.details_expanded,
+                move |_window, cx| {
+                    entity.update(cx, |this, cx| this.toggle_signature_details_expanded(cx));
+                },
+                design,
+            ) {
+                block = block.child(details);
+            }
+        }
+
         if self.fake.is_some() {
             block = block.child(
                 div()

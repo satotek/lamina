@@ -24,6 +24,7 @@ pub(crate) mod rebase_onto;
 mod rebase_plan;
 mod reflog;
 mod sidebar;
+mod signatures;
 mod split;
 mod status_bar;
 mod title_bar;
@@ -440,6 +441,8 @@ pub struct RepoView {
     /// Commit-wide added/removed counts; the details pane keeps the selected
     /// file's counts until they arrive.
     stat: details::CommitStatSlot,
+    signatures: signatures::SignatureTracker,
+    show_signatures: bool,
     /// The selected commit's file tree while it replaces the diff pane.
     tree: tree_view::TreeBrowser,
     /// The blame pane while it replaces the diff pane.
@@ -608,6 +611,10 @@ impl RepoView {
             lfs_notice: None,
             lfs_notice_dismissed: false,
             stat: details::CommitStatSlot::default(),
+            signatures: signatures::SignatureTracker::default(),
+            show_signatures: crate::settings::Settings::get(cx)
+                .history
+                .show_commit_signatures,
             tree: tree_view::TreeBrowser::default(),
             blame: blame_view::BlameView::default(),
             diff: DiffSlot::default(),
@@ -857,6 +864,7 @@ impl RepoView {
         let search = self.search.reset();
         let stat = self.stat.begin(None);
         let in_progress = self.in_progress.clear_details();
+        let signatures: Vec<_> = self.signatures.reset().collect();
         if let Some(session) = self.session.as_ref() {
             if let Some(ticket) = worktree_diff {
                 session.cancel_diff(ticket);
@@ -864,6 +872,7 @@ impl RepoView {
             for ticket in [extra, reflog, search, stat, in_progress]
                 .into_iter()
                 .flatten()
+                .chain(signatures)
             {
                 session.cancel_query(ticket);
             }
@@ -1120,6 +1129,15 @@ impl RepoView {
                     self.commit_graph_offer = true;
                     self.notify_if_active(cx);
                 }
+            }
+            SessionEvent::CommitSignaturesDetected { ticket, formats } => {
+                self.signatures_detected(ticket, &formats, cx);
+            }
+            SessionEvent::CommitSignaturesReady { ticket, signatures } => {
+                self.signatures_ready(ticket, &signatures, cx);
+            }
+            SessionEvent::SignaturesInvalidated => {
+                self.signatures_invalidated(cx);
             }
         }
     }
@@ -1484,6 +1502,7 @@ impl RepoView {
             self.load_files(commit, cx);
         }
         self.load_commit_stat(commit, cx);
+        self.load_selected_signature(commit, cx);
         self.notify_if_active(cx);
     }
 
@@ -1752,6 +1771,13 @@ impl RepoView {
     /// changed, so a new context size or ignore-whitespace shows at once.
     fn settings_changed(&mut self, cx: &mut Context<Self>) {
         self.sync_autofetch(cx);
+        let show_signatures = crate::settings::Settings::get(cx)
+            .history
+            .show_commit_signatures;
+        if show_signatures != self.show_signatures {
+            self.show_signatures = show_signatures;
+            self.sync_signature_setting(cx);
+        }
         if !self.active {
             return;
         }

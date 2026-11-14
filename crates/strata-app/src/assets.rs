@@ -8,7 +8,17 @@ use std::borrow::Cow;
 
 use gpui::{AssetSource, SharedString};
 
-gpui_kit_assets::icon_assets!(ExtraIcons, [ClockArrowDown]);
+gpui_kit_assets::icon_assets!(
+    ExtraIcons,
+    [
+        ClockArrowDown,
+        Shield,
+        ShieldAlert,
+        ShieldCheck,
+        ShieldQuestionMark,
+        ShieldX
+    ]
+);
 
 /// The component icons plus the extras above.
 pub struct AppAssets;

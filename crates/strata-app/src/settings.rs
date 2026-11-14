@@ -119,6 +119,7 @@ pub struct HistorySettings {
     pub show_remote_branches: bool,
     pub show_tags: bool,
     pub show_stashes: bool,
+    pub show_commit_signatures: bool,
     pub date_format: DateFormat,
 }
 
@@ -128,6 +129,7 @@ impl Default for HistorySettings {
             show_remote_branches: true,
             show_tags: true,
             show_stashes: true,
+            show_commit_signatures: true,
             date_format: DateFormat::Relative,
         }
     }

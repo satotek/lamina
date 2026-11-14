@@ -142,106 +142,143 @@ impl RepoView {
         let date_format = design.date_format;
         let show_remote = design.show_remote_branches;
         let show_tags = design.show_tags;
+        let show_signatures = design.show_commit_signatures;
+        let request_signatures = show_signatures && self.session.is_some() && !self.smoke;
         let list_entity = entity.clone();
+        let defer_entity = entity.clone();
         let source_for_list = source.clone();
-        let list = uniform_list("commits", count, move |range, _window, _cx| {
-            range
-                .map(|position| {
-                    let entity = list_entity.clone();
-                    let focus = focus.clone();
-                    // While a search filters the list, `position` is a row of
-                    // the result set and `index` the commit it points at.
-                    let index = filter
-                        .as_ref()
-                        .and_then(|rows| rows.get(position).copied())
-                        .unwrap_or(position);
-                    let Some(mut row) = source_for_list.row(index) else {
-                        return div().into_any_element();
-                    };
-                    // The menu offers a delete for each tag on the commit, so
-                    // collect them before the badge filters hide any.
-                    let target = CommitTarget {
-                        id: source_for_list.commit_id(index),
-                        short: row.id.to_string(),
-                        summary: row.summary.to_string(),
-                        tags: row
-                            .badges
-                            .iter()
-                            .filter(|badge| badge.kind == RefKind::Tag)
-                            .map(|badge| badge.label.to_string())
-                            .collect(),
-                    };
-                    if !show_remote {
-                        row.badges
-                            .retain(|badge| badge.kind != RefKind::RemoteBranch);
-                    }
-                    if !show_tags {
-                        row.badges.retain(|badge| badge.kind != RefKind::Tag);
-                    }
-                    let date = style::date_label(row.time, now, date_format);
-                    let filtered = filter.is_some();
-                    let click_entity = entity.clone();
-                    let click_order = order.clone();
-                    let right_entity = entity.clone();
-                    let id = ("commit-row", index);
-                    // A ref revealed from the sidebar keeps its row tinted
-                    // while it is not the selection.
-                    let revealed = revealed.is_some_and(|commit| Some(commit) == target.id);
-                    let selected = selection.contains(index);
-                    let element = if filtered {
-                        // The graph is hidden while filtered: spaced-out rows
-                        // would draw lanes that never existed between them.
-                        filtered_commit_row(
-                            id,
-                            &row,
-                            selected,
-                            revealed,
-                            &date,
-                            &row_design,
-                            columns,
-                        )
-                    } else {
-                        commit_row(id, &row, selected, revealed, &date, &row_design, columns)
-                    }
-                    .cursor_pointer()
-                    .on_click(move |event, window, cx| {
-                        let modifiers = event.modifiers();
-                        let shift = modifiers.shift;
-                        let secondary = modifiers.secondary(cx);
-                        let order = click_order.clone();
-                        click_entity.update(cx, |this, cx| {
-                            this.click_commit(index, position, shift, secondary, &order, cx);
-                            window.focus(&focus, cx);
+        let list = uniform_list("commits", count, move |range, window, cx| {
+            let mut uncached = Vec::new();
+            let items = {
+                let view = show_signatures.then(|| list_entity.read(cx));
+                range
+                    .map(|position| {
+                        let entity = list_entity.clone();
+                        let focus = focus.clone();
+                        // While a search filters the list, `position` is a row of
+                        // the result set and `index` the commit it points at.
+                        let index = filter
+                            .as_ref()
+                            .and_then(|rows| rows.get(position).copied())
+                            .unwrap_or(position);
+                        let Some(mut row) = source_for_list.row(index) else {
+                            return div().into_any_element();
+                        };
+                        let commit_id = source_for_list.commit_id(index);
+                        let sig_state = view.as_ref().and_then(|view| {
+                            let oid = commit_id?;
+                            let state = view.commit_signature_state(oid);
+                            if request_signatures && view.should_schedule_signature(oid) {
+                                uncached.push(oid);
+                            }
+                            state
                         });
-                    })
-                    // Right-clicking outside the selection selects that row,
-                    // so the menu never acts on rows the user did not point at.
-                    .on_mouse_down(MouseButton::Right, move |_, _, cx| {
-                        right_entity.update(cx, |this, cx| this.ensure_commit_selection(index, cx));
-                    });
-                    let menu_entity = entity;
-                    let menu_state = menu_state.clone();
-                    crate::ui::context_menu(
-                        ("commit-row-menu", index),
-                        &row_design,
-                        element,
-                        move |menu, window, cx| {
-                            let multi = menu_entity.read(cx).multi_pick_context();
-                            history_ops::commit_menu(
-                                menu,
-                                target.clone(),
-                                menu_state.clone(),
-                                multi,
-                                menu_entity.clone(),
-                                window,
-                                cx,
+                        // The menu offers a delete for each tag on the commit, so
+                        // collect them before the badge filters hide any.
+                        let target = CommitTarget {
+                            id: commit_id,
+                            short: row.id.to_string(),
+                            summary: row.summary.to_string(),
+                            tags: row
+                                .badges
+                                .iter()
+                                .filter(|badge| badge.kind == RefKind::Tag)
+                                .map(|badge| badge.label.to_string())
+                                .collect(),
+                        };
+                        if !show_remote {
+                            row.badges
+                                .retain(|badge| badge.kind != RefKind::RemoteBranch);
+                        }
+                        if !show_tags {
+                            row.badges.retain(|badge| badge.kind != RefKind::Tag);
+                        }
+                        let date = style::date_label(row.time, now, date_format);
+                        let filtered = filter.is_some();
+                        let click_entity = entity.clone();
+                        let click_order = order.clone();
+                        let right_entity = entity.clone();
+                        // A ref revealed from the sidebar keeps its row tinted
+                        // while it is not the selection.
+                        let revealed = revealed.is_some_and(|commit| Some(commit) == target.id);
+                        let selected = selection.contains(index);
+                        let row_ui_state = row_state(selected, revealed);
+                        let element = if filtered {
+                            // The graph is hidden while filtered: spaced-out rows
+                            // would draw lanes that never existed between them.
+                            filtered_commit_row(
+                                index,
+                                &row,
+                                sig_state.as_ref(),
+                                row_ui_state,
+                                &date,
+                                &row_design,
+                                columns,
                             )
-                        },
-                    )
-                    .w_full()
-                    .into_any_element()
-                })
-                .collect::<Vec<_>>()
+                        } else {
+                            commit_row(
+                                index,
+                                &row,
+                                sig_state.as_ref(),
+                                row_ui_state,
+                                &date,
+                                &row_design,
+                                columns,
+                            )
+                        }
+                        .cursor_pointer()
+                        .on_click(move |event, window, cx| {
+                            let modifiers = event.modifiers();
+                            let shift = modifiers.shift;
+                            let secondary = modifiers.secondary(cx);
+                            let order = click_order.clone();
+                            click_entity.update(cx, |this, cx| {
+                                this.click_commit(index, position, shift, secondary, &order, cx);
+                                window.focus(&focus, cx);
+                            });
+                        })
+                        // Right-clicking outside the selection selects that row,
+                        // so the menu never acts on rows the user did not point at.
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            move |_, _, cx| {
+                                right_entity
+                                    .update(cx, |this, cx| this.ensure_commit_selection(index, cx));
+                            },
+                        );
+                        let menu_entity = entity;
+                        let menu_state = menu_state.clone();
+                        crate::ui::context_menu(
+                            ("commit-row-menu", index),
+                            &row_design,
+                            element,
+                            move |menu, window, cx| {
+                                let multi = menu_entity.read(cx).multi_pick_context();
+                                history_ops::commit_menu(
+                                    menu,
+                                    target.clone(),
+                                    menu_state.clone(),
+                                    multi,
+                                    menu_entity.clone(),
+                                    window,
+                                    cx,
+                                )
+                            },
+                        )
+                        .w_full()
+                        .into_any_element()
+                    })
+                    .collect::<Vec<_>>()
+            };
+            if !uncached.is_empty() {
+                let defer_entity = defer_entity.clone();
+                window.defer(cx, move |_, cx| {
+                    defer_entity.update(cx, |this, cx| {
+                        this.schedule_visible_signatures(uncached, cx);
+                    });
+                });
+            }
+            items
         })
         .track_scroll(&self.commit_scroll)
         .with_scrollbar(&self.commit_scroll)
@@ -422,21 +459,20 @@ fn row_state(selected: bool, revealed: bool) -> crate::ui::RowState {
 }
 
 fn commit_row(
-    id: impl Into<gpui::ElementId>,
+    row_index: usize,
     data: &RowData<'_>,
-    selected: bool,
-    revealed: bool,
+    signature: Option<&crate::ui::CommitSignatureState>,
+    state: crate::ui::RowState,
     date: &str,
     design: &Design,
     columns: CommitColumns,
 ) -> gpui::Stateful<Div> {
     let avatar_color = design.avatar_color(&data.email);
     let initials = style::initials(&data.author);
-    let state = row_state(selected, revealed);
     // The graph fades into the row's own fill, so it has to be the same colour
     // `ui::list_row` gives the row.
     let fade = crate::ui::row_surface(state, design);
-    crate::ui::list_row(id, state, design)
+    crate::ui::list_row(("commit-row", row_index), state, design)
         .gap_3()
         .h(px(graph_canvas::ROW_HEIGHT))
         .w_full()
@@ -478,6 +514,12 @@ fn commit_row(
                             text.font_weight(FontWeight::SEMIBOLD)
                         })
                         .child(data.summary.to_string()),
+                )
+                .when_some(
+                    signature.and_then(|sig| {
+                        crate::ui::signature_badge(("commit-sig", row_index), sig, design)
+                    }),
+                    |cell, badge| cell.child(badge),
                 )
                 .when(data.shallow_boundary, |cell| {
                     cell.child(
@@ -535,17 +577,17 @@ fn commit_row(
 /// the graph, which is hidden: the matching commits are not adjacent in
 /// history, so lanes between them would be fiction.
 fn filtered_commit_row(
-    id: impl Into<gpui::ElementId>,
+    row_index: usize,
     data: &RowData<'_>,
-    selected: bool,
-    revealed: bool,
+    signature: Option<&crate::ui::CommitSignatureState>,
+    state: crate::ui::RowState,
     date: &str,
     design: &Design,
     columns: CommitColumns,
 ) -> gpui::Stateful<Div> {
     let avatar_color = design.avatar_color(&data.email);
     let initials = style::initials(&data.author);
-    crate::ui::list_row(id, row_state(selected, revealed), design)
+    crate::ui::list_row(("commit-row", row_index), state, design)
         .gap_3()
         .h(px(graph_canvas::ROW_HEIGHT))
         .w_full()
@@ -578,6 +620,12 @@ fn filtered_commit_row(
                         .truncate()
                         .text_color(design.text)
                         .child(data.summary.to_string()),
+                )
+                .when_some(
+                    signature.and_then(|sig| {
+                        crate::ui::signature_badge(("filtered-commit-sig", row_index), sig, design)
+                    }),
+                    |cell, badge| cell.child(badge),
                 )
                 .when(data.shallow_boundary, |cell| {
                     cell.child(

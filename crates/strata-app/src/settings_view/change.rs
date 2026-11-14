@@ -141,6 +141,10 @@ pub fn show_stashes(settings: &mut Settings, show: bool) {
     settings.history.show_stashes = show;
 }
 
+pub fn show_commit_signatures(settings: &mut Settings, show: bool) {
+    settings.history.show_commit_signatures = show;
+}
+
 pub fn date_format(settings: &mut Settings, format: DateFormat) {
     settings.history.date_format = format;
 }
@@ -237,6 +241,7 @@ mod tests {
         show_remote_branches(&mut settings, false);
         show_tags(&mut settings, false);
         show_stashes(&mut settings, false);
+        show_commit_signatures(&mut settings, false);
         date_format(&mut settings, DateFormat::Absolute);
         git_executable(&mut settings, "/opt/git/bin/git");
         auto_fetch_minutes(&mut settings, 15);
