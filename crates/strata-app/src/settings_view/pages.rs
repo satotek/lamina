@@ -11,8 +11,9 @@ use std::path::Path;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, AppContext as _, Entity, FontWeight, IntoElement, ParentElement, PathPromptOptions,
-    SharedString, StyleRefinement, Styled, Subscription, Window, div, px, relative,
+    AnyElement, App, AppContext as _, Entity, FontWeight, IntoElement, ParentElement,
+    PathPromptOptions, SharedString, StyleRefinement, Styled, Subscription, Window, div, px,
+    relative,
 };
 use gpui_component::group_box::GroupBoxVariant;
 use gpui_component::input::{Input, InputEvent, InputState};
@@ -28,6 +29,7 @@ use super::change::{self, Section};
 use crate::actions::OpenGitConfig;
 use crate::settings::{self, DateFormat, DiffLayout, Settings, ThemeMode};
 use crate::style::Design;
+use crate::tools::Tooling;
 
 /// Font families offered beside the free-text font fields.
 const UI_FONTS: &[&str] = &["Inter", "SF Pro Text", "Segoe UI"];
@@ -403,6 +405,49 @@ fn tools(control: f32, design: &Design) -> SettingPage {
                 ),
             ),
         )
+        .groups(card("ghq").items([
+            SettingItem::new(
+                "Use ghq",
+                tool_toggle(
+                    |settings| settings.tools.ghq.enabled,
+                    change::ghq_enabled,
+                ),
+            )
+            .description(
+                "List ghq's repositories in the picker and default a clone into ghq's directory layout.",
+            ),
+            SettingItem::new("Status", SettingField::render(ghq_status)),
+            SettingItem::new(
+                "Root override",
+                text_field(
+                    "/path/to/ghq/root",
+                    &[],
+                    control,
+                    |settings| {
+                        settings
+                            .tools
+                            .ghq
+                            .root
+                            .as_ref()
+                            .map(|root| root.display().to_string())
+                    },
+                    change::ghq_root,
+                ),
+            )
+            .description(
+                "Leave empty to use the root `ghq root` reports. Both `ghq list` and the clone destination follow this value.",
+            ),
+        ]))
+        .groups(card("GitHub CLI (gh)").items([
+            SettingItem::new(
+                "Use GitHub CLI",
+                tool_toggle(|settings| settings.tools.gh.enabled, change::gh_enabled),
+            )
+            .description(
+                "Open files and commits on GitHub and create pull requests through `gh pr create --web`.",
+            ),
+            SettingItem::new("Status", SettingField::render(gh_status)),
+        ]))
         .groups(card("Repository").item(SettingItem::render(|_, _, cx| {
             let design = Design::new(cx.theme(), Settings::get(cx));
             let available = crate::git_config_view::has_repository(cx);
@@ -838,6 +883,88 @@ fn git_executable_error(path: Option<&Path>) -> Option<String> {
         Ok(_) => Some(format!("{} is not a file", path.display())),
         Err(_) => Some(format!("{} does not exist", path.display())),
     }
+}
+
+/// A switch that also runs detection again: turning a tool off must make its
+/// items disappear on the next frame, and turning it on must find it without a
+/// restart.
+fn tool_toggle(get: fn(&Settings) -> bool, set: fn(&mut Settings, bool)) -> SettingField<bool> {
+    SettingField::switch(
+        move |cx| get(Settings::get(cx)),
+        move |value, cx| {
+            settings::update(cx, |settings| set(settings, value));
+            crate::tools::redetect(cx);
+            cx.refresh_windows();
+        },
+    )
+}
+
+/// What ghq detection found: path, version and the effective root.
+fn ghq_status(
+    _options: &gpui_component::setting::RenderOptions,
+    _window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let design = Design::new(cx.theme(), Settings::get(cx));
+    let settings_root = Settings::get(cx).tools.ghq.root.clone();
+    let Some(tooling) = Tooling::get(cx) else {
+        return status_text("ghq is not installed.".to_owned(), false, &design);
+    };
+    match tooling.ghq() {
+        Some(info) => {
+            let version = info.version.as_deref().unwrap_or("version unknown");
+            let root = settings_root.as_deref().unwrap_or(info.root.as_path());
+            status_text(
+                format!(
+                    "{} · {version}\nRoot: {}",
+                    info.binary.display(),
+                    root.display()
+                ),
+                true,
+                &design,
+            )
+        }
+        None => status_text(tooling.ghq_reason(), false, &design),
+    }
+}
+
+/// What `gh` detection found: path, version and whether it has an account.
+fn gh_status(
+    _options: &gpui_component::setting::RenderOptions,
+    _window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let design = Design::new(cx.theme(), Settings::get(cx));
+    let Some(tooling) = Tooling::get(cx) else {
+        return status_text("gh is not installed.".to_owned(), false, &design);
+    };
+    match tooling.gh() {
+        Some(info) if info.logged_in => status_text(
+            format!("{} · {} · logged in", info.binary.display(), info.version),
+            true,
+            &design,
+        ),
+        Some(info) => status_text(
+            format!(
+                "{} · {} · {}",
+                info.binary.display(),
+                info.version,
+                tooling.gh_reason()
+            ),
+            false,
+            &design,
+        ),
+        None => status_text(tooling.gh_reason(), false, &design),
+    }
+}
+
+fn status_text(text: String, ok: bool, design: &Design) -> AnyElement {
+    div()
+        .max_w(px(420.0))
+        .text_size(px(design.tiny()))
+        .text_color(if ok { design.muted } else { design.remove_text })
+        .child(text)
+        .into_any_element()
 }
 
 fn field_key(options: &gpui_component::setting::RenderOptions, prefix: &str) -> SharedString {

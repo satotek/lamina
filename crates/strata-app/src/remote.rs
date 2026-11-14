@@ -332,6 +332,8 @@ struct Running {
     success: String,
     /// The push to retry with `--force-with-lease`, when one is possible.
     retry: Option<ForceOffer>,
+    /// The branch a successful push may offer a pull request for.
+    pull_request_branch: Option<String>,
     /// git's latest progress line.
     text: Option<String>,
     percent: Option<u8>,
@@ -417,6 +419,13 @@ impl Remote {
             }
             None => Notification::success(running.success.clone()).title(running.kind.label()),
         };
+        let entity = cx.entity();
+        // A branch just pushed to GitHub is the moment the pull-request form
+        // is useful; the action is added only when gh can open it.
+        let note = match (&failure, running.pull_request_branch.as_deref()) {
+            (None, Some(branch)) => crate::github::with_create_pr(note, &entity, branch, cx),
+            _ => note,
+        };
         // A push the remote refused as non-fast-forward is the one failure the
         // user can resolve in place.
         let offer = match failure {
@@ -425,7 +434,6 @@ impl Remote {
             }
             _ => None,
         };
-        let entity = cx.entity();
         // Clear the status-bar segment even when there is no window left to
         // announce the outcome in.
         if active {
@@ -718,6 +726,7 @@ impl RepoView {
             Kind::Fetch,
             "Fetched all remotes".to_owned(),
             None,
+            None,
             cx,
         );
     }
@@ -734,6 +743,7 @@ impl RepoView {
             Operation::FetchUnshallow,
             Kind::Fetch,
             "Fetched the full history".to_owned(),
+            None,
             None,
             cx,
         );
@@ -756,6 +766,7 @@ impl RepoView {
             Kind::Pull,
             pull_message(upstream),
             None,
+            None,
             cx,
         );
     }
@@ -765,6 +776,7 @@ impl RepoView {
         match push_plan(&targets) {
             Err(_) => {}
             Ok(PushPlan::Upstream { branch, remote }) => {
+                let pull_request_branch = Some(branch.clone());
                 let (success, retry) = match remote {
                     Some(remote) => (
                         push_message(&branch, &remote),
@@ -786,6 +798,7 @@ impl RepoView {
                     Kind::Push,
                     success,
                     retry,
+                    pull_request_branch,
                     cx,
                 );
             }
@@ -850,6 +863,7 @@ impl RepoView {
     /// Pushes a branch for the first time and records the upstream.
     fn publish_branch(&mut self, remote: String, branch: String, cx: &mut Context<Self>) {
         let success = push_message(&branch, &remote);
+        let pull_request_branch = Some(branch.clone());
         let retry = Some(ForceOffer {
             remote: remote.clone(),
             branch: branch.clone(),
@@ -865,6 +879,7 @@ impl RepoView {
             Kind::Push,
             success,
             retry,
+            pull_request_branch,
             cx,
         );
     }
@@ -883,6 +898,7 @@ impl RepoView {
             success,
             // A rejected lease is reported, not offered again.
             None,
+            None,
             cx,
         );
     }
@@ -893,6 +909,7 @@ impl RepoView {
         kind: Kind,
         success: String,
         retry: Option<ForceOffer>,
+        pull_request_branch: Option<String>,
         cx: &mut Context<Self>,
     ) {
         let Some(session) = self.session.as_ref() else {
@@ -904,6 +921,7 @@ impl RepoView {
             kind,
             success,
             retry,
+            pull_request_branch,
             text: None,
             percent: None,
         });

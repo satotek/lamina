@@ -28,6 +28,7 @@ mod external_tools;
 mod fake;
 mod file_history;
 mod git_config_view;
+mod github;
 mod graph_canvas;
 mod merge_editor;
 mod metrics;
@@ -43,6 +44,7 @@ mod settings_view;
 mod stash;
 mod style;
 mod tabs;
+mod tools;
 mod ui;
 mod workspace;
 mod worktree_panel;
@@ -95,6 +97,7 @@ fn main() {
     app.run(move |cx: &mut App| {
         gpui_component::init(cx);
         settings::init(cx);
+        tools::init(cx);
         workspace::init(cx);
         actions::bind(cx);
         settings_view::bind(cx);

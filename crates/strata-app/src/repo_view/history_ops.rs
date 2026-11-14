@@ -675,6 +675,10 @@ pub(crate) fn commit_menu(
     let summary = target.summary;
     let tags = target.tags;
 
+    if let Some(item) = crate::github::commit_item(&entity, commit, cx) {
+        menu = menu.item(item);
+    }
+
     let onto = state.branch_label();
     let cherry_blocked = state.blocked_for(HistoryAction::CherryPick, commit);
     let revert_blocked = state.blocked_for(HistoryAction::Revert, commit);

@@ -442,7 +442,7 @@ impl RepoView {
                         ("changed-file-menu", index),
                         &list_design,
                         trigger,
-                        move |menu, _window, _cx| {
+                        move |menu, _window, cx| {
                             let entity = menu_entity.clone();
                             let path = menu_path.clone();
                             let present = in_working_tree(menu_work_dir.as_deref(), &path);
@@ -480,6 +480,15 @@ impl RepoView {
                                             });
                                         },
                                     ));
+                                if let Some(item) = crate::github::file_item(
+                                    &menu_entity,
+                                    commit,
+                                    &menu_path,
+                                    None,
+                                    cx,
+                                ) {
+                                    menu = menu.item(item);
+                                }
                             }
                             menu
                         },

@@ -14,6 +14,7 @@ pub mod merge;
 pub mod patch;
 pub mod repo;
 pub mod session;
+pub mod tools;
 pub mod types;
 pub mod watch;
 

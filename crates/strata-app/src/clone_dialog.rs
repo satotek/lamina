@@ -40,6 +40,7 @@ use strata_core::git_cli::{CloneOptions, CloneOutcome, Git, clone_repository, in
 use crate::picker::OpenTarget;
 use crate::settings::Settings;
 use crate::style::Design;
+use crate::tools::Tooling;
 use crate::ui;
 use crate::workspace::Workspace;
 
@@ -290,6 +291,9 @@ struct CloneDialog {
     depth: Entity<InputState>,
     /// The last name derived from the URL, so typing a custom name sticks.
     derived_name: String,
+    /// The last destination folder derived from the URL, so a user-picked
+    /// folder is not overwritten on every keystroke.
+    derived_parent: Option<String>,
     /// The exact destination of the running clone, frozen while fields stay
     /// editable.
     attempt: Option<PathBuf>,
@@ -344,6 +348,7 @@ impl CloneDialog {
             branch,
             depth,
             derived_name: String::new(),
+            derived_parent: None,
             attempt: None,
             recurse_submodules: false,
             options_open: false,
@@ -363,9 +368,11 @@ impl CloneDialog {
         self.cancel.is_some()
     }
 
-    /// Keeps the folder name in step with the URL until the user edits it.
+    /// Keeps the folder name and ghq destination in step with the URL until
+    /// the user edits them.
     fn derive_name(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(derived) = directory_name(self.url.read(cx).value().as_ref()) else {
+        let url = self.url.read(cx).value().to_string();
+        let Some(derived) = directory_name(&url) else {
             return;
         };
         let current = self.name.read(cx).value().to_string();
@@ -374,6 +381,57 @@ impl CloneDialog {
                 .update(cx, |state, cx| state.set_value(derived.clone(), window, cx));
             self.derived_name = derived;
         }
+        self.apply_ghq_destination(&url, window, cx);
+    }
+
+    /// A URL ghq understands defaults the destination to
+    /// `<ghq root>/<host>/<owner>/<repo>`, as long as the user has not picked
+    /// a folder themselves.
+    fn apply_ghq_destination(&mut self, url: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(destination) = self.ghq_destination(url, cx) else {
+            return;
+        };
+        let Some(parent) = destination.parent() else {
+            return;
+        };
+        let parent = parent.to_string_lossy().into_owned();
+        let current_parent = self.parent.read(cx).value().to_string();
+        if current_parent.trim().is_empty()
+            || Some(&current_parent) == self.derived_parent.as_ref()
+            || current_parent == home_directory().to_string_lossy().into_owned()
+        {
+            self.parent
+                .update(cx, |state, cx| state.set_value(parent.clone(), window, cx));
+            self.derived_parent = Some(parent);
+        }
+
+        if let Some(name) = destination
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+        {
+            let current = self.name.read(cx).value().to_string();
+            if current.trim().is_empty() || current == self.derived_name {
+                self.name
+                    .update(cx, |state, cx| state.set_value(name.clone(), window, cx));
+                self.derived_name = name;
+            }
+        }
+    }
+
+    fn ghq_destination(&self, url: &str, cx: &App) -> Option<PathBuf> {
+        let settings = Settings::get(cx);
+        if !settings.tools.ghq.enabled {
+            return None;
+        }
+        let tooling = Tooling::get(cx)?;
+        let ghq = tooling.ghq()?;
+        let root = settings
+            .tools
+            .ghq
+            .root
+            .as_deref()
+            .unwrap_or(ghq.root.as_path());
+        strata_core::tools::ghq_destination(root, url)
     }
 
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {

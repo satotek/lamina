@@ -208,6 +208,42 @@ pub struct Tools {
     /// Command to open a terminal in the repository; `{path}` is substituted.
     /// `None` uses the platform's default terminal.
     pub terminal: Option<String>,
+    pub ghq: GhqSettings,
+    pub gh: GhSettings,
+}
+
+/// Optional ghq integration: the repository pickup in the picker and the
+/// clone destination.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GhqSettings {
+    /// On by default; the UI still disables it when ghq is not installed.
+    pub enabled: bool,
+    /// `None` uses the root `ghq root` reports.
+    pub root: Option<PathBuf>,
+}
+
+impl Default for GhqSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            root: None,
+        }
+    }
+}
+
+/// Optional GitHub CLI integration. The app never handles a token: `gh` keeps
+/// its own credentials.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GhSettings {
+    pub enabled: bool,
+}
+
+impl Default for GhSettings {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

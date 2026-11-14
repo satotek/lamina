@@ -24,11 +24,13 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::PopupMenuItem;
 use gpui_component::{ActiveTheme as _, TitleBar};
 use strata_core::repo::Repo;
+use strata_core::tools as core_tools;
 
 use crate::recent::{RecentRepositories, RecentRepository};
 use crate::scrollbar::WithScrollbar as _;
 use crate::settings::Settings;
 use crate::style::Design;
+use crate::tools::Tooling;
 use crate::ui;
 use crate::workspace::Workspace;
 
@@ -44,6 +46,9 @@ const ROW_HEIGHT: f32 = 38.0;
 const DIALOG_LIST_HEIGHT: f32 = 300.0;
 /// The welcome screen has the room for a little more.
 const PAGE_LIST_HEIGHT: f32 = 260.0;
+/// The ghq section is attached under the recent list, so it gets a shorter
+/// window onto its (possibly thousands of) repositories.
+const GHQ_LIST_HEIGHT: f32 = 200.0;
 
 #[cfg(target_os = "macos")]
 const MODIFIER: &str = "Cmd";
@@ -115,6 +120,21 @@ pub(crate) enum OpenTarget {
     NewTab,
 }
 
+/// The ghq repositories the picker can open.
+///
+/// The list is loaded on the background executor and filtered once per query
+/// change, so a `ghq list -p` with thousands of entries never scans the paths
+/// on every frame. `uniform_list` only builds the visible rows.
+#[derive(Default)]
+struct GhqState {
+    paths: Rc<Vec<PathBuf>>,
+    /// Indices into `paths`, best fuzzy match first.
+    filtered: Rc<Vec<usize>>,
+    loading: bool,
+    error: Option<String>,
+    visible: bool,
+}
+
 /// A directory chooser for one repository.
 pub struct Picker {
     mode: Mode,
@@ -130,7 +150,11 @@ pub struct Picker {
     error: Option<String>,
     focus: FocusHandle,
     scroll: UniformListScrollHandle,
+    ghq: GhqState,
+    ghq_scroll: UniformListScrollHandle,
+    ghq_generation: u64,
     _input_events: Subscription,
+    _tooling: Subscription,
 }
 
 impl Picker {
@@ -155,6 +179,7 @@ impl Picker {
                     // position no longer points at what the user is looking at.
                     this.selected = 0;
                     this.error = None;
+                    this.refresh_ghq_filter(cx);
                     cx.notify();
                 }
                 InputEvent::PressEnter { secondary, .. } => {
@@ -181,7 +206,8 @@ impl Picker {
                 }
                 _ => {}
             });
-        Self {
+        let tooling = cx.observe_global::<Tooling>(|this, cx| this.reload_ghq(cx));
+        let mut picker = Self {
             mode,
             target,
             workspace,
@@ -193,8 +219,14 @@ impl Picker {
             error: None,
             focus,
             scroll: UniformListScrollHandle::default(),
+            ghq: GhqState::default(),
+            ghq_scroll: UniformListScrollHandle::default(),
+            ghq_generation: 0,
             _input_events,
-        }
+            _tooling: tooling,
+        };
+        picker.reload_ghq(cx);
+        picker
     }
 
     /// The picker's text field: the window focuses it so typing goes to the
@@ -208,6 +240,93 @@ impl Picker {
         self.input.focus_handle(cx)
     }
 
+    /// Loads `ghq list -p` off the UI thread. Re-runs whenever detection
+    /// finishes or the tool settings change, and never when the tool is off.
+    fn reload_ghq(&mut self, cx: &mut Context<Self>) {
+        self.ghq_generation += 1;
+        let generation = self.ghq_generation;
+        self.ghq.loading = false;
+        self.ghq.error = None;
+
+        let Some(tooling) = Tooling::get(cx) else {
+            self.clear_ghq(cx);
+            return;
+        };
+        if !Settings::get(cx).tools.ghq.enabled {
+            self.clear_ghq(cx);
+            return;
+        }
+        let Some(ghq) = tooling.ghq().cloned() else {
+            self.clear_ghq(cx);
+            return;
+        };
+
+        let root = Settings::get(cx).tools.ghq.root.clone();
+        let binary = ghq.binary;
+        self.ghq.visible = true;
+        self.ghq.loading = true;
+        cx.notify();
+        let task = cx
+            .background_executor()
+            .spawn(async move { core_tools::ghq_list(&binary, root.as_deref()) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |picker, cx| {
+                if picker.ghq_generation != generation {
+                    return;
+                }
+                picker.ghq.loading = false;
+                match result {
+                    Ok(paths) => {
+                        picker.ghq.paths = Rc::new(paths);
+                        picker.ghq.error = None;
+                    }
+                    Err(error) => {
+                        picker.ghq.paths = Rc::default();
+                        picker.ghq.error = Some(error.to_string());
+                    }
+                }
+                picker.refresh_ghq_filter(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn clear_ghq(&mut self, cx: &mut Context<Self>) {
+        self.ghq = GhqState::default();
+        cx.notify();
+    }
+
+    /// Re-ranks the ghq paths with the same subsequence matcher the palette
+    /// uses.
+    fn refresh_ghq_filter(&mut self, cx: &App) {
+        if self.ghq.paths.is_empty() {
+            self.ghq.filtered = Rc::default();
+            return;
+        }
+        let query = if self.path_mode {
+            String::new()
+        } else {
+            self.input.read(cx).value().to_string()
+        };
+        let labels: Vec<String> = self
+            .ghq
+            .paths
+            .iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect();
+        let candidates: Vec<crate::palette::Candidate<'_>> = labels
+            .iter()
+            .map(|label| crate::palette::Candidate {
+                label,
+                visible: true,
+                recent: None,
+            })
+            .collect();
+        self.ghq.filtered = Rc::new(crate::palette::rank(&candidates, &query));
+    }
+
     /// The repositories the list shows: `recents` filtered by the text field,
     /// or all of them while the field is being used to type a path.
     fn filtered(&self, cx: &App) -> Vec<usize> {
@@ -219,19 +338,35 @@ impl Picker {
         filter_indices(self.recents.entries(), &query)
     }
 
+    fn row_count(&self, cx: &App) -> usize {
+        self.filtered(cx).len() + self.ghq.filtered.len()
+    }
+
     fn selected_path(&self, cx: &App) -> Option<PathBuf> {
-        let index = *self.filtered(cx).get(self.selected)?;
-        self.recents.get(index).map(|entry| entry.path.clone())
+        let recents = self.filtered(cx);
+        if self.selected < recents.len() {
+            let index = *recents.get(self.selected)?;
+            return self.recents.get(index).map(|entry| entry.path.clone());
+        }
+        let position = self.selected - recents.len();
+        let index = *self.ghq.filtered.get(position)?;
+        self.ghq.paths.get(index).cloned()
     }
 
     fn step(&mut self, delta: isize, cx: &mut Context<Self>) {
-        let len = self.filtered(cx).len();
+        let recents = self.filtered(cx).len();
+        let len = recents + self.ghq.filtered.len();
         if len == 0 {
             return;
         }
         self.selected = move_selection(self.selected, delta, len);
-        self.scroll
-            .scroll_to_item(self.selected, ScrollStrategy::Center);
+        if self.selected < recents {
+            self.scroll
+                .scroll_to_item(self.selected, ScrollStrategy::Center);
+        } else {
+            self.ghq_scroll
+                .scroll_to_item(self.selected - recents, ScrollStrategy::Center);
+        }
         cx.notify();
     }
 
@@ -349,6 +484,66 @@ impl Picker {
         }
     }
 
+    fn open_ghq_row_in(
+        &mut self,
+        position: usize,
+        target: OpenTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let recents = self.filtered(cx).len();
+        self.selected = recents + position;
+        let Some(path) = self
+            .ghq
+            .filtered
+            .get(position)
+            .copied()
+            .and_then(|index| self.ghq.paths.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        match self.open_path_in(path, target, window, cx) {
+            Ok(()) => {}
+            Err(message) => {
+                self.error = Some(message);
+                cx.notify();
+            }
+        }
+    }
+
+    fn open_ghq_row_in_new_window(
+        &mut self,
+        position: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let recents = self.filtered(cx).len();
+        self.selected = recents + position;
+        let Some(path) = self
+            .ghq
+            .filtered
+            .get(position)
+            .copied()
+            .and_then(|index| self.ghq.paths.get(index))
+            .cloned()
+        else {
+            return;
+        };
+        match resolve_repository(&path) {
+            Ok(root) => {
+                crate::workspace::open_new_window(root, cx);
+                if self.mode == Mode::Dialog && window.has_active_dialog(cx) {
+                    window.defer(cx, |window, cx| window.close_dialog(cx));
+                }
+            }
+            Err(message) => {
+                self.error = Some(message);
+                cx.notify();
+            }
+        }
+    }
+
     /// Opens the platform's directory chooser using the picker's default target.
     pub(crate) fn open_native(&mut self, window: &mut Window, cx: &mut App) {
         self.open_native_in(self.target, window, cx);
@@ -449,7 +644,7 @@ impl Picker {
         if let Err(error) = self.recents.save_default() {
             log::warn!("cannot save the recent-repository list: {error}");
         }
-        let len = self.filtered(cx).len();
+        let len = self.row_count(cx);
         self.selected = self.selected.min(len.saturating_sub(1));
         cx.notify();
     }
@@ -469,6 +664,7 @@ impl Picker {
         });
         window.focus(&focus, cx);
         self.selected = 0;
+        self.refresh_ghq_filter(cx);
         cx.notify();
     }
 
@@ -488,11 +684,23 @@ impl Picker {
         let target = self.target;
         let mode = self.mode;
         let now = crate::recent::now_seconds();
-        let count = filtered.len();
+        let recent_count = filtered.len();
         let filtered = Rc::new(filtered);
         let list_id = match self.mode {
             Mode::Page => "picker-recent-page",
             Mode::Dialog => "picker-recent-dialog",
+        };
+
+        let ghq_paths = Rc::clone(&self.ghq.paths);
+        let ghq_filtered = Rc::clone(&self.ghq.filtered);
+        let ghq_count = ghq_filtered.len();
+        let ghq_selected = selected.checked_sub(recent_count);
+        let ghq_visible = self.ghq.visible;
+        let ghq_loading = self.ghq.loading;
+        let ghq_error = self.ghq.error.clone();
+        let ghq_id = match self.mode {
+            Mode::Page => "picker-ghq-page",
+            Mode::Dialog => "picker-ghq-dialog",
         };
 
         let mut column = div().flex().flex_col().gap_2().w_full();
@@ -555,7 +763,7 @@ impl Picker {
             )));
         }
 
-        if count == 0 {
+        if recent_count == 0 {
             column = column.child(
                 div()
                     .pt_2()
@@ -572,7 +780,7 @@ impl Picker {
                 Mode::Page => PAGE_LIST_HEIGHT,
                 Mode::Dialog => DIALOG_LIST_HEIGHT,
             };
-            let list = uniform_list(list_id, count, move |range, _window, _cx| {
+            let list = uniform_list(list_id, recent_count, move |range, _window, _cx| {
                 range
                     .map(|position| {
                         let index = filtered[position];
@@ -597,6 +805,68 @@ impl Picker {
             .h(px(height))
             .w_full();
             column = column.child(list);
+        }
+
+        if ghq_visible {
+            column = column.child(
+                div().flex().items_center().justify_between().pt_1().child(
+                    ui::section_header("picker-ghq", "GHQ REPOSITORIES", design)
+                        .count(ghq_paths.len())
+                        .px(px(0.0))
+                        .h(px(20.0)),
+                ),
+            );
+            if ghq_loading && ghq_paths.is_empty() {
+                column = column.child(
+                    div()
+                        .text_size(px(11.5))
+                        .text_color(design.muted)
+                        .child("Loading ghq repositories…"),
+                );
+            } else if let Some(error) = ghq_error {
+                column = column.child(div().max_w(px(520.0)).child(ui::banner(
+                    ui::BannerKind::Danger,
+                    format!("ghq list failed: {error}"),
+                    design,
+                )));
+            } else if ghq_count == 0 {
+                column = column.child(div().text_size(px(11.5)).text_color(design.muted).child(
+                    if ghq_paths.is_empty() {
+                        "No ghq repositories yet."
+                    } else {
+                        "No ghq repository matches that filter."
+                    },
+                ));
+            } else {
+                let entity = self.entity.clone();
+                let row_design = design.clone();
+                let paths = Rc::clone(&ghq_paths);
+                let indices = Rc::clone(&ghq_filtered);
+                let list = uniform_list(ghq_id, ghq_count, move |range, _window, _cx| {
+                    range
+                        .map(|position| {
+                            let index = indices[position];
+                            let Some(path) = paths.get(index) else {
+                                return div().into_any_element();
+                            };
+                            ghq_row(
+                                mode,
+                                target,
+                                position,
+                                path,
+                                ghq_selected == Some(position),
+                                entity.clone(),
+                                &row_design,
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .track_scroll(&self.ghq_scroll)
+                .with_scrollbar(&self.ghq_scroll)
+                .h(px(GHQ_LIST_HEIGHT))
+                .w_full();
+                column = column.child(list);
+            }
         }
 
         if self.mode == Mode::Page {
@@ -804,6 +1074,115 @@ fn recent_row(
             .item(PopupMenuItem::new("Open in New Window").on_click(open_new_window))
             .separator()
             .item(PopupMenuItem::new("Remove from Recent").on_click(remove))
+    })
+    .into_any_element()
+}
+
+/// Row rendering for a ghq repository.
+#[allow(clippy::too_many_arguments)]
+fn ghq_row(
+    mode: Mode,
+    default_target: OpenTarget,
+    position: usize,
+    path: &Path,
+    selected: bool,
+    entity: Entity<Picker>,
+    design: &Design,
+) -> AnyElement {
+    let group = format!("ghq-{mode:?}-{position}");
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    let path_label = path.display().to_string();
+
+    let open_entity = entity.clone();
+    let open = div()
+        .id(("ghq-open", position))
+        .flex()
+        .flex_1()
+        .min_w_0()
+        .h_full()
+        .items_center()
+        .gap_2()
+        .cursor_pointer()
+        .on_click(move |event, window, cx| {
+            let target = if event.modifiers().secondary(cx) {
+                OpenTarget::NewTab
+            } else {
+                default_target
+            };
+            open_entity.update(cx, |picker, cx| {
+                picker.open_ghq_row_in(position, target, window, cx);
+            });
+        })
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .flex_1()
+                .min_w_0()
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(px(12.0))
+                        .text_color(design.text)
+                        .child(name),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(px(10.5))
+                        .text_color(design.muted)
+                        .child(path_label),
+                ),
+        );
+
+    let mut row = div()
+        .group(group)
+        .flex()
+        .items_center()
+        .gap_2()
+        .h(px(ROW_HEIGHT))
+        .w_full()
+        .px_2()
+        .rounded_sm()
+        .hover(|style| style.bg(design.row_selected))
+        .child(open);
+    if selected {
+        row = row.bg(design.row_selected);
+    }
+
+    let menu_id: SharedString = format!("ghq-menu-{mode:?}-{position}").into();
+    let menu_entity = entity;
+    ui::context_menu(menu_id, design, row, move |menu, _window, _cx| {
+        let open_current = {
+            let entity = menu_entity.clone();
+            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                entity.update(cx, |picker, cx| {
+                    picker.open_ghq_row_in(position, OpenTarget::Current, window, cx);
+                });
+            }
+        };
+        let open_new_tab = {
+            let entity = menu_entity.clone();
+            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                entity.update(cx, |picker, cx| {
+                    picker.open_ghq_row_in(position, OpenTarget::NewTab, window, cx);
+                });
+            }
+        };
+        let open_new_window = {
+            let entity = menu_entity.clone();
+            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                entity.update(cx, |picker, cx| {
+                    picker.open_ghq_row_in_new_window(position, window, cx);
+                });
+            }
+        };
+        menu.item(PopupMenuItem::new("Open").on_click(open_current))
+            .item(PopupMenuItem::new("Open in New Tab").on_click(open_new_tab))
+            .item(PopupMenuItem::new("Open in New Window").on_click(open_new_window))
     })
     .into_any_element()
 }

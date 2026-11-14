@@ -189,6 +189,19 @@ pub fn terminal(settings: &mut Settings, command: &str) {
     settings.tools.terminal = optional_text(command);
 }
 
+pub fn ghq_enabled(settings: &mut Settings, enabled: bool) {
+    settings.tools.ghq.enabled = enabled;
+}
+
+/// A blank field keeps using the root `ghq root` reports.
+pub fn ghq_root(settings: &mut Settings, root: &str) {
+    settings.tools.ghq.root = optional_text(root).map(PathBuf::from);
+}
+
+pub fn gh_enabled(settings: &mut Settings, enabled: bool) {
+    settings.tools.gh.enabled = enabled;
+}
+
 pub fn external_avatars(settings: &mut Settings, load: bool) {
     settings.privacy.external_avatars = load;
 }

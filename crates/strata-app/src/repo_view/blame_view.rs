@@ -987,7 +987,7 @@ impl RepoView {
                                 ("blame-gutter-menu", index),
                                 &design,
                                 gutter,
-                                move |menu, _window, _cx| {
+                                move |menu, _window, cx| {
                                     let parent_entity = menu_entity.clone();
                                     let parent_path = orig_path.clone();
                                     let copy = copy_id.clone();
@@ -1030,6 +1030,16 @@ impl RepoView {
                                             ));
                                         },
                                     ))
+                                    .when_some(
+                                        crate::github::file_item(
+                                            &menu_entity,
+                                            commit,
+                                            &orig_path,
+                                            Some((line, line)),
+                                            cx,
+                                        ),
+                                        |menu, item| menu.item(item),
+                                    )
                                 },
                             )
                             .into_any_element()
