@@ -31,7 +31,7 @@ use crate::actions::{
     CloneRepository, CloseTab, NavigateBack, NewRepository, NewTab, NextTab, OpenInEditor,
     OpenRepository, OpenSettings, OpenTerminalHere, PreviousTab, Quit, SelectTab1, SelectTab2,
     SelectTab3, SelectTab4, SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9,
-    StashChanges, ToggleDetailsMaximized, ToggleFrameStats, TogglePalette,
+    StashChanges, SwitchBranch, ToggleDetailsMaximized, ToggleFrameStats, TogglePalette,
 };
 use crate::branches::CreateBranchFromHead;
 use crate::remote::{FetchRemotes, PullBranch, PushBranch};
@@ -228,6 +228,11 @@ const COMMANDS: &[Command] = &[
     Command {
         label: "Create branch from HEAD",
         action: || Box::new(CreateBranchFromHead),
+        needs_repo: true,
+    },
+    Command {
+        label: "Switch Branch…",
+        action: || Box::new(SwitchBranch),
         needs_repo: true,
     },
     Command {

@@ -113,28 +113,41 @@ impl RepoView {
             .child(icon(IconName::ChevronDown, 12.0, design.muted));
 
         let branch_chip = fit.branch.then(|| {
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
+            let chip = crate::ui::content_button("branch-chip")
+                .ghost()
+                .cursor_pointer()
                 .h(px(28.0))
                 .px_2p5()
                 .rounded(px(7.0))
                 .border_1()
                 .border_color(design.border)
                 .bg(design.background)
-                .child(glyph(style::glyph::BRANCH, 14.0, design.text))
-                .child(div().max_w(px(fit.branch_width)).truncate().child(branch))
-                .when(fit.track && !track.is_empty(), |chip| {
-                    chip.child(
-                        div()
-                            .flex_none()
-                            .text_size(px(11.0))
-                            .text_color(design.muted)
-                            .child(track),
-                    )
-                })
-                .child(icon(IconName::ChevronDown, 12.0, design.muted))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.0))
+                        .text_size(px(design.ui))
+                        .child(glyph(style::glyph::BRANCH, 14.0, design.text))
+                        .child(div().max_w(px(fit.branch_width)).truncate().child(branch))
+                        .when(fit.track && !track.is_empty(), |content| {
+                            content.child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(11.0))
+                                    .text_color(design.muted)
+                                    .child(track),
+                            )
+                        })
+                        .child(icon(IconName::ChevronDown, 12.0, design.muted)),
+                );
+            // Without a session there is nothing to switch to, so the chip
+            // stays the plain label it was.
+            if self.session.is_some() {
+                crate::branch_switcher::chip(self, chip, design)
+            } else {
+                chip.into_any_element()
+            }
         });
 
         // The real field lives in the title bar when a repository can search;

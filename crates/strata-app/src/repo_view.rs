@@ -48,6 +48,7 @@ use strata_core::session::{
 };
 use strata_core::{FileChange, HeadInfo, Oid, RefKind};
 
+use crate::branch_switcher::BranchSwitcher;
 use crate::branches::{BranchStart, Branches};
 use crate::data::{self, LaneWidth, Source};
 use crate::debug_launch::{self, DebugDialog, DebugLaunch, SnapshotRevMatch, TreeTarget};
@@ -344,6 +345,8 @@ pub struct RepoView {
     pub(crate) entity: WeakEntity<RepoView>,
     /// Branch sections, dialogs and the operations they started.
     pub(crate) branches: Branches,
+    /// The branch switcher under the title bar's chip.
+    pub(crate) branch_switcher: BranchSwitcher,
     /// Submodules and linked worktrees, which are not part of a snapshot and so
     /// are re-read after every one.
     extra_lists: ExtraLists,
@@ -529,6 +532,7 @@ impl RepoView {
             worktree: WorktreePanel::default(),
             entity,
             branches: Branches::default(),
+            branch_switcher: BranchSwitcher::default(),
             extra_lists: ExtraLists::default(),
             remote: Remote::default(),
             search: SearchState::default(),
@@ -988,7 +992,7 @@ impl RepoView {
 
     /// True while the session is running an operation or one this view started
     /// has not reported back yet.
-    fn is_busy(&self) -> bool {
+    pub(crate) fn is_busy(&self) -> bool {
         self.branches.is_running()
             || self
                 .session

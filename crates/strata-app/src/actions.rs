@@ -77,6 +77,9 @@ actions!(
         /// Opens the command palette over the active window. Handled globally
         /// by the palette module.
         TogglePalette,
+        /// Opens the branch switcher under the title bar's branch chip.
+        /// Handled on `RepoView` by `branch_switcher.rs`.
+        SwitchBranch,
         /// Returns to the parent repository this one was opened from. Handled
         /// on `RepoView` when a parent exists on the navigation stack.
         NavigateBack,
@@ -121,6 +124,10 @@ const PLATFORM_STASH: &str = "ctrl-shift-s";
 const PLATFORM_PALETTE: &str = "cmd-shift-p";
 #[cfg(not(target_os = "macos"))]
 const PLATFORM_PALETTE: &str = "ctrl-shift-p";
+#[cfg(target_os = "macos")]
+const PLATFORM_SWITCH_BRANCH: &str = "cmd-b";
+#[cfg(not(target_os = "macos"))]
+const PLATFORM_SWITCH_BRANCH: &str = "ctrl-b";
 
 pub fn bind(cx: &mut App) {
     let scope = Some(REPO_VIEW);
@@ -144,6 +151,7 @@ pub fn bind(cx: &mut App) {
         KeyBinding::new("end", SelectLast, scope),
         KeyBinding::new("f12", ToggleFrameStats, scope),
         KeyBinding::new(PLATFORM_STASH, StashChanges, scope),
+        KeyBinding::new(PLATFORM_SWITCH_BRANCH, SwitchBranch, scope),
         KeyBinding::new("alt-left", NavigateBack, scope),
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-[", NavigateBack, scope),

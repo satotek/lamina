@@ -2982,7 +2982,7 @@ impl RepoView {
 
 /// Checks out `remote` as `local`, creating `local` from the remote ref when it
 /// does not exist yet.
-fn checkout_remote(
+pub(crate) fn checkout_remote(
     view: &mut RepoView,
     remote: &str,
     local: &str,

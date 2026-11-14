@@ -11,6 +11,7 @@
 
 mod actions;
 mod autofetch;
+mod branch_switcher;
 mod branches;
 mod clone_dialog;
 mod component_theme;
@@ -85,6 +86,7 @@ fn main() {
         settings_view::bind(cx);
         worktree_panel::bind(cx);
         branches::bind(cx);
+        branch_switcher::bind(cx);
         conflicts::bind(cx);
         remote::bind(cx);
         search::bind(cx);

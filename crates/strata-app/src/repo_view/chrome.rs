@@ -17,7 +17,7 @@ use super::{PAGE, RepoView};
 use crate::actions::{
     self, ExtendSelectionNext, ExtendSelectionPrevious, NavigateBack, OpenInEditor,
     OpenTerminalHere, SelectFirst, SelectLast, SelectNext, SelectPageDown, SelectPageUp,
-    SelectPrevious, StashChanges, ToggleDetailsMaximized, ToggleFrameStats,
+    SelectPrevious, StashChanges, SwitchBranch, ToggleDetailsMaximized, ToggleFrameStats,
 };
 use crate::branches::CreateBranchFromHead;
 use crate::data::Source;
@@ -98,6 +98,9 @@ impl Render for RepoView {
             )
             .on_action(cx.listener(|this, _: &CreateBranchFromHead, window, cx| {
                 this.create_branch_from_head(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &SwitchBranch, window, cx| {
+                this.open_branch_switcher(window, cx)
             }))
             .on_action(cx.listener(|this, _: &FetchRemotes, window, cx| {
                 this.remote_command(Command::Fetch, window, cx)

@@ -14,7 +14,7 @@ use gpui::{
     RenderOnce, SharedString, StyleRefinement, Styled, Window,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::{Disableable as _, Icon, Sizable as _, Size, StyledExt as _};
+use gpui_component::{Disableable as _, Icon, Selectable as _, Sizable as _, Size, StyledExt as _};
 
 /// What a button means, which decides its fill.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -57,6 +57,11 @@ pub struct UiButton {
     kind: ButtonKind,
     size: ButtonSize,
     disabled: bool,
+    /// The button is selected in a set, as a toggle would be.
+    selected: bool,
+    /// The button is the trigger of an open popover or menu, which the
+    /// component paints like a selection.
+    open: bool,
     tooltip: Option<SharedString>,
     focus: Option<FocusHandle>,
     on_click: Option<ClickHandler>,
@@ -89,6 +94,8 @@ impl UiButton {
             kind: ButtonKind::default(),
             size: ButtonSize::default(),
             disabled: false,
+            selected: false,
+            open: false,
             tooltip: None,
             focus: None,
             on_click: None,
@@ -168,6 +175,26 @@ impl Styled for UiButton {
     }
 }
 
+impl gpui_component::Selectable for UiButton {
+    fn selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    fn is_selected(&self) -> bool {
+        self.selected
+    }
+
+    fn open(mut self, open: bool) -> Self {
+        self.open = open;
+        self
+    }
+
+    fn is_open(&self) -> bool {
+        self.open
+    }
+}
+
 impl RenderOnce for UiButton {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let Self {
@@ -177,6 +204,8 @@ impl RenderOnce for UiButton {
             kind,
             size,
             disabled,
+            selected,
+            open,
             tooltip,
             focus,
             on_click,
@@ -207,6 +236,8 @@ impl RenderOnce for UiButton {
             button = button.track_focus(&focus);
         }
         button = button.disabled(disabled);
+        button = button.selected(selected);
+        button = button.open(open);
         if let Some(tooltip) = tooltip {
             button = button.tooltip(tooltip.clone());
             // An icon-only button has no label for a screen reader to announce,
