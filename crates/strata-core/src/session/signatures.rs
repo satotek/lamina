@@ -199,7 +199,7 @@ fn process_job(
         return Ok(());
     }
 
-    let hints = shared.repo.signature_config_hints();
+    let hints = shared.git.signature_config_hints()?;
     let Some(verified) = shared
         .git
         .verify_commit_signatures(&signed, &hints, &is_cancelled)?

@@ -54,7 +54,7 @@ fn signature_detection_and_verification_batch() {
     }
 
     let git = Git::new(path);
-    let hints = repo.signature_config_hints();
+    let hints = git.signature_config_hints().expect("signature hints");
 
     // 1. Verify whatever signed commits exist in the first 50 visible rows.
     let first_50 = repo

@@ -289,7 +289,7 @@ fn ssh_signed_commits_verify_g_u_e_and_bad_in_isolated_temp_repo() {
 
     // First verify WITHOUT gpg.ssh.allowedSignersFile configured -> E (CannotCheck), distinct from B.
     let git = test.git_handle();
-    let hints_missing = repo.signature_config_hints();
+    let hints_missing = git.signature_config_hints().expect("hints");
     let unconfigured = git
         .verify_commit_signatures(&signed, &hints_missing, &|| false)
         .expect("verify without allowedSignersFile")
@@ -320,7 +320,7 @@ fn ssh_signed_commits_verify_g_u_e_and_bad_in_isolated_temp_repo() {
         allowed_signers.to_str().expect("allowed signers path"),
     ]);
 
-    let hints_configured = repo.signature_config_hints();
+    let hints_configured = git.signature_config_hints().expect("hints");
     assert!(hints_configured.ssh_allowed_signers_configured);
     assert!(hints_configured.ssh_allowed_signers_exists);
 
@@ -509,7 +509,7 @@ fn openpgp_end_to_end_when_gpg_is_installed() {
     let res = git
         .verify_commit_signatures(
             &[(pgp_oid, SignatureFormat::OpenPgp)],
-            &repo.signature_config_hints(),
+            &git.signature_config_hints().expect("hints"),
             &|| false,
         )
         .expect("verify")
@@ -528,7 +528,7 @@ fn openpgp_end_to_end_when_gpg_is_installed() {
     let res_missing = missing_key_git
         .verify_commit_signatures(
             &[(pgp_oid, SignatureFormat::OpenPgp)],
-            &repo.signature_config_hints(),
+            &git.signature_config_hints().expect("hints"),
             &|| false,
         )
         .expect("verify missing key")

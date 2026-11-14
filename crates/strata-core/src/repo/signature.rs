@@ -150,35 +150,6 @@ impl Repo {
         }
         Ok(results)
     }
-
-    /// Reads local/effective signature verification config hints through `gix`.
-    pub fn signature_config_hints(&self) -> SignatureConfigHints {
-        let repo = self.local();
-        let config = repo.config_snapshot();
-        let raw = config
-            .string("gpg.ssh.allowedSignersFile")
-            .map(|value| String::from_utf8_lossy(value.as_ref()).trim().to_owned())
-            .filter(|value| !value.is_empty());
-        let Some(raw_path) = raw else {
-            return SignatureConfigHints::default();
-        };
-        let resolved = expand_tilde(&raw_path);
-        let exists = resolved.is_file();
-        SignatureConfigHints {
-            ssh_allowed_signers_configured: true,
-            ssh_allowed_signers_exists: exists,
-            ssh_allowed_signers_path: Some(resolved),
-        }
-    }
-}
-
-fn expand_tilde(raw: &str) -> PathBuf {
-    if let Some(rest) = raw.strip_prefix("~/")
-        && let Some(home) = std::env::var_os("HOME")
-    {
-        return PathBuf::from(home).join(rest);
-    }
-    PathBuf::from(raw)
 }
 
 fn detect_commit_signature_format(

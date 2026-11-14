@@ -28,6 +28,32 @@ pub struct ParsedSignatureRow {
 }
 
 impl Git {
+    /// Reads the settings that shape the "cannot check" hint, through `git`
+    /// so they match what `verify_commit_signatures` sees: the same
+    /// environment, includes, and any change made since the repository was
+    /// opened. `--path` expands `~` the way git does.
+    pub fn signature_config_hints(&self) -> Result<SignatureConfigHints> {
+        let args = to_args(&["config", "--path", "--get", "gpg.ssh.allowedSignersFile"]);
+        let output = self.run_output(&args, None)?;
+        // Exit 1 means the key is unset; anything else is a real failure.
+        if output.status.code() == Some(1) {
+            return Ok(SignatureConfigHints::default());
+        }
+        if !output.status.success() {
+            return Err(command_error(&args, &output));
+        }
+        let raw = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if raw.is_empty() {
+            return Ok(SignatureConfigHints::default());
+        }
+        let resolved = std::path::PathBuf::from(raw);
+        Ok(SignatureConfigHints {
+            ssh_allowed_signers_configured: true,
+            ssh_allowed_signers_exists: resolved.is_file(),
+            ssh_allowed_signers_path: Some(resolved),
+        })
+    }
+
     /// Verifies a batch of already-detected signed commits using `git log`.
     ///
     /// Only signed commits (from `Repo::commit_signature_formats`) should be
