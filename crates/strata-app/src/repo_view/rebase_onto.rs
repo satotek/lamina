@@ -76,18 +76,20 @@ pub(crate) fn pushed_warning(remotes: &[String]) -> Option<String> {
 pub(crate) fn rebase_menu_item(
     target: RebaseTarget,
     branch: &str,
-    entry_target: &str,
+    entry_target: Option<&str>,
     entity: Entity<RepoView>,
 ) -> PopupMenuItem {
-    let label = menu_label(
-        t!(
+    // "here" gets its own sentence: Japanese spaces a ref name off from the
+    // particles around it, which reads wrong around the word for "here".
+    let text = match entry_target {
+        Some(entry_target) => t!(
             "history_ops.menu.rebase",
             branch = branch,
             target = entry_target
-        )
-        .to_string(),
-        target.blocked.as_deref(),
-    );
+        ),
+        None => t!("history_ops.menu.rebase_here", branch = branch),
+    };
+    let label = menu_label(text.to_string(), target.blocked.as_deref());
     let mut item = PopupMenuItem::new(label).disabled(target.blocked.is_some());
     if target.blocked.is_none() {
         let onto = target.onto;

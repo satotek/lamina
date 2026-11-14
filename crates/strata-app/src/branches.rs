@@ -2077,7 +2077,7 @@ fn local_row(
                     menu.item(rebase_menu_item(
                         target,
                         &current,
-                        &branch,
+                        Some(&branch),
                         entity_menu.clone(),
                     ))
                 })
@@ -2326,7 +2326,7 @@ fn remote_row(
                 menu.item(rebase_menu_item(
                     target,
                     &current,
-                    &remote,
+                    Some(&remote),
                     entity_menu.clone(),
                 ))
             })

@@ -734,12 +734,7 @@ pub(crate) fn commit_menu(
 
     menu = menu.separator().item(cherry).item(revert);
     if let Some(target) = rebase {
-        menu = menu.item(rebase_menu_item(
-            target,
-            &onto,
-            t!("history_ops.menu.here").as_ref(),
-            entity.clone(),
-        ));
+        menu = menu.item(rebase_menu_item(target, &onto, None, entity.clone()));
     }
     menu = menu.separator();
 
