@@ -13,7 +13,7 @@ use std::collections::{BinaryHeap, HashMap};
 
 use gix::objs::FindExt;
 
-use super::CancelCheck;
+use super::{CancelCheck, Shallow};
 use crate::{Error, Result};
 
 /// Commits outside the commit-graph have no generation number, so they can
@@ -68,6 +68,8 @@ enum GraphParents {
 pub(super) struct Walk {
     objects: gix::OdbHandle,
     graph: Option<gix::commitgraph::Graph>,
+    /// Commits whose parents are outside a shallow clone.
+    shallow: Shallow,
     /// Whether a graph was loaded, even after a corrupt one is dropped.
     graph_present: bool,
     /// Reachable commits read from the object database instead of the graph.
@@ -98,6 +100,7 @@ impl Walk {
         objects: gix::OdbHandle,
         graph: Option<gix::commitgraph::Graph>,
         tips: &[gix::ObjectId],
+        shallow: Shallow,
         cancelled: Option<CancelCheck>,
         reserve_from_graph: bool,
     ) -> Result<Self> {
@@ -111,6 +114,7 @@ impl Walk {
             objects,
             graph_present: graph.is_some(),
             graph,
+            shallow,
             commits_outside_graph: 0,
             nodes: Vec::with_capacity(initial),
             by_id: HashMap::with_capacity(initial),
@@ -260,6 +264,14 @@ impl Walk {
     /// Load the parent list of `index` into the arena and resolve parent nodes.
     fn load_parents(&mut self, index: usize) -> Result<()> {
         if self.nodes[index].parents_len != NO_PARENTS {
+            return Ok(());
+        }
+        // A shallow boundary is a root: its parent ids are recorded in the
+        // commit object but those commits are not in this repository.
+        if self.shallow.is_boundary(self.nodes[index].id) {
+            self.preloaded_parents.remove(&(index as u32));
+            self.nodes[index].parents_start = self.parent_arena.len() as u32;
+            self.nodes[index].parents_len = 0;
             return Ok(());
         }
         self.parents_buf.clear();

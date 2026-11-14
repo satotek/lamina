@@ -1048,7 +1048,180 @@ fn on_watch(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc::{self, Receiver};
+    use std::time::{Duration, Instant};
+
     use super::*;
+    use crate::graph::Half;
+    use crate::test_support::shallow_clone_fixture;
+
+    /// Opens a session on `path`, returning the event stream it publishes to.
+    fn open_session(path: &std::path::Path) -> (Session, Receiver<SessionEvent>) {
+        let (tx, rx) = mpsc::channel();
+        let session = Session::open(path, move |event| {
+            let _ = tx.send(event);
+        })
+        .expect("open session");
+        (session, rx)
+    }
+
+    /// Waits until history and refs are published, failing on a load error.
+    fn wait_for_complete(session: &Session, events: &Receiver<SessionEvent>) -> Arc<RepoSnapshot> {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let snapshot = session.snapshot();
+            if snapshot.commits.complete && snapshot.head.is_some() {
+                return snapshot;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match events.recv_timeout(remaining) {
+                Ok(SessionEvent::LoadFailed { error }) => panic!("session load failed: {error}"),
+                Ok(_) => {}
+                Err(error) => panic!("snapshot did not complete: {error}"),
+            }
+        }
+    }
+
+    /// The next event matching `wanted`, failing on any load, query or diff error.
+    fn next_matching(
+        events: &Receiver<SessionEvent>,
+        mut wanted: impl FnMut(&SessionEvent) -> bool,
+    ) -> SessionEvent {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match events.recv_timeout(remaining) {
+                Ok(event) => match &event {
+                    SessionEvent::LoadFailed { error } => panic!("session load failed: {error}"),
+                    SessionEvent::QueryFailed { error, .. } => panic!("query failed: {error}"),
+                    SessionEvent::DiffFailed { error, .. } => panic!("diff failed: {error}"),
+                    _ if wanted(&event) => return event,
+                    _ => {}
+                },
+                Err(error) => panic!("timed out waiting for an event: {error}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_shallow_repository_publishes_a_complete_snapshot() {
+        let (_source, clone) = shallow_clone_fixture(&["--depth", "2"]);
+        let (session, events) = open_session(clone.path());
+        let snapshot = wait_for_complete(&session, &events);
+
+        let mut expected = clone.rev_list("HEAD");
+        expected.reverse();
+        let ids: Vec<Oid> = (0..snapshot.commits.len())
+            .map(|index| snapshot.commits.get(index).expect("row").0.id)
+            .collect();
+        assert_eq!(
+            ids, expected,
+            "opening a shallow clone lists exactly the commits within the depth"
+        );
+        assert_eq!(snapshot.commits.len(), 2);
+
+        let (boundary, row) = snapshot
+            .commits
+            .get(snapshot.commits.len() - 1)
+            .expect("boundary row");
+        assert!(
+            boundary.parents.is_empty(),
+            "the boundary must be a root, not a missing parent id"
+        );
+        assert!(
+            row.edges.iter().all(|segment| segment.half != Half::Bottom),
+            "no parent edge may be drawn from a boundary: {row:?}"
+        );
+        assert_eq!(
+            snapshot.head,
+            Some(HeadInfo::Branch {
+                short_name: "main".into(),
+                target: Some(clone.head()),
+            })
+        );
+        assert!(
+            snapshot.upstreams.contains_key("main"),
+            "the tracking branch is still listed"
+        );
+    }
+
+    #[test]
+    fn a_shallow_repository_answers_commit_queries() {
+        let (_source, clone) = shallow_clone_fixture(&["--depth", "2"]);
+        let (session, events) = open_session(clone.path());
+        wait_for_complete(&session, &events);
+
+        let head = clone.head();
+        let boundary = clone.rev("HEAD^1");
+
+        let ticket = session.request_commit_stat(boundary);
+        let event = next_matching(
+            &events,
+            |event| matches!(event, SessionEvent::CommitStatReady { ticket: ready, .. } if *ready == ticket),
+        );
+        let SessionEvent::CommitStatReady { stat, .. } = event else {
+            unreachable!()
+        };
+        assert_eq!(stat.added, 7, "the boundary stat is against the empty tree");
+
+        let ticket = session.request_diff(DiffRequest::Commit {
+            commit: boundary,
+            path: "dir/old.txt".into(),
+        });
+        let event = next_matching(
+            &events,
+            |event| matches!(event, SessionEvent::DiffReady { ticket: ready, .. } if *ready == ticket),
+        );
+        let SessionEvent::DiffReady { view, .. } = event else {
+            unreachable!()
+        };
+        assert!(
+            !view.diff.hunks.is_empty(),
+            "the boundary diff is against the empty tree"
+        );
+
+        let ticket = session.path_history_streaming("dir/new.txt".into());
+        let mut history = Vec::new();
+        loop {
+            let event = next_matching(&events, |event| {
+                matches!(
+                    event,
+                    SessionEvent::PathHistoryBatch { ticket: ready, .. }
+                        | SessionEvent::PathHistoryDone { ticket: ready }
+                        if *ready == ticket
+                )
+            });
+            match event {
+                SessionEvent::PathHistoryBatch { entries, .. } => {
+                    history.extend(entries.iter().map(|entry| entry.commit.id));
+                }
+                SessionEvent::PathHistoryDone { .. } => break,
+                _ => unreachable!(),
+            }
+        }
+        assert_eq!(
+            history,
+            [head, boundary],
+            "the rename is followed back to the boundary, where the walk stops"
+        );
+
+        let ticket = session.request_blame(head, "dir/new.txt");
+        let event = next_matching(
+            &events,
+            |event| matches!(event, SessionEvent::BlameReady { ticket: ready, .. } if *ready == ticket),
+        );
+        let SessionEvent::BlameReady { blame, .. } = event else {
+            unreachable!()
+        };
+        assert_eq!(blame.lines, ["one", "TWO", "three", "four", "five"]);
+        assert!(
+            blame
+                .hunks
+                .iter()
+                .all(|hunk| hunk.commit == head || hunk.commit == boundary),
+            "blame stops at the boundary"
+        );
+    }
 
     fn commit(index: usize) -> CommitInfo {
         CommitInfo {

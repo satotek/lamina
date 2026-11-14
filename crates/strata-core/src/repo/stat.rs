@@ -20,6 +20,7 @@ use gix::object::tree::diff::ChangeDetached;
 use gix::objs::TreeRefIter;
 
 use super::Repo;
+use super::log::Shallow;
 use crate::{ChangeKind, CommitStat, Error, FileStat, Oid, Result};
 
 /// A text diff above this size is skipped: counting the lines of a huge blob
@@ -127,17 +128,20 @@ impl Repo {
         self.commit_diffs().record_tree_diff();
 
         let repo = self.local();
+        // A shallow boundary is a root here even though its commit object still
+        // names parents that this clone does not have.
+        let boundary = Shallow::load(&repo)?.is_boundary(commit);
         let commit = repo.find_commit(commit).map_err(Error::gix)?;
         let tree = commit.tree().map_err(Error::gix)?;
         let parent_tree = match commit.parent_ids().next() {
-            Some(parent) => Some(
+            Some(parent) if !boundary => Some(
                 repo.find_commit(parent.detach())
                     .map_err(Error::gix)?
                     .tree()
                     .map_err(Error::gix)?,
             ),
             // A root commit added everything, so the empty tree is the other side.
-            None => None,
+            _ => None,
         };
         let empty = repo.empty_tree();
         let parent_tree = parent_tree.as_ref().unwrap_or(&empty);
@@ -677,7 +681,7 @@ mod tests {
     use super::*;
     use crate::FileChange;
     use crate::diff::{DiffOptions, LineKind, diff_text};
-    use crate::test_support::TestRepo;
+    use crate::test_support::{TestRepo, shallow_clone_fixture};
 
     /// The counts of the full text diff, which used to back the stat.
     fn text_counts(old: &[u8], new: &[u8]) -> (u64, u64) {
@@ -847,6 +851,35 @@ mod tests {
         );
         assert_eq!(handle.rewrite_pass_count(), 1);
         assert_rename_sides(&stat, &changes);
+    }
+
+    #[test]
+    fn a_shallow_boundary_is_diffed_against_the_empty_tree() {
+        let (_source, clone) = shallow_clone_fixture(&["--depth", "2"]);
+        let handle = clone.open();
+        let boundary = clone.rev("HEAD^1");
+
+        let stat = handle.commit_stat(boundary).expect("boundary stat");
+        let paths: Vec<&str> = stat.files.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            ["base.txt", "dir/old.txt", "keep.txt", "topic.txt"],
+            "the missing parent must not hide the whole commit"
+        );
+        assert_eq!(
+            stat.added, 7,
+            "every line of the boundary tree is an addition"
+        );
+        assert_eq!(stat.removed, 0);
+
+        let changes = handle.commit_changes(boundary).expect("boundary changes");
+        assert!(
+            changes
+                .iter()
+                .all(|change| change.kind == ChangeKind::Added),
+            "a boundary is a root, so its file list adds everything: {changes:?}"
+        );
+        assert_eq!(changes.len(), stat.files.len());
     }
 
     #[test]

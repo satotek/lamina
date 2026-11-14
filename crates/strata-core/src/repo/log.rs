@@ -14,6 +14,37 @@ use crate::{CommitInfo, Error, HeadInfo, Oid, RefInfo, RefKind, Result, StashInf
 
 pub(crate) use path::PathWalk;
 
+/// The commits at a shallow clone's boundary, whose parents are not in the
+/// repository. Everything that walks ancestry stops at these commits, the way
+/// git treats them as roots.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Shallow {
+    /// Sorted, so a boundary check is a binary search.
+    boundary: Arc<[Oid]>,
+}
+
+impl Shallow {
+    /// The boundary of `repo`, empty when it is not a shallow clone.
+    pub(crate) fn load(repo: &gix::Repository) -> Result<Self> {
+        let Some(commits) = repo.shallow_commits().map_err(Error::gix)? else {
+            return Ok(Self::default());
+        };
+        let mut boundary: Vec<Oid> = commits.iter().copied().collect();
+        boundary.sort_unstable();
+        Ok(Self {
+            boundary: boundary.into(),
+        })
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.boundary.is_empty()
+    }
+
+    pub(crate) fn is_boundary(&self, id: Oid) -> bool {
+        self.boundary.binary_search(&id).is_ok()
+    }
+}
+
 /// Cooperative cancellation for a walk: returns `true` to stop it.
 ///
 /// Shared between the commit walk and the path-history filter, which has to keep
@@ -36,6 +67,7 @@ pub(crate) type CancelCheck = Arc<dyn Fn() -> bool + Send + Sync>;
 pub struct CommitWalk {
     repo: gix::Repository,
     walk: walk::Walk,
+    shallow: Shallow,
     object_buf: Vec<u8>,
     parents_buf: Vec<Oid>,
 }
@@ -66,6 +98,7 @@ impl Iterator for CommitWalk {
             Ok(Some(id)) => Some(commit_info(
                 &self.repo,
                 id,
+                &self.shallow,
                 &mut self.object_buf,
                 &mut self.parents_buf,
             )),
@@ -79,6 +112,11 @@ impl Repo {
     /// Parent ids of `commit`, first parent first.
     pub fn parents(&self, commit: Oid) -> Result<Vec<Oid>> {
         let repo = self.local();
+        // A boundary commit's parents are outside the clone: it is a root here,
+        // which is also what makes its diff fall back to the empty tree.
+        if Shallow::load(&repo)?.is_boundary(commit) {
+            return Ok(Vec::new());
+        }
         let commit = repo.find_commit(commit).map_err(Error::gix)?;
         Ok(commit.parent_ids().map(|id| id.detach()).collect())
     }
@@ -217,10 +255,19 @@ impl Repo {
         // A missing or corrupt commit-graph is not fatal: object reads still work.
         let graph = repo.commit_graph_if_enabled().ok().flatten();
         let tips = walk_tips(&repo, graph.as_ref())?;
-        let walk = walk::Walk::new(repo.objects.clone(), graph, &tips, cancelled, true)?;
+        let shallow = Shallow::load(&repo)?;
+        let walk = walk::Walk::new(
+            repo.objects.clone(),
+            graph,
+            &tips,
+            shallow.clone(),
+            cancelled,
+            true,
+        )?;
         Ok(CommitWalk {
             repo,
             walk,
+            shallow,
             object_buf: Vec::new(),
             parents_buf: Vec::with_capacity(4),
         })
@@ -261,10 +308,19 @@ impl Repo {
                 tips.push(commit);
             }
         }
-        let walk = walk::Walk::new(repo.objects.clone(), graph, &tips, cancelled, false)?;
+        let shallow = Shallow::load(&repo)?;
+        let walk = walk::Walk::new(
+            repo.objects.clone(),
+            graph,
+            &tips,
+            shallow.clone(),
+            cancelled,
+            false,
+        )?;
         Ok(CommitWalk {
             repo,
             walk,
+            shallow,
             object_buf: Vec::new(),
             parents_buf: Vec::with_capacity(4),
         })
@@ -281,7 +337,8 @@ impl Repo {
         let repo = self.local();
         let graph = repo.commit_graph_if_enabled().ok().flatten();
         let tips = walk_tips(&repo, graph.as_ref())?;
-        PathWalk::new(repo.objects.clone(), graph, &tips, cancelled)
+        let shallow = Shallow::load(&repo)?;
+        PathWalk::new(repo.objects.clone(), graph, &tips, shallow, cancelled)
     }
 }
 
@@ -453,6 +510,7 @@ fn walk_tips(
 pub(crate) fn commit_info(
     repo: &gix::Repository,
     id: gix::ObjectId,
+    shallow: &Shallow,
     object_buf: &mut Vec<u8>,
     parents_buf: &mut Vec<Oid>,
 ) -> Result<CommitInfo> {
@@ -489,6 +547,12 @@ pub(crate) fn commit_info(
         }
     }
 
+    // The boundary commit's parents are absent from a shallow clone, so it is
+    // shown as a root and the graph draws no edge to a missing commit.
+    if shallow.is_boundary(id) {
+        parents_buf.clear();
+    }
+
     let parents = if parents_buf.is_empty() {
         Vec::new()
     } else {
@@ -521,7 +585,52 @@ fn first_line(message: &gix::bstr::BStr) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_support::TestRepo;
+    use crate::test_support::{TestRepo, shallow_clone_fixture};
+
+    #[test]
+    fn a_shallow_clone_walk_ends_at_the_boundary() {
+        let (_source, clone) = shallow_clone_fixture(&["--depth", "2"]);
+        let repo = clone.open();
+        let walked: Vec<_> = repo
+            .walk_commits()
+            .expect("walk")
+            .map(|commit| commit.expect("commit"))
+            .collect();
+        let ids: Vec<_> = walked.iter().map(|commit| commit.id).collect();
+        let mut expected = clone.rev_list("HEAD");
+        expected.reverse();
+        assert_eq!(ids, expected, "the walk lists exactly the depth");
+
+        let boundary = walked.last().expect("a boundary commit");
+        assert!(
+            boundary.parents.is_empty(),
+            "the boundary is a root: it must not point at a missing commit"
+        );
+        assert!(
+            repo.parents(boundary.id).expect("parents").is_empty(),
+            "the boundary has no parents to diff against"
+        );
+        assert!(
+            !walked[..walked.len() - 1]
+                .iter()
+                .any(|commit| commit.parents.is_empty()),
+            "only the boundary is a root"
+        );
+    }
+
+    #[test]
+    fn a_depth_one_clone_walks_only_its_tip_as_a_root() {
+        let (_source, clone) = shallow_clone_fixture(&["--depth", "1"]);
+        let repo = clone.open();
+        let walked: Vec<_> = repo
+            .walk_commits()
+            .expect("walk")
+            .map(|commit| commit.expect("commit"))
+            .collect();
+        assert_eq!(walked.len(), 1);
+        assert_eq!(walked[0].id, clone.head());
+        assert!(walked[0].parents.is_empty());
+    }
 
     #[test]
     fn commits_between_lists_the_range_a_rebase_would_replay() {

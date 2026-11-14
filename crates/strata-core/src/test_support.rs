@@ -13,7 +13,10 @@ use crate::repo::Repo;
 
 /// A fresh repository in a temporary directory.
 pub(crate) struct TestRepo {
-    dir: tempfile::TempDir,
+    _dir: tempfile::TempDir,
+    /// The worktree root. A clone lives in a subdirectory so the fixture's
+    /// config file does not make the clone destination non-empty.
+    root: PathBuf,
     config: PathBuf,
 }
 
@@ -25,7 +28,32 @@ const TIME: &str = "1700000000 +0000";
 
 impl TestRepo {
     pub(crate) fn new() -> Self {
-        let dir = tempfile::TempDir::new().expect("temporary directory");
+        let repo = Self::with_dir(tempfile::TempDir::new().expect("temporary directory"));
+        repo.git(&["init", "-q"]);
+        repo
+    }
+
+    /// A repository in a fresh temporary directory, cloned from `source` with
+    /// `args`. The source is a local `file://` URL so the clone needs no network.
+    pub(crate) fn clone_from(source: &TestRepo, args: &[&str]) -> Self {
+        let repo = Self::with_dir(tempfile::TempDir::new().expect("temporary directory"));
+        let url = format!("file://{}", source.path().display());
+        let mut argv = vec!["clone"];
+        argv.extend_from_slice(args);
+        argv.push(&url);
+        argv.push(".");
+        repo.git(&argv);
+        repo
+    }
+
+    /// The fixture environment, before either `git init` or `git clone`.
+    fn with_dir(dir: tempfile::TempDir) -> Self {
+        let root = dir.path().join("repo");
+        std::fs::create_dir(&root).expect("create repository directory");
+        Self::with_root(dir, root)
+    }
+
+    fn with_root(dir: tempfile::TempDir, root: PathBuf) -> Self {
         let config = dir.path().join("gitconfig");
         std::fs::write(
             &config,
@@ -37,13 +65,15 @@ impl TestRepo {
         )
         .expect("write test git config");
 
-        let repo = Self { dir, config };
-        repo.git(&["init", "-q"]);
-        repo
+        Self {
+            _dir: dir,
+            root,
+            config,
+        }
     }
 
     pub(crate) fn path(&self) -> &Path {
-        self.dir.path()
+        &self.root
     }
 
     /// Write a file relative to the worktree, creating parent directories.
@@ -137,4 +167,34 @@ impl TestRepo {
             .env_remove("GIT_INDEX_FILE");
         command
     }
+}
+
+/// A source repository whose HEAD renames a file after a merge, and a clone of
+/// it made with `args`.
+///
+/// With `["--depth", "2"]` the clone keeps the rename commit and the merge
+/// below it, which makes the merge the shallow boundary: neither of its two
+/// parents is in the clone.
+pub(crate) fn shallow_clone_fixture(args: &[&str]) -> (TestRepo, TestRepo) {
+    let source = TestRepo::new();
+    source.write("base.txt", "base\n");
+    source.commit("base");
+    source.write("dir/old.txt", "one\ntwo\nthree\n");
+    source.write("keep.txt", "keep\n");
+    source.commit("add files");
+    source.write("dir/old.txt", "one\nTWO\nthree\n");
+    source.commit("edit file");
+    source.write("dir/old.txt", "one\nTWO\nthree\nfour\n");
+    source.commit("edit again");
+    source.git(&["checkout", "-q", "-b", "topic"]);
+    source.write("topic.txt", "topic\n");
+    source.commit("topic commit");
+    source.git(&["checkout", "-q", "main"]);
+    source.git(&["merge", "-q", "--no-ff", "-m", "merge topic", "topic"]);
+    source.git(&["mv", "dir/old.txt", "dir/new.txt"]);
+    source.write("dir/new.txt", "one\nTWO\nthree\nfour\nfive\n");
+    source.commit("rename and edit");
+
+    let clone = TestRepo::clone_from(&source, args);
+    (source, clone)
 }

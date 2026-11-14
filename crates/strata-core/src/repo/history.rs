@@ -18,8 +18,7 @@ use gix::object::tree::diff::ChangeDetached;
 use gix::objs::{FindExt, TreeRefIter};
 
 use super::Repo;
-use super::log::CancelCheck;
-use super::log::PathWalk;
+use super::log::{CancelCheck, PathWalk, Shallow};
 use crate::{CommitInfo, Error, Oid, Result};
 
 /// Resolved entries are kept per tree id. In linear history a commit's tree is
@@ -57,6 +56,7 @@ pub struct PathHistoryEntry {
 pub struct PathHistoryEntries {
     repo: gix::Repository,
     walk: PathWalk,
+    shallow: Shallow,
     /// Path components of the file in the commit being inspected. Moves from
     /// the queried name to older names as the walk goes back past renames.
     components: Vec<Vec<u8>>,
@@ -124,7 +124,13 @@ impl PathHistoryEntries {
         id: Oid,
         parents_buf: &mut Vec<Oid>,
     ) -> Result<CommitInfo> {
-        super::log::commit_info(&self.repo, id, &mut self.odb_buf, parents_buf)
+        super::log::commit_info(
+            &self.repo,
+            id,
+            &self.shallow,
+            &mut self.odb_buf,
+            parents_buf,
+        )
     }
 
     fn is_cancelled(&self) -> bool {
@@ -365,12 +371,14 @@ impl Repo {
     ) -> Result<PathHistoryEntries> {
         let mut repo = self.local();
         let walk = self.path_walk_with(cancelled.clone())?;
+        let shallow = Shallow::load(&repo)?;
         // A missing or corrupt graph only costs speed here.
         let graph = repo.commit_graph_if_enabled().ok().flatten();
         repo.object_cache_size_if_unset(OBJECT_CACHE_BYTES);
         let mut entries = PathHistoryEntries {
             repo,
             walk,
+            shallow,
             components: Vec::new(),
             display_path: String::new(),
             graph,
@@ -381,5 +389,47 @@ impl Repo {
         };
         entries.set_path(path.as_bytes());
         Ok(entries)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::test_support::shallow_clone_fixture;
+
+    #[test]
+    fn file_history_stops_at_the_shallow_boundary() {
+        let (_source, clone) = shallow_clone_fixture(&["--depth", "2"]);
+        let repo = clone.open();
+        let head = clone.head();
+        let boundary = clone.rev("HEAD^1");
+
+        let mut entries = repo
+            .path_history_entries("dir/old.txt")
+            .expect("path history");
+        let mut commits = Vec::new();
+        let mut parents_buf = Vec::new();
+        for entry in entries.by_ref() {
+            let entry = entry.expect("history row");
+            commits.push(entry.commit);
+        }
+        assert_eq!(
+            commits,
+            [head, boundary],
+            "the walk stops at the boundary instead of failing on its parents"
+        );
+
+        let info = entries
+            .read_commit_info(boundary, &mut parents_buf)
+            .expect("boundary info");
+        assert!(info.parents.is_empty(), "a boundary row is shown as a root");
+
+        // Git treats a boundary as a root, so it adds every path its tree has.
+        // The walk must stop there rather than read the missing parents.
+        let history: Vec<_> = repo
+            .path_history("keep.txt")
+            .expect("path history")
+            .map(|commit| commit.expect("history row"))
+            .collect();
+        assert_eq!(history, [boundary]);
     }
 }

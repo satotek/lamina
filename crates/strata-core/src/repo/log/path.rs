@@ -17,7 +17,7 @@ use std::collections::{BinaryHeap, HashMap};
 
 use gix::objs::FindExt;
 
-use super::CancelCheck;
+use super::{CancelCheck, Shallow};
 use crate::{Error, Oid, Result};
 
 /// One row: the commit and its first parent, the only parent a path walk
@@ -69,6 +69,8 @@ const MAX_RESERVED_COMMITS: usize = 1 << 20;
 pub(crate) struct PathWalk {
     objects: gix::OdbHandle,
     graph: Option<gix::commitgraph::Graph>,
+    /// Commits whose parents are outside a shallow clone.
+    shallow: Shallow,
     /// Children still to be emitted, plus one: a commit is ready when it is
     /// back to one.
     pending: HashMap<Oid, u32>,
@@ -88,11 +90,13 @@ impl PathWalk {
         objects: gix::OdbHandle,
         graph: Option<gix::commitgraph::Graph>,
         tips: &[Oid],
+        shallow: Shallow,
         cancelled: Option<CancelCheck>,
     ) -> Result<Self> {
         let mut walk = Self {
             objects,
             graph,
+            shallow,
             pending: HashMap::new(),
             ready: BinaryHeap::new(),
             next_sequence: 0,
@@ -228,12 +232,15 @@ impl PathWalk {
     /// missing or corrupt graph falls back to the object database.
     fn metadata(&mut self, id: &Oid) -> Result<i64> {
         self.parents_buf.clear();
+        // A shallow boundary is a root: stop before following ids this clone
+        // does not have, which would otherwise fail the whole walk.
+        let boundary = self.shallow.is_boundary(*id);
         if let Some(graph) = self.graph.as_ref()
             && let Some(commit) = graph.commit_by_id(id)
         {
             let time = commit.committer_timestamp() as i64;
             let mut corrupt = false;
-            for parent in commit.iter_parents() {
+            for parent in commit.iter_parents().take_while(|_| !boundary) {
                 match parent {
                     Ok(position) => self
                         .parents_buf
@@ -257,7 +264,9 @@ impl PathWalk {
             .objects
             .find_commit_iter(id, &mut self.object_buf)
             .map_err(Error::gix)?;
-        self.parents_buf.extend(iter.parent_ids());
+        if !boundary {
+            self.parents_buf.extend(iter.parent_ids());
+        }
         let time = iter
             .committer()
             .map_err(Error::gix)?

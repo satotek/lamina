@@ -1,7 +1,10 @@
 //! Line attribution: which commit introduced each line of a file.
 //!
-//! Shallow histories and small files use `gix-blame` in-process, avoiding the
-//! cost of spawning a subprocess.
+//! Short histories and small files use `gix-blame` in-process, avoiding the
+//! cost of spawning a subprocess. A shallow clone always takes the `git` path:
+//! `gix-blame` follows parent commits that the clone does not contain, whereas
+//! `git blame` stops at the shallow boundary and attributes the remaining lines
+//! to the boundary commit.
 //!
 //! Reads in Strata normally use `gix`, with `blame` on deep histories or large
 //! files as a deliberate, measured exception that falls back to `git blame
@@ -26,6 +29,7 @@ use std::sync::Arc;
 use gix::bstr::{BStr, ByteSlice};
 
 use super::Repo;
+use super::log::Shallow;
 use crate::git_cli::Git;
 use crate::{Error, Oid, Result};
 
@@ -158,8 +162,10 @@ impl Repo {
             return Ok(None);
         }
 
-        let use_git =
-            blob_data.len() > GIX_MAX_BLOB_BYTES || exceeds_depth(&repo, commit, GIX_MAX_DEPTH);
+        let shallow = Shallow::load(&repo)?;
+        let use_git = !shallow.is_empty()
+            || blob_data.len() > GIX_MAX_BLOB_BYTES
+            || exceeds_depth(&repo, commit, GIX_MAX_DEPTH);
         if use_git {
             let owned_git;
             let git = match git {
@@ -323,7 +329,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::test_support::{AUTHOR_EMAIL, AUTHOR_NAME, TestRepo};
+    use crate::test_support::{AUTHOR_EMAIL, AUTHOR_NAME, TestRepo, shallow_clone_fixture};
 
     /// Commit per 1-based line, read from the hunks.
     fn line_commits(blame: &Blame) -> Vec<Oid> {
@@ -441,6 +447,30 @@ mod tests {
         assert!(
             blame.hunks.iter().all(|hunk| hunk.commit != renamed),
             "the rename commit introduced no line"
+        );
+    }
+
+    #[test]
+    fn shallow_clone_blame_stops_at_the_boundary() {
+        let (_source, clone) = shallow_clone_fixture(&["--depth", "2"]);
+        let head = clone.head();
+        let boundary = clone.rev("HEAD^1");
+        let blame = clone.open().blame(head, "dir/new.txt").expect("blame");
+
+        assert_eq!(blame.lines, ["one", "TWO", "three", "four", "five"]);
+        assert_hunks_cover(&blame);
+        assert!(
+            blame
+                .hunks
+                .iter()
+                .all(|hunk| hunk.commit == head || hunk.commit == boundary),
+            "lines below the boundary belong to the boundary commit: {:?}",
+            blame.hunks
+        );
+        assert_eq!(
+            line_commits(&blame),
+            git_line_commits(&clone, head, "dir/new.txt"),
+            "the fallback must agree with git blame"
         );
     }
 

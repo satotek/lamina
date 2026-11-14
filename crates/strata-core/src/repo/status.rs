@@ -617,3 +617,27 @@ fn matches_any_target(path: &str, targets: &[String]) -> bool {
                 .is_some_and(|rest| rest.starts_with('/'))
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::ChangeKind;
+    use crate::test_support::shallow_clone_fixture;
+
+    #[test]
+    fn status_of_a_shallow_clone_reads_head_and_the_index() {
+        let (_source, clone) = shallow_clone_fixture(&["--depth", "2"]);
+        let repo = clone.open();
+        assert_eq!(
+            repo.status().expect("clean status"),
+            Default::default(),
+            "a fresh shallow clone is clean"
+        );
+
+        clone.write("dir/new.txt", "one\nTWO\nthree\nfour\nchanged\n");
+        let status = repo.status().expect("dirty status");
+        assert_eq!(status.staged, Vec::new());
+        assert_eq!(status.unstaged.len(), 1);
+        assert_eq!(status.unstaged[0].path, "dir/new.txt");
+        assert_eq!(status.unstaged[0].kind, ChangeKind::Modified);
+    }
+}
