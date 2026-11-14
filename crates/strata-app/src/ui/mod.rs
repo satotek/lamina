@@ -14,6 +14,7 @@
 mod badge;
 mod banner;
 mod button;
+mod checkbox;
 mod confirm;
 mod focus;
 pub(crate) mod gallery;
@@ -33,6 +34,7 @@ pub use badge::{
 };
 pub use banner::{BannerKind, banner};
 pub use button::{ButtonKind, ButtonSize, UiButton, button, content_button, icon_button};
+pub use checkbox::checkbox;
 pub use confirm::{Confirm, confirm, confirm_with};
 pub(crate) use focus::focus_input;
 pub use lfs::{install_hint, lfs_badge, lfs_card};

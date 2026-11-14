@@ -163,7 +163,16 @@ impl Render for RepoView {
             // measured bounds: the sidebar, the commit list's columns and the
             // title bar all decide what they show in the same frame.
             let viewport_width = window.viewport_size().width.as_f32();
-            let sidebar_width = super::sidebar::width_for(viewport_width);
+            // The merge editor takes the whole repository view: the sidebar
+            // steps aside with the working-tree lists so the three panes get
+            // the width. Escape or the editor's close button restores it.
+            let merge_full_window =
+                self.mode == MainMode::Worktree && self.worktree.conflicts.is_full_window();
+            let sidebar_width = if merge_full_window {
+                0.0
+            } else {
+                super::sidebar::width_for(viewport_width)
+            };
             let content_width = (viewport_width - sidebar_width).max(0.0);
             let sidebar = self.sidebar(cx, &design, sidebar_width);
             // The worktree view owns the main area while it is open; a file
@@ -213,16 +222,12 @@ impl Render for RepoView {
             if let Some(banner) = self.commit_graph_banner(entity.clone(), &design, cx) {
                 main = main.child(banner);
             }
+            let mut columns = div().flex().flex_1().min_h_0().min_w_0();
+            if !merge_full_window {
+                columns = columns.child(sidebar);
+            }
             root = root
-                .child(
-                    div()
-                        .flex()
-                        .flex_1()
-                        .min_h_0()
-                        .min_w_0()
-                        .child(sidebar)
-                        .child(main.child(content)),
-                )
+                .child(columns.child(main.child(content)))
                 .child(self.status_bar(&design));
         }
 

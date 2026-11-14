@@ -375,6 +375,22 @@ fn picture(
     design: &Design,
     missing: bool,
 ) -> AnyElement {
+    labelled_picture(state, side, label, design.muted, design, missing)
+}
+
+/// One picture under a coloured label, for a pane outside the diff view.
+///
+/// The conflict editor shows the stages of a binary image conflict and labels
+/// them with the same A/B colours as its text panes, so the label colour is a
+/// parameter rather than the theme's muted text.
+pub(crate) fn labelled_picture(
+    state: &State,
+    side: &ImageSide,
+    label: impl Into<gpui::SharedString>,
+    label_color: Hsla,
+    design: &Design,
+    missing: bool,
+) -> AnyElement {
     let mut frame = div()
         .relative()
         .flex_1()
@@ -394,7 +410,7 @@ fn picture(
         .flex_1()
         .min_w_0()
         .min_h_0()
-        .child(side_label(&label, side, design))
+        .child(side_label(&label.into(), side, label_color))
         .child(frame)
         .into_any_element()
 }
@@ -569,9 +585,9 @@ fn swipe(
                 .flex_none()
                 .text_size(px(11.0))
                 .text_color(design.muted)
-                .child(side_label(&t!("image_diff.old"), old, design))
+                .child(side_label(&t!("image_diff.old"), old, design.muted))
                 .child(t!("image_diff.drag_divider").to_string())
-                .child(side_label(&t!("image_diff.new"), new, design)),
+                .child(side_label(&t!("image_diff.new"), new, design.muted)),
         )
         .child(area_element)
         .into_any_element()
@@ -634,7 +650,7 @@ fn onion(state: &State, diff: &ImageDiff, design: &Design, missing: bool) -> Any
                 .flex_none()
                 .text_size(px(11.0))
                 .text_color(design.muted)
-                .child(side_label(&t!("image_diff.old"), old, design))
+                .child(side_label(&t!("image_diff.old"), old, design.muted))
                 .child(
                     t!(
                         "image_diff.new_at",
@@ -642,7 +658,7 @@ fn onion(state: &State, diff: &ImageDiff, design: &Design, missing: bool) -> Any
                     )
                     .to_string(),
                 )
-                .child(side_label(&t!("image_diff.new"), new, design)),
+                .child(side_label(&t!("image_diff.new"), new, design.muted)),
         )
         .child(stack)
         .into_any_element()
@@ -774,7 +790,7 @@ fn placeholder(side: &ImageSide, missing: bool) -> String {
     }
 }
 
-fn side_label(label: &str, side: &ImageSide, design: &Design) -> AnyElement {
+fn side_label(label: &str, side: &ImageSide, color: Hsla) -> AnyElement {
     let mut text = String::from(label);
     if let (Some(width), Some(height)) = (side.width, side.height) {
         text.push_str(&t!("image_diff.dimensions", width = width, height = height));
@@ -787,7 +803,7 @@ fn side_label(label: &str, side: &ImageSide, design: &Design) -> AnyElement {
         .items_center()
         .px_3p5()
         .text_size(px(11.0))
-        .text_color(design.muted)
+        .text_color(color)
         .child(text)
         .into_any_element()
 }

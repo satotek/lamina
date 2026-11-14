@@ -18,7 +18,8 @@ gpui_kit_assets::icon_assets!(
         ShieldAlert,
         ShieldCheck,
         ShieldQuestionMark,
-        ShieldX
+        ShieldX,
+        X
     ]
 );
 

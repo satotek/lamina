@@ -596,6 +596,15 @@ impl RepoView {
         }
     }
 
+    /// The details of the stopped operation, once they have been read.
+    ///
+    /// The conflict editor names the commits a rebase, cherry-pick or revert
+    /// is working with, from the same query the banner uses.
+    pub(crate) fn stopped_operation_details(&self) -> Option<&InProgressDetails> {
+        let state = self.session.as_ref()?.snapshot().state;
+        self.in_progress.details_for(state)
+    }
+
     pub(crate) fn on_in_progress_details_ready(
         &mut self,
         ticket: QueryTicket,

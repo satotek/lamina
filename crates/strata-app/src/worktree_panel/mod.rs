@@ -26,6 +26,7 @@ use gpui_component::{ActiveTheme as _, Theme};
 use strata_core::diff::{Expansion, GapAction};
 use strata_core::lfs::{LfsInfo, LfsLock};
 use strata_core::patch::LineSelection;
+use strata_core::repo::InProgressDetails;
 use strata_core::session::{
     ConflictSide, DiffRequest, DiffTicket, DiffView, Operation, OperationId, RepoSnapshot, Session,
 };
@@ -1745,9 +1746,13 @@ impl RepoView {
             return synthetic_state(entity, &self.worktree, cx, &colors);
         };
         let snapshot = session.snapshot();
+        // The conflict editor names the commits a stopped rebase, cherry-pick
+        // or revert works with; the banner already asked for the same details.
+        let details = self.stopped_operation_details().cloned();
         self.worktree.render(
             entity,
             &snapshot,
+            details.as_ref(),
             Arc::clone(&self.worktree_lfs),
             Rc::clone(&self.lfs_locks),
             self.lfs_locking_available,
@@ -1775,10 +1780,15 @@ impl WorktreePanel {
             .map(|selected| selected.path.as_str())
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the panel draws the rows, the conflict editor and the commit box together"
+    )]
     fn render(
         &self,
         entity: Entity<RepoView>,
         snapshot: &RepoSnapshot,
+        details: Option<&InProgressDetails>,
         lfs: Arc<HashMap<String, LfsInfo>>,
         locks: Rc<HashMap<String, LfsLock>>,
         locking_available: bool,
@@ -1786,6 +1796,7 @@ impl WorktreePanel {
     ) -> AnyElement {
         let colors = Colors::from_theme(cx.theme(), Settings::get(cx));
         let selected_conflict = self.selected_conflict().map(str::to_owned);
+        let full_window = self.conflicts.is_full_window();
         let mut body = div()
             .flex()
             .flex_row()
@@ -1819,9 +1830,15 @@ impl WorktreePanel {
                 }),
             )
             .on_action(cx.listener(|this, _: &CommitMessage, _, cx| this.commit_worktree(cx)))
-            .on_action(
-                cx.listener(|this, _: &ShowHistory, window, cx| this.close_worktree(window, cx)),
-            )
+            // Escape leaves the whole-view merge editor first; from the
+            // normal layout it still goes back to the history.
+            .on_action(cx.listener(|this, _: &ShowHistory, window, cx| {
+                if this.worktree.conflicts.exit_full_window() {
+                    cx.notify();
+                } else {
+                    this.close_worktree(window, cx);
+                }
+            }))
             // The conflict keys only do something while a conflicted file is
             // selected; `use_conflict_side` re-checks that.
             .on_action(cx.listener(|this, _: &UseOurs, _, cx| {
@@ -1854,8 +1871,9 @@ impl WorktreePanel {
             }))
             .on_action(cx.listener(|this, _: &TakeBase, window, cx| {
                 this.apply_conflict_choice(MergeChoice::Base, window, cx)
-            }))
-            .child(self.lists(
+            }));
+        if !full_window {
+            body = body.child(self.lists(
                 entity.clone(),
                 snapshot,
                 &colors,
@@ -1863,14 +1881,22 @@ impl WorktreePanel {
                 &locks,
                 locking_available,
                 cx,
-            ))
-            .child(match selected_conflict {
-                Some(path) => self.conflicts.pane(&path, entity.clone(), snapshot, cx),
-                None => {
-                    let theme = cx.theme().clone();
-                    self.diff_pane(entity.clone(), snapshot, &theme, &colors, cx)
-                }
-            });
+            ));
+        }
+        body = body.child(match selected_conflict {
+            Some(path) => self.conflicts.pane(
+                &path,
+                entity.clone(),
+                snapshot,
+                details,
+                &self.image_diff,
+                cx,
+            ),
+            None => {
+                let theme = cx.theme().clone();
+                self.diff_pane(entity.clone(), snapshot, &theme, &colors, cx)
+            }
+        });
         if let Some(focus) = &self.focus {
             body = body.track_focus(focus);
         }
@@ -1884,9 +1910,10 @@ impl WorktreePanel {
             .min_h_0()
             .bg(colors.background);
 
-        root = root
-            .child(body)
-            .child(self.commit_box(entity.clone(), snapshot, cx, &colors));
+        root = root.child(body);
+        if !full_window {
+            root = root.child(self.commit_box(entity.clone(), snapshot, cx, &colors));
+        }
 
         root.into_any_element()
     }

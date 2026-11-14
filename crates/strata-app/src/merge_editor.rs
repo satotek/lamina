@@ -25,15 +25,6 @@ pub(crate) enum Choice {
 }
 
 impl Choice {
-    /// The order the conflict bar offers them in.
-    pub(crate) const ALL: [Choice; 5] = [
-        Choice::Ours,
-        Choice::Theirs,
-        Choice::OursThenTheirs,
-        Choice::TheirsThenOurs,
-        Choice::Base,
-    ];
-
     pub(crate) fn label(self) -> String {
         match self {
             Choice::Ours => t!("merge.choice.ours"),
@@ -78,6 +69,64 @@ impl Resolution {
     }
 }
 
+/// One side of the editor. A and B are the pane letters the gutter checkboxes
+/// and the side headers use; which commit a letter stands for depends on the
+/// operation (see the conflict view's role labels).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Side {
+    /// The left pane: ours, HEAD, or a rebase's upstream.
+    A,
+    /// The right pane: theirs, the incoming branch, or the applied commit.
+    B,
+}
+
+impl Side {
+    pub(crate) fn letter(self) -> &'static str {
+        match self {
+            Side::A => "A",
+            Side::B => "B",
+        }
+    }
+}
+
+/// Which sides are ticked for one conflict.
+///
+/// The panes have one checkbox per side rather than a row of choice buttons:
+/// only A is ours, only B is theirs, both is both sides in the order they were
+/// ticked, and neither leaves the marker block in place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct Ticked {
+    pub a: bool,
+    pub b: bool,
+}
+
+impl Ticked {
+    fn of(resolution: Resolution) -> Self {
+        let (a, b) = match resolution {
+            Resolution::Ours => (true, false),
+            Resolution::Theirs => (false, true),
+            Resolution::OursThenTheirs | Resolution::TheirsThenOurs => (true, true),
+            Resolution::Unresolved | Resolution::Base | Resolution::Manual => (false, false),
+        };
+        Self { a, b }
+    }
+
+    pub(crate) fn has(self, side: Side) -> bool {
+        match side {
+            Side::A => self.a,
+            Side::B => self.b,
+        }
+    }
+}
+
+/// Which side one result line came from, for the result pane's left markers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LineMark {
+    Side(Side),
+    /// A line of a conflict that still holds its marker block.
+    Unresolved,
+}
+
 /// One visual row of the side panes: the line of each side at this position.
 ///
 /// A side that has fewer lines than the other in a segment leaves a blank row,
@@ -88,6 +137,8 @@ pub(crate) struct MergeRow {
     pub ours: Option<u32>,
     /// 1-based line number in theirs.
     pub theirs: Option<u32>,
+    /// 1-based line number in the base, for the optional base column.
+    pub base: Option<u32>,
     pub kind: SegmentKind,
     /// Which conflict this row belongs to, for the counter and the selection.
     pub conflict: Option<usize>,
@@ -104,6 +155,9 @@ struct Slot {
     ours: Vec<String>,
     theirs: Vec<String>,
     base: Vec<String>,
+    /// The merge segment this slot came from; automatic lines keep the side
+    /// they originated on for the result markers.
+    kind: SegmentKind,
     /// Which conflict this slot is; `None` for stretches that are not one.
     conflict: Option<usize>,
     resolution: Resolution,
@@ -156,6 +210,7 @@ impl MergeModel {
                 ours,
                 theirs,
                 base,
+                kind: segment.kind,
                 conflict,
                 resolution: Resolution::Unresolved,
             });
@@ -196,16 +251,19 @@ impl MergeModel {
             let is_conflict = segment.kind == SegmentKind::Conflict;
             let ours = analysis.ours.slice(&segment.ours);
             let theirs = analysis.theirs.slice(&segment.theirs);
+            let base = analysis.base.slice(&segment.base);
             if is_conflict {
                 conflict_rows.push(rows.len());
             }
-            let count = ours.len().max(theirs.len());
+            let count = ours.len().max(theirs.len()).max(base.len());
             for index in 0..count {
                 rows.push(MergeRow {
                     ours: (index < ours.len())
                         .then(|| segment.ours.start as u32 + index as u32 + 1),
                     theirs: (index < theirs.len())
                         .then(|| segment.theirs.start as u32 + index as u32 + 1),
+                    base: (index < base.len())
+                        .then(|| segment.base.start as u32 + index as u32 + 1),
                     kind: segment.kind,
                     conflict: is_conflict.then_some(conflict),
                 });
@@ -264,6 +322,7 @@ impl MergeModel {
         true
     }
 
+    #[cfg(test)]
     pub(crate) fn selected_resolution(&self) -> Option<Resolution> {
         self.conflict_slot(self.selected)
             .map(|index| self.slots[index].resolution)
@@ -330,7 +389,13 @@ impl MergeModel {
     /// Applies `choice` to the selected conflict. Returns whether the result
     /// changed.
     pub(crate) fn apply(&mut self, choice: Choice) -> bool {
-        let Some(index) = self.conflict_slot(self.selected) else {
+        self.apply_at(self.selected, choice)
+    }
+
+    /// Applies `choice` to `conflict`; the keyboard shortcuts and the gutter
+    /// checkboxes both end up here.
+    pub(crate) fn apply_at(&mut self, conflict: usize, choice: Choice) -> bool {
+        let Some(index) = self.conflict_slot(conflict) else {
             return false;
         };
         let (lines, resolution, trailing) = match choice {
@@ -376,7 +441,11 @@ impl MergeModel {
 
     /// Puts the selected conflict back to its unresolved marker block.
     pub(crate) fn reset(&mut self) -> bool {
-        let Some(index) = self.conflict_slot(self.selected) else {
+        self.reset_at(self.selected)
+    }
+
+    fn reset_at(&mut self, conflict: usize) -> bool {
+        let Some(index) = self.conflict_slot(conflict) else {
             return false;
         };
         if self.slots[index].resolution.is_unresolved() {
@@ -388,6 +457,119 @@ impl MergeModel {
             self.trailing_newline = true;
         }
         true
+    }
+
+    /// Which sides are ticked for `conflict`.
+    pub(crate) fn ticked(&self, conflict: usize) -> Option<Ticked> {
+        self.conflict_slot(conflict)
+            .map(|index| Ticked::of(self.slots[index].resolution))
+    }
+
+    /// Ticks or unticks one side of `conflict`, keeping the tick order.
+    ///
+    /// Unticking the last ticked side restores the marker block; everything
+    /// else maps onto the same choices the keyboard shortcuts apply. Returns
+    /// whether the result text changed.
+    pub(crate) fn tick(&mut self, conflict: usize, side: Side) -> bool {
+        let Some(ticked) = self.ticked(conflict) else {
+            return false;
+        };
+        let (a, b) = (ticked.a, ticked.b);
+        match side {
+            // Removing the first of both leaves the other side alone, in the
+            // order it keeps.
+            Side::A if a && b => self.apply_at(conflict, Choice::Theirs),
+            Side::B if a && b => self.apply_at(conflict, Choice::Ours),
+            Side::A if a => self.reset_at(conflict),
+            Side::B if b => self.reset_at(conflict),
+            Side::A if b => self.apply_at(conflict, Choice::TheirsThenOurs),
+            Side::B if a => self.apply_at(conflict, Choice::OursThenTheirs),
+            Side::A => self.apply_at(conflict, Choice::Ours),
+            Side::B => self.apply_at(conflict, Choice::Theirs),
+        }
+    }
+
+    /// Whether every conflict has `side` ticked. Also the header checkbox's
+    /// state, so `false` for a merge with no conflicts.
+    pub(crate) fn all_ticked(&self, side: Side) -> bool {
+        self.conflicts > 0
+            && (0..self.conflicts)
+                .all(|conflict| self.ticked(conflict).is_some_and(|ticked| ticked.has(side)))
+    }
+
+    /// The side header's checkbox: tick `side` everywhere, or untick it
+    /// everywhere when it already covers every conflict.
+    pub(crate) fn tick_all(&mut self, side: Side) -> bool {
+        let untick = self.all_ticked(side);
+        let mut changed = false;
+        for conflict in 0..self.conflicts {
+            let ticked = self.ticked(conflict).is_some_and(|ticked| ticked.has(side));
+            if ticked == untick {
+                changed |= self.tick(conflict, side);
+            }
+        }
+        changed
+    }
+
+    /// Which side each line of the result came from, for the result markers.
+    pub(crate) fn result_marks(&self) -> Vec<Option<LineMark>> {
+        let mut marks = Vec::new();
+        for slot in &self.slots {
+            let count = slot.lines.len();
+            let mark = match slot.conflict {
+                Some(_) => match slot.resolution {
+                    Resolution::Unresolved => {
+                        marks.extend(std::iter::repeat_n(Some(LineMark::Unresolved), count));
+                        continue;
+                    }
+                    Resolution::Ours => Some(LineMark::Side(Side::A)),
+                    Resolution::Theirs => Some(LineMark::Side(Side::B)),
+                    Resolution::Base | Resolution::Manual => None,
+                    Resolution::OursThenTheirs | Resolution::TheirsThenOurs => {
+                        let (first, second, first_len) =
+                            if slot.resolution == Resolution::OursThenTheirs {
+                                (Side::A, Side::B, slot.ours.len())
+                            } else {
+                                (Side::B, Side::A, slot.theirs.len())
+                            };
+                        let first_len = first_len.min(count);
+                        marks.extend(
+                            std::iter::repeat_n(Some(LineMark::Side(first)), first_len).chain(
+                                std::iter::repeat_n(
+                                    Some(LineMark::Side(second)),
+                                    count - first_len,
+                                ),
+                            ),
+                        );
+                        continue;
+                    }
+                },
+                // Automatic lines keep the side whose change they are;
+                // unchanged lines belong to neither.
+                None => match slot.kind {
+                    SegmentKind::Ours => Some(LineMark::Side(Side::A)),
+                    SegmentKind::Theirs => Some(LineMark::Side(Side::B)),
+                    SegmentKind::Unchanged | SegmentKind::Conflict => None,
+                },
+            };
+            marks.extend(std::iter::repeat_n(mark, count));
+        }
+        marks
+    }
+
+    /// The 0-based line of the result where `conflict` starts.
+    pub(crate) fn conflict_result_line(&self, conflict: usize) -> Option<usize> {
+        let index = self.conflict_slot(conflict)?;
+        Some(
+            self.slots[..index]
+                .iter()
+                .map(|slot| slot.lines.len())
+                .sum(),
+        )
+    }
+
+    pub(crate) fn selected_result_line(&self) -> Option<usize> {
+        self.conflict_result_line(self.selected)
     }
 
     /// Applies an edit made in the result pane.
@@ -614,6 +796,156 @@ mod tests {
         assert_eq!(model.unresolved_count(), 2);
         assert!(model.has_markers());
         assert!(!model.reset(), "an unresolved conflict has nothing to undo");
+    }
+
+    #[test]
+    fn the_gutter_checkboxes_pick_sides_in_the_order_they_were_ticked() {
+        let mut model = two_conflicts();
+        assert_eq!(model.ticked(0), Some(Ticked::default()));
+
+        // Only A is ours.
+        assert!(model.tick(0, Side::A));
+        assert_eq!(model.ticked(0), Some(Ticked { a: true, b: false }));
+        assert_eq!(model.selected_resolution(), Some(Resolution::Ours));
+        assert!(model.text().contains("TWO-a"));
+        assert!(!model.text().contains("TWO-b"));
+
+        // Adding B after A keeps A first.
+        model.tick(0, Side::B);
+        assert_eq!(model.ticked(0), Some(Ticked { a: true, b: true }));
+        assert_eq!(
+            model.selected_resolution(),
+            Some(Resolution::OursThenTheirs)
+        );
+        assert!(model.text().contains("TWO-a\nTWO-b"));
+
+        // Unticking A leaves B alone.
+        model.tick(0, Side::A);
+        assert_eq!(model.ticked(0), Some(Ticked { a: false, b: true }));
+        assert_eq!(model.selected_resolution(), Some(Resolution::Theirs));
+        assert!(model.text().contains("TWO-b"));
+        assert!(!model.text().contains("TWO-a"));
+
+        // Unticking the last side brings the marker block back.
+        model.tick(0, Side::B);
+        assert_eq!(model.ticked(0), Some(Ticked::default()));
+        assert_eq!(model.selected_resolution(), Some(Resolution::Unresolved));
+        assert!(model.text().contains("<<<<<<< ours"));
+    }
+
+    #[test]
+    fn ticking_b_before_a_puts_theirs_first() {
+        let mut model = two_conflicts();
+        model.tick(0, Side::B);
+        model.tick(0, Side::A);
+        assert_eq!(
+            model.selected_resolution(),
+            Some(Resolution::TheirsThenOurs)
+        );
+        assert!(model.text().contains("TWO-b\nTWO-a"));
+    }
+
+    #[test]
+    fn the_header_checkbox_takes_a_side_for_every_conflict() {
+        let mut model = two_conflicts();
+        assert!(!model.all_ticked(Side::A));
+        assert!(model.tick_all(Side::A));
+        assert!(model.all_ticked(Side::A));
+        assert!(!model.all_ticked(Side::B));
+        assert!(model.all_resolved());
+        let text = model.text();
+        assert!(text.contains("TWO-a") && text.contains("FOUR-a"));
+        assert!(!text.contains("TWO-b") && !text.contains("FOUR-b"));
+
+        // The header checkbox again clears the side everywhere.
+        assert!(model.tick_all(Side::A));
+        assert!(!model.all_ticked(Side::A));
+        assert_eq!(model.unresolved_count(), 2);
+        assert!(model.text().contains("<<<<<<< ours"));
+    }
+
+    #[test]
+    fn a_manual_edit_leaves_both_checkboxes_clear_until_one_is_ticked() {
+        let mut model = two_conflicts();
+        let text = model.text().replace("TWO-a\n=======\nTWO-b", "TWO-merged");
+        assert!(model.apply_text(&text));
+        assert_eq!(model.ticked(0), Some(Ticked::default()));
+        assert!(!model.all_ticked(Side::A));
+
+        // A tick replaces the hand-written text with that side.
+        assert!(model.tick(0, Side::A));
+        assert_eq!(model.ticked(0), Some(Ticked { a: true, b: false }));
+        assert!(model.text().contains("TWO-a"));
+        assert!(!model.text().contains("TWO-merged"));
+
+        // The untouched conflict still has its markers.
+        assert_eq!(model.ticked(1), Some(Ticked::default()));
+        assert!(model.text().contains("<<<<<<< ours"));
+    }
+
+    #[test]
+    fn resetting_still_works_after_a_header_tick() {
+        let mut model = two_conflicts();
+        model.tick_all(Side::B);
+        model.select(1);
+        assert!(model.reset());
+        assert_eq!(model.ticked(1), Some(Ticked::default()));
+        assert!(!model.all_ticked(Side::B));
+        assert!(model.text().contains("<<<<<<< ours"));
+    }
+
+    #[test]
+    fn taking_the_base_clears_both_checkboxes() {
+        let mut model = two_conflicts();
+        model.apply(Choice::Base);
+        assert_eq!(model.ticked(0), Some(Ticked::default()));
+        assert_eq!(model.selected_resolution(), Some(Resolution::Base));
+    }
+
+    #[test]
+    fn result_marks_follow_the_ticked_sides_and_the_automatic_lines() {
+        let mut model = model(
+            "one\ntwo\nthree\nfour\n",
+            "one\nA2\nthree\nfour\n",
+            "one\nB2\nthree\nfour\n",
+        );
+        let marks = model.result_marks();
+        assert_eq!(marks[0], None, "an unchanged line came from neither side");
+        assert_eq!(
+            marks[1..6],
+            [
+                Some(LineMark::Unresolved),
+                Some(LineMark::Unresolved),
+                Some(LineMark::Unresolved),
+                Some(LineMark::Unresolved),
+                Some(LineMark::Unresolved),
+            ],
+            "the whole marker block is unresolved"
+        );
+
+        model.tick(0, Side::A);
+        let marks = model.result_marks();
+        assert_eq!(marks[1], Some(LineMark::Side(Side::A)));
+        assert_eq!(marks[2], None, "the automatic line after it is unchanged");
+
+        let mut model = self::model(
+            "one\ntwo\nthree\nfour\n",
+            "one\nA2\nthree\nfour\n",
+            "one\nB2\nthree\nfour\n",
+        );
+        model.tick(0, Side::A);
+        model.tick(0, Side::B);
+        let marks = model.result_marks();
+        assert_eq!(marks[1], Some(LineMark::Side(Side::A)));
+        assert_eq!(marks[2], Some(LineMark::Side(Side::B)));
+    }
+
+    #[test]
+    fn the_result_line_of_each_conflict_is_where_the_counter_jumps_to() {
+        let model = two_conflicts();
+        assert_eq!(model.conflict_result_line(0), Some(1));
+        assert_eq!(model.selected_result_line(), Some(1));
+        assert!(model.conflict_result_line(2).is_none());
     }
 
     #[test]
