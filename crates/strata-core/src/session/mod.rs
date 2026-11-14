@@ -549,6 +549,16 @@ pub enum SessionEvent {
         /// Parsed from lines like `Receiving objects:  45% (450/1000)`.
         percent: Option<u8>,
     },
+    /// A network command is waiting for a credential or passphrase. Answer it
+    /// with [`Session::answer_askpass`]; answering `None` cancels, which makes
+    /// git report the authentication failure.
+    AskpassPrompt {
+        id: OperationId,
+        /// git's question, e.g. `Username for 'https://example.com': `.
+        prompt: String,
+        /// Passwords and passphrases must be masked while typed.
+        secret: bool,
+    },
     /// Rows (indices into `snapshot.commits` of `generation`) matching a query,
     /// in display order. Rows not loaded yet at that generation are not included.
     QueryReady {
@@ -777,6 +787,16 @@ impl Session {
             let _ = senders.operations.send(OperationJob { id, operation: op });
         }
         id
+    }
+
+    /// Answers the pending [`SessionEvent::AskpassPrompt`] of `id`.
+    ///
+    /// `None` cancels: the helper exits non-zero and git fails with its own
+    /// authentication message, exactly as it would with no credential source.
+    /// Returns false when no prompt is waiting, because it was answered
+    /// already, timed out, or the operation ended.
+    pub fn answer_askpass(&self, id: OperationId, answer: Option<String>) -> bool {
+        self.shared.answer_askpass(id, answer)
     }
 
     /// Computes a diff in the background with [`DiffOptions::default`]. Newer
@@ -1101,6 +1121,78 @@ mod tests {
                 Err(error) => panic!("timed out waiting for an event: {error}"),
             }
         }
+    }
+
+    #[test]
+    fn a_credential_prompt_is_answered_through_the_session() {
+        let (_source, clone) = shallow_clone_fixture(&["--depth", "1"]);
+        let (session, events) = open_session(clone.path());
+        wait_for_complete(&session, &events);
+
+        let id = session.shared.next_operation_id();
+        let waiting = {
+            let shared = Arc::clone(&session.shared);
+            std::thread::spawn(move || {
+                shared.request_answer(
+                    id,
+                    crate::askpass::Prompt::new("Password for 'https://example.com': "),
+                )
+            })
+        };
+
+        let event = next_matching(
+            &events,
+            |event| matches!(event, SessionEvent::AskpassPrompt { id: ready, .. } if *ready == id),
+        );
+        let SessionEvent::AskpassPrompt { prompt, secret, .. } = event else {
+            unreachable!()
+        };
+        assert_eq!(prompt, "Password for 'https://example.com': ");
+        assert!(secret, "a password prompt must be masked");
+
+        assert!(
+            session.answer_askpass(id, Some("hunter2".to_owned())),
+            "the waiting prompt takes the answer"
+        );
+        let answer = waiting.join().unwrap().expect("the session answered");
+        assert_eq!(answer.as_str(), Some("hunter2"));
+        assert!(
+            !session.answer_askpass(id, Some("again".to_owned())),
+            "a prompt is answered only once"
+        );
+    }
+
+    #[test]
+    fn cancelling_a_credential_prompt_reaches_the_command() {
+        let (_source, clone) = shallow_clone_fixture(&["--depth", "1"]);
+        let (session, events) = open_session(clone.path());
+        wait_for_complete(&session, &events);
+
+        let id = session.shared.next_operation_id();
+        let waiting = {
+            let shared = Arc::clone(&session.shared);
+            std::thread::spawn(move || {
+                shared.request_answer(
+                    id,
+                    crate::askpass::Prompt::new("Username for 'https://example.com': "),
+                )
+            })
+        };
+
+        let event = next_matching(
+            &events,
+            |event| matches!(event, SessionEvent::AskpassPrompt { id: ready, .. } if *ready == id),
+        );
+        let SessionEvent::AskpassPrompt { secret, .. } = event else {
+            unreachable!()
+        };
+        assert!(!secret, "a username prompt must stay readable");
+
+        assert!(session.answer_askpass(id, None), "cancel is an answer");
+        assert!(
+            waiting.join().unwrap().is_none(),
+            "cancelling reaches the helper as no answer"
+        );
     }
 
     #[test]

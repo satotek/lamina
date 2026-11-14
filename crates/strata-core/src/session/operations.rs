@@ -101,7 +101,7 @@ pub(crate) fn run(
 }
 
 fn run_one(
-    shared: &Shared,
+    shared: &Arc<Shared>,
     job: OperationJob,
     status: &Sender<RefreshStatus>,
     load: &Sender<LoadCommand>,
@@ -111,6 +111,9 @@ fn run_one(
     shared.emit(SessionEvent::OperationStarted { id: job.id });
 
     let result = execute(shared, job.id, &job.operation);
+    // A prompt answered as the command ended must not leave a waiter for the
+    // next command that reuses the id.
+    shared.forget_prompt(job.id);
 
     // Refreshes held back during the command are dropped if the session
     // forgets them here: a status scan cannot see a ref that moved. Held
@@ -210,8 +213,15 @@ fn changes_refs(operation: &Operation) -> bool {
     )
 }
 
-fn execute(shared: &Shared, id: OperationId, operation: &Operation) -> Result<()> {
-    let git = &shared.git;
+fn execute(shared: &Arc<Shared>, id: OperationId, operation: &Operation) -> Result<()> {
+    // Credential prompts from git travel to the window and back through the
+    // session. The handler blocks the command's thread until the user answers,
+    // which is what git expects from an askpass program.
+    let git = shared.git.clone().with_askpass({
+        let shared = Arc::clone(shared);
+        move |prompt| shared.request_answer(id, prompt)
+    });
+    let git = &git;
     match operation {
         Operation::StagePaths(paths) => git.stage_paths(paths),
         Operation::UnstagePaths(paths) => git.unstage_paths(paths),

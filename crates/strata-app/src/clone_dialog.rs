@@ -10,6 +10,11 @@
 //! Cancelling only removes the directory when this attempt created it; an
 //! existing empty destination folder is left alone. The worker owns the
 //! blocking `git` call and reports through a channel, so the UI never blocks.
+//!
+//! A private or password-protected remote asks for credentials through the
+//! askpass bridge: the worker forwards the question over the same channel and
+//! waits for the dialog's answer. A cancel there fails the clone with git's
+//! authentication error, and the dialog's own Cancel stops the clone.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -29,6 +34,7 @@ use gpui_component::checkbox::Checkbox;
 use gpui_component::dialog::DialogFooter;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::progress::Progress;
+use strata_core::askpass::Answer;
 use strata_core::git_cli::{CloneOptions, CloneOutcome, Git, clone_repository, init_repository};
 
 use crate::picker::OpenTarget;
@@ -39,6 +45,9 @@ use crate::workspace::Workspace;
 
 /// How often the dialog drains what the clone worker reported.
 const POLL: Duration = Duration::from_millis(50);
+
+/// How often the worker checks whether the dialog it is waiting on was closed.
+const PROMPT_POLL: Duration = Duration::from_millis(100);
 
 /// Open the clone dialog. `target` is where a successful clone is opened,
 /// carried over from the picker that launched the dialog.
@@ -248,8 +257,18 @@ enum Phase {
 
 /// What the clone worker reports through the channel.
 enum Message {
-    Progress { text: String, percent: Option<u8> },
+    Progress {
+        text: String,
+        percent: Option<u8>,
+    },
     Done(Result<CloneOutcome, String>),
+    /// git is waiting for a credential. The answer goes back on `reply`; a
+    /// dropped reply cancels, so a closed dialog never holds the clone.
+    Askpass {
+        prompt: String,
+        secret: bool,
+        reply: mpsc::Sender<Option<String>>,
+    },
 }
 
 /// What the UI does after the worker reports.
@@ -439,10 +458,34 @@ impl CloneDialog {
 
         let (sender, receiver) = mpsc::channel();
         let worker_cancel = Arc::clone(&cancel);
+        let prompt_cancel = Arc::clone(&cancel);
         let worker_target = target.clone();
         std::thread::spawn(move || {
             let progress_sender = sender.clone();
-            let runner = runner_for(&worker_target, binary);
+            // The dialog can be closed while git waits for a credential, so the
+            // handler watches the same flag the clone itself does.
+            let prompt_sender = sender.clone();
+            let runner = runner_for(&worker_target, binary).with_askpass(move |prompt| {
+                let (reply, answer) = mpsc::channel();
+                let message = Message::Askpass {
+                    prompt: prompt.text,
+                    secret: prompt.secret,
+                    reply,
+                };
+                if prompt_sender.send(message).is_err() {
+                    return None;
+                }
+                loop {
+                    if prompt_cancel.load(Ordering::SeqCst) {
+                        return None;
+                    }
+                    match answer.recv_timeout(PROMPT_POLL) {
+                        Ok(answer) => return answer.map(Answer::from_string),
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+                    }
+                }
+            });
             let result = clone_repository(
                 &runner,
                 &url,
@@ -465,6 +508,7 @@ impl CloneDialog {
             let result = loop {
                 cx.background_executor().timer(POLL).await;
                 let mut progress = Vec::new();
+                let mut prompts = Vec::new();
                 let mut done = None;
                 let mut disconnected = false;
                 loop {
@@ -473,6 +517,11 @@ impl CloneDialog {
                             progress.push((text, percent));
                         }
                         Ok(Message::Done(result)) => done = Some(result),
+                        Ok(Message::Askpass {
+                            prompt,
+                            secret,
+                            reply,
+                        }) => prompts.push((prompt, secret, reply)),
                         Err(TryRecvError::Empty) => break,
                         Err(TryRecvError::Disconnected) => {
                             disconnected = true;
@@ -486,6 +535,30 @@ impl CloneDialog {
                         .is_err()
                 {
                     return;
+                }
+                for (prompt, secret, reply) in prompts {
+                    // The dialog may have been closed between the worker asking
+                    // and this frame; the clone is cancelled then, so no prompt
+                    // is shown and the worker gets its cancel.
+                    let running = this
+                        .update(cx, |dialog, _| dialog.is_running())
+                        .unwrap_or(false);
+                    if !running {
+                        let _ = reply.send(None);
+                        continue;
+                    }
+                    let _ = handle.update(cx, |_, window, cx| {
+                        crate::ui::askpass_prompt(
+                            window,
+                            cx,
+                            "Authentication",
+                            prompt,
+                            secret,
+                            move |answer, _window, _cx| {
+                                let _ = reply.send(answer);
+                            },
+                        );
+                    });
                 }
                 if let Some(result) = done {
                     break result;

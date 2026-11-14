@@ -7,6 +7,10 @@
 //! Path lists are normally passed after `--`. Long lists go through
 //! `--pathspec-from-file=-` with NUL separators instead, because Windows caps
 //! a process command line at roughly 32 KiB.
+//!
+//! Network commands also get an askpass channel (see [`crate::askpass`]) when
+//! the handle was built with [`Git::with_askpass`], so git can ask the window
+//! for a username, password or ssh passphrase instead of failing.
 
 mod blame;
 mod clone;
@@ -36,6 +40,7 @@ use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
+use crate::askpass::{Answer, AskpassHost, Prompt};
 use crate::{Error, Result};
 
 /// Oldest git whose `--pathspec-from-file`, `restore --staged` and `switch`
@@ -52,6 +57,11 @@ pub struct Git {
     binary: PathBuf,
     env: Vec<(OsString, OsString)>,
     log: Arc<CommandLog>,
+    /// Answers credential prompts for network commands. `None` keeps the old
+    /// behaviour: git fails when it cannot ask.
+    askpass: Option<Arc<dyn Fn(Prompt) -> Option<Answer> + Send + Sync>>,
+    /// The executable that implements the helper mode, normally this binary.
+    askpass_helper: PathBuf,
 }
 
 impl Git {
@@ -72,6 +82,10 @@ impl Git {
             binary: find_git_binary().unwrap_or_else(|| PathBuf::from("git")),
             env: Vec::new(),
             log: Arc::new(CommandLog::new()),
+            askpass: None,
+            // git runs this path in helper mode; a bundle or an AppImage still
+            // starts the same executable.
+            askpass_helper: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("strata")),
         }
     }
 
@@ -91,6 +105,30 @@ impl Git {
     /// Share a command log with another handle.
     pub fn with_log(mut self, log: Arc<CommandLog>) -> Self {
         self.log = log;
+        self
+    }
+
+    /// Answer git's credential questions through `handler`.
+    ///
+    /// Network commands (`clone`, `fetch`, `pull`, `push`, ...) get a private
+    /// askpass channel for their lifetime; the handler is called on the
+    /// command's thread and may block until the user answers. `None` cancels.
+    /// Commands that never contact a remote get no channel and no askpass
+    /// environment.
+    pub fn with_askpass(
+        mut self,
+        handler: impl Fn(Prompt) -> Option<Answer> + Send + Sync + 'static,
+    ) -> Self {
+        self.askpass = Some(Arc::new(handler));
+        self
+    }
+
+    /// The executable `GIT_ASKPASS` / `SSH_ASKPASS` point at.
+    ///
+    /// Defaults to the running executable; tests and embedders that ship the
+    /// helper elsewhere can name it explicitly.
+    pub fn with_askpass_helper(mut self, program: impl Into<PathBuf>) -> Self {
+        self.askpass_helper = program.into();
         self
     }
 
@@ -140,15 +178,22 @@ impl Git {
     /// [`run`](Self::run), which folds a failure into a message.
     fn run_output(&self, args: &[String], stdin: Option<&[u8]>) -> Result<Output> {
         let started_at = SystemTime::now();
-        let mut command = self.command(args);
+        let (mut command, _askpass) = match self.prepared(args) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                self.log_spawn_failure(args, started_at, &error);
+                return Err(error);
+            }
+        };
         if stdin.is_some() {
             command.stdin(Stdio::piped());
         }
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
+                let error = Error::from(error);
                 self.log_spawn_failure(args, started_at, &error);
-                return Err(error.into());
+                return Err(error);
             }
         };
         if let Some(data) = stdin
@@ -178,11 +223,19 @@ impl Git {
     ) -> Result<Output> {
         let args = to_args(args);
         let started_at = SystemTime::now();
-        let mut child = match self.command(&args).spawn() {
-            Ok(child) => child,
+        let (mut command, _askpass) = match self.prepared(&args) {
+            Ok(prepared) => prepared,
             Err(error) => {
                 self.log_spawn_failure(&args, started_at, &error);
-                return Err(error.into());
+                return Err(error);
+            }
+        };
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                let error = Error::from(error);
+                self.log_spawn_failure(&args, started_at, &error);
+                return Err(error);
             }
         };
         let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
@@ -237,11 +290,19 @@ impl Git {
         }
         let args = to_args(args);
         let started_at = SystemTime::now();
-        let mut child = match self.command(&args).spawn() {
-            Ok(child) => child,
+        let (mut command, _askpass) = match self.prepared(&args) {
+            Ok(prepared) => prepared,
             Err(error) => {
                 self.log_spawn_failure(&args, started_at, &error);
-                return Err(error.into());
+                return Err(error);
+            }
+        };
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                let error = Error::from(error);
+                self.log_spawn_failure(&args, started_at, &error);
+                return Err(error);
             }
         };
         let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
@@ -384,11 +445,19 @@ impl Git {
         }
         let args = to_args(args);
         let started_at = SystemTime::now();
-        let mut child = match self.command(&args).spawn() {
-            Ok(child) => child,
+        let (mut command, _askpass) = match self.prepared(&args) {
+            Ok(prepared) => prepared,
             Err(error) => {
                 self.log_spawn_failure(&args, started_at, &error);
-                return Err(error.into());
+                return Err(error);
+            }
+        };
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                let error = Error::from(error);
+                self.log_spawn_failure(&args, started_at, &error);
+                return Err(error);
             }
         };
         let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
@@ -529,6 +598,32 @@ impl Git {
         self.run(args, stdin.as_deref()).map(|_| ())
     }
 
+    /// The configured command plus the askpass channel it needs, if any.
+    ///
+    /// The host is returned instead of installed on the command because it has
+    /// to outlive the child: dropping it closes the channel the helper is
+    /// still meant to reach.
+    fn prepared(&self, args: &[String]) -> Result<(Command, Option<AskpassHost>)> {
+        let mut command = self.command(args);
+        let host = match &self.askpass {
+            Some(handler) if is_network_command(args) => {
+                let host = AskpassHost::start_with_handler(
+                    Arc::clone(handler),
+                    crate::askpass::IO_TIMEOUT,
+                )
+                .map_err(|error| {
+                    Error::other(format!(
+                        "could not start the credential prompt channel: {error}"
+                    ))
+                })?;
+                host.apply(&mut command, &self.askpass_helper);
+                Some(host)
+            }
+            _ => None,
+        };
+        Ok((command, host))
+    }
+
     fn command(&self, args: &[String]) -> Command {
         let mut command = Command::new(&self.binary);
         command.current_dir(&self.workdir).args(args);
@@ -536,8 +631,9 @@ impl Git {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        // Never prompt: a credential helper that needs a terminal must fail
-        // loudly instead of hanging a GUI process.
+        // Never prompt on a terminal: the askpass bridge, when there is one,
+        // answers for git; without one the command fails loudly instead of
+        // hanging a GUI process.
         command.env("GIT_TERMINAL_PROMPT", "0");
         // Git's messages are parsed (branch names, stash list), so pin English.
         command.env("LC_ALL", "C");
@@ -567,7 +663,7 @@ impl Git {
         ));
     }
 
-    fn log_spawn_failure(&self, args: &[String], started_at: SystemTime, error: &io::Error) {
+    fn log_spawn_failure(&self, args: &[String], started_at: SystemTime, error: &Error) {
         let duration = started_at.elapsed().unwrap_or_default();
         let text = error.to_string();
         self.log.record(CommandRecord::capture(
@@ -667,6 +763,19 @@ fn find_git_binary() -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+/// Commands that may contact a remote, and so may ask for a credential.
+///
+/// `pull` fetches, and `submodule update` / `remote update` clone or fetch too.
+/// Every other command runs without an askpass channel.
+fn is_network_command(args: &[String]) -> bool {
+    match args.first().map(String::as_str) {
+        Some("clone" | "fetch" | "pull" | "push" | "ls-remote") => true,
+        Some("submodule") => matches!(args.get(1).map(String::as_str), Some("update")),
+        Some("remote") => matches!(args.get(1).map(String::as_str), Some("update")),
+        _ => false,
+    }
+}
+
 /// Commands that only read. They get `GIT_OPTIONAL_LOCKS=0` so listing the
 /// repo does not rewrite the index mtime behind the file watcher's back.
 fn is_read_only(args: &[String]) -> bool {
@@ -722,5 +831,106 @@ mod tests {
         );
         assert_eq!(parse_version("git version 3\n"), Some((3, 0, 0)));
         assert_eq!(parse_version("nonsense"), None);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod askpass_tests {
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::path::{Path, PathBuf};
+
+    use tempfile::TempDir;
+
+    use super::Git;
+
+    /// A stand-in for git that reports the environment it was given.
+    fn environment_reporter(directory: &Path) -> PathBuf {
+        let path = directory.join("fake-git");
+        std::fs::write(
+            &path,
+            "#!/bin/sh\n\
+             echo \"GIT_ASKPASS=${GIT_ASKPASS-}\"\n\
+             echo \"SSH_ASKPASS=${SSH_ASKPASS-}\"\n\
+             echo \"SSH_ASKPASS_REQUIRE=${SSH_ASKPASS_REQUIRE-}\"\n\
+             echo \"GIT_TERMINAL_PROMPT=${GIT_TERMINAL_PROMPT-}\"\n\
+             echo \"ENDPOINT=${STRATA_ASKPASS_ENDPOINT-}\"\n\
+             echo \"TOKEN=${STRATA_ASKPASS_TOKEN-}\"\n\
+             if [ -S \"${STRATA_ASKPASS_ENDPOINT-}\" ]; then echo socket=yes; else echo socket=no; fi\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&path, permissions).unwrap();
+        path
+    }
+
+    fn value<'a>(output: &'a str, key: &str) -> &'a str {
+        output
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{key}=")))
+            .unwrap_or_else(|| panic!("{key} is missing from the environment:\n{output}"))
+    }
+
+    #[test]
+    fn network_commands_get_the_askpass_bridge_and_others_do_not() {
+        let temp = TempDir::new().unwrap();
+        let binary = environment_reporter(temp.path());
+        let runner = Git::new(temp.path().to_path_buf())
+            .with_git_binary(&binary)
+            // The helper path is asserted literally; pointing it at the test
+            // binary would run the test suite again if git ever invoked it.
+            .with_askpass_helper("/opt/strata")
+            .with_askpass(|_| None)
+            // A developer's own environment must not decide the assertions.
+            .with_env("GIT_ASKPASS", "")
+            .with_env("SSH_ASKPASS", "")
+            .with_env("SSH_ASKPASS_REQUIRE", "")
+            .with_env("STRATA_ASKPASS_ENDPOINT", "")
+            .with_env("STRATA_ASKPASS_TOKEN", "");
+
+        let output = runner.run(&["fetch", "origin"], None).unwrap();
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert_eq!(value(&text, "GIT_ASKPASS"), "/opt/strata");
+        assert_eq!(value(&text, "SSH_ASKPASS"), "/opt/strata");
+        assert_eq!(value(&text, "SSH_ASKPASS_REQUIRE"), "force");
+        assert_eq!(
+            value(&text, "GIT_TERMINAL_PROMPT"),
+            "0",
+            "the bridge must not re-enable terminal prompts"
+        );
+        assert_eq!(value(&text, "socket"), "yes", "the channel is live");
+        let endpoint = value(&text, "ENDPOINT").to_owned();
+        assert!(!value(&text, "TOKEN").is_empty());
+
+        // The host is dropped with the command, so the socket is gone.
+        assert!(
+            !Path::new(&endpoint).exists(),
+            "the askpass socket must not outlive the command"
+        );
+
+        let output = runner.run(&["status"], None).unwrap();
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert_eq!(
+            value(&text, "GIT_ASKPASS"),
+            "",
+            "a local command must not start a credential channel"
+        );
+        assert_eq!(value(&text, "ENDPOINT"), "");
+        assert_eq!(value(&text, "TOKEN"), "");
+    }
+
+    #[test]
+    fn a_network_command_without_a_handler_gets_no_bridge() {
+        let temp = TempDir::new().unwrap();
+        let binary = environment_reporter(temp.path());
+        let runner = Git::new(temp.path().to_path_buf())
+            .with_git_binary(&binary)
+            .with_env("GIT_ASKPASS", "")
+            .with_env("STRATA_ASKPASS_ENDPOINT", "");
+
+        let output = runner.run(&["push"], None).unwrap();
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert_eq!(value(&text, "GIT_ASKPASS"), "");
+        assert_eq!(value(&text, "ENDPOINT"), "");
     }
 }

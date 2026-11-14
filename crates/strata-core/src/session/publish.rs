@@ -1,16 +1,28 @@
 //! The snapshot store and the state every session thread shares.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::mem;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
+use std::time::{Duration, Instant};
 
+use crate::askpass::{Answer, Prompt};
 use crate::git_cli::Git;
 use crate::repo::Repo;
 use crate::session::{DiffTicket, HistoryScope, OperationId, RepoSnapshot, SessionEvent};
 use crate::watch::Changes;
 
 pub(crate) type EventSink = Arc<dyn Fn(SessionEvent) + Send + Sync>;
+
+/// How long a credential prompt waits for the window to answer. A prompt
+/// nobody sees (a closed window, a background tab) must not keep a git child
+/// alive forever, and cancel fails the command the way git expects.
+const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How often the waiting command checks for shutdown, so closing the session
+/// ends the prompt promptly.
+const PROMPT_POLL: Duration = Duration::from_millis(50);
 
 /// Watcher refreshes held back while an operation was running.
 #[derive(Debug, Default, Clone, Copy)]
@@ -63,6 +75,9 @@ pub(crate) struct Shared {
     cancelled_diffs: Mutex<HashSet<DiffTicket>>,
     operation_active: AtomicBool,
     pending_refresh: Mutex<PendingRefresh>,
+    /// One pending credential question per running operation. The waiter is
+    /// removed by whoever answers first: the window, the timeout or a cancel.
+    prompts: Mutex<HashMap<OperationId, Sender<Option<Answer>>>>,
 }
 
 impl Shared {
@@ -81,6 +96,7 @@ impl Shared {
             cancelled_diffs: Mutex::new(HashSet::new()),
             operation_active: AtomicBool::new(false),
             pending_refresh: Mutex::new(PendingRefresh::default()),
+            prompts: Mutex::new(HashMap::new()),
         }
     }
 
@@ -161,6 +177,51 @@ impl Shared {
 
     pub(crate) fn set_operation_running(&self, running: bool) {
         self.operation_active.store(running, Ordering::SeqCst);
+    }
+
+    /// Asks the window for an answer to a credential prompt and blocks the git
+    /// command's thread until it arrives, the session shuts down, or the
+    /// prompt times out.
+    ///
+    /// The waiter is registered before the event is emitted, so an immediate
+    /// answer cannot be missed.
+    pub(crate) fn request_answer(&self, id: OperationId, prompt: Prompt) -> Option<Answer> {
+        let (sender, receiver) = mpsc::channel();
+        lock(&self.prompts).insert(id, sender);
+        self.emit(SessionEvent::AskpassPrompt {
+            id,
+            prompt: prompt.text,
+            secret: prompt.secret,
+        });
+
+        let deadline = Instant::now() + PROMPT_TIMEOUT;
+        let answer = loop {
+            if self.is_shutdown() {
+                break None;
+            }
+            match receiver.recv_timeout(PROMPT_POLL) {
+                Ok(answer) => break answer,
+                Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() >= deadline => break None,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break None,
+            }
+        };
+        lock(&self.prompts).remove(&id);
+        answer
+    }
+
+    /// Answers a pending prompt. `None` cancels it. False means nothing was
+    /// waiting: the prompt timed out, or the operation already ended.
+    pub(crate) fn answer_askpass(&self, id: OperationId, answer: Option<String>) -> bool {
+        let Some(sender) = lock(&self.prompts).remove(&id) else {
+            return false;
+        };
+        sender.send(answer.map(Answer::from_string)).is_ok()
+    }
+
+    /// Drops a waiter left behind when an operation ends.
+    pub(crate) fn forget_prompt(&self, id: OperationId) {
+        lock(&self.prompts).remove(&id);
     }
 
     pub(crate) fn hold_refresh(&self, changes: &Changes) {

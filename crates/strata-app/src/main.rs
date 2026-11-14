@@ -3,6 +3,10 @@
 //! `strata [PATH]` opens the repository containing `PATH`. `strata --fake [N]`
 //! renders `N` synthetic commits instead, which is the phase-0 render
 //! benchmark; both modes share the same commit-list and diff renderers.
+//! `strata --askpass <prompt>` is git's credential helper mode and runs before
+//! anything else, so it needs no display and no settings. git itself starts the
+//! executable as `strata <prompt>` (with the channel in the environment); the
+//! explicit form is for tests and for running it by hand.
 //!
 //! Started without a path, Strata reopens the last repository when the settings
 //! ask it to and it is still there, and otherwise shows the welcome screen:
@@ -51,6 +55,12 @@ use repo_view::Launch;
 use workspace::Workspace;
 
 fn main() {
+    // git starts this executable as its askpass program while it holds a
+    // credential prompt. That mode must not touch the display server, the
+    // settings or a window, so it is checked before anything else.
+    if let Some(code) = strata_core::askpass::helper_main(std::env::args_os().skip(1)) {
+        std::process::exit(code);
+    }
     env_logger::init();
     let parsed = debug_launch::parse_args();
     if parsed.help {

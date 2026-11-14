@@ -3,6 +3,7 @@
 //! Reads go through `gix` (`repo`), writes go through the `git` CLI (`git_cli`),
 //! so user hooks, signing and credential helpers behave exactly as in a terminal.
 
+pub mod askpass;
 pub mod diff;
 pub mod error;
 pub mod git_cli;

@@ -7,11 +7,11 @@
 //! running, the progress the status bar shows, and the two decisions that need
 //! a dialog (which remote to publish to, and whether to force a rejected push).
 //!
-//! Authentication is git's business: the session runs git with
-//! `GIT_TERMINAL_PROMPT=0`, so a repository without usable credentials fails
-//! instead of waiting for a password on a terminal nobody can see. Such a
-//! failure is classified here and reported with a hint about credential
-//! helpers and ssh-agent.
+//! Authentication is git's business: user credential helpers run first, and
+//! when none answers, the session's askpass bridge asks the window for a
+//! username, password or passphrase (`GIT_TERMINAL_PROMPT=0` still keeps git
+//! off a terminal nobody can see). A failure after that is classified here and
+//! reported with a hint about credential helpers and ssh-agent.
 
 use std::collections::BTreeSet;
 
@@ -47,11 +47,11 @@ const BUSY: &str = "An operation is already running.";
 const NO_SESSION: &str =
     "Remote operations need an open repository; `--fake` renders synthetic data.";
 
-/// Shown with an authentication failure. Strata never prompts, so the fix is
-/// always outside the app.
+/// Shown with an authentication failure. Strata did ask for credentials, so
+/// the fix is either correcting them or letting a helper store them.
 const AUTH_HINT: &str = concat!(
-    "Configure a credential helper or load your key into ssh-agent; ",
-    "Strata never asks for a password."
+    "Check the username and password, or configure a credential helper ",
+    "or load your key into ssh-agent."
 );
 
 actions!(strata, [FetchRemotes, PullBranch, PushBranch]);
@@ -240,7 +240,7 @@ fn commits(count: u32) -> String {
 /// What git's failure means for the UI.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Failure {
-    /// git could not authenticate and could not ask.
+    /// git could not authenticate, even after the askpass prompt.
     Auth,
     /// The remote has commits the local branch does not have.
     NonFastForward,

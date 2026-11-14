@@ -43,8 +43,8 @@ use gpui_component::input::InputState;
 use strata_core::git_cli::CommandRecord;
 use strata_core::repo::{SubmoduleInfo, WorktreeInfo};
 use strata_core::session::{
-    DiffOptions, DiffRequest, DiffTicket, DiffView, Operation, QueryTicket, Session, SessionEvent,
-    SessionOptions,
+    DiffOptions, DiffRequest, DiffTicket, DiffView, Operation, OperationId, QueryTicket, Session,
+    SessionEvent, SessionOptions,
 };
 use strata_core::{FileChange, HeadInfo, Oid, RefKind};
 
@@ -978,6 +978,9 @@ impl RepoView {
                 }
                 self.remote.on_progress(id, &text, percent, cx, self.active)
             }
+            SessionEvent::AskpassPrompt { id, prompt, secret } => {
+                self.prompt_for_credentials(id, prompt, secret, cx);
+            }
             SessionEvent::CommitGraphSuggested { .. } => {
                 if !self.commit_graph_writing
                     && !self.commit_graph_dismissed
@@ -987,6 +990,49 @@ impl RepoView {
                     self.notify_if_active(cx);
                 }
             }
+        }
+    }
+
+    /// Shows git's credential question in a modal and answers the session.
+    ///
+    /// Cancelling, or a window that is already gone, answers `None`: the helper
+    /// exits non-zero and the command fails with git's own message instead of
+    /// waiting for a prompt nobody can see.
+    fn prompt_for_credentials(
+        &mut self,
+        id: OperationId,
+        prompt: String,
+        secret: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let Some(window) = self.window_handle else {
+            session.answer_askpass(id, None);
+            return;
+        };
+        let entity = self.entity.clone();
+        let opened = window.update(cx, |_, window, cx| {
+            crate::ui::askpass_prompt(
+                window,
+                cx,
+                "Authentication",
+                prompt,
+                secret,
+                move |answer, _window, cx| {
+                    if let Some(entity) = entity.upgrade() {
+                        entity.update(cx, |view, _cx| {
+                            if let Some(session) = view.session.as_ref() {
+                                session.answer_askpass(id, answer);
+                            }
+                        });
+                    }
+                },
+            );
+        });
+        if opened.is_err() {
+            session.answer_askpass(id, None);
         }
     }
 
