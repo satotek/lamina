@@ -7,6 +7,11 @@
 //! wrapping, syntax colours, visible whitespace, tab width and the code font)
 //! apply everywhere at once.
 //!
+//! Each hunk is drawn as a card: the header row is its rounded top edge, the
+//! line rows continue its sides and the hunk's last line closes it. The gap
+//! above a card lives in the header row's top padding, so the list stays a
+//! `uniform_list` of fixed-height rows.
+//!
 //! Nothing here reads git: the panes hand over rows and the [`DiffView`] they
 //! came from.
 
@@ -35,6 +40,53 @@ pub const ROW_HEIGHT: f32 = 20.0;
 const GUTTER_WIDTH: f32 = 46.0;
 const PICK_WIDTH: f32 = 14.0;
 const MARKER_WIDTH: f32 = 14.0;
+/// How far a hunk card is inset from the pane's edges.
+const CARD_INSET: f32 = 8.0;
+/// The empty band above a card. It is drawn inside the hunk header row,
+/// because every row of a `uniform_list` is the same fixed height.
+const CARD_GAP: f32 = 8.0;
+
+/// The card edges a drawn row draws.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RowRole {
+    /// The hunk header: the card's rounded top edge. The row also carries the
+    /// gap above the card in its top padding.
+    Header,
+    /// A line row that continues the card's sides.
+    Middle,
+    /// The hunk's last line row: the card's bottom edge and rounded corners.
+    Tail,
+}
+
+/// The role of a row in the unified stream.
+///
+/// Every hunk starts with its header, so a line row that is followed by
+/// anything but another line row closes its card.
+fn row_role(rows: &[Row], index: usize) -> Option<RowRole> {
+    match rows.get(index)? {
+        Row::HunkHeader { .. } => Some(RowRole::Header),
+        Row::Line(_) => Some(if matches!(rows.get(index + 1), Some(Row::Line(_))) {
+            RowRole::Middle
+        } else {
+            RowRole::Tail
+        }),
+    }
+}
+
+/// The role of an item in the side-by-side stream, which pairs the same rows
+/// into one list item per change row.
+fn split_role(pairs: &[SplitRow], index: usize) -> Option<RowRole> {
+    match pairs.get(index)? {
+        SplitRow::Header { .. } => Some(RowRole::Header),
+        SplitRow::Lines { .. } => Some(
+            if matches!(pairs.get(index + 1), Some(SplitRow::Lines { .. })) {
+                RowRole::Middle
+            } else {
+                RowRole::Tail
+            },
+        ),
+    }
+}
 
 /// The old and new side of a side-by-side diff.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -323,7 +375,7 @@ pub fn render_row_with(
     options: RowOptions,
 ) -> AnyElement {
     let highlights = if style.syntax { highlights } else { None };
-    unified_row(row, colors, style, highlights, options, false)
+    unified_row(row, colors, style, highlights, options, false, None)
 }
 
 /// The diff pane's list of rows.
@@ -388,7 +440,15 @@ impl Rows {
         } = self;
         if let Some(pairs) = pairs.as_deref() {
             return match pairs.get(index) {
-                Some(pair) => split_row(*pair, rows, colors, style, view.as_deref(), wrap),
+                Some(pair) => split_row(
+                    *pair,
+                    rows,
+                    colors,
+                    style,
+                    view.as_deref(),
+                    wrap,
+                    split_role(pairs, index),
+                ),
                 // The item count is the pairing's length, so this only happens
                 // for an index from a stale count.
                 None => div().h(px(style.row_height())).w_full().into_any_element(),
@@ -399,7 +459,15 @@ impl Rows {
             return div().into_any_element();
         };
         let highlights = line_highlights(row, view.as_deref(), style.syntax);
-        unified_row(row, colors, style, highlights, RowOptions::default(), wrap)
+        unified_row(
+            row,
+            colors,
+            style,
+            highlights,
+            RowOptions::default(),
+            wrap,
+            row_role(rows, index),
+        )
     }
 }
 
@@ -617,6 +685,7 @@ fn unified_row(
     highlights: Option<&LineHighlights>,
     options: RowOptions,
     wrap: bool,
+    role: Option<RowRole>,
 ) -> AnyElement {
     match row {
         Row::HunkHeader {
@@ -627,50 +696,82 @@ fn unified_row(
         } => hunk_header((*old_start, *old_len, *new_start, *new_len), colors, style),
         Row::Line(line) => {
             let picked = options.pick == Some(true);
-            let mut row = div()
+            let mut outer = div()
                 .flex()
                 .min_h(px(style.row_height()))
                 .w_full()
-                .border_l_2()
-                .border_color(if picked {
-                    colors.selection
-                } else {
-                    Hsla::transparent_black()
-                })
                 .font_family(style.mono.clone())
                 .text_size(px(style.font_size))
                 .text_color(colors.text);
-            row = if wrap {
-                row.items_start()
+            if role.is_some() {
+                outer = outer.pl(px(CARD_INSET)).pr(px(CARD_INSET));
+            }
+            outer = if wrap {
+                outer.items_start()
             } else {
-                row.items_center().h(px(style.row_height()))
+                outer.items_center().h(px(style.row_height()))
             };
 
-            if let Some(background) = line_background(line, colors) {
-                row = row.bg(background);
-            } else if picked {
-                row = row.bg(colors.selection.opacity(0.14));
+            // The tint and the gutters live in this box, inside the card's
+            // border. Without a role (the staging pane) it is the whole row.
+            let mut body = div().flex().flex_1().min_w_0().w_full();
+            body = if wrap {
+                body.items_start().min_h(px(style.row_height()))
+            } else {
+                body.items_center().h_full()
+            };
+
+            match role {
+                Some(role) => {
+                    body = body.border_l_1().border_r_1().border_color(colors.border);
+                    if role == RowRole::Tail {
+                        body = body.border_b_1().rounded_b_sm();
+                    }
+                    // The pick accent stays inside the card so the card's own
+                    // left border runs unbroken along the hunk.
+                    body = body.child(div().flex_none().w(px(2.0)).self_stretch().bg(if picked {
+                        colors.selection
+                    } else {
+                        Hsla::transparent_black()
+                    }));
+                }
+                None => {
+                    body = body.border_l_2().border_color(if picked {
+                        colors.selection
+                    } else {
+                        Hsla::transparent_black()
+                    });
+                }
             }
 
-            row.child(
-                div()
-                    .w(px(PICK_WIDTH))
-                    .flex_none()
-                    .text_size(px(10.0))
-                    .text_color(colors.selection)
-                    .child(if picked { "✓" } else { "" }),
-            )
-            .child(gutter(line.old_lineno, colors))
-            .child(gutter(line.new_lineno, colors))
-            .child(
-                div()
-                    .w(px(MARKER_WIDTH))
-                    .flex_none()
-                    .text_color(colors.gutter)
-                    .child(marker(line.kind)),
-            )
-            .child(line_content(line, colors, style, highlights, wrap))
-            .into_any_element()
+            if let Some(background) = line_background(line, colors) {
+                body = body.bg(background);
+            } else if picked {
+                body = body.bg(colors.selection.opacity(0.14));
+            }
+
+            outer
+                .child(
+                    body.child(
+                        div()
+                            .w(px(PICK_WIDTH))
+                            .flex_none()
+                            .text_size(px(10.0))
+                            .text_color(colors.selection)
+                            .child(if picked { "✓" } else { "" }),
+                    )
+                    .child(gutter(line.old_lineno, colors))
+                    .child(gutter(line.new_lineno, colors))
+                    .child(
+                        div()
+                            .w(px(MARKER_WIDTH))
+                            .flex_none()
+                            .text_color(colors.gutter)
+                            .child(marker(line.kind)),
+                    )
+                    .child(line_content(line, colors, style, highlights, wrap)),
+                )
+                .into_any_element()
         }
     }
 }
@@ -682,6 +783,7 @@ fn split_row(
     style: &DiffStyle,
     view: Option<&DiffView>,
     wrap: bool,
+    role: Option<RowRole>,
 ) -> AnyElement {
     match pair {
         SplitRow::Header { row } => match rows.get(row) {
@@ -700,29 +802,61 @@ fn split_row(
                 old_line.and_then(|line| side_highlights(view, Side::Old, line, style.syntax));
             let new_highlights =
                 new_line.and_then(|line| side_highlights(view, Side::New, line, style.syntax));
-            div()
+            let tail = role == Some(RowRole::Tail);
+
+            let mut outer = div()
                 .flex()
                 .w_full()
                 .min_h(px(style.row_height()))
                 .font_family(style.mono.clone())
                 .text_size(px(style.font_size))
                 .text_color(colors.text)
-                .child(side_cell(
-                    old_line,
-                    Side::Old,
-                    colors,
-                    style,
-                    old_highlights,
-                    wrap,
-                ))
-                .child(side_cell(
-                    new_line,
-                    Side::New,
-                    colors,
-                    style,
-                    new_highlights,
-                    wrap,
-                ))
+                .pl(px(CARD_INSET))
+                .pr(px(CARD_INSET));
+            outer = if wrap {
+                outer.items_start()
+            } else {
+                outer.items_center().h(px(style.row_height()))
+            };
+
+            let mut card = div()
+                .flex()
+                .flex_1()
+                .min_w_0()
+                .w_full()
+                .border_l_1()
+                .border_r_1()
+                .border_color(colors.border);
+            if tail {
+                card = card.border_b_1().rounded_b_sm();
+            }
+            card = if wrap {
+                card.items_start()
+            } else {
+                card.items_center().h_full()
+            };
+
+            outer
+                .child(
+                    card.child(side_cell(
+                        old_line,
+                        Side::Old,
+                        colors,
+                        style,
+                        old_highlights,
+                        wrap,
+                        tail,
+                    ))
+                    .child(side_cell(
+                        new_line,
+                        Side::New,
+                        colors,
+                        style,
+                        new_highlights,
+                        wrap,
+                        tail,
+                    )),
+                )
                 .into_any_element()
         }
     }
@@ -743,6 +877,7 @@ fn side_cell(
     style: &DiffStyle,
     highlights: Option<&LineHighlights>,
     wrap: bool,
+    tail: bool,
 ) -> Div {
     let number = line.and_then(|line| match side {
         Side::Old => line.old_lineno,
@@ -760,7 +895,6 @@ fn side_cell(
         .flex_1()
         .min_w_0()
         .w_full()
-        .min_h(px(style.row_height()))
         .border_l_2()
         .border_color(match side {
             // The divider between the columns, drawn on the new side only.
@@ -768,10 +902,18 @@ fn side_cell(
             Side::New => colors.border,
         });
     cell = if wrap {
-        cell.items_start()
+        cell.items_start().min_h(px(style.row_height()))
     } else {
-        cell.items_center().h(px(style.row_height()))
+        cell.items_center().h_full()
     };
+    if tail {
+        // The tint is painted by the cell, so the card's rounded bottom
+        // corners have to round the cell's own background too.
+        cell = match side {
+            Side::Old => cell.rounded_bl_sm(),
+            Side::New => cell.rounded_br_sm(),
+        };
+    }
     if let Some(background) = background {
         cell = cell.bg(background);
     }
@@ -794,20 +936,37 @@ fn hunk_header(
     colors: &DiffColors,
     style: &DiffStyle,
 ) -> AnyElement {
+    let text = format!("@@ -{old_start},{old_len} +{new_start},{new_len} @@");
+    let band = style.row_height() - CARD_GAP;
+
     div()
         .flex()
-        .items_center()
+        .flex_col()
         .h(px(style.row_height()))
         .w_full()
-        .bg(colors.header)
-        .border_t_1()
-        .border_color(colors.border)
-        .font_family(style.mono.clone())
-        .text_size(px((style.font_size - 1.0).max(9.0)))
-        .text_color(colors.muted)
-        .child(div().pl_2().child(format!(
-            "@@ -{old_start},{old_len} +{new_start},{new_len} @@"
-        )))
+        .pl(px(CARD_INSET))
+        .pr(px(CARD_INSET))
+        .pt(px(CARD_GAP))
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .flex_1()
+                .w_full()
+                .bg(colors.header)
+                .border_t_1()
+                .border_l_1()
+                .border_r_1()
+                .border_color(colors.border)
+                .rounded_t_sm()
+                .font_family(style.mono.clone())
+                .text_size(px((style.font_size - 1.0).max(9.0)))
+                .line_height(px((band - 1.0).max(8.0)))
+                .text_color(colors.muted)
+                .child(div().pl_2().child(text))
+                // Reserved for per-hunk actions.
+                .child(div().flex_1()),
+        )
         .into_any_element()
 }
 
@@ -1284,6 +1443,62 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn roles_close_each_hunk_on_its_last_line() {
+        let rows = vec![
+            header(),
+            line(LineKind::Context, Some(1), Some(1), "a"),
+            line(LineKind::Removed, Some(2), None, "b"),
+            line(LineKind::Added, None, Some(2), "B"),
+            header(),
+            line(LineKind::Added, None, Some(9), "only"),
+        ];
+
+        let roles: Vec<_> = (0..rows.len())
+            .map(|index| row_role(&rows, index))
+            .collect();
+        assert_eq!(
+            roles,
+            vec![
+                Some(RowRole::Header),
+                Some(RowRole::Middle),
+                Some(RowRole::Middle),
+                Some(RowRole::Tail),
+                Some(RowRole::Header),
+                Some(RowRole::Tail),
+            ]
+        );
+        assert_eq!(row_role(&rows, rows.len()), None);
+    }
+
+    #[test]
+    fn split_roles_close_each_hunk_on_its_last_pair() {
+        let rows = vec![
+            header(),
+            line(LineKind::Removed, Some(1), None, "a"),
+            line(LineKind::Added, None, Some(1), "A"),
+            line(LineKind::Context, Some(2), Some(2), "b"),
+            header(),
+            line(LineKind::Added, None, Some(9), "only"),
+        ];
+        let pairs = split_rows(&rows);
+
+        let roles: Vec<_> = (0..pairs.len())
+            .map(|index| split_role(&pairs, index))
+            .collect();
+        assert_eq!(
+            roles,
+            vec![
+                Some(RowRole::Header),
+                Some(RowRole::Middle),
+                Some(RowRole::Tail),
+                Some(RowRole::Header),
+                Some(RowRole::Tail),
+            ]
+        );
+        assert_eq!(split_role(&pairs, pairs.len()), None);
     }
 
     #[test]
