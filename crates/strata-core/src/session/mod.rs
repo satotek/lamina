@@ -477,6 +477,23 @@ pub enum Operation {
     },
     /// `git worktree prune`.
     WorktreePrune,
+    /// `git lfs track <path>`: add `filter=lfs` for the file's pattern to
+    /// `.gitattributes`.
+    LfsTrack {
+        path: String,
+    },
+    /// `git lfs lock <path>`.
+    LfsLock {
+        path: String,
+    },
+    /// `git lfs unlock <path>`.
+    LfsUnlock {
+        path: String,
+    },
+    /// `git lfs pull --include=<path>`: download the real object.
+    LfsPull {
+        path: String,
+    },
     /// `git commit-graph write --reachable --changed-paths`: make future
     /// history walks faster. Never started without an explicit user action.
     WriteCommitGraph,
@@ -532,6 +549,9 @@ pub struct DiffView {
     /// Empty until highlighting finishes; a second `DiffReady` event follows.
     pub old_highlights: Arc<Vec<LineHighlights>>,
     pub new_highlights: Arc<Vec<LineHighlights>>,
+    /// LFS metadata when either side is a pointer. `diff` then holds the real
+    /// content when both objects are local, or no hunks when they are not.
+    pub lfs: Option<crate::lfs::LfsDiffSummary>,
 }
 
 #[derive(Debug, Clone)]

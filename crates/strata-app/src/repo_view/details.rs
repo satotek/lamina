@@ -379,6 +379,7 @@ impl RepoView {
             _ => true,
         };
         let work_dir = Arc::new(self.work_dir());
+        let lfs = Arc::clone(&self.files_lfs);
         let list_design = design.clone();
         let count = files.len();
         let entries: Vec<(String, ChangeKind)> = files
@@ -413,6 +414,9 @@ impl RepoView {
                     )
                     .child(crate::ui::change_badge(*kind, &list_design))
                     .child(div().flex_1().min_w_0().truncate().child(name.to_owned()))
+                    .when(lfs.contains_key(path), |row| {
+                        row.child(crate::ui::lfs_badge(&list_design))
+                    })
                     .when_some(dir, |row, dir| {
                         row.child(
                             div()

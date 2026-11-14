@@ -154,6 +154,12 @@ impl Repo {
             entry.object().map_err(Error::gix)?.into_blob().take_data()
         };
 
+        // A pointer's lines belong to LFS metadata, not to the user's file;
+        // blaming them would attribute `version` and `oid` to a commit.
+        if crate::lfs::LfsPointer::parse(&blob_data).is_some() {
+            return Ok(Some(Blame::default()));
+        }
+
         let lines = split_lines(&blob_data);
         if lines.is_empty() {
             return Ok(Some(Blame::default()));

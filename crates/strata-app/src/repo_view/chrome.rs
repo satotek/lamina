@@ -175,6 +175,23 @@ impl Render for RepoView {
             // is showing, so a stopped operation is visible from the history
             // and not only from the working tree.
             let mut main = div().flex().flex_col().flex_1().min_w_0().min_h_0();
+            if let Some(text) = self.lfs_notice.clone()
+                && !self.lfs_notice_dismissed
+            {
+                let dismiss_entity = self.entity();
+                main = main.child(
+                    crate::ui::banner(crate::ui::BannerKind::Warning, text, &design).action(
+                        crate::ui::button("dismiss-lfs-notice", "Dismiss")
+                            .size(crate::ui::ButtonSize::Tiny)
+                            .on_click(move |_, _, cx| {
+                                dismiss_entity.update(cx, |this, cx| {
+                                    this.lfs_notice_dismissed = true;
+                                    cx.notify();
+                                });
+                            }),
+                    ),
+                );
+            }
             if let Some(banner) = self.in_progress_banner(entity.clone(), &design) {
                 main = main.child(banner);
             }

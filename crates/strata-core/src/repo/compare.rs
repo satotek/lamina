@@ -221,11 +221,11 @@ mod tests {
         assert_eq!(file(&comparison, "keep.txt").stat.removed, 1);
         assert_eq!(
             comparison.added,
-            comparison.files.iter().map(|f| f.stat.added).sum()
+            comparison.files.iter().map(|f| f.stat.added).sum::<u64>()
         );
         assert_eq!(
             comparison.removed,
-            comparison.files.iter().map(|f| f.stat.removed).sum()
+            comparison.files.iter().map(|f| f.stat.removed).sum::<u64>()
         );
     }
 

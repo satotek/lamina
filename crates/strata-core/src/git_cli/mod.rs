@@ -16,6 +16,7 @@ mod blame;
 mod clone;
 mod command_log;
 mod history;
+mod lfs;
 mod manage;
 mod merge;
 mod ops;

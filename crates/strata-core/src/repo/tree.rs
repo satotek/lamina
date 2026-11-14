@@ -5,6 +5,7 @@ use gix::object::tree::EntryKind;
 use gix::objs::TreeRefIter;
 
 use super::Repo;
+use crate::lfs::{LfsPointer, MAX_POINTER_BYTES};
 use crate::{Error, Oid, Result, TreeEntry, TreeEntryKind};
 
 impl Repo {
@@ -99,9 +100,21 @@ fn directory_rank(entry: &TreeEntry) -> u8 {
 }
 
 /// Blob size from the object header, which avoids inflating the content.
+///
+/// An LFS pointer's header carries the metadata file's size; the listing wants
+/// the real object's size, so pointers small enough to be one are inflated and
+/// parsed.
 fn blob_size(repo: &gix::Repository, id: Oid) -> Option<u64> {
     match repo.try_find_header(id) {
-        Ok(Some(header)) if header.kind() == gix::objs::Kind::Blob => Some(header.size()),
+        Ok(Some(header)) if header.kind() == gix::objs::Kind::Blob => {
+            if header.size() <= MAX_POINTER_BYTES as u64
+                && let Ok(blob) = repo.find_blob(id)
+                && let Some(pointer) = LfsPointer::parse(&blob.data)
+            {
+                return Some(pointer.size);
+            }
+            Some(header.size())
+        }
         _ => None,
     }
 }

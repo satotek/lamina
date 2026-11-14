@@ -381,6 +381,10 @@ fn execute(shared: &Arc<Shared>, id: OperationId, operation: &Operation) -> Resu
         } => git.worktree_add(path, branch.as_deref(), new_branch.as_deref(), *commit),
         Operation::WorktreeRemove { path, force } => git.worktree_remove(path, *force),
         Operation::WorktreePrune => git.worktree_prune(),
+        Operation::LfsTrack { path } => git.lfs_track(path),
+        Operation::LfsLock { path } => git.lfs_lock(path),
+        Operation::LfsUnlock { path } => git.lfs_unlock(path),
+        Operation::LfsPull { path } => git.lfs_pull(path),
         Operation::WriteCommitGraph => {
             let mut progress = ProgressReporter::new(shared, id);
             let cancelled = || shared.is_shutdown();

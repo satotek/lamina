@@ -7706,6 +7706,8 @@ dependencies = [
  "imara-diff",
  "insta",
  "notify",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "tree-sitter",

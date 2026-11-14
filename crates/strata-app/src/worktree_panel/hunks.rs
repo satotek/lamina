@@ -15,7 +15,7 @@ use strata_core::ChangeKind;
 use strata_core::diff::{FileDiff, LineKind};
 use strata_core::highlight::LineHighlights;
 use strata_core::patch::LineSelection;
-use strata_core::session::{DiffView, RepoSnapshot};
+use strata_core::session::{DiffView, Operation, RepoSnapshot};
 
 use super::{Colors, HunkAction, LineAction, PanelRow, RowPosition, Selected, Side, WorktreePanel};
 use crate::diff_view::{self, DiffColors, Row as DiffRow, RowOptions};
@@ -153,6 +153,59 @@ impl WorktreePanel {
             }
             (None, None) => {
                 crate::ui::message("computing diff…", colors.muted_foreground, &colors.design)
+                    .into_any_element()
+            }
+            (None, Some(view)) if view.lfs.is_some() => {
+                let summary = view.lfs.clone().expect("checked above");
+                let missing = summary.old.as_ref().is_some_and(|side| !side.present)
+                    || summary.new.as_ref().is_some_and(|side| !side.present);
+                let mut card = crate::ui::lfs_card(summary, &colors.design);
+                if missing && let Some(selected) = &selected {
+                    let path = selected.path.clone();
+                    let entity = entity.clone();
+                    card = card.action(
+                        crate::ui::button("worktree-lfs-download", "Download")
+                            .size(crate::ui::ButtonSize::Tiny)
+                            .on_click(move |_, window, cx| {
+                                let path = path.clone();
+                                entity.update(cx, |this, cx| {
+                                    this.run_operation(
+                                        Operation::LfsPull { path },
+                                        "Download LFS object",
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }),
+                    );
+                }
+                let body = if !self.rows.is_empty() {
+                    self.diff_list(entity.clone(), view, theme, colors)
+                } else if view.diff.binary {
+                    crate::ui::message("Binary file", colors.muted_foreground, &colors.design)
+                        .into_any_element()
+                } else if missing {
+                    crate::ui::message(
+                        "The object is not downloaded",
+                        colors.muted_foreground,
+                        &colors.design,
+                    )
+                    .into_any_element()
+                } else {
+                    crate::ui::message(
+                        "No textual changes",
+                        colors.muted_foreground,
+                        &colors.design,
+                    )
+                    .into_any_element()
+                };
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .child(card)
+                    .child(body)
                     .into_any_element()
             }
             (None, Some(view)) if view.diff.binary => {

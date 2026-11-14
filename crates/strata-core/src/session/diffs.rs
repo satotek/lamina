@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use crate::Result;
 use crate::diff::{DiffOptions, diff_text};
 use crate::highlight::{Highlighter, language_for_path};
+use crate::lfs::{self, LfsDiff, LfsDiffSummary};
 use crate::repo::Repo;
 use crate::session::publish::Shared;
 use crate::session::{
@@ -15,6 +16,9 @@ use crate::session::{
 
 /// A view never shows text this large, and parsing it would stall the worker.
 const MAX_HIGHLIGHT_BYTES: usize = 1024 * 1024;
+/// Same limit for LFS objects: beyond it the summary is more useful than a
+/// diff the pane cannot highlight.
+const MAX_LFS_DIFF_BYTES: usize = 1024 * 1024;
 
 pub(crate) struct DiffJob {
     pub(crate) ticket: DiffTicket,
@@ -57,16 +61,16 @@ pub(crate) fn run(shared: Arc<Shared>, jobs: Arc<Mutex<Receiver<DiffJob>>>) {
 
 fn compute(shared: &Shared, job: &DiffJob, highlighter: &mut Highlighter) -> Result<()> {
     let (old, new) = read_sides(&shared.repo, &job.request)?;
-    let old_bytes = old.as_deref().unwrap_or_default();
-    let new_bytes = new.as_deref().unwrap_or_default();
+    let (old_bytes, new_bytes, lfs) = diff_inputs(&shared.repo, old, new);
 
-    let diff = diff_text(old_bytes, new_bytes, &job.options);
+    let diff = diff_text(&old_bytes, &new_bytes, &job.options);
     let binary = diff.binary;
     let view = Arc::new(DiffView {
         request: job.request.clone(),
         diff,
         old_highlights: Arc::new(Vec::new()),
         new_highlights: Arc::new(Vec::new()),
+        lfs,
     });
     if !emit(shared, job.ticket, Arc::clone(&view)) || binary {
         return Ok(());
@@ -83,14 +87,36 @@ fn compute(shared: &Shared, job: &DiffJob, highlighter: &mut Highlighter) -> Res
         request: view.request.clone(),
         diff: view.diff.clone(),
         old_highlights: Arc::new(
-            highlighter.highlight(language, &String::from_utf8_lossy(old_bytes)),
+            highlighter.highlight(language, &String::from_utf8_lossy(&old_bytes)),
         ),
         new_highlights: Arc::new(
-            highlighter.highlight(language, &String::from_utf8_lossy(new_bytes)),
+            highlighter.highlight(language, &String::from_utf8_lossy(&new_bytes)),
         ),
+        lfs: view.lfs.clone(),
     });
     emit(shared, job.ticket, highlighted);
     Ok(())
+}
+
+/// The bytes to diff, after replacing LFS pointers with their objects where
+/// both sides can be read, plus the metadata the pane shows above the diff.
+fn diff_inputs(
+    repo: &Repo,
+    old: Option<Vec<u8>>,
+    new: Option<Vec<u8>>,
+) -> (Vec<u8>, Vec<u8>, Option<LfsDiffSummary>) {
+    match lfs::resolve_diff(
+        old.as_deref(),
+        new.as_deref(),
+        repo.common_dir(),
+        MAX_LFS_DIFF_BYTES,
+    ) {
+        LfsDiff::NotLfs => (old.unwrap_or_default(), new.unwrap_or_default(), None),
+        LfsDiff::Real { old, new, summary } => (old, new, Some(summary)),
+        // The summary replaces the hunks entirely; diffing the pointer text
+        // would show a three-line metadata change as if it were the file.
+        LfsDiff::Summary(summary) => (Vec::new(), Vec::new(), Some(summary)),
+    }
 }
 
 /// Cancellation is checked at emit time, not only on dequeue: a ticket can be

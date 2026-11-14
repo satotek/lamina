@@ -9,7 +9,7 @@ use gpui::{
 };
 use gpui_component::ActiveTheme as _;
 use gpui_kit_assets::IconName;
-use strata_core::session::DiffView;
+use strata_core::session::{DiffView, Operation};
 
 use super::RepoView;
 use crate::diff_view::{self, DiffColors, Row as DiffRow};
@@ -254,6 +254,9 @@ impl RepoView {
         let Some(view) = self.diff.view().cloned() else {
             return message("computing diff…", design.muted, design);
         };
+        if let Some(summary) = view.lfs.clone() {
+            return self.lfs_diff(summary, view, design, cx);
+        }
         if view.diff.binary {
             return message("Binary file", design.muted, design);
         }
@@ -261,6 +264,61 @@ impl RepoView {
             return message("No textual changes", design.muted, design);
         }
         self.diff_rows_list(Rc::clone(&self.diff_rows), Some(view), design, cx)
+    }
+
+    /// The LFS card above the real-content diff, or above a notice that the
+    /// object is not local.
+    fn lfs_diff(
+        &self,
+        summary: strata_core::lfs::LfsDiffSummary,
+        view: std::sync::Arc<DiffView>,
+        design: &Design,
+        cx: &mut App,
+    ) -> AnyElement {
+        let missing = summary.old.as_ref().is_some_and(|side| !side.present)
+            || summary.new.as_ref().is_some_and(|side| !side.present);
+        let mut card = ui::lfs_card(summary, design);
+        if missing && let Some(path) = self.selected_file_path() {
+            let entity = self.entity();
+            card = card.action(
+                ui::button("lfs-download", "Download")
+                    .size(ButtonSize::Tiny)
+                    .on_click(move |_, window, cx| {
+                        let path = path.clone();
+                        entity.update(cx, |this, cx| {
+                            this.run_operation(
+                                Operation::LfsPull { path },
+                                "Download LFS object",
+                                window,
+                                cx,
+                            );
+                        });
+                    }),
+            );
+        }
+        let body = if !self.diff_rows.is_empty() {
+            self.diff_rows_list(Rc::clone(&self.diff_rows), Some(view), design, cx)
+        } else if view.diff.binary {
+            message("Binary file", design.muted, design)
+        } else if missing {
+            message("The object is not downloaded", design.muted, design)
+        } else {
+            message("No textual changes", design.muted, design)
+        };
+        div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .child(card)
+            .child(body)
+            .into_any_element()
+    }
+
+    fn selected_file_path(&self) -> Option<String> {
+        let files = self.files.as_ref()?;
+        let index = self.selected_file?;
+        files.get(index).map(|change| change.path.clone())
     }
 
     fn diff_rows_list(

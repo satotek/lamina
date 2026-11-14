@@ -20,6 +20,7 @@ mod config;
 mod conflicts;
 mod history;
 mod in_progress;
+mod lfs;
 mod log;
 mod message;
 mod reflog;

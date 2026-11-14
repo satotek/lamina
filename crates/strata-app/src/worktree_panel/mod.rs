@@ -12,7 +12,7 @@ mod commit_box;
 mod file_list;
 mod hunks;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -24,6 +24,7 @@ use gpui::{
 };
 use gpui_component::input::{InputEvent, TextareaState};
 use gpui_component::{ActiveTheme as _, Theme};
+use strata_core::lfs::{LfsInfo, LfsLock};
 use strata_core::patch::LineSelection;
 use strata_core::session::{
     ConflictSide, DiffRequest, DiffTicket, DiffView, Operation, OperationId, RepoSnapshot, Session,
@@ -1676,7 +1677,14 @@ impl RepoView {
             return synthetic_state(entity, &self.worktree, cx, &colors);
         };
         let snapshot = session.snapshot();
-        self.worktree.render(entity, &snapshot, cx)
+        self.worktree.render(
+            entity,
+            &snapshot,
+            Arc::clone(&self.worktree_lfs),
+            Rc::clone(&self.lfs_locks),
+            self.lfs_locking_available,
+            cx,
+        )
     }
 }
 
@@ -1703,6 +1711,9 @@ impl WorktreePanel {
         &self,
         entity: Entity<RepoView>,
         snapshot: &RepoSnapshot,
+        lfs: Arc<HashMap<String, LfsInfo>>,
+        locks: Rc<HashMap<String, LfsLock>>,
+        locking_available: bool,
         cx: &mut Context<RepoView>,
     ) -> AnyElement {
         let colors = Colors::from_theme(cx.theme(), Settings::get(cx));
@@ -1754,7 +1765,15 @@ impl WorktreePanel {
             .on_action(
                 cx.listener(|this, _: &MarkFileResolved, _, cx| this.mark_conflict_resolved(cx)),
             )
-            .child(self.lists(entity.clone(), snapshot, &colors, cx))
+            .child(self.lists(
+                entity.clone(),
+                snapshot,
+                &colors,
+                &lfs,
+                &locks,
+                locking_available,
+                cx,
+            ))
             .child(match selected_conflict {
                 Some(path) => self.conflicts.pane(&path, entity.clone(), snapshot, cx),
                 None => self.diff_pane(entity.clone(), snapshot, cx.theme(), &colors),

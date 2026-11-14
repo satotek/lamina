@@ -30,6 +30,7 @@ mod title_bar;
 mod tree_view;
 mod worktrees;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -43,6 +44,7 @@ use gpui::{
 };
 use gpui_component::input::InputState;
 use strata_core::git_cli::CommandRecord;
+use strata_core::lfs::{LfsInfo, LfsLock};
 use strata_core::repo::{SubmoduleInfo, WorktreeInfo};
 use strata_core::session::{
     DiffOptions, DiffRequest, DiffTicket, DiffView, Operation, OperationId, QueryTicket, Session,
@@ -401,9 +403,24 @@ pub struct RepoView {
     focus: FocusHandle,
 
     files: Option<Vec<FileChange>>,
+    /// LFS metadata for the changed files of the selected commit, keyed by
+    /// path. Read with the file list so a badge never blocks a frame.
+    files_lfs: Arc<HashMap<String, LfsInfo>>,
+    /// LFS metadata for the worktree rows, keyed by path.
+    pub(crate) worktree_lfs: Arc<HashMap<String, LfsInfo>>,
+    worktree_lfs_epoch: u64,
     files_epoch: u64,
     files_error: Option<String>,
     selected_file: Option<usize>,
+
+    /// Remote LFS locks, for the worktree context menu.
+    pub(crate) lfs_locks: Rc<HashMap<String, LfsLock>>,
+    pub(crate) lfs_locking_available: bool,
+    lfs_locks_loaded: bool,
+    /// The one-time warning shown when the repository uses LFS but git-lfs is
+    /// not installed.
+    lfs_notice: Option<String>,
+    lfs_notice_dismissed: bool,
 
     /// Commit-wide added/removed counts; the details pane keeps the selected
     /// file's counts until they arrive.
@@ -562,9 +579,17 @@ impl RepoView {
             splits: split::SplitExtents::default(),
             focus,
             files: None,
+            files_lfs: Arc::new(HashMap::new()),
+            worktree_lfs: Arc::new(HashMap::new()),
+            worktree_lfs_epoch: 0,
             files_epoch: 0,
             files_error: None,
             selected_file: None,
+            lfs_locks: Rc::new(HashMap::new()),
+            lfs_locking_available: false,
+            lfs_locks_loaded: false,
+            lfs_notice: None,
+            lfs_notice_dismissed: false,
             stat: details::CommitStatSlot::default(),
             tree: tree_view::TreeBrowser::default(),
             blame: blame_view::BlameView::default(),
@@ -643,6 +668,7 @@ impl RepoView {
                 view.session = Some(*session);
                 view.search.init_input(window, cx);
                 view.sync_autofetch(cx);
+                view.check_lfs_notice(cx);
                 if view.active {
                     view.publish_repository(cx);
                 }
@@ -751,6 +777,10 @@ impl RepoView {
         self.sync_selection(cx);
         self.settle_edit_selection(cx);
         self.sync_worktree(cx);
+        if self.mode == MainMode::Worktree {
+            self.load_worktree_lfs(cx);
+            self.load_lfs_locks(cx);
+        }
         self.search_on_snapshot(cx);
         self.file_history_on_snapshot(cx);
         self.reflog_on_snapshot(cx);
@@ -1383,6 +1413,7 @@ impl RepoView {
         }
         self.selected_file = None;
         self.files = None;
+        self.files_lfs = Arc::new(HashMap::new());
         self.files_error = None;
         self.diff_scroll = UniformListScrollHandle::default();
         // The tree shows one commit's contents, so another selection leaves it.
@@ -1474,18 +1505,28 @@ impl RepoView {
         // safe off the UI thread.
         let repo = session.repo().clone();
         cx.spawn(async move |this, cx| {
-            let changes = cx
+            let result = cx
                 .background_executor()
-                .spawn(async move { repo.commit_changes(commit) })
+                .spawn(async move {
+                    let files = repo.commit_changes(commit)?;
+                    let mut lfs = HashMap::new();
+                    for change in &files {
+                        if let Ok(Some(info)) = repo.lfs_info_at(commit, &change.path) {
+                            lfs.insert(change.path.clone(), info);
+                        }
+                    }
+                    Ok::<_, strata_core::Error>((files, lfs))
+                })
                 .await;
             this.update(cx, |this, cx| {
                 if this.files_epoch != epoch {
                     return;
                 }
-                match changes {
-                    Ok(files) => {
+                match result {
+                    Ok((files, lfs)) => {
                         let empty = files.is_empty();
                         this.files = Some(files);
+                        this.files_lfs = Arc::new(lfs);
                         this.files_error = None;
                         if empty {
                             this.notify_if_active(cx);
@@ -1500,6 +1541,118 @@ impl RepoView {
                         this.files_error = Some(error.to_string());
                         this.notify_if_active(cx);
                     }
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Reads LFS metadata for the worktree rows off the UI thread.
+    fn load_worktree_lfs(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let snapshot = session.snapshot();
+        let mut paths = Vec::new();
+        for change in snapshot
+            .status
+            .staged
+            .iter()
+            .chain(snapshot.status.unstaged.iter())
+        {
+            if !paths.contains(&change.path) {
+                paths.push(change.path.clone());
+            }
+        }
+        self.worktree_lfs_epoch = self.worktree_lfs_epoch.wrapping_add(1);
+        let epoch = self.worktree_lfs_epoch;
+        let repo = session.repo().clone();
+        cx.spawn(async move |this, cx| {
+            let map = cx
+                .background_executor()
+                .spawn(async move {
+                    let mut map = HashMap::new();
+                    for path in paths {
+                        let info = repo
+                            .lfs_info_in_worktree(&path)
+                            .ok()
+                            .flatten()
+                            .or_else(|| repo.lfs_info_in_index(&path).ok().flatten());
+                        if let Some(info) = info {
+                            map.insert(path, info);
+                        }
+                    }
+                    map
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                if this.worktree_lfs_epoch == epoch {
+                    this.worktree_lfs = Arc::new(map);
+                    this.notify_if_active(cx);
+                }
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Asks the remote for its LFS locks once per view, which also decides
+    /// whether the Lock and Unlock entries belong in the context menu.
+    fn load_lfs_locks(&mut self, cx: &mut Context<Self>) {
+        if self.lfs_locks_loaded {
+            return;
+        }
+        let Some(session) = &self.session else {
+            return;
+        };
+        self.lfs_locks_loaded = true;
+        let git = session.git().clone();
+        cx.spawn(async move |this, cx| {
+            let (available, locks) = cx
+                .background_executor()
+                .spawn(async move {
+                    let available = git.lfs_available();
+                    let locks = git.lfs_locks().ok();
+                    (available, locks)
+                })
+                .await;
+            this.update(cx, |this, cx| {
+                this.lfs_locking_available = available && locks.is_some();
+                this.lfs_locks = Rc::new(
+                    locks
+                        .map(|locks| {
+                            locks
+                                .into_iter()
+                                .map(|lock| (lock.path.clone(), lock))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                );
+                this.notify_if_active(cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Shows the install hint once when the repository tracks LFS files but
+    /// the `git-lfs` command is missing.
+    fn check_lfs_notice(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = &self.session else {
+            return;
+        };
+        let git = session.git().clone();
+        let repo = session.repo().clone();
+        cx.spawn(async move |this, cx| {
+            let missing = cx
+                .background_executor()
+                .spawn(async move { !git.lfs_available() && repo.uses_lfs() })
+                .await;
+            this.update(cx, |this, cx| {
+                if missing && !this.lfs_notice_dismissed && this.lfs_notice.is_none() {
+                    this.lfs_notice = Some(crate::ui::install_hint());
+                    this.notify_if_active(cx);
                 }
             })
             .ok();
@@ -2168,6 +2321,7 @@ mod tests {
             diff: FileDiff::default(),
             old_highlights: Arc::new(Vec::new()),
             new_highlights: Arc::new(Vec::new()),
+            lfs: None,
         })
     }
 

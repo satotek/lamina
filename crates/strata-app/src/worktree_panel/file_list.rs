@@ -1,14 +1,17 @@
 //! The working-tree file lists: the unstaged and staged section headers, their
 //! rows and the context menus on those rows.
 
+use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
     AnyElement, Entity, IntoElement, MouseButton, ParentElement, Styled, div, px, uniform_list,
 };
 use gpui_component::menu::PopupMenuItem;
-use strata_core::session::RepoSnapshot;
+use strata_core::lfs::{LfsInfo, LfsLock};
+use strata_core::session::{Operation, RepoSnapshot};
 use strata_core::{ChangeKind, FileChange};
 
 use super::{Colors, Selection, Side, WorktreePanel};
@@ -30,14 +33,24 @@ struct RowContext {
     rows: Rc<Vec<String>>,
     selection: Selection,
     colors: Colors,
+    lfs: Arc<HashMap<String, LfsInfo>>,
+    locks: Rc<HashMap<String, LfsLock>>,
+    locking_available: bool,
 }
 
 impl WorktreePanel {
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the lists need the snapshot, palette and LFS state together"
+    )]
     pub(super) fn lists(
         &self,
         entity: Entity<RepoView>,
         snapshot: &RepoSnapshot,
         colors: &Colors,
+        lfs: &Arc<HashMap<String, LfsInfo>>,
+        locks: &Rc<HashMap<String, LfsLock>>,
+        locking_available: bool,
         cx: &Context<RepoView>,
     ) -> AnyElement {
         let selected_conflict = self.selected_conflict();
@@ -60,17 +73,35 @@ impl WorktreePanel {
                 Side::Unstaged,
                 &snapshot.status.unstaged,
                 colors,
+                lfs,
+                locks,
+                locking_available,
             ))
-            .child(self.file_section(entity, Side::Staged, &snapshot.status.staged, colors))
+            .child(self.file_section(
+                entity,
+                Side::Staged,
+                &snapshot.status.staged,
+                colors,
+                lfs,
+                locks,
+                locking_available,
+            ))
             .into_any_element()
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "a section carries the row state and the LFS maps it draws"
+    )]
     fn file_section(
         &self,
         entity: Entity<RepoView>,
         side: Side,
         files: &[FileChange],
         colors: &Colors,
+        lfs: &Arc<HashMap<String, LfsInfo>>,
+        locks: &Rc<HashMap<String, LfsLock>>,
+        locking_available: bool,
     ) -> AnyElement {
         // Unmerged paths are listed in the conflicts section; repeating them
         // under "unstaged" would offer stage/discard actions that cannot work.
@@ -153,6 +184,9 @@ impl WorktreePanel {
             rows: Rc::new(files.iter().map(|change| change.path.clone()).collect()),
             selection: self.selection.clone(),
             colors: colors.clone(),
+            lfs: Arc::clone(lfs),
+            locks: Rc::clone(locks),
+            locking_available,
         };
         let entries: Rc<Vec<(String, ChangeKind)>> = Rc::new(
             files
@@ -210,6 +244,9 @@ fn file_row(
     )
     .child(crate::ui::change_badge(kind, &context.colors.design))
     .child(div().flex_1().min_w_0().truncate().child(name.to_owned()))
+    .when(context.lfs.contains_key(&path), |row| {
+        row.child(crate::ui::lfs_badge(&context.colors.design))
+    })
     .when_some(dir, |row, dir| {
         row.child(
             div()
@@ -228,6 +265,9 @@ fn file_row(
     let untracked = kind == ChangeKind::Untracked;
     let menu_entity = context.entity.clone();
     let menu_path = path.clone();
+    let menu_lfs_tracked = context.lfs.contains_key(&path);
+    let menu_locks = Rc::clone(&context.locks);
+    let locking_available = context.locking_available;
     let right_entity = context.entity.clone();
     let right_path = click_path.clone();
 
@@ -270,6 +310,65 @@ fn file_row(
                     editor_entity.update(cx, |this, cx| this.open_file_in_editor(&path, None, cx));
                 },
             ));
+
+            if !menu_lfs_tracked {
+                let track_entity = menu_entity.clone();
+                let track_path = menu_path.clone();
+                menu = menu.item(PopupMenuItem::new("Track with LFS").on_click(
+                    move |_, window, cx| {
+                        let path = track_path.clone();
+                        track_entity.update(cx, |this, cx| {
+                            this.run_operation(
+                                Operation::LfsTrack { path },
+                                "Track with LFS",
+                                window,
+                                cx,
+                            );
+                        });
+                    },
+                ));
+            }
+            if locking_available {
+                match menu_locks.get(&menu_path) {
+                    Some(lock) => {
+                        let unlock_entity = menu_entity.clone();
+                        let unlock_path = menu_path.clone();
+                        let label = match lock.owner.as_deref() {
+                            Some(owner) => format!("Unlock (locked by {owner})"),
+                            None => "Unlock".to_owned(),
+                        };
+                        menu =
+                            menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
+                                let path = unlock_path.clone();
+                                unlock_entity.update(cx, |this, cx| {
+                                    this.run_operation(
+                                        Operation::LfsUnlock { path },
+                                        "LFS unlock",
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }));
+                    }
+                    None => {
+                        let lock_entity = menu_entity.clone();
+                        let lock_path = menu_path.clone();
+                        menu =
+                            menu.item(PopupMenuItem::new("Lock").on_click(move |_, window, cx| {
+                                let path = lock_path.clone();
+                                lock_entity.update(cx, |this, cx| {
+                                    this.run_operation(
+                                        Operation::LfsLock { path },
+                                        "LFS lock",
+                                        window,
+                                        cx,
+                                    );
+                                });
+                            }));
+                    }
+                }
+            }
+
             match side {
                 Side::Unstaged => {
                     let stage_entity = menu_entity.clone();

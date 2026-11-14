@@ -854,7 +854,9 @@ fn load_blob_side<'b>(
         return Ok(LoadedSide::Skip);
     }
     let blob = repo.objects.find_blob(&id, buf).map_err(Error::gix)?;
-    let binary = is_binary(blob.data);
+    // An LFS pointer is metadata, not the file: counting its lines would
+    // report the pointer's three lines as the change.
+    let binary = is_binary(blob.data) || crate::lfs::LfsPointer::parse(blob.data).is_some();
     if cache_insert && let Some(cache) = blobs {
         let lines = (!binary).then(|| count_lines(blob.data));
         let data: Arc<[u8]> = Arc::from(blob.data);

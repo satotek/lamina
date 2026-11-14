@@ -11,6 +11,7 @@
 //! are painted with [`DiffColors`], but blobs over [`MAX_FILE_BYTES`] and
 //! binary files show a notice instead of content.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
@@ -22,6 +23,7 @@ use gpui::{
 use gpui_component::ActiveTheme as _;
 use gpui_kit_assets::IconName;
 use strata_core::highlight::{Highlighter, LineHighlights, language_for_path};
+use strata_core::lfs::{LfsInfo, LfsPointer, format_size, read_object, short_label};
 use strata_core::{Oid, TreeEntry, TreeEntryKind};
 
 use super::RepoView;
@@ -50,6 +52,8 @@ pub(super) struct TreeBrowser {
     commit: Option<Oid>,
     dir: String,
     entries: Option<Vec<TreeEntry>>,
+    /// LFS metadata for the entries of the current listing, keyed by path.
+    lfs: HashMap<String, LfsInfo>,
     error: Option<String>,
     /// Bumped for every listing request; a result for another epoch is stale.
     listing_epoch: u64,
@@ -68,6 +72,7 @@ impl Default for TreeBrowser {
             commit: None,
             dir: String::new(),
             entries: None,
+            lfs: HashMap::new(),
             error: None,
             listing_epoch: 0,
             file: None,
@@ -124,6 +129,7 @@ impl TreeBrowser {
         self.commit = None;
         self.dir.clear();
         self.entries = None;
+        self.lfs.clear();
         self.error = None;
         self.file = None;
         self.listing_epoch += 1;
@@ -138,6 +144,7 @@ impl TreeBrowser {
 
     fn reset_listing(&mut self) -> u64 {
         self.entries = None;
+        self.lfs.clear();
         self.error = None;
         self.file = None;
         self.file_epoch += 1;
@@ -175,11 +182,18 @@ impl TreeBrowser {
         self.file_epoch += 1;
     }
 
-    fn accept_listing(&mut self, epoch: u64, commit: Oid, entries: Vec<TreeEntry>) -> bool {
+    fn accept_listing(
+        &mut self,
+        epoch: u64,
+        commit: Oid,
+        entries: Vec<TreeEntry>,
+        lfs: HashMap<String, LfsInfo>,
+    ) -> bool {
         if !self.is_current_listing(epoch, commit) {
             return false;
         }
         self.entries = Some(entries);
+        self.lfs = lfs;
         self.error = None;
         true
     }
@@ -499,14 +513,22 @@ impl RepoView {
                     repo.tree_entries(commit, &dir)
                         .map(|mut entries| {
                             sort_entries(&mut entries);
-                            entries
+                            let mut lfs = HashMap::new();
+                            for entry in &entries {
+                                if entry.kind == TreeEntryKind::File
+                                    && let Ok(Some(info)) = repo.lfs_info_at(commit, &entry.path)
+                                {
+                                    lfs.insert(entry.path.clone(), info);
+                                }
+                            }
+                            (entries, lfs)
                         })
                         .map_err(|error| error.to_string())
                 })
                 .await;
             this.update(cx, |this, cx| {
                 let accepted = match read {
-                    Ok(entries) => this.tree.accept_listing(epoch, commit, entries),
+                    Ok((entries, lfs)) => this.tree.accept_listing(epoch, commit, entries, lfs),
                     Err(error) => this.tree.fail_listing(epoch, commit, error),
                 };
                 if accepted {
@@ -530,9 +552,23 @@ impl RepoView {
             let read = cx
                 .background_executor()
                 .spawn(async move {
-                    let bytes = repo
+                    let mut bytes = repo
                         .blob_at(commit, &read_path)
                         .map_err(|error| error.to_string())?;
+                    if let Some(pointer) = LfsPointer::parse(&bytes) {
+                        match read_object(repo.common_dir(), &pointer, MAX_FILE_BYTES)
+                            .map_err(|error| error.to_string())?
+                        {
+                            Some(real) => bytes = real,
+                            None => {
+                                return Ok::<FileContent, String>(FileContent::Notice(format!(
+                                    "Git LFS object {} ({}) is not downloaded",
+                                    short_label(&pointer.oid),
+                                    format_size(pointer.size),
+                                )));
+                            }
+                        }
+                    }
                     Ok::<FileContent, String>(file_content(
                         &read_path,
                         bytes,
@@ -697,6 +733,7 @@ impl RepoView {
         }
 
         let entries = Rc::new(entries.clone());
+        let lfs = self.tree.lfs.clone();
         let count = entries.len();
         let entity = self.entity();
         let list_design = design.clone();
@@ -718,6 +755,9 @@ impl RepoView {
                             .truncate()
                             .child(entry.name.clone()),
                     )
+                    .when(lfs.contains_key(&entry.path), |row| {
+                        row.child(crate::ui::lfs_badge(&list_design))
+                    })
                     .when(!detail.is_empty(), |row| {
                         row.child(
                             div()
@@ -919,16 +959,17 @@ mod tests {
         let root_epoch = tree.listing_epoch;
         let src_epoch = tree.enter_dir("src".to_owned());
 
-        assert!(!tree.accept_listing(root_epoch, commit, Vec::new()));
+        assert!(!tree.accept_listing(root_epoch, commit, Vec::new(), HashMap::new()));
         assert!(
             tree.entries.is_none(),
             "the stale listing must not be stored"
         );
-        assert!(!tree.accept_listing(src_epoch, oid(2), Vec::new()));
+        assert!(!tree.accept_listing(src_epoch, oid(2), Vec::new(), HashMap::new()));
         assert!(tree.accept_listing(
             src_epoch,
             commit,
-            vec![entry("main.rs", TreeEntryKind::File)]
+            vec![entry("main.rs", TreeEntryKind::File)],
+            HashMap::new()
         ));
     }
 
