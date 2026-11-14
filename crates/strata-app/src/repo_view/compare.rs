@@ -912,8 +912,8 @@ mod tests {
         Oid::from(bytes)
     }
 
-    /// Escape leaves the view through the `CloseCompare` action, the way the
-    /// close button does, so the header's promise and the key agree.
+    /// Escape leaves the view with the real keymap: search binds Escape later in
+    /// the same context, so its dismiss handler is what closes the view.
     #[gpui::test]
     fn escape_closes_the_compare_view(cx: &mut TestAppContext) {
         cx.update(|cx| {
@@ -921,6 +921,7 @@ mod tests {
             gpui_component::init(cx);
             cx.set_global(Settings::default());
             bind(cx);
+            crate::search::bind(cx);
         });
         let window = cx.add_window(|window, cx| RepoView::new(Launch::fake(8), window, cx));
         let view = window.root(cx).expect("the window's root view");

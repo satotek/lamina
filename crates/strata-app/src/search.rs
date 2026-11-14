@@ -538,6 +538,12 @@ impl RepoView {
         if self.close_file_history(window, cx) {
             return;
         }
+        // Escape peels one layer at a time: an active filter first, then the
+        // compare view that sits beside the list.
+        if !self.search.is_active() && self.compare.is_some() {
+            self.close_compare(window, cx);
+            return;
+        }
         self.clear_search(window, cx);
     }
 
