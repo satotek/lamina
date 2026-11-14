@@ -422,6 +422,12 @@ pub fn execute(
 ) {
     cx.spawn(async move |cx| {
         let program = argv[0].clone();
+        // The command log has no program field and prints every entry as
+        // `git <args>`, so only git runs belong there; anything else would
+        // read as a git command it never was.
+        let is_git = std::path::Path::new(&program)
+            .file_stem()
+            .is_some_and(|stem| stem == "git");
         let args = argv[1..].to_vec();
         let run_dir = dir.clone();
         let run_title = title.clone();
@@ -430,7 +436,9 @@ pub fn execute(
             .spawn(async move { run(&run_dir, &program, &args, &run_title) })
             .await;
         let (finished, record) = result;
-        log.record(record);
+        if is_git {
+            log.record(record);
+        }
         let _ = view.update(cx, |this, cx| {
             this.custom_command_finished(finished, cx);
         });
@@ -457,8 +465,7 @@ fn run(
             let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
             let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
             let record = CommandRecord {
-                // The status line already says "git"; the log keeps the
-                // arguments the way the git CLI records them.
+                // Without the program, as the git CLI records its runs.
                 args: args.to_vec(),
                 started_at,
                 duration,
@@ -478,8 +485,7 @@ fn run(
         Err(error) => {
             let stderr = error.to_string();
             let record = CommandRecord {
-                // The status line already says "git"; the log keeps the
-                // arguments the way the git CLI records them.
+                // Without the program, as the git CLI records its runs.
                 args: args.to_vec(),
                 started_at,
                 duration,
