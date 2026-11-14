@@ -259,8 +259,8 @@ fn ahead_behind_matches_git_for_every_tracking_state() {
             upstreams.get(branch),
             Some(&UpstreamInfo {
                 name: upstream.to_owned(),
-                ahead,
-                behind,
+                ahead: Some(ahead),
+                behind: Some(behind),
                 gone: false,
             }),
             "{branch} vs {upstream}"
@@ -283,8 +283,8 @@ fn ahead_behind_matches_git_for_every_tracking_state() {
             from_graph.get(branch),
             Some(&UpstreamInfo {
                 name: upstream.to_owned(),
-                ahead,
-                behind,
+                ahead: Some(ahead),
+                behind: Some(behind),
                 gone: false,
             }),
             "{branch} with a commit-graph"
@@ -331,8 +331,8 @@ fn upstream_configured_after_opening_is_seen() {
         repo.upstreams().expect("upstreams").get("topic"),
         Some(&UpstreamInfo {
             name: "origin/main".to_owned(),
-            ahead: 1,
-            behind: 0,
+            ahead: Some(1),
+            behind: Some(0),
             gone: false,
         })
     );
@@ -358,8 +358,8 @@ fn a_local_branch_can_be_the_upstream() {
         upstreams.get("topic"),
         Some(&UpstreamInfo {
             name: "base2".to_owned(),
-            ahead: 1,
-            behind: 0,
+            ahead: Some(1),
+            behind: Some(0),
             gone: false,
         })
     );
@@ -374,8 +374,8 @@ fn a_pruned_remote_branch_marks_the_upstream_gone() {
         upstreams.get("gone"),
         Some(&UpstreamInfo {
             name: "origin/gone".to_owned(),
-            ahead: 0,
-            behind: 0,
+            ahead: None,
+            behind: None,
             gone: true,
         })
     );
@@ -396,8 +396,8 @@ fn a_branch_can_track_a_differently_named_remote_branch() {
         upstreams.get("feature"),
         Some(&UpstreamInfo {
             name: "origin/other".to_owned(),
-            ahead: 0,
-            behind: 1,
+            ahead: Some(0),
+            behind: Some(1),
             gone: false,
         })
     );
@@ -514,12 +514,14 @@ fn progress_variants_build_the_same_commands() {
     };
 
     let _ = git.fetch(Some("origin"), true);
+    let _ = git.fetch_unshallow();
     let _ = git.pull(Some(true));
     let _ = git.push(Some("origin"), Some("main"), false, true);
     let plain = args(&git);
 
     git.clear_log();
     let _ = git.fetch_with_progress(Some("origin"), true, |_, _| {});
+    let _ = git.fetch_unshallow_with_progress(|_, _| {});
     let _ = git.pull_with_progress(Some(true), |_, _| {});
     let _ = git.push_with_progress(Some("origin"), Some("main"), false, true, |_, _| {});
     let streaming = args(&git);
@@ -611,8 +613,8 @@ fn upstreams_stay_fast_with_fifty_branches() {
             upstreams.get(branch),
             Some(&UpstreamInfo {
                 name: format!("origin/{branch}"),
-                ahead: *ahead,
-                behind: *behind,
+                ahead: Some(*ahead),
+                behind: Some(*behind),
                 gone: false,
             }),
             "{branch}"

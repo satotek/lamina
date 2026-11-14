@@ -549,7 +549,7 @@ impl RepoView {
                       label: &'static str,
                       tooltip: String,
                       enabled: bool,
-                      badge: Option<u32>,
+                      badge: Option<String>,
                       command: Command| {
             let entity = entity.clone();
             let tooltip = if compact {
@@ -612,18 +612,16 @@ impl RepoView {
                 .child(content)
         };
 
-        let behind = targets
-            .upstream
-            .as_ref()
-            .filter(|upstream| !upstream.gone)
-            .map(|upstream| upstream.behind)
-            .filter(|behind| *behind > 0);
-        let ahead = targets
-            .upstream
-            .as_ref()
-            .filter(|upstream| !upstream.gone)
-            .map(|upstream| upstream.ahead)
-            .filter(|ahead| *ahead > 0);
+        let tracked = targets.upstream.as_ref().filter(|upstream| !upstream.gone);
+        // An unknown count gets a "?" badge: omitting it would read as level,
+        // which is exactly what the shallow history cannot promise.
+        let badge = |count: Option<u32>| match count {
+            Some(count) if count > 0 => Some(count.to_string()),
+            None => Some("?".to_owned()),
+            Some(_) => None,
+        };
+        let behind = tracked.and_then(|upstream| badge(upstream.behind));
+        let ahead = tracked.and_then(|upstream| badge(upstream.ahead));
 
         let fetch = button(
             "remote-fetch",
@@ -719,6 +717,23 @@ impl RepoView {
             },
             Kind::Fetch,
             "Fetched all remotes".to_owned(),
+            None,
+            cx,
+        );
+    }
+
+    /// Fetches the history below a shallow clone's boundary.
+    ///
+    /// The commit details offer this when the selected commit is the boundary;
+    /// it runs through the same progress bar and outcome notification as Fetch.
+    pub(crate) fn fetch_full_history(&mut self, cx: &mut Context<Self>) {
+        if self.remote_blocked().is_some() {
+            return;
+        }
+        self.start_remote(
+            Operation::FetchUnshallow,
+            Kind::Fetch,
+            "Fetched the full history".to_owned(),
             None,
             cx,
         );
@@ -946,11 +961,14 @@ fn pull_tooltip(targets: &Targets, blocked: Option<&'static str>) -> String {
         Some(_) => "Pull the current branch (its upstream is gone)".to_owned(),
         None => "Pull the current branch".to_owned(),
     };
-    if let Some(upstream) = &targets.upstream
-        && !upstream.gone
-        && upstream.behind > 0
-    {
-        tip.push_str(&format!(" · {} behind", commits(upstream.behind)));
+    if let Some(upstream) = targets.upstream.as_ref().filter(|upstream| !upstream.gone) {
+        match upstream.behind {
+            Some(behind) if behind > 0 => {
+                tip.push_str(&format!(" · {} behind", commits(behind)));
+            }
+            None => tip.push_str(" · counts unavailable: history is shallow"),
+            Some(_) => {}
+        }
     }
     tip.push_str(&format!(" · {}", shortcut('L')));
     tip
@@ -967,11 +985,14 @@ fn push_tooltip(targets: &Targets, blocked: Option<&'static str>) -> String {
                 Some(remote) => format!("Push {branch} to {remote}"),
                 None => format!("Push {branch} to its upstream"),
             };
-            if let Some(upstream) = &targets.upstream
-                && !upstream.gone
-                && upstream.ahead > 0
-            {
-                tip.push_str(&format!(" · {} ahead", commits(upstream.ahead)));
+            if let Some(upstream) = targets.upstream.as_ref().filter(|upstream| !upstream.gone) {
+                match upstream.ahead {
+                    Some(ahead) if ahead > 0 => {
+                        tip.push_str(&format!(" · {} ahead", commits(ahead)));
+                    }
+                    None => tip.push_str(" · counts unavailable: history is shallow"),
+                    Some(_) => {}
+                }
             }
             tip.push_str(&format!(" · {}", shortcut('P')));
             tip
@@ -1037,9 +1058,18 @@ mod tests {
     fn upstream(name: &str, ahead: u32, behind: u32, gone: bool) -> UpstreamInfo {
         UpstreamInfo {
             name: name.to_owned(),
-            ahead,
-            behind,
+            ahead: Some(ahead),
+            behind: Some(behind),
             gone,
+        }
+    }
+
+    fn unknown_upstream(name: &str) -> UpstreamInfo {
+        UpstreamInfo {
+            name: name.to_owned(),
+            ahead: None,
+            behind: None,
+            gone: false,
         }
     }
 
@@ -1226,6 +1256,22 @@ mod tests {
             matches!(push_plan(&gone), Ok(PushPlan::Publish { .. })),
             "a gone upstream is republished"
         );
+    }
+
+    #[test]
+    fn unknown_counts_do_not_read_as_up_to_date() {
+        let targets = Targets::read(&snapshot(
+            Some(branch_head("feat/x")),
+            &[("feat/x", unknown_upstream("origin/feat/x"))],
+        ));
+        let pull_tip = pull_tooltip(&targets, None);
+        let push_tip = push_tooltip(&targets, None);
+        for tip in [&pull_tip, &push_tip] {
+            assert!(
+                tip.contains("counts unavailable: history is shallow"),
+                "an unknown count must say so: {tip}"
+            );
+        }
     }
 
     #[test]

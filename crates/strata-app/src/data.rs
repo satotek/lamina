@@ -41,6 +41,9 @@ pub struct RowData<'a> {
     /// Seconds since the Unix epoch.
     pub time: i64,
     pub badges: Vec<Badge<'a>>,
+    /// The commit is a shallow clone's boundary, so its missing parents mean
+    /// "history was not fetched" rather than "history starts here".
+    pub shallow_boundary: bool,
 }
 
 /// A ref badge drawn before the summary.
@@ -93,6 +96,7 @@ impl Source {
                     email: Cow::Owned(fake_email(author)),
                     time: commit.time,
                     badges: fake_badges(index),
+                    shallow_boundary: false,
                 })
             }
             Source::Repo(snapshot) => {
@@ -115,6 +119,7 @@ impl Source {
                         snapshot.head.as_ref(),
                         commit.id,
                     ),
+                    shallow_boundary: commit.shallow_boundary,
                 })
             }
         }
@@ -425,6 +430,7 @@ mod tests {
             author_email: "test@example.invalid".into(),
             author_time: index as i64,
             committer_time: index as i64,
+            shallow_boundary: false,
         }
     }
 

@@ -177,6 +177,30 @@ impl RepoView {
                     .child("synthetic diff"),
             );
         } else if self.session.is_some() {
+            if commit.is_some_and(|commit| commit.shallow_boundary) {
+                let entity = self.entity();
+                block = block.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(11.0))
+                                .text_color(design.muted)
+                                .child("Shallow clone: earlier history was not fetched"),
+                        )
+                        .child(
+                            crate::ui::button("fetch-full-history", "Fetch full history")
+                                .size(crate::ui::ButtonSize::Small)
+                                .on_click(move |_, _window, cx| {
+                                    entity.update(cx, |this, cx| this.fetch_full_history(cx));
+                                }),
+                        ),
+                );
+            }
             let entity = self.entity();
             block = block.child(
                 div().flex().items_center().gap_2().child(

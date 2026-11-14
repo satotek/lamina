@@ -351,6 +351,20 @@ impl Git {
         self.run_unit(&args, None)
     }
 
+    /// `git fetch --unshallow`: fill in the history below a shallow clone's
+    /// boundary. Only meaningful for a shallow clone, which is the only place
+    /// the UI offers it.
+    pub fn fetch_unshallow(&self) -> Result<()> {
+        self.run_unit(
+            &[
+                "fetch".to_owned(),
+                "--unshallow".to_owned(),
+                "--progress".to_owned(),
+            ],
+            None,
+        )
+    }
+
     /// Pull the current branch's upstream. `None` keeps the user's configured
     /// `pull.rebase`; `Some` forces rebase or merge for this call.
     ///

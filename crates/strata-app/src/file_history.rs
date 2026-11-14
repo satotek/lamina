@@ -914,6 +914,7 @@ mod tests {
                 author_email: "test@example.com".to_owned(),
                 author_time: i64::from(n),
                 committer_time: i64::from(n),
+                shallow_boundary: false,
             },
             path: "file.txt".to_owned(),
         }

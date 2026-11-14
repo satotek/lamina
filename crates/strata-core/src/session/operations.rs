@@ -184,6 +184,7 @@ fn changes_refs(operation: &Operation) -> bool {
             | Operation::SetRemoteUrl { .. }
             | Operation::RemoveRemote { .. }
             | Operation::Fetch { .. }
+            | Operation::FetchUnshallow
             | Operation::Pull { .. }
             | Operation::Push { .. }
             | Operation::StashPush { .. }
@@ -276,6 +277,13 @@ fn execute(shared: &Arc<Shared>, id: OperationId, operation: &Operation) -> Resu
             let result = git.fetch_with_progress(remote.as_deref(), *prune, |text, percent| {
                 progress.line(text, percent)
             });
+            progress.finish();
+            result
+        }
+        Operation::FetchUnshallow => {
+            let mut progress = ProgressReporter::new(shared, id);
+            let result =
+                git.fetch_unshallow_with_progress(|text, percent| progress.line(text, percent));
             progress.finish();
             result
         }

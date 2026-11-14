@@ -61,6 +61,7 @@ impl RepoView {
             .as_ref()
             .and_then(crate::branches::upstream_label)
             .unwrap_or_default();
+        let track_note = upstream.as_ref().and_then(crate::branches::upstream_note);
         let back_button = self.parent_name.as_deref().map(|parent| {
             let tooltip = format!("Back to {parent} ({})", back_key_label());
             crate::ui::content_button("back-to-parent")
@@ -113,7 +114,7 @@ impl RepoView {
             .child(icon(IconName::ChevronDown, 12.0, design.muted));
 
         let branch_chip = fit.branch.then(|| {
-            let chip = crate::ui::content_button("branch-chip")
+            let mut chip = crate::ui::content_button("branch-chip")
                 .ghost()
                 .cursor_pointer()
                 .h(px(28.0))
@@ -141,6 +142,9 @@ impl RepoView {
                         })
                         .child(icon(IconName::ChevronDown, 12.0, design.muted)),
                 );
+            if let Some(note) = track_note {
+                chip = chip.tooltip(note.to_owned());
+            }
             // Without a session there is nothing to switch to, so the chip
             // stays the plain label it was.
             if self.session.is_some() {

@@ -30,6 +30,19 @@ impl Git {
         self.stream(&args, on_line)
     }
 
+    /// [`Git::fetch_unshallow`] with stderr delivered line by line.
+    pub fn fetch_unshallow_with_progress(
+        &self,
+        on_line: impl FnMut(&str, Option<u8>),
+    ) -> Result<()> {
+        let args = [
+            "fetch".to_owned(),
+            "--unshallow".to_owned(),
+            "--progress".to_owned(),
+        ];
+        self.stream(&args, on_line)
+    }
+
     /// [`Git::pull`] with stderr delivered line by line.
     pub fn pull_with_progress(
         &self,

@@ -14,7 +14,7 @@ use super::Repo;
 use super::log::Shallow;
 use super::renames;
 use super::stat::{file_stat, tree_changes};
-use super::upstream::{count_exclusive, count_exclusive_shallow};
+use super::upstream::{count_exclusive, count_exclusive_shallow, exclusive_counts_shallow};
 use crate::{ChangeKind, Error, FileStat, Oid, Result};
 
 /// Which trees [`Repo::comparison`] diffs.
@@ -123,8 +123,13 @@ impl Repo {
             )
         } else {
             // Below the boundary there is no trustworthy merge base, so the
-            // walk compares the two histories up to it instead.
-            count_exclusive_shallow(&repo, &shallow, b, a)?
+            // walk compares the two histories up to it instead. A comparison
+            // has no unknown state, so an untrustworthy count still shows the
+            // fetched range rather than zero.
+            match count_exclusive_shallow(&repo, &shallow, b, a)? {
+                Some(counts) => counts,
+                None => exclusive_counts_shallow(&repo, &shallow, b, a)?,
+            }
         };
 
         Ok(Comparison {

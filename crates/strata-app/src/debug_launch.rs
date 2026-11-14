@@ -905,6 +905,7 @@ mod tests {
                     author_email: "a@example.com".into(),
                     author_time: 10,
                     committer_time: 10,
+                    shallow_boundary: false,
                 },
                 CommitInfo {
                     id: oid2,
@@ -914,6 +915,7 @@ mod tests {
                     author_email: "a@example.com".into(),
                     author_time: 5,
                     committer_time: 5,
+                    shallow_boundary: false,
                 },
             ],
             rows,

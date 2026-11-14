@@ -583,6 +583,7 @@ pub(crate) fn commit_info(
         author_email,
         author_time,
         committer_time,
+        shallow_boundary: shallow.is_boundary(id),
     })
 }
 
@@ -620,6 +621,10 @@ mod tests {
             "the boundary is a root: it must not point at a missing commit"
         );
         assert!(
+            boundary.shallow_boundary,
+            "the merge at the end of the fetched depth is the boundary"
+        );
+        assert!(
             repo.parents(boundary.id).expect("parents").is_empty(),
             "the boundary has no parents to diff against"
         );
@@ -628,6 +633,15 @@ mod tests {
                 .iter()
                 .any(|commit| commit.parents.is_empty()),
             "only the boundary is a root"
+        );
+        assert_eq!(
+            walked
+                .iter()
+                .filter(|commit| commit.shallow_boundary)
+                .map(|commit| commit.id)
+                .collect::<Vec<_>>(),
+            [boundary.id],
+            "exactly the boundary commit is flagged"
         );
     }
 
@@ -643,6 +657,10 @@ mod tests {
         assert_eq!(walked.len(), 1);
         assert_eq!(walked[0].id, clone.head());
         assert!(walked[0].parents.is_empty());
+        assert!(
+            walked[0].shallow_boundary,
+            "a depth-one clone's only commit is its boundary"
+        );
     }
 
     #[test]

@@ -14,6 +14,10 @@ pub struct CommitInfo {
     /// Seconds since the Unix epoch.
     pub author_time: i64,
     pub committer_time: i64,
+    /// This commit is a shallow clone's boundary: its parents are outside the
+    /// fetched history, so a missing parent edge means "not fetched" rather
+    /// than "root commit".
+    pub shallow_boundary: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -252,9 +256,14 @@ pub struct UpstreamInfo {
     /// Short name of the upstream, e.g. `origin/main`.
     pub name: String,
     /// Commits on the local branch that the upstream lacks.
-    pub ahead: u32,
-    /// Commits on the upstream that the local branch lacks.
-    pub behind: u32,
+    ///
+    /// `None` when the count cannot be computed reliably, for example when the
+    /// merge base is outside a shallow clone's fetched history. A missing
+    /// upstream ref also leaves this unknown.
+    pub ahead: Option<u32>,
+    /// Commits on the upstream that the local branch lacks, with the same
+    /// uncertainty as [`ahead`](Self::ahead).
+    pub behind: Option<u32>,
     /// The configured upstream ref no longer exists (e.g. deleted on the remote and pruned).
     pub gone: bool,
 }

@@ -24,6 +24,7 @@ use gpui::{
 use gpui_component::Sizable as _;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::popover::Popover;
+use gpui_component::tooltip::Tooltip;
 use strata_core::UpstreamInfo;
 use strata_core::session::Operation;
 
@@ -31,7 +32,7 @@ use crate::data::{SidebarData, Source};
 use crate::repo_view::RepoView;
 use crate::style::{self, Design};
 use crate::ui;
-use crate::ui::{BadgeTone, RowState, list_row, status_badge};
+use crate::ui::{BadgeTone, RowState, RowTipExt as _, list_row, status_badge};
 
 /// Key context of the popover's card. The text field sits inside it, with the
 /// field's own `Input` context, so the card's keys only run while it is up.
@@ -80,8 +81,10 @@ pub(crate) struct LocalBranch {
     pub(crate) name: String,
     /// The branch HEAD is on. It is marked and selecting it is a no-op.
     pub(crate) current: bool,
-    /// `↑2 ↓1`, `gone`, or nothing when level with the upstream.
+    /// `↑2 ↓1`, `?`, `gone`, or nothing when level with the upstream.
     pub(crate) upstream: Option<String>,
+    /// Why the label is `?`, for its tooltip.
+    pub(crate) upstream_note: Option<&'static str>,
 }
 
 /// A remote-tracking branch with no local branch of the same name.
@@ -113,12 +116,14 @@ pub(crate) fn choices(
     let mut local: Vec<LocalBranch> = data
         .local
         .iter()
-        .map(|name| LocalBranch {
-            name: name.clone(),
-            current: head == Some(name.as_str()),
-            upstream: upstreams
-                .get(name)
-                .and_then(crate::branches::upstream_label),
+        .map(|name| {
+            let upstream = upstreams.get(name);
+            LocalBranch {
+                name: name.clone(),
+                current: head == Some(name.as_str()),
+                upstream: upstream.and_then(crate::branches::upstream_label),
+                upstream_note: upstream.and_then(crate::branches::upstream_note),
+            }
         })
         .collect();
     local.sort_by(|a, b| a.name.cmp(&b.name));
@@ -672,13 +677,16 @@ fn local_row(
     );
 
     if let Some(upstream) = &branch.upstream {
-        row = row.child(
-            div()
-                .flex_none()
-                .text_size(px(design.tiny()))
-                .text_color(design.muted)
-                .child(upstream.clone()),
-        );
+        let mut label = div()
+            .id(("branch-switcher-upstream", index))
+            .flex_none()
+            .text_size(px(design.tiny()))
+            .text_color(design.muted)
+            .child(upstream.clone());
+        if let Some(note) = branch.upstream_note {
+            label = label.row_tooltip(move |window, cx| Tooltip::new(note).build(window, cx));
+        }
+        row = row.child(label);
     }
     if branch.current {
         row = row.child(status_badge("current", BadgeTone::Accent, design));
@@ -768,8 +776,8 @@ mod tests {
     fn upstream(name: &str, ahead: u32, behind: u32) -> UpstreamInfo {
         UpstreamInfo {
             name: name.to_owned(),
-            ahead,
-            behind,
+            ahead: Some(ahead),
+            behind: Some(behind),
             gone: false,
         }
     }
@@ -800,11 +808,13 @@ mod tests {
                     name: "feature".to_owned(),
                     current: true,
                     upstream: None,
+                    upstream_note: None,
                 },
                 LocalBranch {
                     name: "main".to_owned(),
                     current: false,
                     upstream: Some("↑2 ↓1".to_owned()),
+                    upstream_note: None,
                 },
             ]
         );
@@ -842,11 +852,13 @@ mod tests {
                     name: "main".to_owned(),
                     current: true,
                     upstream: None,
+                    upstream_note: None,
                 },
                 LocalBranch {
                     name: "topic".to_owned(),
                     current: false,
                     upstream: None,
+                    upstream_note: None,
                 },
             ],
             remote: vec![RemoteBranch {
@@ -881,11 +893,13 @@ mod tests {
                     name: "fix/login".to_owned(),
                     current: false,
                     upstream: None,
+                    upstream_note: None,
                 },
                 LocalBranch {
                     name: "main".to_owned(),
                     current: true,
                     upstream: None,
+                    upstream_note: None,
                 },
             ],
             remote: vec![
@@ -938,11 +952,13 @@ mod tests {
                     name: "alpha".to_owned(),
                     current: false,
                     upstream: None,
+                    upstream_note: None,
                 },
                 LocalBranch {
                     name: "main".to_owned(),
                     current: true,
                     upstream: None,
+                    upstream_note: None,
                 },
             ],
             remote: Vec::new(),
@@ -1015,11 +1031,13 @@ mod tests {
                     name: "main".to_owned(),
                     current: true,
                     upstream: None,
+                    upstream_note: None,
                 },
                 LocalBranch {
                     name: "topic".to_owned(),
                     current: false,
                     upstream: Some("↑2".to_owned()),
+                    upstream_note: None,
                 },
             ],
             remote: vec![one_remote()],

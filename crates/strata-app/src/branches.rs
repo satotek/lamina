@@ -272,8 +272,10 @@ enum SidebarItem {
         name: String,
         /// Position in the section's natural order, for the element id.
         index: usize,
-        /// `↑2 ↓1`, `gone`, or nothing when level with the upstream.
+        /// `↑2 ↓1`, `?`, `gone`, or nothing when level with the upstream.
         upstream: Option<String>,
+        /// Why the label is `?`, for the label's tooltip.
+        upstream_note: Option<&'static str>,
     },
     RemoteBranch {
         name: String,
@@ -905,10 +907,12 @@ impl Branches {
                         continue;
                     }
                     for (index, name) in natural_sorted(&local).into_iter().enumerate() {
+                        let upstream = upstreams.get(name);
                         items.push(SidebarItem::LocalBranch {
                             name: name.to_owned(),
                             index,
-                            upstream: upstreams.get(name).and_then(upstream_label),
+                            upstream: upstream.and_then(upstream_label),
+                            upstream_note: upstream.and_then(upstream_note),
                         });
                     }
                 }
@@ -1494,11 +1498,13 @@ fn item_element(
             name,
             index,
             upstream,
+            upstream_note,
         } => local_row(
             name,
             *index,
             head == Some(name.as_str()),
             upstream.as_deref(),
+            *upstream_note,
             reveal.is_ref(RefKind::LocalBranch, name),
             enabled,
             busy,
@@ -1857,6 +1863,7 @@ fn local_row(
     index: usize,
     active: bool,
     upstream: Option<&str>,
+    upstream_note: Option<&'static str>,
     revealed: bool,
     enabled: bool,
     busy: bool,
@@ -1872,13 +1879,16 @@ fn local_row(
     )
     .cursor_pointer();
     if let Some(label) = upstream {
-        row = row.child(
-            div()
-                .flex_none()
-                .text_size(px(colors.design.tiny()))
-                .text_color(colors.muted_foreground)
-                .child(label.to_owned()),
-        );
+        let mut label = div()
+            .id(("local-branch-upstream", index))
+            .flex_none()
+            .text_size(px(colors.design.tiny()))
+            .text_color(colors.muted_foreground)
+            .child(label.to_owned());
+        if let Some(note) = upstream_note {
+            label = label.row_tooltip(move |window, cx| Tooltip::new(note).build(window, cx));
+        }
+        row = row.child(label);
     }
 
     if !enabled {
@@ -3850,22 +3860,35 @@ pub(crate) fn validate_remote_url(url: &str) -> Result<&str, &'static str> {
     Ok(url)
 }
 
-/// The sidebar label for a branch's upstream: `↑2 ↓1`, `↑3`, `↓1`, `gone`, or/// nothing when the branch is level with its upstream.
+/// The sidebar label for a branch's upstream: `↑2 ↓1`, `↑3`, `↓1`, `?`,
+/// `gone`, or nothing when the branch is level with its upstream.
 pub(crate) fn upstream_label(upstream: &UpstreamInfo) -> Option<String> {
     if upstream.gone {
         return Some("gone".to_owned());
     }
+    let (Some(ahead), Some(behind)) = (upstream.ahead, upstream.behind) else {
+        return Some("?".to_owned());
+    };
     let mut label = String::new();
-    if upstream.ahead > 0 {
-        label.push_str(&format!("↑{}", upstream.ahead));
+    if ahead > 0 {
+        label.push_str(&format!("↑{ahead}"));
     }
-    if upstream.behind > 0 {
+    if behind > 0 {
         if !label.is_empty() {
             label.push(' ');
         }
-        label.push_str(&format!("↓{}", upstream.behind));
+        label.push_str(&format!("↓{behind}"));
     }
     (!label.is_empty()).then_some(label)
+}
+
+/// Tooltip text explaining a `?` upstream label.
+pub(crate) const UPSTREAM_UNKNOWN_TOOLTIP: &str = "Counts unavailable: history is shallow";
+
+/// Why an upstream label is `?`, when it is.
+pub(crate) fn upstream_note(upstream: &UpstreamInfo) -> Option<&'static str> {
+    (!upstream.gone && (upstream.ahead.is_none() || upstream.behind.is_none()))
+        .then_some(UPSTREAM_UNKNOWN_TOOLTIP)
 }
 
 /// `origin/feature/login` -> `feature/login`. The remote name is the first path
@@ -3956,9 +3979,18 @@ mod tests {
     fn upstream(name: &str, ahead: u32, behind: u32, gone: bool) -> UpstreamInfo {
         UpstreamInfo {
             name: name.to_owned(),
-            ahead,
-            behind,
+            ahead: Some(ahead),
+            behind: Some(behind),
             gone,
+        }
+    }
+
+    fn unknown_upstream(name: &str) -> UpstreamInfo {
+        UpstreamInfo {
+            name: name.to_owned(),
+            ahead: None,
+            behind: None,
+            gone: false,
         }
     }
 
@@ -3985,6 +4017,26 @@ mod tests {
             upstream_label(&upstream("origin/gone", 0, 0, true)).as_deref(),
             Some("gone"),
             "a deleted upstream is more important than the counts"
+        );
+    }
+
+    #[test]
+    fn unknown_counts_render_a_question_mark_with_a_reason() {
+        let unknown = unknown_upstream("origin/main");
+        assert_eq!(upstream_label(&unknown).as_deref(), Some("?"));
+        assert_eq!(
+            upstream_note(&unknown),
+            Some("Counts unavailable: history is shallow")
+        );
+        assert_eq!(
+            upstream_note(&upstream("origin/main", 0, 0, false)),
+            None,
+            "a known count needs no explanation"
+        );
+        assert_eq!(
+            upstream_note(&upstream("origin/gone", 0, 0, true)),
+            None,
+            "a gone upstream says so instead of showing counts"
         );
     }
 
@@ -4593,11 +4645,13 @@ mod tests {
                     name: "main".into(),
                     index: 0,
                     upstream: Some("↑2 ↓1".into()),
+                    upstream_note: None,
                 },
                 SidebarItem::LocalBranch {
                     name: "topic".into(),
                     index: 1,
                     upstream: None,
+                    upstream_note: None,
                 },
                 SidebarItem::SectionHeader {
                     section: Section::Remote,

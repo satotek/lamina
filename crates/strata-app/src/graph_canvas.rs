@@ -100,7 +100,16 @@ pub fn row_lanes(row: GraphRow<'_>) -> u16 {
 /// A row's graph, sized to that row's own indent.
 ///
 /// `fade` is the colour behind the row, used by the gradient at a clipped edge.
-pub fn graph_column(row: GraphRow<'_>, colors: [Hsla; LANES], fade: Hsla) -> impl IntoElement {
+/// `boundary` draws a dashed stub under the node for a shallow clone's last
+/// fetched commit, where the line to the parents was never fetched; `muted`
+/// paints that stub.
+pub fn graph_column(
+    row: GraphRow<'_>,
+    boundary: bool,
+    colors: [Hsla; LANES],
+    fade: Hsla,
+    muted: Hsla,
+) -> impl IntoElement {
     let lanes = row_lanes(row);
     let width = px(indent(lanes));
     // The paint closure must own its data; only visible rows are copied.
@@ -110,6 +119,8 @@ pub fn graph_column(row: GraphRow<'_>, colors: [Hsla; LANES], fade: Hsla) -> imp
         lanes,
         passes: row.passes.to_vec(),
         edges: row.edges.to_vec(),
+        boundary,
+        muted,
     };
 
     div().w(width).h_full().flex_none().child(
@@ -127,6 +138,8 @@ struct OwnedRow {
     lanes: u16,
     passes: Vec<PassThrough>,
     edges: Vec<Segment>,
+    boundary: bool,
+    muted: Hsla,
 }
 
 /// A point in lane space: `x` is a distance from the row's left edge, `y` a
@@ -331,7 +344,7 @@ fn paint_row(
 
     // The node goes on top of the fade: only the lines are clipped, and a
     // commit dot on the edge lane must stay crisp.
-    if row.node_lane < visible {
+    let node_x = if row.node_lane < visible {
         paint_node(
             bounds,
             middle,
@@ -339,6 +352,7 @@ fn paint_row(
             colors[slot(row.node_color)],
             window,
         );
+        Some(lane_offset(row.node_lane))
     } else if let Some(x) = node_marker(row.node_lane, row.lanes) {
         let color = colors[slot(row.node_color)];
         let diameter = MARKER_RADIUS * 2.0;
@@ -355,6 +369,37 @@ fn paint_row(
             )
             .corner_radii(px(MARKER_RADIUS)),
         );
+        Some(x)
+    } else {
+        None
+    };
+
+    if row.boundary
+        && let Some(x) = node_x
+    {
+        paint_boundary_stub(bounds, middle, x, row.muted, window);
+    }
+}
+
+/// Three short dashes below a shallow boundary's node: the parents exist on
+/// the remote, but their side of the line was not fetched.
+fn paint_boundary_stub(
+    bounds: Bounds<Pixels>,
+    middle: Pixels,
+    lane: f32,
+    color: Hsla,
+    window: &mut Window,
+) {
+    const DASH: f32 = 1.5;
+    const GAP: f32 = 2.0;
+    let x = bounds.origin.x + px(lane) - px(DASH / 2.0);
+    let mut y = middle + px(NODE_RADIUS + 1.0);
+    for _ in 0..3 {
+        window.paint_quad(fill(
+            Bounds::new(point(x, y), size(px(DASH), px(DASH))),
+            color,
+        ));
+        y += px(DASH + GAP);
     }
 }
 
@@ -411,6 +456,8 @@ mod tests {
             lanes,
             passes: passes.to_vec(),
             edges: edges.to_vec(),
+            boundary: false,
+            muted: Hsla::default(),
         }
     }
 

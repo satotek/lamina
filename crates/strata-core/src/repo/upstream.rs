@@ -132,8 +132,8 @@ impl Repo {
                     short,
                     UpstreamInfo {
                         name: tracking_name,
-                        ahead: 0,
-                        behind: 0,
+                        ahead: None,
+                        behind: None,
                         gone: true,
                     },
                 );
@@ -143,37 +143,29 @@ impl Repo {
                 continue;
             };
 
-            let (ahead, behind) = if local.id == upstream.id {
-                (0, 0)
+            let counts = if local.id == upstream.id {
+                Some((0, 0))
+            } else if shallow.is_empty() {
+                // Outside a shallow clone the merge base is always available,
+                // and gix reports it as an error when it is not.
+                let bases: Vec<Oid> = repo
+                    .merge_bases_many_with_graph(local.id, &[upstream.id], &mut graph)
+                    .map_err(Error::gix)?
+                    .into_iter()
+                    .map(|id| id.detach())
+                    .collect();
+                Some((
+                    count_exclusive(&mut graph, local.id, &bases)?,
+                    count_exclusive(&mut graph, upstream.id, &bases)?,
+                ))
             } else {
-                // A shallow clone has no trustworthy merge base: it may be
-                // below the boundary, and gix then reports a wrong one instead
-                // of failing. Walk each side with the other hidden, which is
-                // what `git rev-list --left-right --count a...b` does and what
-                // gix's revision walk already bounds at the shallow boundary.
-                let counts = if shallow.is_empty() {
-                    (|| {
-                        let bases: Vec<Oid> = repo
-                            .merge_bases_many_with_graph(local.id, &[upstream.id], &mut graph)
-                            .map_err(Error::gix)?
-                            .into_iter()
-                            .map(|id| id.detach())
-                            .collect();
-                        Ok::<_, Error>((
-                            count_exclusive(&mut graph, local.id, &bases)?,
-                            count_exclusive(&mut graph, upstream.id, &bases)?,
-                        ))
-                    })()
-                } else {
-                    count_exclusive_shallow(&repo, &shallow, local.id, upstream.id)
-                };
-                match counts {
-                    Ok(counts) => counts,
-                    // A count that still cannot be computed must not fail the
-                    // whole snapshot; the branch keeps its upstream with 0/0.
-                    Err(_) if !shallow.is_empty() => (0, 0),
-                    Err(error) => return Err(error),
-                }
+                // A count that still cannot be computed must not fail the
+                // whole snapshot; the branch keeps its upstream, unknown.
+                count_exclusive_shallow(&repo, &shallow, local.id, upstream.id).unwrap_or_default()
+            };
+            let (ahead, behind) = match counts {
+                Some((ahead, behind)) => (Some(ahead), Some(behind)),
+                None => (None, None),
             };
 
             upstreams.insert(
@@ -193,9 +185,16 @@ impl Repo {
 
 /// How many commits each side has that the other does not, in a shallow clone.
 ///
-/// A merge base below the boundary cannot be found, so both histories are read
-/// up to their boundary commits (their roots) and compared. That is what
-/// `git rev-list --left-right --count a...b` counts there.
+/// Both histories are read up to their boundary commits (their roots) and
+/// compared, which is what `git rev-list --left-right --count a...b` counts
+/// there. `None` means the counts are not trustworthy: the histories meet only
+/// at truncated boundary roots, so the real merge base may be below them and
+/// the commits that would make up the difference were never fetched.
+///
+/// A shared commit that is not itself a boundary proves the merge base is
+/// inside the fetched history: every merge base is at or after a common
+/// ancestor, so the walk above it is complete. One history containing the
+/// other is also exact, however far below the boundary they meet.
 ///
 /// `local` and `upstream` are just the two sides; the pair is returned in that
 /// order. A comparison of two arbitrary commits uses it the same way.
@@ -204,15 +203,47 @@ pub(crate) fn count_exclusive_shallow(
     shallow: &Shallow,
     local: Oid,
     upstream: Oid,
-) -> Result<(u32, u32)> {
+) -> Result<Option<(u32, u32)>> {
     let local_history = reachable(repo, shallow, local)?;
     let upstream_history = reachable(repo, shallow, upstream)?;
-    let ahead = local_history.difference(&upstream_history).count();
-    let behind = upstream_history.difference(&local_history).count();
-    Ok((
+    let contained =
+        local_history.is_subset(&upstream_history) || upstream_history.is_subset(&local_history);
+    let merge_base_inside = || {
+        local_history
+            .intersection(&upstream_history)
+            .any(|id| !shallow.is_boundary(*id))
+    };
+    if !contained && !merge_base_inside() {
+        return Ok(None);
+    }
+    Ok(Some(count_histories(&local_history, &upstream_history)))
+}
+
+/// The counts a shallow comparison can compute from the fetched commits alone,
+/// whether or not they are trustworthy.
+///
+/// `Repo::comparison` has no unknown state to carry, so it uses this when
+/// [`count_exclusive_shallow`] reports the counts cannot be trusted; the UI
+/// says "?" for an upstream, where the count has somewhere to be unknown.
+pub(crate) fn exclusive_counts_shallow(
+    repo: &gix::Repository,
+    shallow: &Shallow,
+    local: Oid,
+    upstream: Oid,
+) -> Result<(u32, u32)> {
+    Ok(count_histories(
+        &reachable(repo, shallow, local)?,
+        &reachable(repo, shallow, upstream)?,
+    ))
+}
+
+fn count_histories(local: &HashSet<Oid>, upstream: &HashSet<Oid>) -> (u32, u32) {
+    let ahead = local.difference(upstream).count();
+    let behind = upstream.difference(local).count();
+    (
         u32::try_from(ahead).unwrap_or(u32::MAX),
         u32::try_from(behind).unwrap_or(u32::MAX),
-    ))
+    )
 }
 
 /// Every commit reachable from `tip`, stopping at a shallow boundary.
@@ -277,15 +308,25 @@ pub(crate) fn count_exclusive(
 mod tests {
     use crate::test_support::shallow_clone_fixture;
 
+    /// Parses `git rev-list --left-right --count a...b`.
+    fn git_counts(clone: &crate::test_support::TestRepo, range: &str) -> (u32, u32) {
+        let count = clone.git(&["rev-list", "--left-right", "--count", range]);
+        let mut fields = count
+            .split_whitespace()
+            .map(|field| field.parse::<u32>().expect("count"));
+        (
+            fields.next().expect("ahead"),
+            fields.next().expect("behind"),
+        )
+    }
+
     #[test]
-    fn an_ahead_behind_count_below_the_boundary_matches_git() {
+    fn counts_are_unknown_when_the_merge_base_is_below_the_boundary() {
         let (_source, clone) = shallow_clone_fixture(&["--depth", "3"]);
-        // The merge's two parents are inside the clone; their common ancestor
-        // is below the boundary, so the merge base cannot be found.
-        let first = clone.rev("HEAD^1^1");
-        let second = clone.rev("HEAD^1^2");
-        let first = first.to_string();
-        let second = second.to_string();
+        // The merge's two parents are inside the clone, and each is a boundary
+        // root; their common ancestor was never fetched.
+        let first = clone.rev("HEAD^1^1").to_string();
+        let second = clone.rev("HEAD^1^2").to_string();
         clone.git(&["branch", "mine", &first]);
         clone.git(&["branch", "other", &second]);
         clone.git(&["config", "branch.mine.remote", "."]);
@@ -296,21 +337,43 @@ mod tests {
             .upstreams()
             .expect("one uncomputable count must not fail the snapshot");
         let mine = upstreams.get("mine").expect("mine still has an upstream");
-        let count = clone.git(&["rev-list", "--left-right", "--count", "mine...other"]);
-        let mut fields = count
-            .split_whitespace()
-            .map(|field| field.parse::<u32>().expect("count"));
-        let expected = (
-            fields.next().expect("ahead"),
-            fields.next().expect("behind"),
-        );
         assert_eq!(
             (mine.ahead, mine.behind),
-            expected,
-            "each side counts up to the boundary, like git does"
+            (None, None),
+            "counts whose merge base is outside the clone are not reported"
         );
 
         let main = upstreams.get("main").expect("main tracks origin/main");
-        assert_eq!((main.ahead, main.behind), (0, 0));
+        assert_eq!(
+            (main.ahead, main.behind),
+            (Some(0), Some(0)),
+            "matching tips are known to be level"
+        );
+    }
+
+    #[test]
+    fn counts_inside_the_boundary_match_git() {
+        let (_source, clone) = shallow_clone_fixture(&["--depth", "5"]);
+        // `other` is the merge's first parent, which is inside the fetched
+        // depth: the merge base is available, so the counts are exact.
+        let local = clone.head().to_string();
+        let base = clone.rev("HEAD^1^1").to_string();
+        clone.git(&["branch", "mine", &local]);
+        clone.git(&["branch", "other", &base]);
+        clone.git(&["config", "branch.mine.remote", "."]);
+        clone.git(&["config", "branch.mine.merge", "refs/heads/other"]);
+
+        let upstreams = clone.open().upstreams().expect("upstreams");
+        let mine = upstreams.get("mine").expect("mine has an upstream");
+        let expected = git_counts(&clone, "mine...other");
+        assert_eq!(
+            (mine.ahead, mine.behind),
+            (Some(expected.0), Some(expected.1)),
+            "an available merge base gives the same counts as git"
+        );
+        assert!(
+            expected.0 > 0 && expected.1 == 0,
+            "the fixture should leave `mine` ahead of `other`: {expected:?}"
+        );
     }
 }

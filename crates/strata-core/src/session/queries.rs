@@ -497,6 +497,7 @@ mod tests {
                 author_email: "strata@example.com".to_string(),
                 author_time: index as i64,
                 committer_time: index as i64,
+                shallow_boundary: false,
             });
         }
         let mut list = CommitList::default();

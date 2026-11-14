@@ -305,7 +305,13 @@ fn commit_row(
         .w_full()
         .mx(px(0.0))
         .px_3()
-        .child(graph_canvas::graph_column(data.graph, design.lane, fade))
+        .child(graph_canvas::graph_column(
+            data.graph,
+            data.shallow_boundary,
+            design.lane,
+            fade,
+            design.muted,
+        ))
         .child(
             div()
                 .flex_1()
@@ -335,7 +341,16 @@ fn commit_row(
                             text.font_weight(FontWeight::SEMIBOLD)
                         })
                         .child(data.summary.to_string()),
-                ),
+                )
+                .when(data.shallow_boundary, |cell| {
+                    cell.child(
+                        div()
+                            .flex_none()
+                            .text_size(px(design.tiny()))
+                            .text_color(design.muted)
+                            .child("⋯ history not fetched"),
+                    )
+                }),
         )
         .child(
             div()
@@ -421,7 +436,16 @@ fn filtered_commit_row(
                         .truncate()
                         .text_color(design.text)
                         .child(data.summary.to_string()),
-                ),
+                )
+                .when(data.shallow_boundary, |cell| {
+                    cell.child(
+                        div()
+                            .flex_none()
+                            .text_size(px(design.tiny()))
+                            .text_color(design.muted)
+                            .child("⋯ history not fetched"),
+                    )
+                }),
         )
         .child(
             div()

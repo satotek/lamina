@@ -339,6 +339,9 @@ pub enum Operation {
         remote: Option<String>,
         prune: bool,
     },
+    /// `git fetch --unshallow`: fetch the history below a shallow clone's
+    /// boundary, turning the truncated roots into ordinary commits.
+    FetchUnshallow,
     Pull {
         rebase: Option<bool>,
     },
@@ -1376,6 +1379,7 @@ mod tests {
             author_email: "test@example.invalid".into(),
             author_time: index as i64,
             committer_time: index as i64,
+            shallow_boundary: false,
         }
     }
 
