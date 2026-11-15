@@ -119,6 +119,21 @@ impl MenuState {
         self.busy
     }
 
+    /// The reason every history-changing entry shares right now, shown once at
+    /// the top of the commit menu instead of after each disabled entry.
+    ///
+    /// A running operation is reported before a half-finished one: it is the
+    /// state that will change on its own.
+    pub(crate) fn shared_reason(&self) -> Option<String> {
+        if self.busy {
+            Some(t!("branch.reason.busy").to_string())
+        } else if self.pending {
+            Some(t!("reflog.finish_first").to_string())
+        } else {
+            None
+        }
+    }
+
     /// Tracked staged or worktree changes.
     pub(crate) fn dirty(&self) -> bool {
         self.dirty
@@ -159,6 +174,19 @@ impl MenuState {
             return Some(t!("history_ops.reason.is_head").to_string());
         }
         self.blocked(action)
+    }
+}
+
+/// A menu entry's label. A `reason` the menu already shows once at the top
+/// (`shared`) is not repeated after every entry.
+pub(crate) fn blocked_label(
+    base: impl Into<String>,
+    reason: Option<&str>,
+    shared: Option<&str>,
+) -> String {
+    match reason {
+        Some(reason) if Some(reason) != shared => menu_label(base, Some(reason)),
+        _ => base.into(),
     }
 }
 
@@ -659,6 +687,16 @@ pub(crate) enum BranchAction {
     ShowAll,
 }
 
+impl BranchAction {
+    /// Whether the action moves HEAD or rewrites history, which git refuses
+    /// while another merge, rebase or cherry-pick is unfinished.
+    ///
+    /// Rename and delete only write a ref, so they keep working mid-operation.
+    fn needs_idle_repository(self) -> bool {
+        matches!(self, Self::Checkout | Self::Merge | Self::Rebase)
+    }
+}
+
 /// Which branch entries make sense for `kind`.
 ///
 /// The checked-out branch cannot be checked out, merged into itself or
@@ -722,39 +760,59 @@ fn branch_section(
         return menu;
     }
     let current = state.branch_label();
-    let busy = state.busy();
     if let [branch] = branches.as_slice() {
-        return branch_actions_menu(menu.separator(), branch, &current, busy, entity, cx)
-            .separator();
+        return branch_actions_menu(
+            menu.separator(),
+            branch,
+            &current,
+            state.clone(),
+            entity,
+            cx,
+        )
+        .separator();
     }
     let mut menu = menu.separator();
     for branch in branches {
         let label = branch.name.clone();
         let current = current.clone();
+        let state = state.clone();
         let entity = entity.clone();
         menu = menu.submenu(label, window, cx, move |submenu, _, cx| {
-            branch_actions_menu(submenu, &branch, &current, busy, &entity, cx)
+            branch_actions_menu(submenu, &branch, &current, state.clone(), &entity, cx)
         });
     }
     menu.separator()
 }
 
 /// One branch's entries, in the order [`branch_actions`] lists them.
+///
+/// The menu shows an operation's reason once at its top, so entries blocked
+/// only by that reason stay short. Rename and delete keep working while an
+/// operation is unfinished; checkout, merge and rebase wait for it.
 fn branch_actions_menu(
     mut menu: PopupMenu,
     branch: &BranchAtCommit,
     current: &str,
-    busy: bool,
+    state: MenuState,
     entity: &Entity<RepoView>,
     cx: &App,
 ) -> PopupMenu {
-    let busy_reason = busy.then(|| t!("branch.reason.busy").to_string());
+    let busy = state.busy();
+    let shared = state.shared_reason();
+    let history_locked = busy || state.pending();
     let is_current = branch.kind == RefKind::LocalBranch && branch.name == current;
     let hidden = entity.read(cx).is_ref_hidden(branch.kind, &branch.name);
     let any_hidden = entity.read(cx).hidden_ref_count() > 0;
     for action in branch_actions(branch.kind, is_current, hidden, any_hidden) {
         let name = branch.name.clone();
         let kind = branch.kind;
+        // The shared reason is already written once at the top of the menu, so
+        // these entries stay plain; they are only ever blocked by it.
+        let locked = if action.needs_idle_repository() {
+            history_locked
+        } else {
+            busy
+        };
         let item = match action {
             BranchAction::Solo => solo_history_item(kind, &name, entity),
             BranchAction::Hide => hide_history_item(kind, &name, entity),
@@ -763,55 +821,50 @@ fn branch_actions_menu(
                 let Some((_, target)) = entity.read(cx).branch_rebase_target(kind, &name) else {
                     continue;
                 };
-                rebase_menu_item(target, current, Some(&name), entity.clone())
+                rebase_menu_item(
+                    target,
+                    current,
+                    Some(&name),
+                    shared.as_deref(),
+                    entity.clone(),
+                )
             }
             BranchAction::Checkout => {
                 let label = t!("history_ops.branch.checkout", branch = name).to_string();
-                PopupMenuItem::new(menu_label(label, busy_reason.as_ref()))
-                    .disabled(busy_reason.is_some())
-                    .on_click({
-                        let entity = entity.clone();
-                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                            entity.update(cx, |view, cx| {
-                                view.checkout_branch(kind, &name, window, cx)
-                            });
-                        }
-                    })
+                PopupMenuItem::new(label).disabled(locked).on_click({
+                    let entity = entity.clone();
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        entity.update(cx, |view, cx| view.checkout_branch(kind, &name, window, cx));
+                    }
+                })
             }
             BranchAction::Merge => {
                 let label =
                     t!("history_ops.branch.merge", branch = name, current = current).to_string();
-                PopupMenuItem::new(menu_label(label, busy_reason.as_ref()))
-                    .disabled(busy_reason.is_some())
-                    .on_click({
-                        let entity = entity.clone();
-                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                            entity.update(cx, |view, cx| view.merge_branch(&name, window, cx));
-                        }
-                    })
+                PopupMenuItem::new(label).disabled(locked).on_click({
+                    let entity = entity.clone();
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        entity.update(cx, |view, cx| view.merge_branch(&name, window, cx));
+                    }
+                })
             }
             BranchAction::Rename => {
                 let label = t!("history_ops.branch.rename", branch = name).to_string();
-                PopupMenuItem::new(menu_label(label, busy_reason.as_ref()))
-                    .disabled(busy_reason.is_some())
-                    .on_click({
-                        let entity = entity.clone();
-                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                            entity.update(cx, |view, cx| view.rename_branch(&name, window, cx));
-                        }
-                    })
+                PopupMenuItem::new(label).disabled(locked).on_click({
+                    let entity = entity.clone();
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        entity.update(cx, |view, cx| view.rename_branch(&name, window, cx));
+                    }
+                })
             }
             BranchAction::Delete => {
                 let label = t!("history_ops.branch.delete", branch = name).to_string();
-                PopupMenuItem::new(menu_label(label, busy_reason.as_ref()))
-                    .disabled(busy_reason.is_some())
-                    .on_click({
-                        let entity = entity.clone();
-                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                            entity
-                                .update(cx, |view, cx| view.delete_branch_here(&name, window, cx));
-                        }
-                    })
+                PopupMenuItem::new(label).disabled(locked).on_click({
+                    let entity = entity.clone();
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        entity.update(cx, |view, cx| view.delete_branch_here(&name, window, cx));
+                    }
+                })
             }
         };
         menu = menu.item(item);
@@ -888,10 +941,17 @@ pub(crate) fn commit_menu(
     window: &mut Window,
     cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
+    // A merge, rebase or cherry-pick disables several entries for the same
+    // reason. One note at the top keeps the long menu readable; the entries
+    // below stay short.
+    let shared = state.as_ref().and_then(MenuState::shared_reason);
+    if let Some(reason) = shared.as_ref() {
+        menu = menu.item(PopupMenuItem::label(reason.clone())).separator();
+    }
     // While several rows are selected, the single-commit entries have no one
     // row to act on, so the menu offers the multi-pick instead.
     if let Some(multi) = multi {
-        return multi_commit_menu(menu, &multi, entity);
+        return multi_commit_menu(menu, &multi, shared.as_deref(), entity);
     }
     // The branches pointing at this commit act on the branch, not the commit,
     // so they lead the menu: that is what a right-click on a tagged tip is
@@ -948,9 +1008,10 @@ pub(crate) fn commit_menu(
     let cherry = {
         let entity = entity.clone();
         let short = short.clone();
-        PopupMenuItem::new(menu_label(
+        PopupMenuItem::new(blocked_label(
             t!("history_ops.menu.cherry_pick_onto", onto = onto).to_string(),
-            cherry_blocked.as_ref(),
+            cherry_blocked.as_deref(),
+            shared.as_deref(),
         ))
         .disabled(cherry_blocked.is_some())
         .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
@@ -961,9 +1022,10 @@ pub(crate) fn commit_menu(
     let revert = {
         let entity = entity.clone();
         let short = short.clone();
-        PopupMenuItem::new(menu_label(
+        PopupMenuItem::new(blocked_label(
             t!("history_ops.menu.revert").to_string(),
-            revert_blocked.as_ref(),
+            revert_blocked.as_deref(),
+            shared.as_deref(),
         ))
         .disabled(revert_blocked.is_some())
         .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
@@ -976,7 +1038,13 @@ pub(crate) fn commit_menu(
 
     menu = menu.separator().item(cherry).item(revert);
     if let Some(target) = rebase {
-        menu = menu.item(rebase_menu_item(target, &onto, None, entity.clone()));
+        menu = menu.item(rebase_menu_item(
+            target,
+            &onto,
+            None,
+            shared.as_deref(),
+            entity.clone(),
+        ));
     }
     menu = menu.separator();
 
@@ -984,9 +1052,14 @@ pub(crate) fn commit_menu(
     menu = match reset_blocked {
         // `PopupMenu` cannot mark the submenu entry itself disabled, so a
         // blocked reset is a plain disabled entry that names the reason.
-        Some(reason) => {
-            menu.item(PopupMenuItem::new(menu_label(reset_label, Some(reason))).disabled(true))
-        }
+        Some(reason) => menu.item(
+            PopupMenuItem::new(blocked_label(
+                reset_label,
+                Some(reason.as_str()),
+                shared.as_deref(),
+            ))
+            .disabled(true),
+        ),
         None => {
             let entity = entity.clone();
             let short = short.clone();
@@ -1028,9 +1101,10 @@ pub(crate) fn commit_menu(
         let entity = entity.clone();
         let point = commit.to_string();
         let from = t!("history_ops.menu.from_commit", short = short).to_string();
-        PopupMenuItem::new(menu_label(
+        PopupMenuItem::new(blocked_label(
             t!("history_ops.menu.create_branch").to_string(),
-            branch_blocked.as_ref(),
+            branch_blocked.as_deref(),
+            shared.as_deref(),
         ))
         .disabled(branch_blocked.is_some())
         .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
@@ -1044,9 +1118,10 @@ pub(crate) fn commit_menu(
     let create_tag = {
         let entity = entity.clone();
         let short = short.clone();
-        PopupMenuItem::new(menu_label(
+        PopupMenuItem::new(blocked_label(
             t!("history_ops.menu.create_tag").to_string(),
-            tag_blocked.as_ref(),
+            tag_blocked.as_deref(),
+            shared.as_deref(),
         ))
         .disabled(tag_blocked.is_some())
         .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
@@ -1062,9 +1137,10 @@ pub(crate) fn commit_menu(
         let entity = entity.clone();
         let name = tag.clone();
         menu = menu.item(
-            PopupMenuItem::new(menu_label(
+            PopupMenuItem::new(blocked_label(
                 t!("history_ops.menu.delete_tag", tag = tag).to_string(),
-                delete_blocked.as_ref(),
+                delete_blocked.as_deref(),
+                shared.as_deref(),
             ))
             .disabled(delete_blocked.is_some())
             .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
@@ -1079,9 +1155,10 @@ pub(crate) fn commit_menu(
     // A menu only opens with a session, so the repository is there.
     let compare_blocked = super::compare::with_head_blocked(true, Some(commit), state.head);
     menu = menu.item(
-        PopupMenuItem::new(menu_label(
+        PopupMenuItem::new(blocked_label(
             t!("history_ops.menu.compare_head").to_string(),
-            compare_blocked.as_ref(),
+            compare_blocked.as_deref(),
+            shared.as_deref(),
         ))
         .disabled(compare_blocked.is_some())
         .on_click({
@@ -1095,9 +1172,10 @@ pub(crate) fn commit_menu(
     );
     let worktree_compare_blocked = super::compare::with_worktree_blocked(true, Some(commit));
     menu = menu.item(
-        PopupMenuItem::new(menu_label(
+        PopupMenuItem::new(blocked_label(
             t!("history_ops.menu.compare_worktree").to_string(),
-            worktree_compare_blocked.as_ref(),
+            worktree_compare_blocked.as_deref(),
+            shared.as_deref(),
         ))
         .disabled(worktree_compare_blocked.is_some())
         .on_click({
@@ -1114,9 +1192,10 @@ pub(crate) fn commit_menu(
     let worktree_short = short.clone();
     let create_worktree = {
         let entity = entity.clone();
-        PopupMenuItem::new(menu_label(
+        PopupMenuItem::new(blocked_label(
             t!("history_ops.menu.create_worktree").to_string(),
-            busy_reason.as_ref(),
+            busy_reason.as_deref(),
+            shared.as_deref(),
         ))
         .disabled(busy_reason.is_some())
         .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
@@ -1128,9 +1207,10 @@ pub(crate) fn commit_menu(
     let save_patch = {
         let entity = entity.clone();
         let short = short.clone();
-        PopupMenuItem::new(menu_label(
+        PopupMenuItem::new(blocked_label(
             t!("history_ops.menu.save_patch").to_string(),
-            busy_reason.as_ref(),
+            busy_reason.as_deref(),
+            shared.as_deref(),
         ))
         .disabled(busy_reason.is_some())
         .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
@@ -1144,7 +1224,15 @@ pub(crate) fn commit_menu(
 
     let edit = entity.read(cx).edit_context(commit);
     menu = menu.separator();
-    menu = edit_group(menu, commit, &summary, &state, edit.as_ref(), &entity);
+    menu = edit_group(
+        menu,
+        commit,
+        &summary,
+        &state,
+        edit.as_ref(),
+        shared.as_deref(),
+        &entity,
+    );
     menu
 }
 
@@ -1154,6 +1242,7 @@ pub(crate) fn commit_menu(
 fn multi_commit_menu(
     mut menu: PopupMenu,
     multi: &MultiPickContext,
+    shared: Option<&str>,
     entity: Entity<RepoView>,
 ) -> PopupMenu {
     let copy = multi.copy.clone();
@@ -1175,9 +1264,10 @@ fn multi_commit_menu(
         let (a, b) = (*a, *b);
         menu = menu
             .item(
-                PopupMenuItem::new(menu_label(
+                PopupMenuItem::new(blocked_label(
                     t!("history_ops.menu.compare_commits").to_string(),
-                    blocked.as_ref(),
+                    blocked.as_deref(),
+                    shared,
                 ))
                 .disabled(blocked.is_some())
                 .on_click({
@@ -1189,14 +1279,15 @@ fn multi_commit_menu(
             )
             .separator();
     }
-    let label = menu_label(
+    let label = blocked_label(
         t!(
             "history_ops.menu.cherry_pick_many",
             count = multi.count,
             onto = multi.branch
         )
         .to_string(),
-        multi.blocked.as_ref(),
+        multi.blocked.as_deref(),
+        shared,
     );
     let mut item = PopupMenuItem::new(label).disabled(multi.blocked.is_some());
     if multi.blocked.is_none() {
@@ -1210,13 +1301,14 @@ fn multi_commit_menu(
 }
 
 /// The t!("history_ops.menu.edit_commit").to_string() group. Every entry says why it is disabled, because a
-/// popup item has no tooltip.
+/// popup item has no tooltip; the menu-wide reason is not repeated.
 fn edit_group(
     mut menu: PopupMenu,
     commit: Oid,
     summary: &str,
     state: &MenuState,
     edit: Option<&EditContext>,
+    shared: Option<&str>,
     entity: &Entity<RepoView>,
 ) -> PopupMenu {
     menu = menu.item(PopupMenuItem::label(
@@ -1224,8 +1316,9 @@ fn edit_group(
     ));
     for action in EditAction::ALL {
         let blocked = edit_blocked(state, edit, action);
-        let mut item = PopupMenuItem::new(menu_label(action.label(), blocked.as_ref()))
-            .disabled(blocked.is_some());
+        let mut item =
+            PopupMenuItem::new(blocked_label(action.label(), blocked.as_deref(), shared))
+                .disabled(blocked.is_some());
         if blocked.is_none() {
             let entity = entity.clone();
             let summary = summary.to_owned();
@@ -1240,9 +1333,10 @@ fn edit_group(
     // The dialog edits `onto..HEAD` with `onto` at the commit's parent, which
     // is the range a reword of this commit replays, so it qualifies the same way.
     let blocked = edit_blocked(state, edit, EditAction::Reword);
-    let mut item = PopupMenuItem::new(menu_label(
+    let mut item = PopupMenuItem::new(blocked_label(
         t!("history_ops.menu.edit_history").to_string(),
-        blocked.as_ref(),
+        blocked.as_deref(),
+        shared,
     ))
     .disabled(blocked.is_some());
     if blocked.is_none() {
@@ -2308,6 +2402,57 @@ mod tests {
             ),
             "Revert commit (this is HEAD)"
         );
+    }
+
+    #[test]
+    fn the_menu_wide_reason_is_not_repeated_on_every_entry() {
+        let head = branch("main", oid(2));
+        let pending = MenuState::read(Some(&head), RepoState::Merging, false);
+        let shared = pending.shared_reason();
+        let finish = t!("reflog.finish_first").to_string();
+        assert_eq!(shared.as_deref(), Some(finish.as_str()));
+        assert_eq!(
+            blocked_label("Reset", Some(finish.as_str()), shared.as_deref()),
+            "Reset",
+            "the reason is already in the menu header"
+        );
+        assert_eq!(
+            blocked_label("Revert", Some("this is HEAD"), shared.as_deref()),
+            "Revert (this is HEAD)",
+            "a different reason still belongs to its entry"
+        );
+
+        let busy = MenuState::read(Some(&head), RepoState::Normal, true);
+        assert_eq!(
+            busy.shared_reason(),
+            Some(t!("branch.reason.busy").to_string())
+        );
+
+        let normal = MenuState::read(Some(&head), RepoState::Normal, false);
+        assert_eq!(normal.shared_reason(), None);
+    }
+
+    #[test]
+    fn only_actions_that_move_head_wait_for_an_unfinished_operation() {
+        for action in [
+            BranchAction::Checkout,
+            BranchAction::Merge,
+            BranchAction::Rebase,
+        ] {
+            assert!(action.needs_idle_repository(), "{action:?} moves HEAD");
+        }
+        for action in [
+            BranchAction::Rename,
+            BranchAction::Delete,
+            BranchAction::Solo,
+            BranchAction::Hide,
+            BranchAction::ShowAll,
+        ] {
+            assert!(
+                !action.needs_idle_repository(),
+                "{action:?} only edits refs"
+            );
+        }
     }
 
     #[test]

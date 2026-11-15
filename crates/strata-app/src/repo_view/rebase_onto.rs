@@ -17,10 +17,9 @@ use strata_core::session::Operation;
 use strata_core::{Oid, RefKind};
 
 use super::RepoView;
-use super::history_ops::{MenuState, PendingSelection, head_target};
+use super::history_ops::{MenuState, PendingSelection, blocked_label, head_target};
 use crate::data::short_oid;
 use crate::ui;
-use crate::ui::menu_label;
 
 /// What one rebase menu entry offers before the user confirms it.
 pub(crate) struct RebaseTarget {
@@ -73,10 +72,14 @@ pub(crate) fn pushed_warning(remotes: &[String]) -> Option<String> {
 }
 
 /// One menu entry for a rebase, disabled with its reason when it cannot run.
+///
+/// `shared` is the reason the menu already shows once at its top, if any; it is
+/// not repeated after the label.
 pub(crate) fn rebase_menu_item(
     target: RebaseTarget,
     branch: &str,
     entry_target: Option<&str>,
+    shared: Option<&str>,
     entity: Entity<RepoView>,
 ) -> PopupMenuItem {
     // "here" gets its own sentence: Japanese spaces a ref name off from the
@@ -89,7 +92,7 @@ pub(crate) fn rebase_menu_item(
         ),
         None => t!("history_ops.menu.rebase_here", branch = branch),
     };
-    let label = menu_label(text.to_string(), target.blocked.as_deref());
+    let label = blocked_label(text.to_string(), target.blocked.as_deref(), shared);
     let mut item = PopupMenuItem::new(label).disabled(target.blocked.is_some());
     if target.blocked.is_none() {
         let onto = target.onto;

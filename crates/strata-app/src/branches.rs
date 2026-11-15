@@ -2975,6 +2975,7 @@ fn local_row(
                         target,
                         &current,
                         Some(&branch),
+                        None,
                         entity_menu.clone(),
                     ))
                 })
@@ -3232,6 +3233,7 @@ fn remote_row(
                     target,
                     &current,
                     Some(&remote),
+                    None,
                     entity_menu.clone(),
                 ))
             })
