@@ -921,7 +921,10 @@ mod tests {
 
     #[test]
     fn missing_tokens_are_rejected_without_silent_defaults() {
-        let valid = BUNDLED_SOURCES[0].1;
+        // A Windows checkout may convert the bundled files to CRLF, and the
+        // needles below are written with plain newlines.
+        let normalized = BUNDLED_SOURCES[0].1.replace("\r\n", "\n");
+        let valid = normalized.as_str();
         for needle in [
             "on_accent = \"#ffffff\"\n",
             "bright_white = \"#3f4450\"\n",
