@@ -74,103 +74,6 @@ jobs:
       - run: rustup show
       - run: cargo fmt --all --check
 
-  clippy:
-    name: clippy (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    env:
-      # Clippy emits metadata instead of codegen, so its `target/` shares almost
-      # nothing with the one the test job produces; each lane owns its cache.
-      CI_LANE: clippy
-    steps:
-      - uses: actions/checkout@v7.0.1
-
-      - name: Install Linux dependencies
-        if: runner.os == 'Linux'
-        run: |
-          # LINUX_PACKAGES is one package per line; xargs turns it into
-          # arguments, which avoids relying on unquoted word splitting.
-          sudo apt-get update
-          printf '%s\n' "$LINUX_PACKAGES" | xargs sudo apt-get install -y
-
-      - name: Install Rust toolchain
-        run: rustup show
-
-      # `cargo clippy` still compiles and runs build scripts, and
-      # crates/strata-term/build.rs builds libghostty-vt with Zig.
-      # This setup action runs on Node 24; the more common one still targets
-      # the deprecated Node 20 runtime.
-      - name: Install Zig
-        uses: vercel-labs/setup-zig@v1.0.2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-
-      - name: Compute cache key
-        id: cache-key
-        shell: bash
-        run: |
-          echo "rustc=$(rustc -vV | sed -n 's/^release: //p')" >> "$GITHUB_OUTPUT"
-          echo "sources=${{ hashFiles('Cargo.toml', '**/Cargo.toml', 'Cargo.lock', 'crates/strata-term/build.rs', 'rust-toolchain.toml', '.github/workflows/ci.yml', 'scripts/ci-sources') }}" >> "$GITHUB_OUTPUT"
-
-      # The whole `target/` is cached, not just resolved dependencies: without
-      # the workspace artifacts every run recompiles strata-app from scratch,
-      # which is most of the job. build.rs keeps its libghostty-vt archive and
-      # tarballs under target/ghostty-vt-cache, so they ride along.
-      #
-      # The key only covers files that change the dependency graph or the
-      # compiler. A source-only push therefore hits the primary key and saves
-      # nothing, which keeps one cache per OS instead of one per commit.
-      - name: Restore cargo cache
-        id: cargo-cache
-        uses: actions/cache/restore@v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: strata-${{ runner.os }}-${{ runner.arch }}-${{ env.CI_LANE }}-${{ env.CI_CACHE_VERSION }}-${{ steps.cache-key.outputs.rustc }}-${{ env.ZIG_VERSION }}-${{ steps.cache-key.outputs.sources }}
-          restore-keys: |
-            strata-${{ runner.os }}-${{ runner.arch }}-${{ env.CI_LANE }}-${{ env.CI_CACHE_VERSION }}-${{ steps.cache-key.outputs.rustc }}-
-
-      # Checkout stamps every file with the current time, which makes cargo
-      # consider every cached artifact stale. Rewind the mtimes of unchanged
-      # files so only the crates a push touched are rebuilt.
-      - name: Restore source mtimes
-        shell: bash
-        # Windows images expose the interpreter as `python` only.
-        run: |
-          python=$(command -v python3 || command -v python)
-          "$python" scripts/ci-sources restore
-
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-
-      - name: Record source mtimes
-        if: always()
-        shell: bash
-        # Windows images expose the interpreter as `python` only.
-        run: |
-          python=$(command -v python3 || command -v python)
-          "$python" scripts/ci-sources record
-
-      # Refuse to write caches from pull requests and other branches: they
-      # would evict the ones main keeps warm, and the next main run rebuilds.
-      - name: Save cargo cache
-        if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6.1.0
-        with:
-          key: strata-${{ runner.os }}-${{ runner.arch }}-${{ env.CI_LANE }}-${{ env.CI_CACHE_VERSION }}-${{ steps.cache-key.outputs.rustc }}-${{ env.ZIG_VERSION }}-${{ steps.cache-key.outputs.sources }}
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -181,6 +84,12 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     env:
       CI_LANE: test
+      # Clippy runs locally before every commit. What only CI can catch is a
+      # platform-specific compiler warning (an item used solely under a cfg for
+      # another OS), and denying warnings in this build catches that without
+      # compiling the workspace a second time. Cargo caps lints for
+      # dependencies, so only workspace code is affected.
+      RUSTFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -286,11 +195,12 @@ jobs:
             target
 
   no-terminal:
-    name: clippy (no terminal feature)
+    name: check (no terminal feature)
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
-      CI_LANE: clippy-no-terminal
+      CI_LANE: check-no-terminal
+      RUSTFLAGS: -D warnings
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -311,8 +221,8 @@ jobs:
           echo "rustc=$(rustc -vV | sed -n 's/^release: //p')" >> "$GITHUB_OUTPUT"
           echo "sources=${{ hashFiles('Cargo.toml', '**/Cargo.toml', 'Cargo.lock', 'crates/strata-term/build.rs', 'rust-toolchain.toml', '.github/workflows/ci.yml', 'scripts/ci-sources') }}" >> "$GITHUB_OUTPUT"
 
-      # The feature set differs from the workspace clippy lane, so the artifacts
-      # do too; sharing a cache would make both lanes rebuild each other's work.
+      # The feature set differs from the test lane, so the artifacts do too;
+      # sharing a cache would make both lanes rebuild each other's work.
       - name: Restore cargo cache
         id: cargo-cache
         uses: actions/cache/restore@v6.1.0
@@ -336,8 +246,8 @@ jobs:
       # No Zig step here on purpose: the point of this job is that the app
       # still builds when the terminal feature, and with it libghostty-vt, is
       # turned off.
-      - name: Clippy without the terminal feature
-        run: cargo clippy -p strata-app --no-default-features --all-targets -- -D warnings
+      - name: Check without the terminal feature
+        run: cargo check -p strata-app --no-default-features --all-targets
 
       - name: Record source mtimes
         if: always()

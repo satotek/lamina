@@ -22,10 +22,11 @@ build step needs an image tool. How to regenerate them is the last section.
 
 ## CI and releases
 
-`.github/workflows/ci.yml` runs rustfmt, then clippy and the test suite on
-Ubuntu, macOS and Windows, plus one job that runs clippy with
-`--no-default-features` to prove the app still builds without the terminal
-feature and therefore without Zig.
+`.github/workflows/ci.yml` runs rustfmt, then builds and runs the test suite
+with warnings denied on Ubuntu, macOS and Windows, plus one job that checks
+the app with `--no-default-features` to prove it still builds without the
+terminal feature and therefore without Zig. Clippy runs locally before each
+commit rather than in CI, so the workspace is compiled once per platform.
 
 Zig 0.17.1 is required by `crates/strata-term/build.rs`, which downloads
 libghostty-vt 1.0.1 and its dependency tarballs (verifying their SHA-256 sums)
