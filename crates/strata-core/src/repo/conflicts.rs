@@ -7,7 +7,7 @@ use gix::index::entry::Stage;
 
 use super::Repo;
 use crate::merge::ConflictStyle;
-use crate::{ConflictEntry, ConflictKind, ConflictSides, Error, RepoState, Result};
+use crate::{ConflictEntry, ConflictKind, ConflictSides, Error, HeadInfo, RepoState, Result};
 
 /// Index stage bits, for combining the stages present on one path.
 const BASE: u8 = 1 << 0;
@@ -129,6 +129,61 @@ impl Repo {
         }
         Ok(sides)
     }
+
+    /// Content of `path` for the left side of an index-to-worktree diff.
+    ///
+    /// A normal path answers its stage-0 entry. An unmerged path has no stage 0,
+    /// so the "ours" stage stands in: that is the version the conflict markers
+    /// surround, which keeps the diff to the conflicted regions instead of
+    /// showing the whole file as added. A conflict without ours (deleted by us)
+    /// falls back to HEAD, the last version we had.
+    pub fn file_in_index_or_ours(&self, path: &str) -> Result<Option<Vec<u8>>> {
+        let repo = self.local();
+        let index = repo.index_or_empty().map_err(Error::gix)?;
+        let path_bstr = BStr::new(path);
+
+        if let Some(entry) = index.entry_by_path_and_stage(path_bstr, Stage::Unconflicted) {
+            return blob_content(&repo, entry);
+        }
+
+        let mut unmerged = false;
+        for stage in [Stage::Base, Stage::Ours, Stage::Theirs] {
+            let Some(entry) = index.entry_by_path_and_stage(path_bstr, stage) else {
+                continue;
+            };
+            unmerged = true;
+            if stage == Stage::Ours {
+                return blob_content(&repo, entry);
+            }
+        }
+        if !unmerged {
+            return Ok(None);
+        }
+
+        let head = match self.head()? {
+            HeadInfo::Branch {
+                target: Some(commit),
+                ..
+            } => Some(commit),
+            HeadInfo::Detached { target } => Some(target),
+            _ => None,
+        };
+        match head {
+            Some(commit) => self.file_at_commit(commit, path),
+            None => Ok(None),
+        }
+    }
+}
+
+/// A blob's bytes, unless the entry is a submodule or a sparse directory, whose
+/// "content" is not text to show.
+fn blob_content(repo: &gix::Repository, entry: &gix::index::Entry) -> Result<Option<Vec<u8>>> {
+    if entry.mode.is_submodule() || entry.mode.is_sparse() {
+        return Ok(None);
+    }
+    Ok(Some(
+        repo.find_blob(entry.id).map_err(Error::gix)?.data.clone(),
+    ))
 }
 
 fn stage_bit(stage: Stage) -> u8 {

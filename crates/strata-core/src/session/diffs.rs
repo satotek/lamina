@@ -214,9 +214,10 @@ fn read_sides(repo: &Repo, request: &DiffRequest) -> Result<Sides> {
             Ok((old, new))
         }
         DiffRequest::Staged { path } => Ok((head_file(repo, path)?, repo.file_in_index(path)?)),
-        DiffRequest::Unstaged { path } => {
-            Ok((repo.file_in_index(path)?, worktree_as_git(repo, path)?))
-        }
+        DiffRequest::Unstaged { path } => Ok((
+            repo.file_in_index_or_ours(path)?,
+            worktree_as_git(repo, path)?,
+        )),
         DiffRequest::Compare {
             base,
             head,
@@ -247,5 +248,80 @@ fn path_of(request: &DiffRequest) -> &str {
         | DiffRequest::Unstaged { path }
         | DiffRequest::Compare { path, .. }
         | DiffRequest::CompareWorktree { path, .. } => path,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diff::LineKind;
+    use crate::test_support::TestRepo;
+
+    /// A conflicted file has no stage-0 index entry, so the index side of the
+    /// unstaged diff used to be empty and the whole file read as added.
+    #[test]
+    fn an_unmerged_path_diffs_the_worktree_against_ours() {
+        let repo = TestRepo::new();
+        repo.write("config.toml", "a = 1\nb = base\nc = 3\n");
+        repo.commit("base");
+
+        repo.git(&["checkout", "-q", "-b", "feature"]);
+        repo.write("config.toml", "a = 1\nb = feature\nc = 3\n");
+        repo.commit("feature");
+
+        repo.git(&["checkout", "-q", "main"]);
+        repo.write("config.toml", "a = 1\nb = main\nc = 3\n");
+        repo.commit("main");
+
+        let output = repo.git_output(&["merge", "feature"]);
+        assert!(
+            !output.status.success(),
+            "the merge has to stop on the conflict"
+        );
+
+        let opened = repo.open();
+        assert!(
+            opened
+                .file_in_index("config.toml")
+                .expect("read the index")
+                .is_none(),
+            "an unmerged path has no stage-0 entry"
+        );
+
+        let (old, new) = read_sides(
+            &opened,
+            &DiffRequest::Unstaged {
+                path: "config.toml".into(),
+            },
+        )
+        .expect("read both sides");
+        let old = old.expect("ours is the left side");
+        let new = new.expect("the worktree file is the right side");
+
+        let diff = diff_text(&old, &new, &DiffOptions::default());
+        assert_eq!(diff.hunks.len(), 1, "only the conflicted region changed");
+        let hunk = &diff.hunks[0];
+        assert_eq!(hunk.old_start, 1, "the file must not read as newly added");
+        assert_eq!(hunk.old_len, 3);
+        assert_eq!(hunk.new_len, 7);
+        assert_eq!(
+            hunk.lines
+                .iter()
+                .filter(|line| line.kind == LineKind::Removed)
+                .count(),
+            0,
+            "ours is already in the worktree file"
+        );
+        let added: Vec<&str> = hunk
+            .lines
+            .iter()
+            .filter(|line| line.kind == LineKind::Added)
+            .map(|line| line.content.as_str())
+            .collect();
+        assert_eq!(
+            added,
+            ["<<<<<<< HEAD", "=======", "b = feature", ">>>>>>> feature"],
+            "the conflict markers and the other side are the only additions"
+        );
     }
 }
