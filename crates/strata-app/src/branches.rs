@@ -21,10 +21,10 @@ use std::rc::Rc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Div, ElementId, Entity,
-    FocusHandle, Focusable as _, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement,
-    Pixels, ScrollStrategy, Size, Stateful, StatefulInteractiveElement as _, Styled,
-    UniformListScrollHandle, Window, actions, anchored, deferred, div, hsla, point, px,
-    uniform_list,
+    FocusHandle, Focusable as _, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton,
+    ParentElement, Pixels, Point, Render, ScrollStrategy, Size, Stateful,
+    StatefulInteractiveElement as _, Styled, UniformListScrollHandle, Window, actions, anchored,
+    deferred, div, hsla, point, px, uniform_list,
 };
 use gpui_component::{
     Icon, Sizable as _,
@@ -507,6 +507,39 @@ impl<T> RefNode<T> {
     }
 }
 
+/// A branch row being dragged onto another branch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DraggedBranch {
+    pub(crate) kind: RefKind,
+    pub(crate) name: String,
+}
+
+/// What a branch drop menu can run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DropAction {
+    Merge,
+    Rebase,
+    FastForward,
+}
+
+/// One entry of the menu a branch dropped on another opens.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DropEntry {
+    pub(crate) action: DropAction,
+    pub(crate) label: String,
+    /// Why the entry is disabled, drawn after the label.
+    pub(crate) blocked: Option<String>,
+}
+
+/// The menu a branch dropped on another branch opens, at the drop point.
+struct DropMenu {
+    position: Point<Pixels>,
+    source: DraggedBranch,
+    target: String,
+    entries: Vec<DropEntry>,
+}
+
+/// Everything the branch UI owns between frames.
 #[derive(Default)]
 pub(crate) struct Branches {
     collapsed: [bool; Section::ALL.len()],
@@ -534,6 +567,8 @@ pub(crate) struct Branches {
     /// The folder the left and right arrows act on: the one clicked or hovered
     /// last, since the list has no row cursor of its own.
     folder_focus: RefCell<Option<String>>,
+    /// The menu a branch dropped on another branch opened.
+    drop_menu: Option<DropMenu>,
     dialog: Option<Dialog>,
     /// Operations this module started, keyed by the id the session returned.
     /// The label is what the status bar prefixes a failure with.
@@ -926,6 +961,9 @@ impl Branches {
                 });
         }
         column = column.child(list);
+        if let Some(menu) = self.drop_menu_overlay(colors, entity) {
+            column = column.child(menu);
+        }
         if let Some(dialog) = self.dialog_overlay(colors, entity) {
             column = column.child(dialog);
         }
@@ -1373,6 +1411,92 @@ impl Branches {
             index += 1;
             within = Pixels::ZERO;
         }
+    }
+
+    /// The menu a branch dropped on another branch opened, at the drop point.
+    ///
+    /// It is a small card rather than a context menu because it is not the
+    /// consequence of a right-click; the rows are the same list rows the rest
+    /// of the sidebar uses. Clicking anywhere else dismisses it.
+    fn drop_menu_overlay(&self, colors: &Colors, entity: &Entity<RepoView>) -> Option<AnyElement> {
+        let menu = self.drop_menu.as_ref()?;
+        let design = &colors.design;
+        let dismiss = {
+            let entity = entity.clone();
+            move |_: &gpui::MouseDownEvent, window: &mut Window, cx: &mut App| {
+                entity.update(cx, |view, cx| view.dismiss_drop_menu(window, cx));
+            }
+        };
+        let backdrop = deferred(
+            anchored().position(point(px(0.0), px(0.0))).child(
+                div()
+                    .w(self.viewport.width)
+                    .h(self.viewport.height)
+                    .occlude()
+                    .on_mouse_down(MouseButton::Left, dismiss),
+            ),
+        )
+        .with_priority(1);
+
+        let mut card = div()
+            .id("branch-drop-menu")
+            .flex()
+            .flex_col()
+            .gap(px(1.0))
+            .min_w(px(220.0))
+            .max_w(px(340.0))
+            .p(px(4.0))
+            .rounded(px(8.0))
+            .bg(design.panel)
+            .border_1()
+            .border_color(design.border)
+            .text_size(px(design.small()))
+            .text_color(design.text)
+            .occlude();
+        if let Some(focus) = &self.dialog_focus {
+            let close_entity = entity.clone();
+            card = card
+                .track_focus(focus)
+                .on_key_down(move |event, window, cx| {
+                    if event.keystroke.key == "escape" {
+                        close_entity.update(cx, |view, cx| view.dismiss_drop_menu(window, cx));
+                        cx.stop_propagation();
+                    }
+                });
+        }
+        for (index, entry) in menu.entries.iter().enumerate() {
+            let label = crate::ui::menu_label(entry.label.clone(), entry.blocked.as_ref());
+            let mut row = crate::ui::list_row(
+                ("branch-drop-entry", index),
+                crate::ui::RowState::NORMAL,
+                design,
+            )
+            .h(px(26.0))
+            .w_full()
+            .min_w_0()
+            .overflow_hidden()
+            .mx(px(0.0))
+            .px_2()
+            .rounded(px(5.0))
+            .text_size(px(design.small()))
+            .text_color(design.text)
+            .child(div().min_w_0().truncate().child(label));
+            match entry.blocked {
+                Some(_) => row = row.opacity(0.6),
+                None => {
+                    let action = entry.action;
+                    let click_entity = entity.clone();
+                    row = row.cursor_pointer().on_click(move |_, window, cx| {
+                        click_entity
+                            .update(cx, |view, cx| view.run_drop_action(action, window, cx));
+                    });
+                }
+            }
+            card = card.child(row);
+        }
+
+        let card = deferred(anchored().position(menu.position).child(card)).with_priority(2);
+        Some(div().child(backdrop).child(card).into_any_element())
     }
 
     fn dialog_overlay(&self, colors: &Colors, entity: &Entity<RepoView>) -> Option<AnyElement> {
@@ -2263,6 +2387,136 @@ fn folder_row(
     .into_any_element()
 }
 
+/// The chip that follows the pointer while a branch row is dragged.
+struct BranchDragChip {
+    branch: DraggedBranch,
+    design: Design,
+}
+
+impl Render for BranchDragChip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("branch-drag-chip")
+            .p(px(2.0))
+            .rounded_full()
+            .bg(self.design.panel)
+            .border_1()
+            .border_color(self.design.border)
+            .child(crate::ui::ref_badge(
+                self.branch.kind,
+                false,
+                self.branch.name.clone(),
+                &self.design,
+            ))
+    }
+}
+
+/// Makes a local branch row the drop target of a branch drag. A branch onto
+/// itself is not a target, so dropping it there does nothing and it gets no
+/// highlight.
+fn branch_drop_target(
+    row: Stateful<Div>,
+    target: &str,
+    colors: &Colors,
+    entity: Entity<RepoView>,
+) -> Stateful<Div> {
+    branch_drop_target_with(row, target, colors.design.accent_soft, entity)
+}
+
+/// The shape a drop target takes outside a sidebar row, such as a branch chip
+/// in the history list, where only the target's name and the accent are needed.
+pub(crate) fn branch_drop_target_with(
+    row: Stateful<Div>,
+    target: &str,
+    accent: Hsla,
+    entity: Entity<RepoView>,
+) -> Stateful<Div> {
+    let can_target = target.to_owned();
+    let highlight = target.to_owned();
+    let drop_target = target.to_owned();
+    row.can_drop(move |dragged, _, _| {
+        dragged
+            .downcast_ref::<DraggedBranch>()
+            .is_some_and(|dragged| {
+                !(dragged.kind == RefKind::LocalBranch && dragged.name == can_target)
+            })
+    })
+    .drag_over::<DraggedBranch>(move |style, dragged, _, _| {
+        if dragged.kind == RefKind::LocalBranch && dragged.name == highlight {
+            style
+        } else {
+            style.bg(accent)
+        }
+    })
+    .on_drop(move |dragged: &DraggedBranch, window, cx| {
+        let target = drop_target.clone();
+        let source = dragged.clone();
+        let position = window.mouse_position();
+        entity.update(cx, |view, cx| {
+            view.open_branch_drop_menu(source, target, position, window, cx);
+        });
+    })
+}
+
+/// The menu entries a branch dropped on `target` offers, or `None` when the
+/// drop means nothing: a local branch onto itself.
+///
+/// `fast_forward` is whether the remote source can fast-forward the target;
+/// `None` means the tips could not be read.
+pub(crate) fn drop_entries(
+    source: &DraggedBranch,
+    target: &str,
+    head: Option<&str>,
+    busy: bool,
+    fast_forward: Option<bool>,
+) -> Option<Vec<DropEntry>> {
+    if source.kind == RefKind::LocalBranch && source.name == target {
+        return None;
+    }
+    let checked_out = head == Some(target);
+    let checkout_first = || t!("branch.drop.checkout_first", branch = target).to_string();
+    let blocked = || {
+        if busy {
+            Some(t!("branch.reason.busy").to_string())
+        } else if !checked_out {
+            Some(checkout_first())
+        } else {
+            None
+        }
+    };
+    let mut entries = vec![
+        DropEntry {
+            action: DropAction::Merge,
+            label: t!("branch.drop.merge", source = source.name, target = target).to_string(),
+            blocked: blocked(),
+        },
+        DropEntry {
+            action: DropAction::Rebase,
+            label: t!("branch.drop.rebase", target = target, source = source.name).to_string(),
+            blocked: blocked(),
+        },
+    ];
+    if source.kind == RefKind::RemoteBranch && local_name_for_remote(&source.name) == Some(target) {
+        let blocked = if busy {
+            Some(t!("branch.reason.busy").to_string())
+        } else if !checked_out {
+            Some(checkout_first())
+        } else {
+            match fast_forward {
+                Some(true) => None,
+                Some(false) => Some(t!("branch.drop.not_fast_forward").to_string()),
+                None => Some(t!("branch.drop.cannot_read").to_string()),
+            }
+        };
+        entries.push(DropEntry {
+            action: DropAction::FastForward,
+            label: t!("branch.drop.fast_forward", target = target).to_string(),
+            blocked,
+        });
+    }
+    Some(entries)
+}
+
 /// The section-level actions of the two lists git stores outside the refs.
 fn section_menu(
     menu: PopupMenu,
@@ -2565,17 +2819,33 @@ fn local_row(
     // One click shows the branch in the graph; a second one checks it out.
     let click_entity = entity.clone();
     let branch = name.to_owned();
-    row = row.on_click(move |event, window, cx| {
-        let branch = branch.clone();
-        click_entity.update(cx, |view, cx| {
-            if event.click_count() < 2 {
-                view.reveal_ref(RefKind::LocalBranch, &branch, window, cx);
-            } else if !busy && !active {
-                let label = t!("branch.op.checkout", branch = branch).to_string();
-                view.run_operation(Operation::Checkout { branch }, label, window, cx);
-            }
-        });
-    });
+    let drag_design = colors.design.clone();
+    row = row
+        .on_click(move |event, window, cx| {
+            let branch = branch.clone();
+            click_entity.update(cx, |view, cx| {
+                if event.click_count() < 2 {
+                    view.reveal_ref(RefKind::LocalBranch, &branch, window, cx);
+                } else if !busy && !active {
+                    let label = t!("branch.op.checkout", branch = branch).to_string();
+                    view.run_operation(Operation::Checkout { branch }, label, window, cx);
+                }
+            });
+        })
+        .on_drag(
+            DraggedBranch {
+                kind: RefKind::LocalBranch,
+                name: name.to_owned(),
+            },
+            move |dragged, _, _, cx| {
+                let design = drag_design.clone();
+                cx.new(|_| BranchDragChip {
+                    branch: dragged.clone(),
+                    design,
+                })
+            },
+        );
+    row = branch_drop_target(row, name, colors, entity.clone());
 
     let entity_menu = entity.clone();
     let branch = name.to_owned();
@@ -2864,6 +3134,21 @@ fn remote_row(
     if !enabled {
         return row_element.into_any_element();
     }
+
+    let drag_design = colors.design.clone();
+    let row_element = row_element.on_drag(
+        DraggedBranch {
+            kind: RefKind::RemoteBranch,
+            name: name.to_owned(),
+        },
+        move |dragged, _, _, cx| {
+            let design = drag_design.clone();
+            cx.new(|_| BranchDragChip {
+                branch: dragged.clone(),
+                design,
+            })
+        },
+    );
 
     // Double-clicking `origin/foo` switches to `foo` when it exists and
     // creates it from the remote ref otherwise.
@@ -3798,6 +4083,137 @@ impl RepoView {
         self.branches.set_scope(None);
         self.branches.clear_revealed();
         cx.notify();
+    }
+
+    /// Opens the merge/rebase menu for a branch dropped on `target`.
+    ///
+    /// The entries are decided up front, so a drop whose operations cannot run
+    /// (the target is not checked out) still opens the menu and says why rather
+    /// than doing nothing.
+    pub(crate) fn open_branch_drop_menu(
+        &mut self,
+        source: DraggedBranch,
+        target: String,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.branches.dialog_open() {
+            return;
+        }
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let head = match session.snapshot().head.as_ref() {
+            Some(HeadInfo::Branch { short_name, .. }) => Some(short_name.clone()),
+            _ => None,
+        };
+        let fast_forward = (source.kind == RefKind::RemoteBranch)
+            .then(|| self.fast_forward_ready(&source.name, &target))
+            .flatten();
+        let busy = self.is_busy();
+        let Some(entries) = drop_entries(&source, &target, head.as_deref(), busy, fast_forward)
+        else {
+            return;
+        };
+        self.branches.drop_menu = Some(DropMenu {
+            position,
+            source,
+            target,
+            entries,
+        });
+        if let Some(focus) = self.branches.dialog_focus.clone() {
+            window.focus(&focus, cx);
+        }
+        cx.notify();
+    }
+
+    /// Runs one entry of the open branch drop menu.
+    ///
+    /// Merging and fast-forwarding are the existing merge operation, and the
+    /// rebase goes through the same confirmation the branch menu opens; nothing
+    /// here runs git itself.
+    pub(crate) fn run_drop_action(
+        &mut self,
+        action: DropAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(menu) = self.branches.drop_menu.take() else {
+            return;
+        };
+        self.focus_root(window, cx);
+        cx.notify();
+        if self.is_busy() {
+            return;
+        }
+        match action {
+            DropAction::Merge | DropAction::FastForward => {
+                let label = if action == DropAction::FastForward {
+                    t!(
+                        "branch.op.fast_forward",
+                        target = menu.target,
+                        source = menu.source.name
+                    )
+                    .to_string()
+                } else {
+                    t!("branch.op.merge", branch = menu.source.name).to_string()
+                };
+                self.run_operation(
+                    Operation::Merge {
+                        branch: menu.source.name,
+                        no_ff: false,
+                    },
+                    label,
+                    window,
+                    cx,
+                );
+            }
+            DropAction::Rebase => {
+                let tip = self.session.as_ref().and_then(|session| {
+                    session
+                        .snapshot()
+                        .refs
+                        .iter()
+                        .find(|info| {
+                            info.kind == menu.source.kind && info.short_name == menu.source.name
+                        })
+                        .map(|info| info.target)
+                });
+                match tip {
+                    Some(tip) => self.confirm_rebase(tip, menu.source.name, window, cx),
+                    None => {
+                        self.status_error = Some(t!("branch.drop.cannot_read").to_string());
+                        cx.notify();
+                    }
+                }
+            }
+        }
+    }
+
+    pub(crate) fn dismiss_drop_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.branches.drop_menu.take().is_some() {
+            self.focus_root(window, cx);
+            cx.notify();
+        }
+    }
+
+    /// Whether `source`'s tip contains `target`'s, which lets a merge
+    /// fast-forward instead of creating a merge commit. `None` when either tip
+    /// cannot be read.
+    fn fast_forward_ready(&self, source: &str, target: &str) -> Option<bool> {
+        let session = self.session.as_ref()?;
+        let snapshot = session.snapshot();
+        let tip = |kind: RefKind, name: &str| {
+            snapshot
+                .refs
+                .iter()
+                .find(|info| info.kind == kind && info.short_name == name)
+                .map(|info| info.target)
+        };
+        let target_tip = tip(RefKind::LocalBranch, target)?;
+        let source_tip = tip(RefKind::RemoteBranch, source)?;
+        session.repo().is_ancestor(target_tip, source_tip).ok()
     }
 }
 
@@ -6027,6 +6443,116 @@ mod tests {
             })
             .collect();
         assert_eq!(labels, ["t3/a"]);
+    }
+
+    fn dragged(kind: RefKind, name: &str) -> DraggedBranch {
+        DraggedBranch {
+            kind,
+            name: name.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_local_branch_dropped_on_another_offers_merge_and_rebase() {
+        let entries = drop_entries(
+            &dragged(RefKind::LocalBranch, "topic"),
+            "main",
+            Some("main"),
+            false,
+            None,
+        )
+        .expect("a drop between two branches has a menu");
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].action, DropAction::Merge);
+        assert_eq!(entries[0].label, "Merge topic into main");
+        assert_eq!(entries[0].blocked, None);
+        assert_eq!(entries[1].action, DropAction::Rebase);
+        assert_eq!(entries[1].label, "Rebase main onto topic");
+        assert_eq!(entries[1].blocked, None);
+    }
+
+    #[test]
+    fn a_remote_branch_dropped_on_its_tracking_branch_also_offers_fast_forward() {
+        let entries = drop_entries(
+            &dragged(RefKind::RemoteBranch, "origin/topic"),
+            "topic",
+            Some("topic"),
+            false,
+            Some(true),
+        )
+        .expect("a remote drop has a menu");
+
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[2].action, DropAction::FastForward);
+        assert_eq!(entries[2].label, "Fast-forward topic");
+        assert_eq!(entries[2].blocked, None);
+
+        let behind = drop_entries(
+            &dragged(RefKind::RemoteBranch, "origin/topic"),
+            "topic",
+            Some("topic"),
+            false,
+            Some(false),
+        )
+        .expect("the menu still opens");
+        assert_eq!(behind[2].blocked.as_deref(), Some("not a fast-forward"));
+
+        let elsewhere = drop_entries(
+            &dragged(RefKind::RemoteBranch, "origin/topic"),
+            "main",
+            Some("main"),
+            false,
+            Some(true),
+        )
+        .expect("a remote can be merged into another branch");
+        assert_eq!(
+            elsewhere.len(),
+            2,
+            "fast-forward only applies to the tracking branch"
+        );
+    }
+
+    #[test]
+    fn a_branch_dropped_on_itself_has_no_menu() {
+        assert_eq!(
+            drop_entries(
+                &dragged(RefKind::LocalBranch, "main"),
+                "main",
+                Some("main"),
+                false,
+                None,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn a_drop_on_a_branch_that_is_not_checked_out_explains_why() {
+        let entries = drop_entries(
+            &dragged(RefKind::LocalBranch, "topic"),
+            "main",
+            Some("other"),
+            false,
+            None,
+        )
+        .expect("the menu opens with disabled entries");
+        assert_eq!(
+            entries[0].blocked.as_deref(),
+            Some("check out main first"),
+            "a merge runs on the checked-out branch"
+        );
+        assert_eq!(entries[1].blocked.as_deref(), Some("check out main first"));
+
+        let busy = drop_entries(
+            &dragged(RefKind::LocalBranch, "topic"),
+            "main",
+            Some("main"),
+            true,
+            None,
+        )
+        .expect("the menu opens while an operation runs");
+        assert_eq!(busy[0].blocked.as_deref(), Some("an operation is running"));
     }
 
     #[test]

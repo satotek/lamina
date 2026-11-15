@@ -941,6 +941,36 @@ fn badge_chip(
     .row_tooltip(move |window, cx| Tooltip::new(full_name.clone()).build(window, cx))
 }
 
+/// A local branch chip is also the drop target of a branch dragged from the
+/// sidebar, which opens the same merge menu the sidebar rows do. The wrapper's
+/// padding is room for the drop highlight, since the chip paints its own fill.
+fn branch_drop_chip(
+    chip: Stateful<Div>,
+    badge: &Badge<'_>,
+    slot: usize,
+    design: &Design,
+    entity: &Entity<RepoView>,
+) -> AnyElement {
+    if badge.kind != RefKind::LocalBranch {
+        return chip.into_any_element();
+    }
+    let wrapper = div()
+        .id(("commit-ref-drop", slot))
+        .flex_none()
+        .flex()
+        .items_center()
+        .rounded_full()
+        .p(px(2.0))
+        .child(chip);
+    crate::branches::branch_drop_target_with(
+        wrapper,
+        &badge.label,
+        design.accent_soft,
+        entity.clone(),
+    )
+    .into_any_element()
+}
+
 fn ref_chips_strip(
     row_index: usize,
     badges: &[Badge<'_>],
@@ -961,11 +991,18 @@ fn ref_chips_strip(
         .overflow_hidden();
 
     for (chip_index, badge) in plan.visible.iter().enumerate() {
-        strip = strip.child(badge_chip(
+        let chip = badge_chip(
             ("commit-ref", (row_index << 8) | chip_index),
             badge,
             plan.max_label_width,
             design,
+        );
+        strip = strip.child(branch_drop_chip(
+            chip,
+            badge,
+            (row_index << 8) | chip_index,
+            design,
+            entity,
         ));
     }
 
