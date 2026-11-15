@@ -217,19 +217,22 @@ pub(crate) fn graph_info(
         .map(|(_, row)| row);
     let (head_lane, head_color) = head_row.map_or((0, 0), |row| (row.node_lane, row.node_color));
 
-    let merge_target = if snapshot.state == RepoState::Merging {
+    // The row, not only the lane: the dashed edge has to run down through the
+    // rows in between, so it needs to know where the target node sits.
+    let merge_row = if snapshot.state == RepoState::Merging {
         match details.filter(|d| details_match_state(d, RepoState::Merging)) {
             Some(InProgressDetails::Merge { heads, .. }) => heads
                 .first()
                 .and_then(|head| head.id)
-                .and_then(|oid| snapshot.commit_index.get(&oid).copied())
-                .and_then(|idx| snapshot.commits.get(idx))
-                .map(|(_, row)| (row.node_lane, row.node_color)),
+                .and_then(|oid| snapshot.commit_index.get(&oid).copied()),
             _ => None,
         }
     } else {
         None
     };
+    let merge_target = merge_row
+        .and_then(|idx| snapshot.commits.get(idx))
+        .map(|(_, row)| (row.node_lane, row.node_color));
 
     let lanes = head_lane
         .max(merge_target.map_or(0, |(lane, _)| lane))
@@ -241,6 +244,7 @@ pub(crate) fn graph_info(
         head_color,
         has_head_edge: head_oid.is_some(),
         merge_target,
+        merge_target_index: merge_row,
         lanes,
     }
 }
@@ -455,6 +459,27 @@ mod tests {
         assert_eq!(
             graph.merge_target,
             Some((feature_row.node_lane, feature_row.node_color))
+        );
+        assert_eq!(
+            graph.merge_target_index,
+            Some(feature_idx),
+            "the edge has to know which row holds the target node"
+        );
+        for index in 0..feature_idx {
+            assert_eq!(
+                graph.merge_edge_at(index).map(|edge| edge.to_node),
+                Some(false),
+                "row {index} passes the dashed edge on"
+            );
+        }
+        assert_eq!(
+            graph.merge_edge_at(feature_idx).map(|edge| edge.to_node),
+            Some(true)
+        );
+        assert_eq!(
+            graph.merge_edge_at(feature_idx + 1),
+            None,
+            "the edge ends at the MERGE_HEAD node"
         );
         assert_ne!(
             head_row.node_lane, feature_row.node_lane,

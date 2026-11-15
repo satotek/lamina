@@ -210,6 +210,7 @@ impl RepoView {
                                     head_color: 0,
                                     has_head_edge: false,
                                     merge_target: None,
+                                    merge_target_index: None,
                                     lanes: 1,
                                 });
                             let summary = uncommitted_summary
@@ -343,6 +344,7 @@ impl RepoView {
                                 &row,
                                 sig_state.as_ref(),
                                 changed_count,
+                                uncommitted_graph.and_then(|graph| graph.merge_edge_at(index)),
                                 row_ui_state,
                                 &date,
                                 &row_design,
@@ -709,6 +711,7 @@ fn commit_row(
     data: &RowData<'_>,
     signature: Option<&crate::ui::CommitSignatureState>,
     changed_count: Option<usize>,
+    merge_edge: Option<graph_canvas::MergeEdge>,
     state: crate::ui::RowState,
     date: &str,
     design: &Design,
@@ -730,6 +733,7 @@ fn commit_row(
         .child(graph_canvas::graph_column(
             data.graph,
             data.shallow_boundary,
+            merge_edge,
             design.lane,
             fade,
             design.muted,

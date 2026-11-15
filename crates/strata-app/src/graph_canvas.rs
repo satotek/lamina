@@ -102,10 +102,12 @@ pub fn row_lanes(row: GraphRow<'_>) -> u16 {
 /// `fade` is the colour behind the row, used by the gradient at a clipped edge.
 /// `boundary` draws a dashed stub under the node for a shallow clone's last
 /// fetched commit, where the line to the parents was never fetched; `muted`
-/// paints that stub.
+/// paints that stub. `merge_edge` is the dashed run a merge in progress adds on
+/// the way down to `MERGE_HEAD`.
 pub fn graph_column(
     row: GraphRow<'_>,
     boundary: bool,
+    merge_edge: Option<MergeEdge>,
     colors: [Hsla; LANES],
     fade: Hsla,
     muted: Hsla,
@@ -120,6 +122,7 @@ pub fn graph_column(
         passes: row.passes.to_vec(),
         edges: row.edges.to_vec(),
         boundary,
+        merge_edge,
         muted,
     };
 
@@ -139,7 +142,39 @@ pub struct UncommittedGraph {
     pub head_color: u16,
     pub has_head_edge: bool,
     pub merge_target: Option<(u16, u16)>,
+    /// Row of the `MERGE_HEAD` commit in the commit list, when the graph shows
+    /// it. The target's lane alone cannot say how far down to draw.
+    pub merge_target_index: Option<usize>,
     pub lanes: u16,
+}
+
+/// The dashed line a merge in progress draws on its way to `MERGE_HEAD`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MergeEdge {
+    /// `MERGE_HEAD`'s node lane, which the edge follows down the list.
+    pub lane: u16,
+    /// `MERGE_HEAD`'s node colour.
+    pub color: u16,
+    /// This row holds the target node, so the edge stops at the node instead of
+    /// running through the row.
+    pub to_node: bool,
+}
+
+impl UncommittedGraph {
+    /// The dashed run this merge edge contributes to commit row `index`.
+    ///
+    /// `None` once the target is behind us, or when the graph does not show the
+    /// `MERGE_HEAD` commit at all (its branch is hidden), so nothing is drawn
+    /// towards a node that is not on screen.
+    pub fn merge_edge_at(&self, index: usize) -> Option<MergeEdge> {
+        let (lane, color) = self.merge_target?;
+        let target = self.merge_target_index?;
+        (index <= target).then_some(MergeEdge {
+            lane,
+            color,
+            to_node: index == target,
+        })
+    }
 }
 
 /// Graph column for the synthetic uncommitted row: a hollow dashed circle on
@@ -170,6 +205,7 @@ struct OwnedRow {
     passes: Vec<PassThrough>,
     edges: Vec<Segment>,
     boundary: bool,
+    merge_edge: Option<MergeEdge>,
     muted: Hsla,
 }
 
@@ -351,6 +387,20 @@ fn paint_row(
             {
                 window.paint_path(path, colors[color]);
             }
+        }
+
+        // The merge edge is dashed and painted over the lanes, because the
+        // branch it points at may not have a line of its own this far up.
+        if let Some(edge) = row.merge_edge
+            && edge.lane < visible
+        {
+            let end = if edge.to_node {
+                // Leave the node itself its solid outline.
+                middle - px(NODE_RADIUS + 1.0)
+            } else {
+                top + height
+            };
+            paint_dashed_vertical(left, top, end, edge.lane, colors[slot(edge.color)], window);
         }
     });
 
@@ -571,9 +621,8 @@ fn paint_uncommitted_row(
             } else if !graph.has_head_edge && merge_lane < visible {
                 paint_dashed_vertical(
                     left,
-                    top,
-                    middle,
-                    height,
+                    middle + px(NODE_RADIUS + 1.0),
+                    top + height,
                     merge_lane,
                     colors[slot(merge_color)],
                     window,
@@ -584,9 +633,8 @@ fn paint_uncommitted_row(
         if graph.has_head_edge && graph.head_lane < visible {
             paint_dashed_vertical(
                 left,
-                top,
-                middle,
-                height,
+                middle + px(NODE_RADIUS + 1.0),
+                top + height,
                 graph.head_lane,
                 colors[slot(graph.head_color)],
                 window,
@@ -665,9 +713,8 @@ fn paint_uncommitted_row(
 
 fn paint_dashed_vertical(
     left: Pixels,
-    top: Pixels,
-    middle: Pixels,
-    height: Pixels,
+    from: Pixels,
+    to: Pixels,
     lane: u16,
     color: Hsla,
     window: &mut Window,
@@ -675,10 +722,9 @@ fn paint_dashed_vertical(
     const DASH: f32 = 2.5;
     const GAP: f32 = 2.0;
     let x = left + px(lane_offset(lane)) - px(STROKE_WIDTH / 2.0);
-    let bottom = top + height;
-    let mut y = middle + px(NODE_RADIUS + 1.0);
-    while y < bottom {
-        let dash_height = px(DASH).min(bottom - y);
+    let mut y = from;
+    while y < to {
+        let dash_height = px(DASH).min(to - y);
         window.paint_quad(fill(
             Bounds::new(point(x, y), size(px(STROKE_WIDTH), dash_height)),
             color,
@@ -715,6 +761,7 @@ mod tests {
             passes: passes.to_vec(),
             edges: edges.to_vec(),
             boundary: false,
+            merge_edge: None,
             muted: Hsla::default(),
         }
     }
@@ -1037,5 +1084,61 @@ mod tests {
         );
         assert!((last_pt.x - lane_offset(2)).abs() < 1e-4);
         assert!((last_pt.y - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn the_merge_edge_passes_through_every_row_up_to_the_target() {
+        let graph = UncommittedGraph {
+            head_lane: 0,
+            head_color: 0,
+            has_head_edge: true,
+            merge_target: Some((2, 5)),
+            merge_target_index: Some(3),
+            lanes: 3,
+        };
+        for index in 0..3 {
+            assert_eq!(
+                graph.merge_edge_at(index),
+                Some(MergeEdge {
+                    lane: 2,
+                    color: 5,
+                    to_node: false,
+                }),
+                "row {index} is between the uncommitted row and MERGE_HEAD"
+            );
+        }
+        assert_eq!(
+            graph.merge_edge_at(3),
+            Some(MergeEdge {
+                lane: 2,
+                color: 5,
+                to_node: true,
+            }),
+            "the target row ends the edge at its node"
+        );
+        assert_eq!(graph.merge_edge_at(4), None, "nothing is drawn below it");
+    }
+
+    #[test]
+    fn a_hidden_merge_head_leaves_no_dangling_edge() {
+        let graph = UncommittedGraph {
+            head_lane: 0,
+            head_color: 0,
+            has_head_edge: true,
+            merge_target: Some((2, 5)),
+            merge_target_index: None,
+            lanes: 3,
+        };
+        assert_eq!(graph.merge_edge_at(0), None);
+        assert_eq!(
+            UncommittedGraph {
+                merge_target_index: Some(1),
+                merge_target: None,
+                ..graph
+            }
+            .merge_edge_at(0),
+            None,
+            "a lane without a target row is not drawn either"
+        );
     }
 }
