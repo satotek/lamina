@@ -65,7 +65,7 @@ use crate::fake::{self, FakeRepo};
 use crate::file_history::FileHistory;
 use crate::image_diff;
 use crate::metrics::FrameMetrics;
-use crate::pull_requests::PullRequests;
+use crate::pull_requests::{PullRequests, RefreshCause};
 use crate::remote::Remote;
 use crate::search::SearchState;
 use crate::worktree_panel::{MainMode, WorktreePanel};
@@ -1085,11 +1085,19 @@ impl RepoView {
                     }
                 }
                 self.worktree.on_operation_finished(id, error.as_deref());
-                let refresh_pull_requests =
+                let remote_finished =
                     self.remote
                         .on_finished(id, error.as_deref(), cx, self.active);
-                if refresh_pull_requests {
-                    self.refresh_pull_requests(cx);
+                if remote_finished {
+                    // `on_finished` reports a fetch and a push the same way;
+                    // the push notification leaves a marker, and a push is the
+                    // one remote command whose refresh must not be throttled.
+                    let cause = if self.pull_requests.take_pending_push() {
+                        RefreshCause::AfterPush
+                    } else {
+                        RefreshCause::Automatic
+                    };
+                    self.refresh_pull_requests(cause, cx);
                 }
                 // The label records which operation failed, so the status bar
                 // names it instead of showing a bare git message.

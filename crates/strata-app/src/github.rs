@@ -143,7 +143,12 @@ pub(crate) fn remote_branch_item(
 }
 
 /// Adds the pull-request action to a successful push notification, when the
-/// branch is on a GitHub remote and `gh` can create one.
+/// branch is on a GitHub remote.
+///
+/// The action opens the branch's existing pull request when the cache knows one
+/// is open, and asks `gh` for the creation form when it does not; either way the
+/// push marks the cache, because it is the moment the branch may have gained or
+/// lost a pull request, and the refresh that follows it must not be throttled.
 pub(crate) fn with_create_pr(
     note: Notification,
     entity: &Entity<RepoView>,
@@ -153,6 +158,26 @@ pub(crate) fn with_create_pr(
     if remote_for(entity.read(cx), cx).is_none() {
         return note;
     }
+    entity.read(cx).pull_requests.note_push();
+
+    // The branch's pull request is already open: the form would ask GitHub for
+    // a second one, so the notification offers the existing one instead.
+    let existing = entity
+        .read(cx)
+        .pull_requests
+        .open_for_branch(branch)
+        .map(|pull_request| (pull_request.number, pull_request.url.clone()));
+    if let Some((number, url)) = existing {
+        return note.action(move |_, _, _| {
+            let url = url.clone();
+            Button::new("notification-open-pr")
+                .label(t!("github.open_pull_request", number = number).to_string())
+                .on_click(move |_, _, cx| {
+                    cx.open_with_system(std::path::Path::new(&url));
+                })
+        });
+    }
+
     let Some(tooling) = Tooling::get(cx) else {
         return note;
     };

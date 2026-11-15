@@ -6,6 +6,10 @@
 //! never run anything themselves: the CLI call is a background task, so a slow
 //! network never stalls a frame.
 //!
+//! That call costs seconds on a repository with many pull requests, so only a
+//! refresh the user asked for, or one right after a push, always runs; the
+//! automatic ones give up when the cache is still fresh. See [`may_refresh`].
+//!
 //! Everything here is behind the existing gh setting and requires a GitHub
 //! remote `gh` is logged in to. When any of that is missing the cache stays
 //! empty and the badges simply do not appear: an optional integration must not
@@ -17,8 +21,10 @@
 //! owner. That second half is what keeps a fork's pull request off a same-named
 //! branch in the upstream repository.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable as _,
@@ -45,6 +51,13 @@ const DIALOG_WIDTH: f32 = 520.0;
 /// The list scrolls once it would push the dialog past this height.
 const LIST_MAX_HEIGHT: f32 = 360.0;
 
+/// The shortest gap between two automatic refreshes.
+///
+/// One `gh pr list` on a repository with a hundred pull requests takes several
+/// seconds, and a fetch or push would otherwise repeat it while the answer from
+/// the previous one is still good.
+const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+
 actions!(
     strata,
     [
@@ -54,6 +67,45 @@ actions!(
         CheckoutPullRequest,
     ]
 );
+
+/// Why the pull requests are being asked for again.
+///
+/// The caller knows what the refresh is for; the cache only needs to know
+/// whether the answer is worth the wait.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RefreshCause {
+    /// The view asked on its own: the repository opened, a fetch finished, or
+    /// a checkout left the badges out of date.
+    Automatic,
+    /// The user asked: the command, or the checkout dialog with nothing to
+    /// list.
+    Explicit,
+    /// A push to the repository's GitHub remote just finished, so the branch
+    /// may have gained or lost its pull request.
+    AfterPush,
+}
+
+/// Whether a refresh with `cause` may start at `now`.
+///
+/// A running refresh already answers for the cache, and an automatic one that
+/// repeats a refresh finished moments ago only spends the user's time; the
+/// explicit command and the push both name a reason the cache cannot cover.
+fn may_refresh(
+    cause: RefreshCause,
+    last_finished: Option<Instant>,
+    running: bool,
+    now: Instant,
+) -> bool {
+    match cause {
+        RefreshCause::Explicit | RefreshCause::AfterPush => true,
+        RefreshCause::Automatic => {
+            !running
+                && last_finished.is_none_or(|finished| {
+                    now.saturating_duration_since(finished) >= REFRESH_INTERVAL
+                })
+        }
+    }
+}
 
 /// The whole pull-request cache of one repository view.
 ///
@@ -79,6 +131,14 @@ pub(crate) struct PullRequests {
     /// Incremented per request; a slower answer from an older request must not
     /// replace a newer one.
     generation: u64,
+    /// When the last refresh finished, for the automatic throttle.
+    last_finished: Option<Instant>,
+    /// A push to the GitHub remote is waiting for the refresh that follows it.
+    ///
+    /// Only the push notification knows that the command which just finished
+    /// was a push rather than a fetch, so it leaves this marker; the refresh
+    /// then knows it must not be throttled.
+    push_pending: Cell<bool>,
 }
 
 impl Default for PullRequests {
@@ -92,6 +152,8 @@ impl Default for PullRequests {
             started: false,
             enabled: true,
             generation: 0,
+            last_finished: None,
+            push_pending: Cell::new(false),
         }
     }
 }
@@ -107,6 +169,30 @@ impl PullRequests {
 
     pub(crate) fn for_branch(&self, branch: &str) -> Option<&PullRequestSummary> {
         self.by_branch.get(branch)
+    }
+
+    /// The open pull request the cache knows for `branch`.
+    ///
+    /// A branch whose only pull request is merged or closed still needs a new
+    /// one, so the offer to create it stays; an open one means the form would
+    /// ask GitHub for a duplicate.
+    pub(crate) fn open_for_branch(&self, branch: &str) -> Option<&PullRequestSummary> {
+        self.by_branch
+            .get(branch)
+            .filter(|pull_request| pull_request.state.is_open())
+    }
+
+    /// Records that a push to the GitHub remote just finished.
+    ///
+    /// The push notification is built from a plain `&RepoView` and runs before
+    /// the refresh it prompts, which is why the marker is interior mutable.
+    pub(crate) fn note_push(&self) {
+        self.push_pending.set(true);
+    }
+
+    /// Whether a push is waiting to be followed by its refresh.
+    pub(crate) fn take_pending_push(&self) -> bool {
+        self.push_pending.replace(false)
     }
 
     pub(crate) fn is_refreshing(&self) -> bool {
@@ -144,6 +230,7 @@ impl PullRequests {
             return;
         }
         self.refreshing = false;
+        self.last_finished = Some(Instant::now());
         match result {
             Ok(items) => {
                 self.items = items;
@@ -161,6 +248,9 @@ impl PullRequests {
         self.by_branch = Rc::new(HashMap::new());
         self.error = None;
         self.refreshing = false;
+        // An empty cache is not a fresh answer: reopening a view whose
+        // integration was just turned back on must be allowed to ask again.
+        self.last_finished = None;
     }
 
     fn set_by_branch(&mut self, map: HashMap<String, PullRequestSummary>) {
@@ -389,7 +479,7 @@ impl RepoView {
             return;
         }
         self.pull_requests.started = true;
-        self.refresh_pull_requests(cx);
+        self.refresh_pull_requests(RefreshCause::Automatic, cx);
     }
 
     /// Rebuilds the branch map after the cache or the branches changed.
@@ -424,7 +514,10 @@ impl RepoView {
     /// A missing program, a logged-out account, a non-GitHub remote or the
     /// setting being off all leave the cache empty quietly: the badges are an
     /// optional convenience, not a prerequisite for the repository.
-    pub(crate) fn refresh_pull_requests(&mut self, cx: &mut Context<Self>) {
+    ///
+    /// `cause` decides whether the call is worth making now; the automatic one
+    /// that would repeat a refresh made in the last minute does nothing.
+    pub(crate) fn refresh_pull_requests(&mut self, cause: RefreshCause, cx: &mut Context<Self>) {
         let Some(remote) = crate::github::remote_for(self, cx) else {
             self.pull_requests.clear();
             self.recompute_pull_request_map(cx);
@@ -444,6 +537,14 @@ impl RepoView {
         else {
             return;
         };
+        if !may_refresh(
+            cause,
+            self.pull_requests.last_finished,
+            self.pull_requests.refreshing,
+            Instant::now(),
+        ) {
+            return;
+        }
 
         let generation = self.pull_requests.begin();
         self.notify_if_active(cx);
@@ -479,7 +580,7 @@ impl RepoView {
             return;
         }
         self.pull_requests.started = true;
-        self.refresh_pull_requests(cx);
+        self.refresh_pull_requests(RefreshCause::Explicit, cx);
     }
 
     /// Reacts to the tools setting changing.
@@ -513,7 +614,7 @@ impl RepoView {
                 t!("pr.no_cache").to_string()
             });
             self.pull_requests.started = true;
-            self.refresh_pull_requests(cx);
+            self.refresh_pull_requests(RefreshCause::Explicit, cx);
             cx.notify();
             return;
         }
@@ -588,7 +689,7 @@ impl RepoView {
                     Ok(()) => {
                         view.status_note = Some(t!("pr.checked_out", number = number).to_string());
                         view.pull_requests.started = true;
-                        view.refresh_pull_requests(cx);
+                        view.refresh_pull_requests(RefreshCause::Automatic, cx);
                     }
                     Err(error) => {
                         view.status_error = Some(
@@ -1079,6 +1180,121 @@ mod tests {
             Ok(vec![pull_request(1, PullRequestState::Open, "main", "me")]),
         );
         assert_eq!(cache.items[0].number, 2);
+    }
+
+    #[test]
+    fn an_automatic_refresh_waits_out_the_interval() {
+        let now = Instant::now();
+        assert!(may_refresh(RefreshCause::Automatic, None, false, now));
+        assert!(!may_refresh(
+            RefreshCause::Automatic,
+            Some(now - Duration::from_secs(59)),
+            false,
+            now
+        ));
+        assert!(may_refresh(
+            RefreshCause::Automatic,
+            Some(now - REFRESH_INTERVAL),
+            false,
+            now
+        ));
+        assert!(may_refresh(
+            RefreshCause::Automatic,
+            Some(now - Duration::from_secs(600)),
+            false,
+            now
+        ));
+    }
+
+    #[test]
+    fn a_running_refresh_absorbs_an_automatic_one() {
+        let now = Instant::now();
+        assert!(!may_refresh(RefreshCause::Automatic, None, true, now));
+        assert!(!may_refresh(
+            RefreshCause::Automatic,
+            Some(now - Duration::from_secs(3600)),
+            true,
+            now
+        ));
+    }
+
+    #[test]
+    fn the_user_and_a_push_are_never_throttled() {
+        let now = Instant::now();
+        let just_now = Some(now - Duration::from_secs(1));
+        assert!(may_refresh(RefreshCause::Explicit, just_now, false, now));
+        assert!(may_refresh(RefreshCause::Explicit, just_now, true, now));
+        assert!(may_refresh(RefreshCause::AfterPush, just_now, false, now));
+        assert!(may_refresh(RefreshCause::AfterPush, just_now, true, now));
+    }
+
+    #[test]
+    fn a_finished_refresh_starts_the_throttle() {
+        let mut cache = PullRequests::default();
+        assert!(cache.last_finished.is_none());
+        let generation = cache.begin();
+        cache.finish(generation, Err("no answer".into()));
+        assert!(
+            !may_refresh(
+                RefreshCause::Automatic,
+                cache.last_finished,
+                cache.refreshing,
+                Instant::now()
+            ),
+            "a failed refresh still spent the wait"
+        );
+    }
+
+    #[test]
+    fn the_push_marker_is_taken_once() {
+        let cache = PullRequests::default();
+        assert!(!cache.take_pending_push());
+        cache.note_push();
+        assert!(cache.take_pending_push());
+        assert!(
+            !cache.take_pending_push(),
+            "one push, one unthrottled refresh"
+        );
+    }
+
+    #[test]
+    fn a_branch_with_an_open_pull_request_is_not_offered_a_new_one() {
+        let mut cache = PullRequests::default();
+        let mut done = pull_request(5, PullRequestState::Merged, "done", "me");
+        done.updated_at = "2026-04-01T10:00:00Z".into();
+        let generation = cache.begin();
+        cache.finish(
+            generation,
+            Ok(vec![
+                pull_request(4, PullRequestState::Open, "feature", "me"),
+                done,
+            ]),
+        );
+        let remotes = vec![RemoteInfo {
+            name: "origin".into(),
+            fetch_url: Some("https://github.com/me/strata.git".into()),
+            push_url: None,
+        }];
+        let known = vec!["github.com".to_owned()];
+        let map = branch_map(
+            &cache.items,
+            &["feature".to_owned(), "done".to_owned()],
+            &HashMap::new(),
+            &remotes,
+            &known,
+            Some("me"),
+        );
+        cache.set_by_branch(map);
+
+        assert_eq!(
+            cache.open_for_branch("feature").map(|pr| pr.number),
+            Some(4)
+        );
+        assert!(
+            cache.open_for_branch("done").is_none(),
+            "a merged pull request does not stop a new one"
+        );
+        assert!(cache.open_for_branch("missing").is_none());
     }
 
     #[test]
