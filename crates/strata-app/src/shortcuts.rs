@@ -268,6 +268,7 @@ fn group_key(group: Group) -> &'static str {
         Group::Search => "search",
         Group::Picker => "picker",
         Group::Palette => "palette",
+        Group::Application => "application",
         Group::Zoom => "zoom",
         Group::Shortcuts => "shortcuts",
     }
@@ -286,6 +287,7 @@ fn group_title(group: Group) -> String {
         Group::Search => t!("shortcuts.group.search"),
         Group::Picker => t!("shortcuts.group.picker"),
         Group::Palette => t!("shortcuts.group.palette"),
+        Group::Application => t!("shortcuts.group.application"),
         Group::Zoom => t!("shortcuts.group.zoom"),
         Group::Shortcuts => t!("shortcuts.group.shortcuts"),
     }

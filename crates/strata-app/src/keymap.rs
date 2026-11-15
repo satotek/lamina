@@ -47,12 +47,13 @@ pub enum Group {
     Search,
     Picker,
     Palette,
+    Application,
     Zoom,
     Shortcuts,
 }
 
 /// Every group, in registration order.
-pub const GROUP_ORDER: [Group; 13] = [
+pub const GROUP_ORDER: [Group; 14] = [
     Group::Actions,
     Group::Settings,
     Group::GitConfig,
@@ -64,6 +65,7 @@ pub const GROUP_ORDER: [Group; 13] = [
     Group::Search,
     Group::Picker,
     Group::Palette,
+    Group::Application,
     Group::Zoom,
     Group::Shortcuts,
 ];
@@ -180,6 +182,7 @@ use crate::conflicts::{
     TakeBothTheirsFirst, TakeOurs, TakeTheirs, UseOurs, UseTheirs,
 };
 use crate::git_config_view::CloseGitConfig;
+use crate::menus::AboutStrata;
 use crate::palette::{PaletteDismiss, PaletteNext, PalettePrevious};
 use crate::picker::{
     OpenSelectedInNewTab, OpenSelectedRepository, PickerEscape, PickerNext, PickerPrevious,
@@ -1074,9 +1077,18 @@ pub static ACTIONS: &[ActionSpec] = &[
         PaletteDismiss,
         [binding("escape", Some(PALETTE_FIELD))]
     ),
-    // --- the whole-window zoom -------------------------------------------
-    // Its own group rather than more `Actions` rows: window-wide commands
-    // belong together, and the shortcut sheet later lists actions by group.
+    // --- the application menu, zoom and the shortcut sheet ---------------
+    // These are their own groups rather than more `Actions` rows: the
+    // shortcut sheet lists actions under their group, and the menu items and
+    // window-wide commands belong together.
+    action!(
+        "strata::AboutStrata",
+        "About Strata",
+        Application,
+        None,
+        AboutStrata,
+        []
+    ),
     action!(
         "strata::ZoomIn",
         "Zoom in",
@@ -1107,10 +1119,6 @@ pub static ACTIONS: &[ActionSpec] = &[
         40,
         false
     ),
-    // --- the keyboard shortcut sheet -------------------------------------
-    // Its own group rather than more `Actions` rows: the sheet lists actions
-    // under their group, and the window-wide command belongs with the other
-    // commands of its own.
     action!(
         "strata::ShowKeyboardShortcuts",
         "Keyboard shortcuts",
@@ -1754,6 +1762,10 @@ pub fn reload(cx: &mut App) {
     install_defaults(cx);
     crate::commands::bind_keys(cx);
     apply_user(cx);
+    // The native menu bar shows its key equivalents from the keymap, so it has
+    // to be rebuilt after every change or it would keep advertising the old
+    // keys.
+    crate::menus::install(cx);
 }
 
 /// Whether a binding belongs to this app (and is rebuilt from the registry)
@@ -2088,7 +2100,7 @@ mod tests {
             ("up", "PalettePrevious", "Palette > Input"),
             ("down", "PaletteNext", "Palette > Input"),
             ("escape", "PaletteDismiss", "Palette > Input"),
-            // The zoom and the shortcut sheet.
+            // The application menu, the zoom and the shortcut sheet.
             ("secondary-=", "ZoomIn", ""),
             ("secondary-+", "ZoomIn", ""),
             ("secondary--", "ZoomOut", ""),

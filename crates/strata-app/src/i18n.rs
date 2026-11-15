@@ -196,7 +196,7 @@ pub fn action_title(full_name: &str, english: &str) -> String {
 }
 
 /// `SwitchBranch` -> `switch_branch`, `SelectTab1` -> `select_tab1`.
-fn snake_case(name: &str) -> String {
+pub(crate) fn snake_case(name: &str) -> String {
     let mut out = String::with_capacity(name.len() + 4);
     for (index, c) in name.chars().enumerate() {
         if c.is_ascii_uppercase() {
@@ -221,6 +221,9 @@ pub fn apply(cx: &mut App) {
     EXTEND.call_once(|| rust_i18n::extend!(gpui_component));
 
     rust_i18n::set_locale(Settings::get(cx).appearance.language.locale());
+    // The menu bar is text too: its titles and items are rebuilt from the new
+    // locale, not left in the language it was built with.
+    crate::menus::install(cx);
     cx.refresh_windows();
 }
 

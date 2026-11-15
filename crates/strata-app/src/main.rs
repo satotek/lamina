@@ -41,6 +41,7 @@ mod graph_canvas;
 mod i18n;
 mod image_diff;
 mod keymap;
+mod menus;
 mod merge_editor;
 mod metrics;
 mod palette;
@@ -141,6 +142,7 @@ fn main() {
         palette::bind(cx);
         zoom::bind(cx);
         shortcuts::bind(cx);
+        menus::bind(cx);
         #[cfg(feature = "terminal")]
         terminal_panel::bind(cx);
 
@@ -151,6 +153,9 @@ fn main() {
         keymap::watch(cx);
         commands::watch(cx);
         style::theme::watch(cx);
+        // The bar's key equivalents are read from the keymap, so it is built
+        // after every default and the user's file have been applied.
+        menus::install(cx);
 
         open_start(start, debug, cx);
         cx.activate(true);
