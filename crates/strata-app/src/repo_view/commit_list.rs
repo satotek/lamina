@@ -8,13 +8,17 @@ use std::rc::Rc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, Div, FontWeight, InteractiveElement, IntoElement, MouseButton, ParentElement,
-    Styled, div, px, uniform_list,
+    Anchor, AnyElement, ClickEvent, Div, ElementId, Entity, FontWeight, InteractiveElement,
+    IntoElement, MouseButton, ParentElement, SharedString, Stateful, Styled, Window, div, px,
+    uniform_list,
 };
-use gpui_component::Sizable as _;
 use gpui_component::input::Input;
+use gpui_component::popover::Popover;
+use gpui_component::tooltip::Tooltip;
+use gpui_component::{Sizable as _, v_flex};
 use gpui_kit_assets::IconName;
-use strata_core::{Oid, RefKind};
+use strata_core::session::Operation;
+use strata_core::{HeadInfo, Oid, RefKind};
 
 use super::history_ops::{self, CommitTarget};
 use super::{RepoView, one_line};
@@ -23,10 +27,19 @@ use crate::graph_canvas;
 use crate::scrollbar::WithScrollbar as _;
 use crate::search::{Field, SEARCH_BAR, SearchMode};
 use crate::style::{self, Design};
+use crate::ui::RowTipExt as _;
 
 const AUTHOR_WIDTH: f32 = 150.0;
 const DATE_WIDTH: f32 = 96.0;
 const COMMIT_WIDTH: f32 = 64.0;
+
+/// Maximum inline ref chips rendered per commit row before collapsing the rest
+/// into a `+N` overflow chip.
+const MAX_VISIBLE_REF_CHIPS: usize = 2;
+/// Minimum space reserved inside the description cell so inline ref chips do
+/// not squeeze the commit subject off-screen.
+const DESCRIPTION_SUBJECT_RESERVE: f32 = 105.0;
+const MIN_SINGLE_CHIP_LABEL_WIDTH: f32 = 48.0;
 
 /// A row's own left and right padding.
 const ROW_PADDING: f32 = 24.0;
@@ -93,6 +106,10 @@ impl CommitColumns {
             + if self.author { AUTHOR_WIDTH } else { 0.0 }
             + if self.date { DATE_WIDTH } else { 0.0 }
             + CELL_GAP * (self.cells() - 1.0)
+    }
+
+    fn description_width(self, width: f32, graph_width: f32) -> f32 {
+        (width - self.fixed_width(graph_width)).max(0.0)
     }
 
     fn fits(self, width: f32, graph_width: f32) -> bool {
@@ -204,6 +221,12 @@ impl RepoView {
                         let revealed = revealed.is_some_and(|commit| Some(commit) == target.id);
                         let selected = selection.contains(index);
                         let row_ui_state = row_state(selected, revealed);
+                        let row_graph_width = if filtered {
+                            graph_canvas::search_indent()
+                        } else {
+                            graph_canvas::indent(row.graph.width)
+                        };
+                        let desc_width = columns.description_width(width, row_graph_width);
                         let element = if filtered {
                             // The graph is hidden while filtered: spaced-out rows
                             // would draw lanes that never existed between them.
@@ -215,6 +238,8 @@ impl RepoView {
                                 &date,
                                 &row_design,
                                 columns,
+                                desc_width,
+                                &entity,
                             )
                         } else {
                             commit_row(
@@ -225,6 +250,8 @@ impl RepoView {
                                 &date,
                                 &row_design,
                                 columns,
+                                desc_width,
+                                &entity,
                             )
                         }
                         .cursor_pointer()
@@ -492,6 +519,7 @@ fn row_state(selected: bool, revealed: bool) -> crate::ui::RowState {
         .revealed(revealed)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn commit_row(
     row_index: usize,
     data: &RowData<'_>,
@@ -500,6 +528,8 @@ fn commit_row(
     date: &str,
     design: &Design,
     columns: CommitColumns,
+    description_width: f32,
+    entity: &Entity<RepoView>,
 ) -> gpui::Stateful<Div> {
     let avatar_color = design.avatar_color(&data.email);
     let initials = style::initials(&data.author);
@@ -527,18 +557,10 @@ fn commit_row(
                 .items_center()
                 .gap(px(6.0))
                 .overflow_hidden()
-                .when(!data.badges.is_empty(), |cell| {
-                    let mut badges = div()
-                        .flex()
-                        .items_center()
-                        .gap(px(4.0))
-                        .flex_none()
-                        .overflow_hidden();
-                    for badge in &data.badges {
-                        badges = badges.child(badge_chip(badge, design));
-                    }
-                    cell.child(badges)
-                })
+                .when_some(
+                    ref_chips_strip(row_index, &data.badges, description_width, design, entity),
+                    |cell, strip| cell.child(strip),
+                )
                 .child(
                     div()
                         .min_w_0()
@@ -610,6 +632,7 @@ fn commit_row(
 /// A commit row in the filtered result set. A small fixed indent stands in for
 /// the graph, which is hidden: the matching commits are not adjacent in
 /// history, so lanes between them would be fiction.
+#[allow(clippy::too_many_arguments)]
 fn filtered_commit_row(
     row_index: usize,
     data: &RowData<'_>,
@@ -618,6 +641,8 @@ fn filtered_commit_row(
     date: &str,
     design: &Design,
     columns: CommitColumns,
+    description_width: f32,
+    entity: &Entity<RepoView>,
 ) -> gpui::Stateful<Div> {
     let avatar_color = design.avatar_color(&data.email);
     let initials = style::initials(&data.author);
@@ -636,23 +661,18 @@ fn filtered_commit_row(
                 .items_center()
                 .gap(px(6.0))
                 .overflow_hidden()
-                .when(!data.badges.is_empty(), |cell| {
-                    let mut badges = div()
-                        .flex()
-                        .items_center()
-                        .gap(px(4.0))
-                        .flex_none()
-                        .overflow_hidden();
-                    for badge in &data.badges {
-                        badges = badges.child(badge_chip(badge, design));
-                    }
-                    cell.child(badges)
-                })
+                .when_some(
+                    ref_chips_strip(row_index, &data.badges, description_width, design, entity),
+                    |cell, strip| cell.child(strip),
+                )
                 .child(
                     div()
                         .min_w_0()
                         .truncate()
                         .text_color(design.text)
+                        .when(data.badges.iter().any(|badge| badge.head), |text| {
+                            text.font_weight(FontWeight::SEMIBOLD)
+                        })
                         .child(data.summary.to_string()),
                 )
                 .when_some(
@@ -757,8 +777,325 @@ fn search_mode_chip(
         .into_any_element()
 }
 
-fn badge_chip(badge: &Badge<'_>, design: &Design) -> AnyElement {
-    crate::ui::ref_badge(badge.kind, badge.head, badge.label.to_string(), design)
+#[derive(Clone, Debug, PartialEq)]
+struct RefChipPlan<'a> {
+    visible: Vec<Badge<'a>>,
+    hidden: Vec<Badge<'a>>,
+    all: Vec<Badge<'a>>,
+    max_label_width: f32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OwnedBadge {
+    label: String,
+    kind: RefKind,
+    head: bool,
+}
+
+fn ref_display_priority<'a>(badge: &'a Badge<'_>) -> (u8, u8, &'a str) {
+    let head_rank = u8::from(!badge.head);
+    let kind_rank = match badge.kind {
+        RefKind::LocalBranch => 0,
+        RefKind::Tag => 1,
+        RefKind::RemoteBranch => 2,
+    };
+    (head_rank, kind_rank, badge.label.as_ref())
+}
+
+fn ref_chip_width_budget(description_width: f32) -> f32 {
+    (description_width - DESCRIPTION_SUBJECT_RESERVE).max(0.0)
+}
+
+/// Orders commit refs by relevance (HEAD/current branch, local branches, tags,
+/// remote branches) and fits at most [`MAX_VISIBLE_REF_CHIPS`] within the
+/// description column's width budget, leaving the rest for a `+N` chip.
+fn plan_ref_chips<'a>(badges: &[Badge<'a>], description_width: f32) -> RefChipPlan<'a> {
+    let mut all = badges.to_vec();
+    all.sort_by(|a, b| ref_display_priority(a).cmp(&ref_display_priority(b)));
+
+    let max_label_width = crate::ui::REF_BADGE_MAX_LABEL_WIDTH
+        .min((description_width - 80.0).max(MIN_SINGLE_CHIP_LABEL_WIDTH));
+
+    if all.is_empty() {
+        return RefChipPlan {
+            visible: Vec::new(),
+            hidden: Vec::new(),
+            all,
+            max_label_width,
+        };
+    }
+
+    // Keep a single ref rendered as a chip so long single names truncate with
+    // ellipsis and expose their full name in the tooltip instead of turning
+    // into a `+1` chip.
+    if all.len() == 1 {
+        return RefChipPlan {
+            visible: all.clone(),
+            hidden: Vec::new(),
+            all,
+            max_label_width,
+        };
+    }
+
+    let budget = ref_chip_width_budget(description_width);
+    let widths: Vec<f32> = all
+        .iter()
+        .map(|badge| crate::ui::estimate_ref_badge_width(badge.label.as_ref(), max_label_width))
+        .collect();
+
+    let gap = crate::ui::REF_BADGE_GAP;
+    if all.len() <= MAX_VISIBLE_REF_CHIPS {
+        let total_width = widths.iter().sum::<f32>() + gap * (all.len() - 1) as f32;
+        if total_width <= budget {
+            return RefChipPlan {
+                visible: all.clone(),
+                hidden: Vec::new(),
+                all,
+                max_label_width,
+            };
+        }
+    }
+
+    let mut shown = 0usize;
+    let max_with_overflow = MAX_VISIBLE_REF_CHIPS.min(all.len() - 1);
+    for candidate in (1..=max_with_overflow).rev() {
+        let hidden_count = all.len() - candidate;
+        let chips_width = widths[..candidate].iter().sum::<f32>();
+        let gaps_width = gap * candidate as f32;
+        let overflow_width = crate::ui::estimate_ref_overflow_width(hidden_count);
+        if chips_width + gaps_width + overflow_width <= budget {
+            shown = candidate;
+            break;
+        }
+    }
+
+    RefChipPlan {
+        visible: all[..shown].to_vec(),
+        hidden: all[shown..].to_vec(),
+        all,
+        max_label_width,
+    }
+}
+
+fn overflow_tooltip(hidden: &[Badge<'_>]) -> String {
+    hidden
+        .iter()
+        .map(|badge| badge.label.as_ref())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Renders one inline ref chip.
+///
+/// Keeping chip rendering in this single helper lets row layout and future
+/// drop targets share one element builder across normal and filtered rows.
+fn badge_chip(
+    id: impl Into<ElementId>,
+    badge: &Badge<'_>,
+    max_label_width: f32,
+    design: &Design,
+) -> Stateful<Div> {
+    let full_name = SharedString::from(badge.label.to_string());
+    crate::ui::ref_chip(
+        id,
+        badge.kind,
+        badge.head,
+        full_name.clone(),
+        max_label_width,
+        design,
+    )
+    .row_tooltip(move |window, cx| Tooltip::new(full_name.clone()).build(window, cx))
+}
+
+fn ref_chips_strip(
+    row_index: usize,
+    badges: &[Badge<'_>],
+    description_width: f32,
+    design: &Design,
+    entity: &Entity<RepoView>,
+) -> Option<AnyElement> {
+    if badges.is_empty() {
+        return None;
+    }
+
+    let plan = plan_ref_chips(badges, description_width);
+    let mut strip = div()
+        .flex()
+        .items_center()
+        .gap(px(crate::ui::REF_BADGE_GAP))
+        .flex_none()
+        .overflow_hidden();
+
+    for (chip_index, badge) in plan.visible.iter().enumerate() {
+        strip = strip.child(badge_chip(
+            ("commit-ref", (row_index << 8) | chip_index),
+            badge,
+            plan.max_label_width,
+            design,
+        ));
+    }
+
+    if !plan.hidden.is_empty() {
+        let tooltip = overflow_tooltip(&plan.hidden);
+        let trigger = crate::ui::ref_overflow_chip(
+            ("commit-ref-overflow-chip", row_index),
+            plan.hidden.len(),
+            design,
+        )
+        .tooltip(tooltip);
+        let all_owned: Vec<OwnedBadge> = plan
+            .all
+            .iter()
+            .map(|badge| OwnedBadge {
+                label: badge.label.to_string(),
+                kind: badge.kind,
+                head: badge.head,
+            })
+            .collect();
+        strip = strip.child(ref_overflow_popover(
+            row_index,
+            trigger,
+            all_owned,
+            design.clone(),
+            entity.clone(),
+        ));
+    }
+
+    Some(strip.into_any_element())
+}
+
+fn ref_overflow_popover(
+    row_index: usize,
+    trigger: crate::ui::RefOverflowChip,
+    refs: Vec<OwnedBadge>,
+    design: Design,
+    entity: Entity<RepoView>,
+) -> AnyElement {
+    Popover::new(("commit-ref-overflow", row_index))
+        .anchor(Anchor::TopLeft)
+        .offset(px(4.0))
+        .trigger(trigger)
+        .content(move |_, _window, cx| {
+            let popover = cx.entity();
+            let total = refs.len();
+            let mut list = v_flex()
+                .id(("commit-ref-overflow-list", row_index))
+                .gap(px(2.0))
+                .max_h(px(260.0))
+                .overflow_y_scroll();
+
+            for (item_index, item) in refs.iter().enumerate() {
+                let item = item.clone();
+                let click_item = item.clone();
+                let click_entity = entity.clone();
+                let dismiss_popover = popover.clone();
+                let glyph_data = match item.kind {
+                    RefKind::LocalBranch => style::glyph::BRANCH,
+                    RefKind::RemoteBranch => style::glyph::CLOUD,
+                    RefKind::Tag => style::glyph::TAG,
+                };
+                let icon_color = match item.kind {
+                    RefKind::LocalBranch if item.head => design.accent_text,
+                    RefKind::LocalBranch => design.accent_text,
+                    RefKind::RemoteBranch => design.remote_text,
+                    RefKind::Tag => design.tag_text,
+                };
+                let full_label = SharedString::from(item.label.clone());
+                let tooltip_label = full_label.clone();
+
+                list = list.child(
+                    crate::ui::list_row(
+                        ("commit-ref-overflow-item", (row_index << 8) | item_index),
+                        crate::ui::RowState::NORMAL.head(item.head),
+                        &design,
+                    )
+                    .h(px(26.0))
+                    .mx(px(0.0))
+                    .w_full()
+                    .cursor_pointer()
+                    .child(style::glyph_icon(glyph_data, 12.0, icon_color).flex_none())
+                    .child(div().flex_1().min_w_0().truncate().child(full_label))
+                    .when(item.head, |row| {
+                        row.child(crate::ui::status_badge(
+                            t!("history.refs.current").to_string(),
+                            crate::ui::BadgeTone::Accent,
+                            &design,
+                        ))
+                    })
+                    .row_tooltip(move |window, cx| {
+                        Tooltip::new(tooltip_label.clone()).build(window, cx)
+                    })
+                    .on_click(move |_: &ClickEvent, window, cx| {
+                        dismiss_popover.update(cx, |state, cx| state.dismiss(window, cx));
+                        click_entity.update(cx, |view, cx| {
+                            activate_ref_badge(&click_item, view, window, cx);
+                        });
+                    }),
+                );
+            }
+
+            v_flex()
+                .min_w(px(210.0))
+                .max_w(px(340.0))
+                .gap(px(4.0))
+                .child(
+                    div()
+                        .px_2()
+                        .text_size(px(design.tiny()))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(design.muted)
+                        .child(t!("history.refs.title", count = total).to_string()),
+                )
+                .child(list)
+        })
+        .into_any_element()
+}
+
+fn activate_ref_badge(
+    item: &OwnedBadge,
+    view: &mut RepoView,
+    window: &mut Window,
+    cx: &mut Context<RepoView>,
+) {
+    let is_detached_head = item.head
+        && item.label == "HEAD"
+        && view
+            .source()
+            .is_some_and(|source| matches!(source.head(), Some(HeadInfo::Detached { .. })));
+    if is_detached_head {
+        return;
+    }
+
+    let busy = view.is_busy();
+    let has_session = view.session.is_some();
+    match item.kind {
+        RefKind::LocalBranch => {
+            if item.head || !has_session || busy {
+                view.reveal_ref(RefKind::LocalBranch, &item.label, window, cx);
+            } else {
+                let branch = item.label.clone();
+                let label = t!("branch.op.checkout", branch = branch).to_string();
+                view.run_operation(Operation::Checkout { branch }, label, window, cx);
+            }
+        }
+        RefKind::RemoteBranch => {
+            if let Some(local) =
+                crate::branches::local_name_for_remote(&item.label).map(str::to_owned)
+                && has_session
+                && !busy
+            {
+                let existing = view
+                    .source()
+                    .is_some_and(|source| source.sidebar().local.iter().any(|b| b == &local));
+                crate::branches::checkout_remote(view, &item.label, &local, existing, window, cx);
+            } else {
+                view.reveal_ref(RefKind::RemoteBranch, &item.label, window, cx);
+            }
+        }
+        RefKind::Tag => {
+            view.reveal_ref(RefKind::Tag, &item.label, window, cx);
+        }
+    }
 }
 
 fn empty_pane(text: &str, design: &Design) -> AnyElement {
@@ -767,7 +1104,17 @@ fn empty_pane(text: &str, design: &Design) -> AnyElement {
 
 #[cfg(test)]
 mod tests {
+    use std::borrow::Cow;
+
     use super::*;
+
+    fn test_badge(label: &'static str, kind: RefKind, head: bool) -> Badge<'static> {
+        Badge {
+            label: Cow::Borrowed(label),
+            kind,
+            head,
+        }
+    }
 
     #[test]
     fn the_date_goes_before_the_author() {
@@ -837,5 +1184,78 @@ mod tests {
         assert!(columns.author, "a 720 px window still names the author");
         assert!(!columns.date, "the date is the first column to give way");
         assert!(columns.fits(width, graph));
+    }
+
+    #[test]
+    fn ref_chips_order_head_local_tag_then_remote_and_cap_at_two() {
+        let badges = vec![
+            test_badge("origin/main", RefKind::RemoteBranch, false),
+            test_badge("v1.0.0", RefKind::Tag, false),
+            test_badge("alpha", RefKind::LocalBranch, false),
+            test_badge("t3/topic-1", RefKind::LocalBranch, false),
+            test_badge("zeta", RefKind::LocalBranch, true),
+        ];
+
+        let plan = plan_ref_chips(&badges, 600.0);
+        let all_labels: Vec<&str> = plan.all.iter().map(|b| b.label.as_ref()).collect();
+        assert_eq!(
+            all_labels,
+            ["zeta", "alpha", "t3/topic-1", "v1.0.0", "origin/main"]
+        );
+
+        let visible_labels: Vec<&str> = plan.visible.iter().map(|b| b.label.as_ref()).collect();
+        let hidden_labels: Vec<&str> = plan.hidden.iter().map(|b| b.label.as_ref()).collect();
+        assert_eq!(visible_labels, ["zeta", "alpha"]);
+        assert_eq!(hidden_labels, ["t3/topic-1", "v1.0.0", "origin/main"]);
+        assert_eq!(
+            overflow_tooltip(&plan.hidden),
+            "t3/topic-1\nv1.0.0\norigin/main"
+        );
+    }
+
+    #[test]
+    fn ref_chips_shrink_count_on_narrow_columns() {
+        let badges = vec![
+            test_badge(
+                "feature/very-long-branch-name-alpha",
+                RefKind::LocalBranch,
+                true,
+            ),
+            test_badge(
+                "feature/very-long-branch-name-beta",
+                RefKind::LocalBranch,
+                false,
+            ),
+            test_badge("origin/main", RefKind::RemoteBranch, false),
+        ];
+
+        // Wide description shows 2 chips + `+1`.
+        let wide = plan_ref_chips(&badges, 560.0);
+        assert_eq!(wide.visible.len(), 2);
+        assert_eq!(wide.hidden.len(), 1);
+
+        // Medium description only has room for 1 max-width chip + `+2`.
+        let medium = plan_ref_chips(&badges, 305.0);
+        assert_eq!(medium.visible.len(), 1);
+        assert_eq!(medium.hidden.len(), 2);
+
+        // Very narrow description leaves only the `+3` chip so the summary stays visible.
+        let narrow = plan_ref_chips(&badges, 140.0);
+        assert_eq!(narrow.visible.len(), 0);
+        assert_eq!(narrow.hidden.len(), 3);
+    }
+
+    #[test]
+    fn single_long_branch_chip_stays_visible_without_overflow_chip() {
+        let badges = vec![test_badge(
+            "t3/an-unusually-long-branch-name-that-truncates-with-ellipsis",
+            RefKind::LocalBranch,
+            false,
+        )];
+
+        let plan = plan_ref_chips(&badges, 160.0);
+        assert_eq!(plan.visible.len(), 1);
+        assert!(plan.hidden.is_empty());
+        assert!(plan.max_label_width <= crate::ui::REF_BADGE_MAX_LABEL_WIDTH);
     }
 }
