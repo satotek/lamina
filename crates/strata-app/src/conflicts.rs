@@ -1059,18 +1059,39 @@ impl RepoView {
 
     /// Takes one whole side of the selected conflict and stages it.
     pub(crate) fn use_conflict_side(&mut self, side: ConflictSide, cx: &mut Context<Self>) {
-        if self.worktree.conflicts.pending.is_some() {
-            return;
-        }
         let Some(path) = self.worktree.selected_conflict().map(str::to_owned) else {
             return;
         };
+        self.resolve_conflict_path(path, side, cx);
+    }
+
+    /// Resolves `path` using `side` and stages the result.
+    pub(crate) fn resolve_conflict_path(
+        &mut self,
+        path: String,
+        side: ConflictSide,
+        cx: &mut Context<Self>,
+    ) {
+        if self.worktree.conflicts.pending.is_some() {
+            return;
+        }
         let Some(session) = self.session.as_ref() else {
             return;
         };
         let id = session.run(Operation::ResolveConflict { path, side });
         self.worktree.conflicts.start(id, PendingAction::Resolve);
         cx.notify();
+    }
+
+    /// Switches to the Working Tree view and opens `path` in the merge editor.
+    pub(crate) fn open_conflict_in_merge_editor(
+        &mut self,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_worktree(window, cx);
+        self.select_conflict_file(path, window, cx);
     }
 
     /// Applies a per-conflict choice and shows the new result.

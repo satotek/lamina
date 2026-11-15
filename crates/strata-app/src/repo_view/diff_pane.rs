@@ -57,6 +57,8 @@ impl RepoView {
             left.child(self.reflog_details(design))
                 .child(self.files_summary(design, cx))
                 .child(self.file_list(design, cx))
+        } else if self.uncommitted_selected {
+            left.child(self.uncommitted_details_column(design))
         } else if self.selection.is_multi() {
             let mut summary = left.child(self.commit_selection_summary(design));
             // Until the range's file list arrives there is nothing to show;
@@ -106,6 +108,8 @@ impl RepoView {
                 .min_h_0()
                 .child(if self.tree.is_open() {
                     self.tree_pane(design, cx)
+                } else if self.mode != MainMode::Reflog && self.uncommitted_selected {
+                    self.uncommitted_diff_pane(design, cx)
                 } else {
                     div()
                         .flex()

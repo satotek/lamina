@@ -1006,7 +1006,14 @@ impl RepoView {
         if self.worktree.selection.side() != Some(Side::Unstaged) {
             return;
         }
-        let paths = self.worktree.selection.paths();
+        self.stage_paths(self.worktree.selection.paths(), cx);
+    }
+
+    pub(crate) fn stage_path(&mut self, path: String, cx: &mut Context<Self>) {
+        self.stage_paths(vec![path], cx);
+    }
+
+    fn stage_paths(&mut self, paths: Vec<String>, cx: &mut Context<Self>) {
         if paths.is_empty() {
             return;
         }
@@ -1023,7 +1030,14 @@ impl RepoView {
         if self.worktree.selection.side() != Some(Side::Staged) {
             return;
         }
-        let paths = self.worktree.selection.paths();
+        self.unstage_paths(self.worktree.selection.paths(), cx);
+    }
+
+    pub(crate) fn unstage_path(&mut self, path: String, cx: &mut Context<Self>) {
+        self.unstage_paths(vec![path], cx);
+    }
+
+    fn unstage_paths(&mut self, paths: Vec<String>, cx: &mut Context<Self>) {
         if paths.is_empty() {
             return;
         }
@@ -1163,7 +1177,24 @@ impl RepoView {
         if self.worktree.selection.side() != Some(Side::Unstaged) {
             return;
         }
-        let paths = self.worktree.selection.paths();
+        self.discard_unstaged_paths(self.worktree.selection.paths(), window, cx);
+    }
+
+    pub(crate) fn discard_unstaged_path(
+        &mut self,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.discard_unstaged_paths(vec![path], window, cx);
+    }
+
+    fn discard_unstaged_paths(
+        &mut self,
+        paths: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if paths.is_empty() {
             return;
         }
@@ -1238,7 +1269,24 @@ impl RepoView {
         if self.worktree.selection.side() != Some(Side::Staged) {
             return;
         }
-        let paths = self.worktree.selection.paths();
+        self.discard_staged_paths(self.worktree.selection.paths(), window, cx);
+    }
+
+    pub(crate) fn discard_staged_path(
+        &mut self,
+        path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.discard_staged_paths(vec![path], window, cx);
+    }
+
+    fn discard_staged_paths(
+        &mut self,
+        paths: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if paths.is_empty() {
             return;
         }
@@ -1274,9 +1322,13 @@ impl RepoView {
     ) {
         // A dialog hands focus back to whatever had it when it opened. The
         // context menu that usually offers these is already closing and its
-        // focus handle dies with it, so give the dialog the panel's handle and
-        // the panel keeps its keys (Enter, s, u) after the dialog closes.
-        let focus = self.worktree.ensure_focus(cx);
+        // focus handle dies with it, so return focus to whichever view owns
+        // the surface that opened it.
+        let focus = if self.mode == MainMode::Worktree {
+            self.worktree.ensure_focus(cx)
+        } else {
+            self.view_focus()
+        };
         window.focus(&focus, cx);
         let entity = cx.weak_entity();
         crate::ui::confirm(window, cx, confirm, move |_, cx| {

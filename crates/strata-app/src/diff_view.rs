@@ -565,6 +565,64 @@ pub fn render_row_with(
     unified_row(row, colors, style, highlights, options, false, None)
 }
 
+/// Renders a slice of diff rows for a stacked multi-file diff pane, honoring
+/// split vs unified layout, wrapping, syntax highlighting, and gap actions.
+///
+/// `scope` namespaces gap-button element IDs so multiple stacked file sections
+/// never collide on `("gap-above", gap)` etc.
+pub(crate) fn render_stacked_rows(
+    scope: usize,
+    rows: &[Row],
+    view: Option<&DiffView>,
+    colors: &DiffColors,
+    style: &DiffStyle,
+    on_gap: Option<&GapHandler>,
+) -> Vec<AnyElement> {
+    if style.split {
+        let pairs = split_rows(rows);
+        return pairs
+            .iter()
+            .enumerate()
+            .map(|(index, pair)| {
+                split_row_scoped(
+                    Some(scope),
+                    *pair,
+                    rows,
+                    colors,
+                    style,
+                    view,
+                    style.wrap,
+                    split_role(&pairs, index),
+                    on_gap,
+                )
+            })
+            .collect();
+    }
+    rows.iter()
+        .enumerate()
+        .map(|(index, row)| match row {
+            Row::Gap { gap, hidden } => {
+                gap_bar_scoped(Some(scope), *gap, *hidden, colors, style, on_gap)
+            }
+            _ => {
+                let highlights = line_highlights(row, view, style.syntax);
+                unified_row(
+                    row,
+                    colors,
+                    style,
+                    highlights,
+                    RowOptions {
+                        inset: true,
+                        ..RowOptions::default()
+                    },
+                    style.wrap,
+                    row_role(rows, index),
+                )
+            }
+        })
+        .collect()
+}
+
 /// The diff pane's list of rows.
 ///
 /// Unwrapped rows all share [`DiffStyle::row_height`], so they stay in the
@@ -1007,6 +1065,24 @@ fn split_row(
     role: Option<RowRole>,
     on_gap: Option<&GapHandler>,
 ) -> AnyElement {
+    split_row_scoped(None, pair, rows, colors, style, view, wrap, role, on_gap)
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "one call per side-by-side item; a struct would only rename the fields"
+)]
+fn split_row_scoped(
+    scope: Option<usize>,
+    pair: SplitRow,
+    rows: &[Row],
+    colors: &DiffColors,
+    style: &DiffStyle,
+    view: Option<&DiffView>,
+    wrap: bool,
+    role: Option<RowRole>,
+    on_gap: Option<&GapHandler>,
+) -> AnyElement {
     match pair {
         SplitRow::Header { row } => match rows.get(row) {
             Some(Row::HunkHeader {
@@ -1018,7 +1094,9 @@ fn split_row(
             _ => div().into_any_element(),
         },
         SplitRow::Gap { row } => match rows.get(row) {
-            Some(Row::Gap { gap, hidden }) => gap_bar(*gap, *hidden, colors, style, on_gap),
+            Some(Row::Gap { gap, hidden }) => {
+                gap_bar_scoped(scope, *gap, *hidden, colors, style, on_gap)
+            }
             _ => div().into_any_element(),
         },
         SplitRow::Lines { old, new } => {
@@ -1170,25 +1248,26 @@ pub(crate) fn gap_bar(
     style: &DiffStyle,
     on_gap: Option<&GapHandler>,
 ) -> AnyElement {
-    let mut row = div()
-        .flex()
-        .items_center()
-        .justify_center()
-        .gap(px(8.0))
-        .h(px(style.row_height()))
-        .w_full()
-        .bg(colors.header)
-        .border_t_1()
-        .border_b_1()
-        .border_color(colors.border)
-        .font_family(style.mono.clone())
-        .text_size(px((style.font_size - 1.0).max(9.0)))
-        .text_color(colors.muted)
-        .child(if hidden == 1 {
+    gap_bar_scoped(None, gap, hidden, colors, style, on_gap)
+}
+
+fn gap_bar_scoped(
+    scope: Option<usize>,
+    gap: usize,
+    hidden: u32,
+    colors: &DiffColors,
+    style: &DiffStyle,
+    on_gap: Option<&GapHandler>,
+) -> AnyElement {
+    let mut row = hidden_bar_shell(
+        if hidden == 1 {
             t!("diff.hidden.one", count = hidden).to_string()
         } else {
             t!("diff.hidden.other", count = hidden).to_string()
-        });
+        },
+        colors,
+        style,
+    );
     if let Some(on_gap) = on_gap {
         for (id, label, action, tooltip) in [
             (
@@ -1211,8 +1290,12 @@ pub(crate) fn gap_bar(
             ),
         ] {
             let on_gap = Rc::clone(on_gap);
+            let button_id = match scope {
+                Some(scope) => gpui::ElementId::named_usize(format!("{id}-{scope}"), gap),
+                None => gpui::ElementId::from((id, gap)),
+            };
             row = row.child(
-                crate::ui::button((id, gap), label)
+                crate::ui::button(button_id, label)
                     .size(crate::ui::ButtonSize::Tiny)
                     .ghost()
                     .tooltip(tooltip)
@@ -1221,6 +1304,71 @@ pub(crate) fn gap_bar(
         }
     }
     row.into_any_element()
+}
+
+/// Whether a truncation bar's click reveals one step or all remaining rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CapReveal {
+    Step,
+    All,
+}
+
+/// Renders the per-file truncation bar matching [`gap_bar`] styling, offering
+/// incremental and full expansion of a capped stacked diff.
+pub(crate) fn hidden_lines_bar(
+    scope: usize,
+    hidden: usize,
+    more_label: String,
+    all_label: String,
+    colors: &DiffColors,
+    style: &DiffStyle,
+    on_reveal: impl Fn(CapReveal, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let label = if hidden == 1 {
+        t!("diff.hidden.one", count = hidden).to_string()
+    } else {
+        t!("diff.hidden.other", count = hidden).to_string()
+    };
+    let on_reveal = Rc::new(on_reveal);
+    let on_more = Rc::clone(&on_reveal);
+    hidden_bar_shell(label, colors, style)
+        .child(
+            crate::ui::button(
+                gpui::ElementId::named_usize("stacked-show-more", scope),
+                more_label,
+            )
+            .size(crate::ui::ButtonSize::Tiny)
+            .ghost()
+            .on_click(move |_event, window, cx| on_more(CapReveal::Step, window, cx)),
+        )
+        .child(
+            crate::ui::button(
+                gpui::ElementId::named_usize("stacked-show-all", scope),
+                all_label,
+            )
+            .size(crate::ui::ButtonSize::Tiny)
+            .ghost()
+            .on_click(move |_event, window, cx| on_reveal(CapReveal::All, window, cx)),
+        )
+        .into_any_element()
+}
+
+fn hidden_bar_shell(label: String, colors: &DiffColors, style: &DiffStyle) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(8.0))
+        .h(px(style.row_height()))
+        .w_full()
+        .bg(colors.header)
+        .border_t_1()
+        .border_b_1()
+        .border_color(colors.border)
+        .font_family(style.mono.clone())
+        .text_size(px((style.font_size - 1.0).max(9.0)))
+        .text_color(colors.muted)
+        .child(label)
 }
 
 fn hunk_header(

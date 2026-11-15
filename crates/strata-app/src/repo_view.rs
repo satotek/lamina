@@ -34,6 +34,7 @@ mod status_bar;
 mod title_bar;
 mod tree_view;
 mod uncommitted;
+mod uncommitted_diff;
 mod worktrees;
 
 use std::collections::HashMap;
@@ -410,6 +411,8 @@ pub struct RepoView {
     pub(crate) selected: Option<usize>,
     /// True when the synthetic uncommitted row at visual index 0 is selected.
     pub(crate) uncommitted_selected: bool,
+    /// Stacked working-tree diff state while the uncommitted row is selected.
+    pub(crate) uncommitted_diff: uncommitted_diff::UncommittedDiffState,
     /// The rows selected in the commit list. Its focused row mirrors
     /// `selected`, so single selection works exactly as it did before.
     selection: CommitSelection,
@@ -624,6 +627,7 @@ impl RepoView {
             lanes: LaneWidth::default(),
             selected: None,
             uncommitted_selected: false,
+            uncommitted_diff: uncommitted_diff::UncommittedDiffState::default(),
             selection: CommitSelection::default(),
             selection_commit: None,
             edit_selection: None,
@@ -857,6 +861,9 @@ impl RepoView {
         self.sync_selection(cx);
         self.settle_edit_selection(cx);
         self.sync_worktree(cx);
+        if self.uncommitted_selected {
+            self.sync_uncommitted_diff(cx);
+        }
         if self.mode == MainMode::Worktree {
             self.load_worktree_lfs(cx);
             self.load_lfs_locks(cx);
@@ -916,6 +923,7 @@ impl RepoView {
         self.discard_blame();
         self.cancel_diff();
         self.drop_selection_diff();
+        self.uncommitted_diff.cancel_all(self.session.as_ref());
         self.files_epoch = self.files_epoch.wrapping_add(1);
         self.tree.close();
         let worktree_diff = self.worktree.cancel_diff();
@@ -1081,6 +1089,9 @@ impl RepoView {
                 if self.compare_diff_ready(ticket, &view, cx) {
                     return;
                 }
+                if self.uncommitted_diff_ready(ticket, &view, cx) {
+                    return;
+                }
                 if self.worktree.on_diff_ready(ticket, &view) {
                     self.notify_if_active(cx);
                     return;
@@ -1100,6 +1111,9 @@ impl RepoView {
                     return;
                 }
                 if self.compare_diff_failed(ticket, &error, cx) {
+                    return;
+                }
+                if self.uncommitted_diff_failed(ticket, &error, cx) {
                     return;
                 }
                 if self.worktree.on_diff_failed(ticket, &error) {
@@ -1684,6 +1698,7 @@ impl RepoView {
         self.discard_blame();
         self.cancel_diff();
         self.drop_selection_diff();
+        self.sync_uncommitted_diff(cx);
         self.commit_scroll.scroll_to_item(0, ScrollStrategy::Center);
         self.notify_if_active(cx);
     }
@@ -1696,6 +1711,7 @@ impl RepoView {
                 return;
             }
             self.uncommitted_selected = false;
+            self.uncommitted_diff.cancel_all(self.session.as_ref());
         }
         let Some(source) = self.source() else {
             return;
@@ -1765,6 +1781,7 @@ impl RepoView {
         self.branches.clear_revealed();
         self.branches.clear_selected_extra();
         self.uncommitted_selected = false;
+        self.uncommitted_diff.cancel_all(self.session.as_ref());
         self.selected = index;
         self.selection_commit = commit;
         // The reveal mark belongs to the ref the sidebar showed, not to
@@ -2123,6 +2140,7 @@ impl RepoView {
             .show_uncommitted_changes;
         if !show_uncommitted && self.uncommitted_selected {
             self.uncommitted_selected = false;
+            self.uncommitted_diff.cancel_all(self.session.as_ref());
             self.sync_selection(cx);
         }
         if !self.active {
@@ -2134,6 +2152,9 @@ impl RepoView {
             return;
         }
         self.diff_options = options;
+        if self.uncommitted_selected {
+            self.sync_uncommitted_diff(cx);
+        }
         if self.file_history.is_some() {
             self.request_history_diff(cx);
         } else if self.compare.is_some() {
