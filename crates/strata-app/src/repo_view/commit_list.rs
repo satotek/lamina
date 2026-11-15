@@ -40,6 +40,8 @@ const MAX_VISIBLE_REF_CHIPS: usize = 2;
 /// not squeeze the commit subject off-screen.
 const DESCRIPTION_SUBJECT_RESERVE: f32 = 105.0;
 const MIN_SINGLE_CHIP_LABEL_WIDTH: f32 = 48.0;
+/// Approximate space taken by the right-aligned changed-file count pill and its gap.
+const CHANGED_COUNT_RESERVE: f32 = 32.0;
 
 /// A row's own left and right padding.
 const ROW_PADDING: f32 = 24.0;
@@ -161,14 +163,17 @@ impl RepoView {
         let show_remote = design.show_remote_branches;
         let show_tags = design.show_tags;
         let show_signatures = design.show_commit_signatures;
+        let show_changed_counts = design.show_changed_file_count;
         let request_signatures = show_signatures && self.session.is_some() && !self.smoke;
+        let request_changed_counts = show_changed_counts && self.session.is_some() && !self.smoke;
         let list_entity = entity.clone();
         let defer_entity = entity.clone();
         let source_for_list = source.clone();
         let list = uniform_list("commits", count, move |range, window, cx| {
             let mut uncached = Vec::new();
+            let mut visible_for_counts = Vec::new();
             let items = {
-                let view = show_signatures.then(|| list_entity.read(cx));
+                let view = (show_signatures || show_changed_counts).then(|| list_entity.read(cx));
                 range
                     .map(|position| {
                         let entity = list_entity.clone();
@@ -183,14 +188,29 @@ impl RepoView {
                             return div().into_any_element();
                         };
                         let commit_id = source_for_list.commit_id(index);
-                        let sig_state = view.as_ref().and_then(|view| {
-                            let oid = commit_id?;
-                            let state = view.commit_signature_state(oid);
-                            if request_signatures && view.should_schedule_signature(oid) {
-                                uncached.push(oid);
-                            }
-                            state
-                        });
+                        let sig_state = if show_signatures {
+                            view.as_ref().and_then(|view| {
+                                let oid = commit_id?;
+                                let state = view.commit_signature_state(oid);
+                                if request_signatures && view.should_schedule_signature(oid) {
+                                    uncached.push(oid);
+                                }
+                                state
+                            })
+                        } else {
+                            None
+                        };
+                        let changed_count = if show_changed_counts {
+                            view.as_ref().and_then(|view| {
+                                let oid = commit_id?;
+                                if request_changed_counts {
+                                    visible_for_counts.push(oid);
+                                }
+                                view.commit_changed_file_count(oid)
+                            })
+                        } else {
+                            None
+                        };
                         // The menu offers a delete for each tag on the commit, so
                         // collect them before the badge filters hide any.
                         let target = CommitTarget {
@@ -227,6 +247,11 @@ impl RepoView {
                             graph_canvas::indent(row.graph.width)
                         };
                         let desc_width = columns.description_width(width, row_graph_width);
+                        let chip_desc_width = if show_changed_counts {
+                            (desc_width - CHANGED_COUNT_RESERVE).max(0.0)
+                        } else {
+                            desc_width
+                        };
                         let element = if filtered {
                             // The graph is hidden while filtered: spaced-out rows
                             // would draw lanes that never existed between them.
@@ -234,11 +259,12 @@ impl RepoView {
                                 index,
                                 &row,
                                 sig_state.as_ref(),
+                                changed_count,
                                 row_ui_state,
                                 &date,
                                 &row_design,
                                 columns,
-                                desc_width,
+                                chip_desc_width,
                                 &entity,
                             )
                         } else {
@@ -246,11 +272,12 @@ impl RepoView {
                                 index,
                                 &row,
                                 sig_state.as_ref(),
+                                changed_count,
                                 row_ui_state,
                                 &date,
                                 &row_design,
                                 columns,
-                                desc_width,
+                                chip_desc_width,
                                 &entity,
                             )
                         }
@@ -306,11 +333,16 @@ impl RepoView {
                     })
                     .collect::<Vec<_>>()
             };
-            if !uncached.is_empty() {
+            if !uncached.is_empty() || request_changed_counts {
                 let defer_entity = defer_entity.clone();
                 window.defer(cx, move |_, cx| {
                     defer_entity.update(cx, |this, cx| {
-                        this.schedule_visible_signatures(uncached, cx);
+                        if !uncached.is_empty() {
+                            this.schedule_visible_signatures(uncached, cx);
+                        }
+                        if request_changed_counts {
+                            this.observe_visible_changed_file_counts(visible_for_counts, cx);
+                        }
                     });
                 });
             }
@@ -520,10 +552,67 @@ fn row_state(selected: bool, revealed: bool) -> crate::ui::RowState {
 }
 
 #[allow(clippy::too_many_arguments)]
+fn commit_description_cell(
+    row_index: usize,
+    sig_prefix: &'static str,
+    data: &RowData<'_>,
+    signature: Option<&crate::ui::CommitSignatureState>,
+    changed_count: Option<usize>,
+    design: &Design,
+    description_width: f32,
+    entity: &Entity<RepoView>,
+) -> Div {
+    div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .overflow_hidden()
+        .when_some(
+            ref_chips_strip(row_index, &data.badges, description_width, design, entity),
+            |cell, strip| cell.child(strip),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_color(design.text)
+                .when(data.badges.iter().any(|badge| badge.head), |text| {
+                    text.font_weight(FontWeight::SEMIBOLD)
+                })
+                .child(data.summary.to_string()),
+        )
+        .when_some(
+            signature
+                .and_then(|sig| crate::ui::signature_badge((sig_prefix, row_index), sig, design)),
+            |cell, badge| cell.child(badge),
+        )
+        .when(data.shallow_boundary, |cell| {
+            cell.child(
+                div()
+                    .flex_none()
+                    .text_size(px(design.tiny()))
+                    .text_color(design.muted)
+                    .child(t!("history.shallow_boundary").to_string()),
+            )
+        })
+        .when_some(changed_count, |cell, count| {
+            cell.child(div().flex_1().min_w_0())
+                .child(crate::ui::changed_file_count_badge(
+                    ("commit-files", row_index),
+                    count,
+                    design,
+                ))
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
 fn commit_row(
     row_index: usize,
     data: &RowData<'_>,
     signature: Option<&crate::ui::CommitSignatureState>,
+    changed_count: Option<usize>,
     state: crate::ui::RowState,
     date: &str,
     design: &Design,
@@ -549,44 +638,16 @@ fn commit_row(
             fade,
             design.muted,
         ))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .overflow_hidden()
-                .when_some(
-                    ref_chips_strip(row_index, &data.badges, description_width, design, entity),
-                    |cell, strip| cell.child(strip),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_color(design.text)
-                        .when(data.badges.iter().any(|badge| badge.head), |text| {
-                            text.font_weight(FontWeight::SEMIBOLD)
-                        })
-                        .child(data.summary.to_string()),
-                )
-                .when_some(
-                    signature.and_then(|sig| {
-                        crate::ui::signature_badge(("commit-sig", row_index), sig, design)
-                    }),
-                    |cell, badge| cell.child(badge),
-                )
-                .when(data.shallow_boundary, |cell| {
-                    cell.child(
-                        div()
-                            .flex_none()
-                            .text_size(px(design.tiny()))
-                            .text_color(design.muted)
-                            .child(t!("history.shallow_boundary").to_string()),
-                    )
-                }),
-        )
+        .child(commit_description_cell(
+            row_index,
+            "commit-sig",
+            data,
+            signature,
+            changed_count,
+            design,
+            description_width,
+            entity,
+        ))
         .when(columns.author, |row| {
             row.child(
                 div()
@@ -637,6 +698,7 @@ fn filtered_commit_row(
     row_index: usize,
     data: &RowData<'_>,
     signature: Option<&crate::ui::CommitSignatureState>,
+    changed_count: Option<usize>,
     state: crate::ui::RowState,
     date: &str,
     design: &Design,
@@ -653,44 +715,16 @@ fn filtered_commit_row(
         .mx(px(0.0))
         .px_3()
         .child(div().w(px(graph_canvas::search_indent())).flex_none())
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .overflow_hidden()
-                .when_some(
-                    ref_chips_strip(row_index, &data.badges, description_width, design, entity),
-                    |cell, strip| cell.child(strip),
-                )
-                .child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_color(design.text)
-                        .when(data.badges.iter().any(|badge| badge.head), |text| {
-                            text.font_weight(FontWeight::SEMIBOLD)
-                        })
-                        .child(data.summary.to_string()),
-                )
-                .when_some(
-                    signature.and_then(|sig| {
-                        crate::ui::signature_badge(("filtered-commit-sig", row_index), sig, design)
-                    }),
-                    |cell, badge| cell.child(badge),
-                )
-                .when(data.shallow_boundary, |cell| {
-                    cell.child(
-                        div()
-                            .flex_none()
-                            .text_size(px(design.tiny()))
-                            .text_color(design.muted)
-                            .child(t!("history.shallow_boundary").to_string()),
-                    )
-                }),
-        )
+        .child(commit_description_cell(
+            row_index,
+            "filtered-commit-sig",
+            data,
+            signature,
+            changed_count,
+            design,
+            description_width,
+            entity,
+        ))
         .when(columns.author, |row| {
             row.child(
                 div()

@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 
-use gix::bstr::{BString, ByteSlice};
+use gix::bstr::{BStr, BString, ByteSlice};
 use gix::diff::blob::{Diff, InternedInput};
 use gix::object::tree::EntryMode;
 use gix::object::tree::diff::ChangeDetached;
@@ -201,30 +201,59 @@ impl Repo {
         Ok(files)
     }
 
+    /// Count of paths changed by `commit` against its first parent (or the
+    /// empty tree for a root commit / shallow boundary).
+    ///
+    /// Runs a tree-to-tree walk without inflating any blobs and pairs exact
+    /// renames by object id and compatible entry kind so renames count as one
+    /// changed file without content diffs. Never touches [`CommitDiffCache`],
+    /// so visible-row counting while scrolling cannot evict the selected
+    /// commit's cached diff.
+    pub fn commit_changed_file_count(&self, commit: Oid) -> Result<usize> {
+        let repo = self.local();
+        let (parent_tree, tree) = self.first_parent_tree_pair(&repo, commit)?;
+        let mut visitor = CountTreeVisitor::new(Oid::empty_blob(repo.object_hash()));
+        let mut state = gix::diff::tree::State::default();
+        gix::diff::tree(
+            TreeRefIter::from_bytes(&parent_tree.data, parent_tree.id.kind()),
+            TreeRefIter::from_bytes(&tree.data, tree.id.kind()),
+            &mut state,
+            &repo.objects,
+            &mut visitor,
+        )
+        .map_err(Error::gix)?;
+        Ok(visitor.finish())
+    }
+
+    fn first_parent_tree_pair<'r>(
+        &self,
+        repo: &'r gix::Repository,
+        commit: Oid,
+    ) -> Result<(gix::Tree<'r>, gix::Tree<'r>)> {
+        // A shallow boundary is a root here even though its commit object still
+        // names parents that this clone does not have.
+        let boundary = Shallow::load(repo)?.is_boundary(commit);
+        let commit = repo.find_commit(commit).map_err(Error::gix)?;
+        let tree = commit.tree().map_err(Error::gix)?;
+        let parent_tree = match commit.parent_ids().next() {
+            Some(parent) if !boundary => repo
+                .find_commit(parent.detach())
+                .map_err(Error::gix)?
+                .tree()
+                .map_err(Error::gix)?,
+            // A root commit added everything, so the empty tree is the other side.
+            _ => repo.empty_tree(),
+        };
+        Ok((parent_tree, tree))
+    }
+
     fn diff_first_parent(&self, commit: Oid) -> Result<Vec<ChangeDetached>> {
         #[cfg(test)]
         self.commit_diffs().record_tree_diff();
 
         let repo = self.local();
-        // A shallow boundary is a root here even though its commit object still
-        // names parents that this clone does not have.
-        let boundary = Shallow::load(&repo)?.is_boundary(commit);
-        let commit = repo.find_commit(commit).map_err(Error::gix)?;
-        let tree = commit.tree().map_err(Error::gix)?;
-        let parent_tree = match commit.parent_ids().next() {
-            Some(parent) if !boundary => Some(
-                repo.find_commit(parent.detach())
-                    .map_err(Error::gix)?
-                    .tree()
-                    .map_err(Error::gix)?,
-            ),
-            // A root commit added everything, so the empty tree is the other side.
-            _ => None,
-        };
-        let empty = repo.empty_tree();
-        let parent_tree = parent_tree.as_ref().unwrap_or(&empty);
-
-        tree_changes(&repo, parent_tree, &tree)
+        let (parent_tree, tree) = self.first_parent_tree_pair(&repo, commit)?;
+        tree_changes(&repo, &parent_tree, &tree)
     }
 
     fn commit_diffs(&self) -> MutexGuard<'_, CommitDiffCache> {
@@ -488,6 +517,124 @@ pub(crate) fn tree_changes(
     .map_err(Error::gix)?;
 
     Ok(recorder.records.into_iter().map(detached_change).collect())
+}
+
+struct CountTreeVisitor {
+    empty_blob: Oid,
+    modified: usize,
+    unpaired_empty: usize,
+    additions: Vec<(Oid, u8)>,
+    deletions: Vec<(Oid, u8)>,
+}
+
+impl CountTreeVisitor {
+    fn new(empty_blob: Oid) -> Self {
+        Self {
+            empty_blob,
+            modified: 0,
+            unpaired_empty: 0,
+            additions: Vec::new(),
+            deletions: Vec::new(),
+        }
+    }
+
+    fn record_addition(&mut self, oid: Oid, mode: EntryMode) {
+        if oid == self.empty_blob {
+            self.unpaired_empty += 1;
+        } else {
+            self.additions.push((oid, entry_kind_group(mode)));
+        }
+    }
+
+    fn record_deletion(&mut self, oid: Oid, mode: EntryMode) {
+        if oid == self.empty_blob {
+            self.unpaired_empty += 1;
+        } else {
+            self.deletions.push((oid, entry_kind_group(mode)));
+        }
+    }
+
+    fn finish(mut self) -> usize {
+        let paired = if self.additions.is_empty() || self.deletions.is_empty() {
+            0
+        } else {
+            self.additions.sort_unstable();
+            self.deletions.sort_unstable();
+            let (mut i, mut j, mut matches) = (0, 0, 0);
+            while i < self.additions.len() && j < self.deletions.len() {
+                match self.additions[i].cmp(&self.deletions[j]) {
+                    std::cmp::Ordering::Equal => {
+                        matches += 1;
+                        i += 1;
+                        j += 1;
+                    }
+                    std::cmp::Ordering::Less => i += 1,
+                    std::cmp::Ordering::Greater => j += 1,
+                }
+            }
+            matches
+        };
+        self.modified + self.unpaired_empty + self.additions.len() + self.deletions.len() - paired
+    }
+}
+
+fn entry_kind_group(mode: EntryMode) -> u8 {
+    use gix::object::tree::EntryKind::*;
+    match mode.kind() {
+        Blob | BlobExecutable => 0,
+        Link => 1,
+        Commit => 2,
+        Tree => 3,
+    }
+}
+
+impl gix::diff::tree::Visit for CountTreeVisitor {
+    fn pop_front_tracked_path_and_set_current(&mut self) {}
+
+    fn push_back_tracked_path_component(&mut self, _component: &BStr) {}
+
+    fn push_path_component(&mut self, _component: &BStr) {}
+
+    fn pop_path_component(&mut self) {}
+
+    fn visit(&mut self, change: gix::diff::tree::visit::Change) -> gix::diff::tree::visit::Action {
+        use gix::diff::tree::visit::{Action, Change};
+
+        match change {
+            Change::Addition {
+                entry_mode, oid, ..
+            } => {
+                if !entry_mode.is_tree() {
+                    self.record_addition(oid, entry_mode);
+                }
+            }
+            Change::Deletion {
+                entry_mode, oid, ..
+            } => {
+                if !entry_mode.is_tree() {
+                    self.record_deletion(oid, entry_mode);
+                }
+            }
+            Change::Modification {
+                previous_entry_mode,
+                previous_oid,
+                entry_mode,
+                oid,
+            } => {
+                if previous_entry_mode.is_tree() && entry_mode.is_tree() {
+                    return Action::Continue(());
+                }
+                if entry_mode.is_tree() {
+                    self.record_deletion(previous_oid, previous_entry_mode);
+                } else if previous_entry_mode.is_tree() {
+                    self.record_addition(oid, entry_mode);
+                } else {
+                    self.modified += 1;
+                }
+            }
+        }
+        Action::Continue(())
+    }
 }
 
 /// One file of a first-parent tree diff, before its lines are counted.
@@ -1343,5 +1490,81 @@ mod tests {
         assert_eq!(handle.rewrite_pass_count(), 4);
         handle.commit_changes(commits[2]).expect("commit changes");
         assert_eq!(handle.rewrite_pass_count(), 4);
+    }
+
+    #[test]
+    fn commit_changed_file_count_handles_root_normal_merge_and_rename() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "alpha\n");
+        repo.write("dir/b.txt", "beta\n");
+        repo.write("dir/sub/c.txt", "gamma\n");
+        let root = repo.commit("root");
+
+        // Root commit counts every file in the tree.
+        let handle = repo.open();
+        assert_eq!(
+            handle
+                .commit_changed_file_count(root)
+                .expect("root file count"),
+            3
+        );
+        assert_eq!(
+            handle.cached_commit_diffs(),
+            0,
+            "fast file count must not populate or evict the diff cache"
+        );
+
+        // Normal commit: one modified, one added, one deleted -> 3.
+        repo.write("a.txt", "alpha updated\n");
+        repo.write("added.txt", "new\n");
+        std::fs::remove_file(repo.path().join("dir/b.txt")).expect("remove dir/b.txt");
+        let normal = repo.commit("modify add delete");
+        assert_eq!(
+            handle
+                .commit_changed_file_count(normal)
+                .expect("normal file count"),
+            3
+        );
+
+        // Exact rename (`git mv`): counts as 1 changed file, not 2.
+        std::fs::create_dir_all(repo.path().join("moved")).expect("create moved dir");
+        repo.git(&["mv", "dir/sub/c.txt", "moved/c.txt"]);
+        let rename = repo.commit("rename file");
+        assert_eq!(
+            handle
+                .commit_changed_file_count(rename)
+                .expect("rename file count"),
+            1
+        );
+
+        // Merge commit: counts differences against the first parent only.
+        repo.git(&["checkout", "-q", "-b", "side", &normal.to_string()]);
+        repo.write("side1.txt", "side one\n");
+        repo.write("side2.txt", "side two\n");
+        repo.commit("side work");
+
+        repo.git(&["checkout", "-q", "main"]);
+        repo.git(&["merge", "-q", "--no-ff", "-m", "merge side", "side"]);
+        let merge = repo.head();
+        assert_eq!(
+            handle
+                .commit_changed_file_count(merge)
+                .expect("merge file count"),
+            2
+        );
+    }
+
+    #[test]
+    fn commit_changed_file_count_treats_shallow_boundary_as_root() {
+        let (_source, clone) = shallow_clone_fixture(&["--depth", "2"]);
+        let handle = clone.open();
+        let boundary = clone.rev("HEAD^1");
+
+        assert_eq!(
+            handle
+                .commit_changed_file_count(boundary)
+                .expect("boundary file count"),
+            4
+        );
     }
 }

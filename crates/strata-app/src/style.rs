@@ -108,6 +108,8 @@ pub struct Design {
     pub show_stashes: bool,
     /// `history.show_commit_signatures`; hides signature badges and verification.
     pub show_commit_signatures: bool,
+    /// `history.show_changed_file_count`; hides changed-file count pills.
+    pub show_changed_file_count: bool,
     /// `behaviour.summary_length_hint`, the commit box's counter target.
     pub summary_hint: u32,
     /// UI text size, from `appearance.ui_font_size`.
@@ -205,6 +207,7 @@ impl Design {
             show_tags: settings.history.show_tags,
             show_stashes: settings.history.show_stashes,
             show_commit_signatures: settings.history.show_commit_signatures,
+            show_changed_file_count: settings.history.show_changed_file_count,
             summary_hint: settings.behaviour.summary_length_hint,
             ui: settings.appearance.ui_font_size,
             code: settings

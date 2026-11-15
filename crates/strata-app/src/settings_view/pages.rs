@@ -360,6 +360,18 @@ fn history(control: f32, design: &Design) -> SettingPage {
             .description(t!("settings.history.commit_signatures_description").to_string()),
         ),
     )
+    .groups(
+        card(t!("settings.history.rows").to_string()).item(
+            SettingItem::new(
+                t!("settings.history.changed_file_count").to_string(),
+                toggle(
+                    |settings| settings.history.show_changed_file_count,
+                    change::show_changed_file_count,
+                ),
+            )
+            .description(t!("settings.history.changed_file_count_description").to_string()),
+        ),
+    )
 }
 
 fn behaviour(control: f32, design: &Design) -> SettingPage {

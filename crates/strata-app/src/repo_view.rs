@@ -7,6 +7,7 @@
 //! session, whose own workers do the work.
 
 mod blame_view;
+mod changed_counts;
 mod chrome;
 mod commit_graph;
 mod commit_list;
@@ -454,6 +455,8 @@ pub struct RepoView {
     selection_diff: selection_diff::SelectionDiff,
     signatures: signatures::SignatureTracker,
     show_signatures: bool,
+    changed_counts: changed_counts::ChangedFileCountTracker,
+    show_changed_file_count: bool,
     /// The selected commit's file tree while it replaces the diff pane.
     tree: tree_view::TreeBrowser,
     /// The blame pane while it replaces the diff pane.
@@ -641,6 +644,10 @@ impl RepoView {
             show_signatures: crate::settings::Settings::get(cx)
                 .history
                 .show_commit_signatures,
+            changed_counts: changed_counts::ChangedFileCountTracker::default(),
+            show_changed_file_count: crate::settings::Settings::get(cx)
+                .history
+                .show_changed_file_count,
             tree: tree_view::TreeBrowser::default(),
             blame: blame_view::BlameView::default(),
             diff: DiffSlot::default(),
@@ -1985,6 +1992,13 @@ impl RepoView {
         if show_signatures != self.show_signatures {
             self.show_signatures = show_signatures;
             self.sync_signature_setting(cx);
+        }
+        let show_changed_file_count = crate::settings::Settings::get(cx)
+            .history
+            .show_changed_file_count;
+        if show_changed_file_count != self.show_changed_file_count {
+            self.show_changed_file_count = show_changed_file_count;
+            self.sync_changed_file_count_setting(cx);
         }
         if !self.active {
             return;

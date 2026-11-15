@@ -322,6 +322,36 @@ pub fn count_pill(count: impl ToString, design: &Design) -> AnyElement {
         .into_any_element()
 }
 
+/// A subtle muted pill showing how many files a commit changed.
+pub fn changed_file_count_badge(
+    id: impl Into<ElementId>,
+    count: usize,
+    design: &Design,
+) -> AnyElement {
+    let tooltip = SharedString::from(if count == 1 {
+        t!("history.changed_files.one", count = count).to_string()
+    } else {
+        t!("history.changed_files.other", count = count).to_string()
+    });
+    div()
+        .id(id)
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .min_w(px(18.0))
+        .h(px(16.0))
+        .px(px(5.0))
+        .rounded_full()
+        .bg(design.field)
+        .text_size(px(design.tiny()))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(design.muted)
+        .child(count.to_string())
+        .row_tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+        .into_any_element()
+}
+
 /// A round initials avatar, coloured by the author's email.
 pub fn avatar(text: impl Into<SharedString>, color: Hsla, size: f32) -> AnyElement {
     div()
