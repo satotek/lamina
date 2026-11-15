@@ -931,7 +931,7 @@ fn unified_row(
 
             // The tint and the gutters live in this box, inside the card's
             // border. Without a role (the staging pane) it is the whole row.
-            let mut body = div().flex().flex_1().min_w_0().w_full();
+            let mut body = div().flex().flex_1().min_w_0().w_full().overflow_hidden();
             body = if wrap {
                 body.items_start().min_h(px(style.row_height()))
             } else {
@@ -1048,7 +1048,7 @@ fn split_row(
                 outer.items_center().h(px(style.row_height()))
             };
 
-            let mut card = div().flex().flex_1().min_w_0().w_full();
+            let mut card = div().flex().flex_1().min_w_0().w_full().overflow_hidden();
             if !loose {
                 card = card.border_l_1().border_r_1().border_color(colors.border);
             }
@@ -1115,11 +1115,14 @@ fn side_cell(
         None => (None, ""),
     };
 
+    // An unwrapped line is as wide as its text, so a long one would paint over
+    // the neighbouring column; the clip keeps each side inside its own half.
     let mut cell = div()
         .flex()
         .flex_1()
         .min_w_0()
         .w_full()
+        .overflow_hidden()
         .border_l_2()
         .border_color(match side {
             // The divider between the columns, drawn on the new side only.
