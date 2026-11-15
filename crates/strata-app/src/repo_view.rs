@@ -3064,6 +3064,8 @@ mod tests {
         fn prepare_app(cx: &mut App) {
             cx.set_quit_mode(QuitMode::Explicit);
             gpui_component::init(cx);
+            // Only Unix overrides the shell, so Windows never mutates it.
+            #[cfg_attr(not(unix), allow(unused_mut))]
             let mut settings = crate::settings::Settings::default();
             #[cfg(unix)]
             {

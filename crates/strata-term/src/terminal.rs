@@ -2433,6 +2433,8 @@ fn reap_child_after_eof(
 }
 
 fn terminate_and_reap(child: &mut Box<dyn portable_pty::Child + Send + Sync>) {
+    // Read before kill: the id may be gone once the child is reaped.
+    #[cfg(unix)]
     let pid = child.process_id();
     let _ = child.kill();
 

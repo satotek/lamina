@@ -1213,6 +1213,8 @@ mod tests {
         cx.update(|cx| {
             cx.set_quit_mode(gpui::QuitMode::Explicit);
             gpui_component::init(cx);
+            // Only Unix overrides the shell, so Windows never mutates it.
+            #[cfg_attr(not(unix), allow(unused_mut))]
             let mut settings = Settings::default();
             #[cfg(unix)]
             {
