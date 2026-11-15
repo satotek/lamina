@@ -6,6 +6,8 @@
 pub mod askpass;
 pub mod diff;
 pub mod encoding;
+#[cfg(unix)]
+pub mod env_path;
 pub mod error;
 pub mod forge;
 pub mod git_cli;

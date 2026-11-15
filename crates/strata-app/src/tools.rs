@@ -1,10 +1,11 @@
 //! Detection of the optional ghq and GitHub CLI installations.
 //!
-//! Both programs are looked up once at startup on the background executor,
-//! never on the UI thread, and the answer is kept in a global for the session.
-//! Toggling either setting re-runs detection. A missing program is an ordinary
-//! state, not an error: the UI keeps working and shows why its integration is
-//! disabled.
+//! Both programs are looked up on the background executor, never on the UI
+//! thread, and the answer is kept in a global for the session. Detection runs
+//! at startup, when a tool's setting changes and when the settings window
+//! opens, so a program installed while Strata runs is found without a restart.
+//! A missing program is an ordinary state, not an error: the UI keeps working
+//! and shows why its integration is disabled.
 
 use gpui::{App, Global};
 
@@ -77,8 +78,8 @@ pub fn init(cx: &mut App) {
     redetect(cx);
 }
 
-/// Runs both detections again, off the UI thread. Called at startup and when a
-/// tool's on/off setting changes.
+/// Runs both detections again, off the UI thread. Called at startup, when a
+/// tool's on/off setting changes, and when the settings window opens.
 pub fn redetect(cx: &mut App) {
     let root = Settings::get(cx).tools.ghq.root.clone();
     let generation = {
@@ -89,42 +90,47 @@ pub fn redetect(cx: &mut App) {
     };
 
     let task = cx.background_executor().spawn(async move {
+        // The lookup has to happen here, next to the detection, because it is
+        // what tells "not installed" from "installed but unusable".
+        let ghq_installed = core_tools::find_binary("ghq").is_some();
+        let gh_installed = core_tools::find_binary("gh").is_some();
         (
-            core_tools::detect_ghq(root.as_deref()),
-            core_tools::detect_gh(),
+            install_state(ghq_installed, core_tools::detect_ghq(root.as_deref())),
+            install_state(gh_installed, core_tools::detect_gh()),
         )
     });
     cx.spawn(async move |cx| {
-        let (ghq, gh) = task.await;
+        let ((ghq, ghq_error), (gh, gh_error)) = task.await;
         cx.update_global::<Tooling, _>(|tooling, cx| {
             if tooling.generation != generation {
                 return;
             }
             tooling.detecting = false;
-            match ghq {
-                Ok(info) => {
-                    tooling.ghq = Some(info);
-                    tooling.ghq_error = None;
-                }
-                Err(error) => {
-                    tooling.ghq = None;
-                    tooling.ghq_error = Some(error.to_string());
-                }
-            }
-            match gh {
-                Ok(info) => {
-                    tooling.gh = Some(info);
-                    tooling.gh_error = None;
-                }
-                Err(error) => {
-                    tooling.gh = None;
-                    tooling.gh_error = Some(error.to_string());
-                }
-            }
+            tooling.ghq = ghq;
+            tooling.ghq_error = ghq_error;
+            tooling.gh = gh;
+            tooling.gh_error = gh_error;
             cx.refresh_windows();
         });
     })
     .detach();
+}
+
+/// Splits a detection result into the stored tool and the message a row shows.
+///
+/// A program that is not on PATH is not a failure to report: each row has its
+/// own localized "not installed" text, while the core's message is English and
+/// names the executable. Every other failure keeps the core message, which says
+/// which command failed.
+fn install_state<T>(
+    installed: bool,
+    result: strata_core::Result<T>,
+) -> (Option<T>, Option<String>) {
+    match result {
+        Ok(tool) => (Some(tool), None),
+        Err(_) if !installed => (None, None),
+        Err(error) => (None, Some(error.to_string())),
+    }
 }
 
 #[cfg(test)]
@@ -180,5 +186,54 @@ mod tests {
             ..Tooling::default()
         };
         assert_eq!(tooling.ghq_reason(), "ghq root failed: permission denied");
+    }
+
+    #[test]
+    fn a_program_missing_from_path_keeps_the_localized_not_installed_text() {
+        // The core reports "ghq is not installed" in English; the row must not
+        // show that, because it has its own translation of the same state.
+        let (ghq, error) = install_state::<GhqInfo>(
+            false,
+            Err(strata_core::Error::other("ghq is not installed")),
+        );
+        assert!(ghq.is_none());
+        assert_eq!(error, None);
+
+        let tooling = Tooling {
+            ghq_error: error,
+            ..Tooling::default()
+        };
+        assert_eq!(tooling.ghq_reason(), t!("settings.tools.ghq_missing"));
+    }
+
+    #[test]
+    fn an_installed_program_that_fails_keeps_the_core_message() {
+        let (gh, error) = install_state::<GhInfo>(
+            true,
+            Err(strata_core::Error::other(
+                "gh auth status failed: permission denied",
+            )),
+        );
+        assert!(gh.is_none());
+
+        let tooling = Tooling {
+            gh_error: error,
+            ..Tooling::default()
+        };
+        assert_eq!(
+            tooling.gh_reason(),
+            "gh auth status failed: permission denied"
+        );
+    }
+
+    #[test]
+    fn a_successful_detection_stores_the_tool_and_no_error() {
+        let (gh, error) = install_state(true, Ok(gh(true)));
+        assert!(error.is_none());
+        let tooling = Tooling {
+            gh,
+            ..Tooling::default()
+        };
+        assert_eq!(tooling.gh_reason(), "");
     }
 }

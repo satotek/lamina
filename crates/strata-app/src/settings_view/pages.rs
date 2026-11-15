@@ -454,7 +454,7 @@ fn tools(control: f32, design: &Design) -> SettingPage {
             .description(t!("settings.tools.use_ghq_description").to_string()),
             SettingItem::new(
                 t!("settings.tools.status").to_string(),
-                SettingField::render(ghq_status),
+                SettingField::render(tool_status_row("redetect-ghq", ghq_status)),
             ),
             SettingItem::new(
                 t!("settings.tools.root_override").to_string(),
@@ -485,7 +485,7 @@ fn tools(control: f32, design: &Design) -> SettingPage {
             .description(t!("settings.tools.use_gh_description").to_string()),
             SettingItem::new(
                 t!("settings.tools.status").to_string(),
-                SettingField::render(gh_status),
+                SettingField::render(tool_status_row("redetect-gh", gh_status)),
             ),
         ]),
     )
@@ -1456,6 +1456,28 @@ fn tool_toggle(get: fn(&Settings) -> bool, set: fn(&mut Settings, bool)) -> Sett
             cx.refresh_windows();
         },
     )
+}
+
+/// A tool's status row with the button that runs detection again, so a program
+/// installed while Strata runs shows up without a restart.
+fn tool_status_row(
+    id: &'static str,
+    status: fn(&gpui_component::setting::RenderOptions, &mut Window, &mut App) -> AnyElement,
+) -> impl Fn(&gpui_component::setting::RenderOptions, &mut Window, &mut App) -> AnyElement {
+    move |options, window, cx| {
+        let detecting = Tooling::get(cx).is_some_and(Tooling::detecting);
+        h_flex()
+            .gap_2()
+            .items_center()
+            .child(status(options, window, cx))
+            .child(
+                crate::ui::button(id, t!("settings.tools.redetect").to_string())
+                    .size(crate::ui::ButtonSize::Tiny)
+                    .disabled(detecting)
+                    .on_click(|_, _, cx| crate::tools::redetect(cx)),
+            )
+            .into_any_element()
+    }
 }
 
 /// What ghq detection found: path, version and the effective root.

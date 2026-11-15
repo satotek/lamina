@@ -82,6 +82,15 @@ fn main() {
         std::process::exit(code);
     }
     env_logger::init();
+
+    // A launch from Finder, the Dock or a desktop file inherits the minimal
+    // PATH the session started with, so Homebrew, Nix and ~/.local/bin tools
+    // are invisible and `git` resolves to the system copy. The login shell
+    // knows the real list; ask it once, before any thread exists that could
+    // have inherited the old value.
+    #[cfg(unix)]
+    inherit_login_shell_path();
+
     let parsed = debug_launch::parse_args();
     if parsed.help {
         println!("{}", debug_launch::help_text());
@@ -144,6 +153,16 @@ fn main() {
         keymap::report_to_window(cx);
         commands::report_to_window(cx);
     });
+}
+
+#[cfg(unix)]
+fn inherit_login_shell_path() {
+    let path = strata_core::env_path::login_shell_path();
+    // SAFETY: the GPUI application, the background executor and the logger's
+    // writer are all created after this. The only other thread that can exist
+    // is the login-shell query's pipe reader, which never touches the
+    // environment, so nothing reads it while it is replaced.
+    unsafe { std::env::set_var("PATH", path) };
 }
 
 fn open_start(start: StartMode, debug: DebugLaunch, cx: &mut App) {

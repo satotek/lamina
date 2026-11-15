@@ -7786,6 +7786,7 @@ dependencies = [
  "gix",
  "imara-diff",
  "insta",
+ "log",
  "memchr",
  "notify",
  "regex",
