@@ -10,8 +10,6 @@ Strata is a fast, lightweight native Git client for macOS and Windows (with Linu
 
 Strata is in early (`0.x`) development as a personal open-source project—expect rough edges and breaking changes.
 
-Contributions are not solicited. Bug reports and feature feedback via issues are welcome, but pull requests are generally not accepted because this is maintained as a personal project.
-
 ## Features
 
 ### History & Commit Graph
