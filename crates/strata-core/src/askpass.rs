@@ -231,11 +231,24 @@ impl Listener {
     }
 
     fn accept(&self) -> io::Result<Stream> {
+        // The listener is non-blocking so the accept loop can notice a dropped
+        // host. BSDs (macOS) hand that flag to the accepted socket, where the
+        // protocol below would then read `WouldBlock` when the helper has not
+        // sent its request yet and drop a valid prompt; the reads here are
+        // timed instead, so the connection has to block.
         match self {
             #[cfg(unix)]
-            Self::Unix(listener) => listener.accept().map(|(stream, _)| Stream::Unix(stream)),
+            Self::Unix(listener) => {
+                let (stream, _) = listener.accept()?;
+                stream.set_nonblocking(false)?;
+                Ok(Stream::Unix(stream))
+            }
             #[cfg(not(unix))]
-            Self::Tcp(listener) => listener.accept().map(|(stream, _)| Stream::Tcp(stream)),
+            Self::Tcp(listener) => {
+                let (stream, _) = listener.accept()?;
+                stream.set_nonblocking(false)?;
+                Ok(Stream::Tcp(stream))
+            }
         }
     }
 }
@@ -525,18 +538,28 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 /// The helper side: asks the app and returns what to print.
 fn exchange(endpoint: &OsStr, token: &str, prompt: &str) -> io::Result<Option<Answer>> {
     let mut stream = connect(endpoint)?;
+    // Both bounds go on before anything is sent. The answer may take as long
+    // as the user needs, and the app, not this timeout, is what bounds that
+    // wait; it has to be in place early because the host writes its answer and
+    // closes at once, and macOS refuses to set a timeout on a Unix socket
+    // whose peer has already closed (EINVAL).
     stream.set_timeout(IO_TIMEOUT)?;
+    stream.set_read_timeout(HELPER_RESPONSE_TIMEOUT)?;
     stream.write_all(format!("{PROTOCOL}\n{token}\n{}\n", prompt.len()).as_bytes())?;
     stream.write_all(prompt.as_bytes())?;
     stream.flush()?;
 
     let mut reader = BufReader::new(stream);
-    // The answer may take as long as the user needs; the app, not this
-    // timeout, is what bounds that wait.
-    reader.get_ref().set_read_timeout(HELPER_RESPONSE_TIMEOUT)?;
-    match read_line(&mut reader)?.as_str() {
+    read_response(&mut reader)
+}
+
+/// Reads the host's answer from a channel it may have closed right after
+/// writing it: the data is still in the socket buffer, so only the bytes
+/// matter, not the connection state.
+fn read_response(reader: &mut impl BufRead) -> io::Result<Option<Answer>> {
+    match read_line(reader)?.as_str() {
         "OK" => {
-            let length = read_line(&mut reader)?
+            let length = read_line(reader)?
                 .parse::<usize>()
                 .map_err(|_| invalid("askpass answer length is not a number"))?;
             if length > MAX_ANSWER_BYTES {
@@ -686,6 +709,50 @@ mod tests {
             !asked.load(Ordering::SeqCst),
             "an unauthenticated client must not reach the prompt handler"
         );
+    }
+
+    #[test]
+    fn a_client_that_answers_late_is_still_served() {
+        // The host accepts before the helper has written its request. On BSDs
+        // the accepted socket inherits the listener's non-blocking flag, so a
+        // host that trusted it would drop the connection here and the prompt
+        // would fail with "unable to read askpass response".
+        let host = AskpassHost::start(|_| Some(Answer::new("late"))).unwrap();
+        let (endpoint, token) = channel(&host);
+        let prompt = "Password: ";
+
+        let mut stream = super::connect(&endpoint).unwrap();
+        stream.set_timeout(Duration::from_secs(5)).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        stream
+            .write_all(
+                format!("{}\n{token}\n{}\n{prompt}", super::PROTOCOL, prompt.len()).as_bytes(),
+            )
+            .unwrap();
+
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert_eq!(response, "OK\n4\nlate", "the late request is answered");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_answer_is_readable_from_a_channel_the_host_already_closed() {
+        // The host answers and closes immediately, and macOS refuses a new
+        // timeout on a Unix socket whose peer is gone (EINVAL). The answer is
+        // already in the socket buffer, so it must be read rather than lost to
+        // the connection state.
+        let (client, mut host) = std::os::unix::net::UnixStream::pair().unwrap();
+        let stream = super::Stream::Unix(client);
+        stream.set_timeout(Duration::from_secs(5)).unwrap();
+        stream.set_read_timeout(Duration::from_secs(5)).unwrap();
+        std::io::Write::write_all(&mut host, b"OK\n4\nlate").unwrap();
+        drop(host);
+
+        let answer = super::read_response(&mut std::io::BufReader::new(stream))
+            .unwrap()
+            .expect("the answer");
+        assert_eq!(answer.as_str(), Some("late"));
     }
 
     #[test]

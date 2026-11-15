@@ -638,6 +638,32 @@ mod tests {
         assert!(saw_seq, "expected SGR mouse press sequence echoed by PTY");
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn startup_output_survives_the_spawn_handshake() {
+        // `spawn` used to write its own initial snapshot after the actor had
+        // already published one built from early PTY output. That replaced the
+        // grid with an empty one, and since the core's dirty state was already
+        // consumed, the output never came back.
+        for round in 0..3 {
+            let options = sh_options(40, 10, "printf 'MARK\\n'; sleep 60");
+            let (session, _events) = TerminalSession::spawn(options).expect("spawn");
+
+            // `spawn` only returns once a snapshot is published.
+            let first = session.snapshot();
+            assert_eq!((first.cols, first.rows), (40, 10), "round {round}");
+
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline && !session.snapshot().text().contains("MARK") {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(
+                session.snapshot().text().contains("MARK"),
+                "round {round}: output printed at startup was lost"
+            );
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn drop_terminates_child_process_and_leaves_no_zombie() {

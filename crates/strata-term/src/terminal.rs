@@ -2144,7 +2144,7 @@ impl TerminalSession {
             .map_err(|err| TermError::Io(format!("take pty writer failed: {err}")))?;
 
         let (cmd_tx, cmd_rx) = mpsc::channel::<ActorCmd>();
-        let (init_tx, init_rx) = mpsc::sync_channel::<Result<TerminalSnapshot, TermError>>(1);
+        let (init_tx, init_rx) = mpsc::sync_channel::<Result<(), TermError>>(1);
         let shared_snapshot = Arc::new(RwLock::new(TerminalSnapshot::default()));
         let actor_snapshot = Arc::clone(&shared_snapshot);
 
@@ -2170,10 +2170,9 @@ impl TerminalSession {
             })
             .map_err(|err| TermError::Io(format!("spawn terminal actor thread failed: {err}")))?;
 
-        let initial_snapshot = init_rx.recv().map_err(|_| TermError::SessionStopped)??;
-        if let Ok(mut guard) = shared_snapshot.write() {
-            *guard = initial_snapshot;
-        }
+        // The actor published the initial snapshot before it answered here, so
+        // it has already happened by the time the receive returns.
+        init_rx.recv().map_err(|_| TermError::SessionStopped)??;
 
         Ok(Self {
             cmd_tx,
@@ -2580,7 +2579,7 @@ fn actor_loop(
     cmd_rx: Receiver<ActorCmd>,
     shared_snapshot: Arc<RwLock<TerminalSnapshot>>,
     mut on_event: EventCallback,
-    init_tx: SyncSender<Result<TerminalSnapshot, TermError>>,
+    init_tx: SyncSender<Result<(), TermError>>,
 ) {
     let mut core = match TerminalCore::new(&options) {
         Ok(core) => core,
@@ -2593,9 +2592,16 @@ fn actor_loop(
         }
     };
 
+    // The actor publishes the initial snapshot itself, before it reports
+    // readiness. Writing it from `spawn` instead would race with the first
+    // snapshot built from early PTY output and put the empty grid back, losing
+    // output whose dirty state the core has already consumed.
     match core.snapshot(false, None) {
         Ok(snap) => {
-            let _ = init_tx.send(Ok(snap));
+            if let Ok(mut guard) = shared_snapshot.write() {
+                *guard = snap;
+            }
+            let _ = init_tx.send(Ok(()));
         }
         Err(err) => {
             terminate_and_reap(&mut child);
