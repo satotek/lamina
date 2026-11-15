@@ -460,10 +460,11 @@ fn openpgp_end_to_end_when_gpg_is_installed() {
     }
 
     let test = IsolatedRepo::new();
-    let gnupg = test.gnupg_home();
+    // gpg refuses a home directory others can read; Windows has no such mode bits.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt as _;
+        let gnupg = test.gnupg_home();
         let mut perms = fs::metadata(&gnupg).expect("meta").permissions();
         perms.set_mode(0o700);
         fs::set_permissions(&gnupg, perms).expect("chmod 700");
