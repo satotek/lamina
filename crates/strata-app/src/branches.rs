@@ -14,7 +14,7 @@
 
 use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -162,17 +162,6 @@ impl Section {
         }
     }
 
-    fn empty_label(self) -> String {
-        match self {
-            Section::Local => t!("branch.empty.local").to_string(),
-            Section::Remote => t!("branch.empty.remotes").to_string(),
-            Section::Tags => t!("branch.empty.tags").to_string(),
-            Section::Stashes => t!("branch.empty.stashes").to_string(),
-            Section::Submodules => t!("branch.empty.submodules").to_string(),
-            Section::Worktrees => t!("branch.empty.worktrees").to_string(),
-        }
-    }
-
     /// Whether `history` settings hide this section.
     fn hidden(self, design: &Design) -> bool {
         match self {
@@ -186,9 +175,9 @@ impl Section {
 
     /// Whether the repository has anything for this section.
     ///
-    /// The submodule and worktree sections have no empty state: a repository
-    /// without submodules, or with nothing but its main worktree, hides them
-    /// instead of saying t!("branch.detail.none").to_string().
+    /// Only the submodule and worktree sections hide when empty: a repository
+    /// without submodules, or with nothing but its main worktree, has nothing
+    /// to fold, while the ref sections keep their heading and count.
     fn present(self, extras: &SidebarExtras<'_>) -> bool {
         match self {
             Section::Submodules => !extras.submodules.is_empty(),
@@ -293,10 +282,27 @@ enum SidebarItem {
         count: usize,
         collapsed: bool,
     },
+    /// A folder built from a path segment shared by several refs.
+    Folder {
+        /// Section and path the fold is stored under; see [`folder_key`].
+        key: String,
+        /// The last path segment, which is the row's label.
+        segment: String,
+        /// How many refs sit below the folder.
+        count: usize,
+        open: bool,
+        depth: usize,
+        /// The section the folder belongs to, for its indent under a remote.
+        section: Section,
+    },
     LocalBranch {
         name: String,
+        /// The row's label: the last path segment, or the whole name while a
+        /// filter is active.
+        label: String,
         /// Position in the section's natural order, for the element id.
         index: usize,
+        depth: usize,
         /// `↑2 ↓1`, `?`, or nothing when level with or missing the upstream.
         upstream: Option<String>,
         /// Whether the tracked upstream branch was deleted on the remote.
@@ -306,7 +312,11 @@ enum SidebarItem {
     },
     RemoteBranch {
         name: String,
+        /// The row's label: the path below the remote, or its last segment
+        /// when a folder provides the rest.
+        label: String,
         index: usize,
+        depth: usize,
         /// The local branch `origin/foo` stands for; `None` for `origin/HEAD`.
         local_name: Option<String>,
         /// Whether that local branch exists already.
@@ -314,7 +324,9 @@ enum SidebarItem {
     },
     Tag {
         name: String,
+        label: String,
         index: usize,
+        depth: usize,
     },
     Stash {
         /// `stash@{N}: message`, as the snapshot lists it.
@@ -347,27 +359,8 @@ enum SidebarItem {
         /// This window's own worktree, drawn like the HEAD branch.
         current: bool,
     },
-    /// t!("branch.empty.tags").to_string(), t!("branch.empty.no_branches_fetched").to_string(), ...
-    Placeholder {
-        text: String,
-        place: PlaceholderPlace,
-    },
-}
-
-/// Where a placeholder belongs, which decides its indent and its key.
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum PlaceholderPlace {
-    Section(Section),
-    Remote(String),
-}
-
-impl PlaceholderPlace {
-    fn indent(&self) -> Pixels {
-        match self {
-            PlaceholderPlace::Section(_) => px(38.0),
-            PlaceholderPlace::Remote(_) => px(42.0),
-        }
-    }
+    /// The line a remote with no fetched branches shows under its heading.
+    Placeholder { text: String, remote: String },
 }
 
 /// Identity of a list position that survives a snapshot refresh, so the row
@@ -376,13 +369,13 @@ impl PlaceholderPlace {
 enum ItemKey {
     Section(Section),
     RemoteGroup(String),
+    Folder(String),
     LocalBranch(String),
     RemoteBranch(String),
     Tag(String),
     Stash(usize),
     Submodule(String),
     Worktree(String),
-    SectionEmpty(Section),
     RemoteEmpty(String),
 }
 
@@ -391,16 +384,14 @@ impl SidebarItem {
         match self {
             SidebarItem::SectionHeader { section, .. } => ItemKey::Section(*section),
             SidebarItem::RemoteGroup { name, .. } => ItemKey::RemoteGroup(name.clone()),
+            SidebarItem::Folder { key, .. } => ItemKey::Folder(key.clone()),
             SidebarItem::LocalBranch { name, .. } => ItemKey::LocalBranch(name.clone()),
             SidebarItem::RemoteBranch { name, .. } => ItemKey::RemoteBranch(name.clone()),
             SidebarItem::Tag { name, .. } => ItemKey::Tag(name.clone()),
             SidebarItem::Stash { index, .. } => ItemKey::Stash(*index),
             SidebarItem::Submodule { path, .. } => ItemKey::Submodule(path.clone()),
             SidebarItem::Worktree { path, .. } => ItemKey::Worktree(path.clone()),
-            SidebarItem::Placeholder { place, .. } => match place {
-                PlaceholderPlace::Section(section) => ItemKey::SectionEmpty(*section),
-                PlaceholderPlace::Remote(name) => ItemKey::RemoteEmpty(name.clone()),
-            },
+            SidebarItem::Placeholder { remote, .. } => ItemKey::RemoteEmpty(remote.clone()),
         }
     }
 
@@ -410,18 +401,14 @@ impl SidebarItem {
         match (self, key) {
             (SidebarItem::SectionHeader { section, .. }, ItemKey::Section(key)) => section == key,
             (SidebarItem::RemoteGroup { name, .. }, ItemKey::RemoteGroup(key)) => name == key,
+            (SidebarItem::Folder { key: folder, .. }, ItemKey::Folder(key)) => folder == key,
             (SidebarItem::LocalBranch { name, .. }, ItemKey::LocalBranch(key)) => name == key,
             (SidebarItem::RemoteBranch { name, .. }, ItemKey::RemoteBranch(key)) => name == key,
             (SidebarItem::Tag { name, .. }, ItemKey::Tag(key)) => name == key,
             (SidebarItem::Stash { index, .. }, ItemKey::Stash(key)) => index == key,
             (SidebarItem::Submodule { path, .. }, ItemKey::Submodule(key)) => path == key,
             (SidebarItem::Worktree { path, .. }, ItemKey::Worktree(key)) => path == key,
-            (SidebarItem::Placeholder { place, .. }, ItemKey::SectionEmpty(key)) => {
-                matches!(place, PlaceholderPlace::Section(section) if section == key)
-            }
-            (SidebarItem::Placeholder { place, .. }, ItemKey::RemoteEmpty(key)) => {
-                matches!(place, PlaceholderPlace::Remote(name) if name == key)
-            }
+            (SidebarItem::Placeholder { remote, .. }, ItemKey::RemoteEmpty(key)) => remote == key,
             _ => false,
         }
     }
@@ -442,8 +429,11 @@ struct ItemsKey {
     /// Generation of the last submodule/worktree answer, which arrives outside
     /// the snapshot and changes those rows on its own.
     lists: u64,
-    /// Bumped when a section or a remote group folds.
+    /// Bumped when a section, a remote group or a folder folds.
     local: u64,
+    /// The ref a "show only" scope limits the list to; a different filter
+    /// lists different rows without a new snapshot.
+    filter: Option<String>,
     show_remote_branches: bool,
     show_tags: bool,
     show_stashes: bool,
@@ -465,7 +455,58 @@ pub(crate) enum ExtraSelection {
     Worktree(PathBuf),
 }
 
-/// Everything the branch UI owns between frames.
+/// The fold key of a folder: the section, the remote whose branches it groups,
+/// and the path inside that section. Two remotes can both have a `t3` folder,
+/// and a tag and a branch share a segment without sharing a fold.
+fn folder_key(section: Section, remote: Option<&str>, path: &str) -> String {
+    match remote {
+        Some(remote) => format!("{}:{remote}:{path}", section.id()),
+        None => format!("{}:{path}", section.id()),
+    }
+}
+
+/// The folder keys above `name`, e.g. `a`, `a/b` for `a/b/c`.
+fn folder_ancestors(section: Section, remote: Option<&str>, name: &str) -> Vec<String> {
+    let mut ancestors = Vec::new();
+    let mut end = 0;
+    while let Some(offset) = name[end..].find('/') {
+        end += offset;
+        ancestors.push(folder_key(section, remote, &name[..end]));
+        end += 1;
+    }
+    ancestors
+}
+
+/// One node of the tree a section's ref names build.
+#[derive(Debug, PartialEq, Eq)]
+enum RefNode<T> {
+    Leaf {
+        /// The row's label: the last path segment, or the whole remaining path
+        /// when this leaf stands in for a folder that would have split it.
+        label: String,
+        /// The path inside the section.
+        path: String,
+        value: T,
+    },
+    Folder {
+        /// The path inside the section, e.g. `t3`.
+        path: String,
+        /// The last path segment, the folder row's label.
+        segment: String,
+        children: Vec<RefNode<T>>,
+    },
+}
+
+impl<T> RefNode<T> {
+    /// How many refs sit below the node.
+    fn leaf_count(&self) -> usize {
+        match self {
+            RefNode::Leaf { .. } => 1,
+            RefNode::Folder { children, .. } => children.iter().map(RefNode::leaf_count).sum(),
+        }
+    }
+}
+
 #[derive(Default)]
 pub(crate) struct Branches {
     collapsed: [bool; Section::ALL.len()],
@@ -479,6 +520,20 @@ pub(crate) struct Branches {
     /// The ref history is limited to, as its short name, while a "show only"
     /// scope is active. The scope itself lives in the session.
     scope: Option<String>,
+    /// What the sidebar list is limited to. "Show only" sets it to the same
+    /// ref as the scope; a filter on its own hides every ref that does not
+    /// match and draws the matches by their whole path.
+    filter: Option<String>,
+    /// The folders the user folded, keyed by [`folder_key`]. A folder that is
+    /// not in the set is open, so a folder seen for the first time shows its
+    /// refs; the set lives with the view, like the sections' own folds.
+    folders: RefCell<HashSet<String>>,
+    /// The branch the folders were last laid out for, so a branch switch opens
+    /// the folder the new branch lives in.
+    head_seen: RefCell<Option<String>>,
+    /// The folder the left and right arrows act on: the one clicked or hovered
+    /// last, since the list has no row cursor of its own.
+    folder_focus: RefCell<Option<String>>,
     dialog: Option<Dialog>,
     /// Operations this module started, keyed by the id the session returned.
     /// The label is what the status bar prefixes a failure with.
@@ -841,6 +896,31 @@ impl Branches {
                                 cx.stop_propagation();
                             }
                         }
+                        // A folder folds and unfolds like a section; the folder
+                        // last clicked or hovered is the one the arrows act on.
+                        "left" | "right" => {
+                            let open = event.keystroke.key == "right";
+                            let changed = key_entity.update(cx, |view, cx| {
+                                if view.branches.dialog_open() {
+                                    return false;
+                                }
+                                let Some(folder) = view.branches.focused_folder() else {
+                                    return false;
+                                };
+                                let current = !view.branches.folder_folded(&folder);
+                                if current == open {
+                                    return false;
+                                }
+                                let changed = view.branches.set_folder_open(&folder, open);
+                                if changed {
+                                    cx.notify();
+                                }
+                                changed
+                            });
+                            if changed {
+                                cx.stop_propagation();
+                            }
+                        }
                         _ => {}
                     }
                 });
@@ -869,6 +949,7 @@ impl Branches {
             revision,
             lists: extras.revision,
             local: self.local_revision,
+            filter: self.filter.clone(),
             show_remote_branches: design.show_remote_branches,
             show_tags: design.show_tags,
             show_stashes: design.show_stashes,
@@ -884,8 +965,9 @@ impl Branches {
     }
 
     /// Every visible line of the section list, in drawing order: a heading for
-    /// each shown section, then its rows or one placeholder. A collapsed
-    /// section contributes its heading alone.
+    /// each shown section, then its rows, grouped into folders where their
+    /// paths share a segment. A collapsed section or folder contributes its
+    /// row alone, and a section with nothing in it is just its heading.
     fn flatten(
         &self,
         data: SidebarData,
@@ -902,6 +984,7 @@ impl Branches {
             remote,
             mut tags,
             mut stashes,
+            head_branch,
             ..
         } = data;
         let mut items = Vec::with_capacity(
@@ -913,7 +996,38 @@ impl Branches {
                 + extras.worktrees.len()
                 + 10,
         );
-        let mut remote_row_index = 0;
+        self.open_head_folder(head_branch.as_deref());
+
+        // The folder the history was last revealed from stays open for as long
+        // as its ref row is highlighted, so the tint is never hidden in a fold.
+        let mut forced = HashSet::new();
+        if let Some(head) = head_branch.as_deref() {
+            forced.extend(folder_ancestors(Section::Local, None, head));
+        }
+        if let Some(RevealedRef::Ref(kind, name)) = self.reveal.revealed.as_ref() {
+            match kind {
+                RefKind::LocalBranch => {
+                    forced.extend(folder_ancestors(Section::Local, None, name));
+                }
+                RefKind::Tag => {
+                    forced.extend(folder_ancestors(Section::Tags, None, name));
+                }
+                RefKind::RemoteBranch => {
+                    if let Some((remote_name, path)) = name.split_once('/') {
+                        forced.extend(folder_ancestors(Section::Remote, Some(remote_name), path));
+                    }
+                }
+            }
+        }
+        let folded = self.folders.borrow();
+        // The "show only" scope is the sidebar's filter: while it is on, the
+        // list shows the refs it matches by their whole path and cannot group
+        // them into folders, which would hide the match behind a row.
+        let filter = self
+            .filter
+            .as_deref()
+            .map(str::trim)
+            .filter(|filter| !filter.is_empty());
 
         for section in Section::ALL {
             if section.hidden(design) || !section.present(extras) {
@@ -932,41 +1046,86 @@ impl Branches {
 
             match section {
                 Section::Local => {
-                    if local.is_empty() {
-                        items.push(placeholder(section));
-                        continue;
-                    }
-                    for (index, name) in natural_sorted(&local).into_iter().enumerate() {
-                        let upstream = upstreams.get(name);
-                        items.push(SidebarItem::LocalBranch {
-                            name: name.to_owned(),
-                            index,
+                    let entries: Vec<(String, LocalLeaf)> = natural_sorted(&local)
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, name)| {
+                            (
+                                name.to_owned(),
+                                LocalLeaf {
+                                    name: name.to_owned(),
+                                    index,
+                                },
+                            )
+                        })
+                        .collect();
+                    let mut leaf = |value: LocalLeaf, label: &str, depth: usize| {
+                        let upstream = upstreams.get(&value.name);
+                        SidebarItem::LocalBranch {
+                            name: value.name,
+                            label: label.to_owned(),
+                            index: value.index,
+                            depth,
                             upstream: upstream.and_then(upstream_label),
                             upstream_gone: upstream.is_some_and(|info| info.gone),
                             upstream_note: upstream.and_then(upstream_note),
-                        });
+                        }
+                    };
+                    match filter {
+                        Some(filter) => {
+                            for (path, entry) in entries {
+                                if matches_ref(filter, &entry.name) {
+                                    items.push(leaf(entry, &path, 0));
+                                }
+                            }
+                        }
+                        None => push_ref_nodes(
+                            &mut items,
+                            ref_tree(entries),
+                            0,
+                            Section::Local,
+                            None,
+                            &folded,
+                            &forced,
+                            &mut leaf,
+                        ),
                     }
                 }
                 Section::Tags => {
-                    if tags.is_empty() {
-                        items.push(placeholder(section));
-                        continue;
-                    }
-                    // Tags are the largest section of a real repository, so
-                    // they move their strings instead of copying them.
-                    for (index, name) in natural_sorted_owned(std::mem::take(&mut tags))
-                        .into_iter()
-                        .enumerate()
-                    {
-                        items.push(SidebarItem::Tag { name, index });
+                    let entries: Vec<(String, TagLeaf)> =
+                        natural_sorted_owned(std::mem::take(&mut tags))
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, name)| (name.clone(), TagLeaf { name, index }))
+                            .collect();
+                    let mut leaf = |value: TagLeaf, label: &str, depth: usize| SidebarItem::Tag {
+                        name: value.name,
+                        label: label.to_owned(),
+                        index: value.index,
+                        depth,
+                    };
+                    match filter {
+                        Some(filter) => {
+                            for (path, entry) in entries {
+                                if matches_ref(filter, &entry.name) {
+                                    items.push(leaf(entry, &path, 0));
+                                }
+                            }
+                        }
+                        None => push_ref_nodes(
+                            &mut items,
+                            ref_tree(entries),
+                            0,
+                            Section::Tags,
+                            None,
+                            &folded,
+                            &forced,
+                            &mut leaf,
+                        ),
                     }
                 }
                 // Stash rows keep `stash@{N}` order: the index is the identity.
                 Section::Stashes => {
-                    if stashes.is_empty() {
-                        items.push(placeholder(section));
-                        continue;
-                    }
                     for (index, name) in std::mem::take(&mut stashes).into_iter().enumerate() {
                         items.push(SidebarItem::Stash { name, index });
                     }
@@ -1009,10 +1168,31 @@ impl Branches {
                 // listed even before anything was fetched from it.
                 Section::Remote => {
                     if remote.is_empty() && remotes.is_empty() {
-                        items.push(placeholder(section));
                         continue;
                     }
-                    for group in remote_groups(&remote, remotes) {
+                    let groups = remote_groups(&remote, remotes);
+                    // Row ids keep the whole section's natural order even when
+                    // the filter hides the groups before this one.
+                    let mut indices = HashMap::new();
+                    let mut next_index = 0;
+                    for group in &groups {
+                        for name in &group.branches {
+                            indices.insert(name.clone(), next_index);
+                            next_index += 1;
+                        }
+                    }
+                    for group in groups {
+                        let count = match filter {
+                            Some(filter) => group
+                                .branches
+                                .iter()
+                                .filter(|name| matches_ref(filter, name))
+                                .count(),
+                            None => group.branches.len(),
+                        };
+                        if filter.is_some() && count == 0 {
+                            continue;
+                        }
                         let collapsed = self
                             .remote_groups
                             .get(&group.name)
@@ -1021,7 +1201,7 @@ impl Branches {
                         items.push(SidebarItem::RemoteGroup {
                             name: group.name.clone(),
                             fetch_url: group.fetch_url.clone(),
-                            count: group.branches.len(),
+                            count,
                             collapsed,
                         });
                         if collapsed {
@@ -1030,28 +1210,83 @@ impl Branches {
                         if group.branches.is_empty() {
                             items.push(SidebarItem::Placeholder {
                                 text: t!("branch.empty.no_branches_fetched").to_string(),
-                                place: PlaceholderPlace::Remote(group.name.clone()),
+                                remote: group.name,
                             });
                             continue;
                         }
-                        for name in group.branches {
-                            let local_name = local_name_for_remote(&name).map(str::to_owned);
-                            let existing = local_name.as_deref().is_some_and(|local_name| {
-                                local.iter().any(|branch| branch == local_name)
-                            });
-                            items.push(SidebarItem::RemoteBranch {
-                                name,
-                                index: remote_row_index,
-                                local_name,
-                                existing,
-                            });
-                            remote_row_index += 1;
+                        let prefix = format!("{}/", group.name);
+                        let entries: Vec<(String, RemoteLeaf)> = group
+                            .branches
+                            .into_iter()
+                            .map(|name| {
+                                let local_name = local_name_for_remote(&name).map(str::to_owned);
+                                let existing = local_name.as_deref().is_some_and(|local_name| {
+                                    local.iter().any(|branch| branch == local_name)
+                                });
+                                let path = name.strip_prefix(&prefix).unwrap_or(&name).to_owned();
+                                let index = indices.get(&name).copied().unwrap_or(0);
+                                (
+                                    path,
+                                    RemoteLeaf {
+                                        name,
+                                        index,
+                                        local_name,
+                                        existing,
+                                    },
+                                )
+                            })
+                            .collect();
+                        let mut leaf = |value: RemoteLeaf, label: &str, depth: usize| {
+                            SidebarItem::RemoteBranch {
+                                name: value.name,
+                                label: label.to_owned(),
+                                index: value.index,
+                                depth,
+                                local_name: value.local_name,
+                                existing: value.existing,
+                            }
+                        };
+                        match filter {
+                            Some(filter) => {
+                                for (path, entry) in entries {
+                                    if matches_ref(filter, &entry.name) {
+                                        items.push(leaf(entry, &path, 0));
+                                    }
+                                }
+                            }
+                            None => push_ref_nodes(
+                                &mut items,
+                                ref_tree(entries),
+                                0,
+                                Section::Remote,
+                                Some(group.name.as_str()),
+                                &folded,
+                                &forced,
+                                &mut leaf,
+                            ),
                         }
                     }
                 }
             }
         }
         items
+    }
+
+    /// Opens the folder the checked-out branch lives in whenever HEAD moves,
+    /// so switching branches never leaves the current one hidden in a fold.
+    fn open_head_folder(&self, head: Option<&str>) {
+        let mut seen = self.head_seen.borrow_mut();
+        if seen.as_deref() == head {
+            return;
+        }
+        *seen = head.map(str::to_owned);
+        let Some(head) = head else {
+            return;
+        };
+        let mut folded = self.folders.borrow_mut();
+        for key in folder_ancestors(Section::Local, None, head) {
+            folded.remove(&key);
+        }
     }
 
     /// The sections the collapsed rail lists, in the sidebar's own order.
@@ -1251,7 +1486,14 @@ impl Branches {
     }
 
     pub(crate) fn set_scope(&mut self, name: Option<String>) {
+        self.set_filter(name.clone());
         self.scope = name;
+    }
+
+    /// Limits the sidebar list to refs matching `filter`, without scoping the
+    /// history. `None` lists every ref again.
+    pub(crate) fn set_filter(&mut self, filter: Option<String>) {
+        self.filter = filter;
     }
 
     pub(crate) fn toggle(&mut self, index: usize) {
@@ -1265,6 +1507,49 @@ impl Branches {
         let collapsed = self.remote_groups.entry(group).or_insert(false);
         *collapsed = !*collapsed;
         self.local_revision = self.local_revision.wrapping_add(1);
+    }
+
+    /// Folds or unfolds one folder. The fold is remembered for this view, so it
+    /// survives a snapshot refresh, the way a section's fold does.
+    pub(crate) fn toggle_folder(&mut self, key: String) {
+        let mut folded = self.folders.borrow_mut();
+        if !folded.remove(&key) {
+            folded.insert(key.clone());
+        }
+        drop(folded);
+        *self.folder_focus.borrow_mut() = Some(key);
+        self.local_revision = self.local_revision.wrapping_add(1);
+    }
+
+    /// Whether `key` is folded right now.
+    fn folder_folded(&self, key: &str) -> bool {
+        self.folders.borrow().contains(key)
+    }
+
+    /// Folds or unfolds `key` from the arrow keys: `open` picks the direction,
+    /// and `None` means the key does not apply to the current state.
+    fn set_folder_open(&mut self, key: &str, open: bool) -> bool {
+        let mut folded = self.folders.borrow_mut();
+        let changed = if open {
+            folded.remove(key)
+        } else {
+            folded.insert(key.to_owned())
+        };
+        drop(folded);
+        if changed {
+            self.local_revision = self.local_revision.wrapping_add(1);
+        }
+        changed
+    }
+
+    /// Remembers the folder the arrow keys act on.
+    pub(crate) fn focus_folder(&self, key: String) {
+        *self.folder_focus.borrow_mut() = Some(key);
+    }
+
+    /// The folder the left/right arrows fold or unfold.
+    pub(crate) fn focused_folder(&self) -> Option<String> {
+        self.folder_focus.borrow().clone()
     }
 
     pub(crate) fn set_viewport(&mut self, viewport: Size<Pixels>) {
@@ -1528,19 +1813,145 @@ impl Branches {
     }
 }
 
-/// The line a section shows when it holds no entries.
-fn placeholder(section: Section) -> SidebarItem {
-    SidebarItem::Placeholder {
-        text: section.empty_label(),
-        place: PlaceholderPlace::Section(section),
-    }
-}
-
 /// The names in natural order, taking the list so the caller can move each
 /// string straight into a list item.
 fn natural_sorted_owned(mut names: Vec<String>) -> Vec<String> {
     names.sort_by(|a, b| natural_cmp(a, b));
     names
+}
+
+/// Whether a ref passes the sidebar's filter, which is the "show only" scope:
+/// the whole name is searched, so a scope names the ref it limits history to.
+fn matches_ref(filter: &str, name: &str) -> bool {
+    name.to_lowercase().contains(&filter.trim().to_lowercase())
+}
+
+/// One local branch before it is placed in the folder tree.
+struct LocalLeaf {
+    name: String,
+    index: usize,
+}
+
+/// One remote branch before it is placed in the folder tree.
+struct RemoteLeaf {
+    name: String,
+    index: usize,
+    local_name: Option<String>,
+    existing: bool,
+}
+
+/// One tag before it is placed in the folder tree.
+struct TagLeaf {
+    name: String,
+    index: usize,
+}
+
+/// Groups `(path, value)` entries into folders by path segment.
+///
+/// A folder around a single branch is not worth a row: it is replaced by a leaf
+/// that keeps the whole path, so `t3/blame-view` reads as one line unless the
+/// repository has another `t3/...` ref beside it.
+fn ref_tree<T>(entries: Vec<(String, T)>) -> Vec<RefNode<T>> {
+    grouped(entries, "")
+}
+
+fn grouped<T>(mut entries: Vec<(String, T)>, prefix: &str) -> Vec<RefNode<T>> {
+    entries.sort_by(|a, b| natural_cmp(&a.0, &b.0));
+    let mut nodes = Vec::new();
+    let mut entries = entries.into_iter().peekable();
+    while let Some((path, value)) = entries.next() {
+        let Some((segment, rest)) = path.split_once('/') else {
+            nodes.push(RefNode::Leaf {
+                label: path.clone(),
+                path: format!("{prefix}{path}"),
+                value,
+            });
+            continue;
+        };
+        let segment_prefix = format!("{segment}/");
+        let mut children = vec![(rest.to_owned(), value)];
+        while let Some((next, value)) =
+            entries.next_if(|(next, _)| next.starts_with(&segment_prefix))
+        {
+            let rest = next
+                .strip_prefix(&segment_prefix)
+                .unwrap_or(&next)
+                .to_owned();
+            children.push((rest, value));
+        }
+        let mut children = grouped(children, &format!("{prefix}{segment}/"));
+        // A folder that holds one branch is indistinguishable from that branch
+        // at this level, so the leaf takes the path the folder would have split.
+        if children.len() == 1 && matches!(children.first(), Some(RefNode::Leaf { .. })) {
+            let Some(RefNode::Leaf { path, value, .. }) = children.pop() else {
+                unreachable!("a one-child folder's child is a leaf");
+            };
+            let label = path.strip_prefix(prefix).unwrap_or(&path).to_owned();
+            nodes.push(RefNode::Leaf { label, path, value });
+            continue;
+        }
+        nodes.push(RefNode::Folder {
+            path: format!("{prefix}{segment}"),
+            segment: segment.to_owned(),
+            children,
+        });
+    }
+    nodes.sort_by(|a, b| match (a, b) {
+        (RefNode::Leaf { label: a, .. }, RefNode::Leaf { label: b, .. }) => natural_cmp(a, b),
+        (RefNode::Folder { path: a, .. }, RefNode::Folder { path: b, .. }) => natural_cmp(a, b),
+        (RefNode::Leaf { label, .. }, RefNode::Folder { path, .. }) => natural_cmp(label, path),
+        (RefNode::Folder { path, .. }, RefNode::Leaf { label, .. }) => natural_cmp(path, label),
+    });
+    nodes
+}
+
+/// Pushes the folder tree's rows: a folder row per branch-point, its leaves
+/// below, indented a step further.
+#[allow(clippy::too_many_arguments)]
+fn push_ref_nodes<T>(
+    items: &mut Vec<SidebarItem>,
+    nodes: Vec<RefNode<T>>,
+    depth: usize,
+    section: Section,
+    remote: Option<&str>,
+    folded: &HashSet<String>,
+    forced: &HashSet<String>,
+    leaf: &mut impl FnMut(T, &str, usize) -> SidebarItem,
+) {
+    for node in nodes {
+        match node {
+            RefNode::Leaf { label, value, .. } => items.push(leaf(value, &label, depth)),
+            RefNode::Folder {
+                path,
+                segment,
+                children,
+            } => {
+                let key = folder_key(section, remote, &path);
+                let open = !folded.contains(&key) || forced.contains(&key);
+                let count = children.iter().map(RefNode::leaf_count).sum();
+                items.push(SidebarItem::Folder {
+                    key,
+                    segment,
+                    count,
+                    open,
+                    depth,
+                    section,
+                });
+                if open {
+                    push_ref_nodes(
+                        items,
+                        children,
+                        depth + 1,
+                        section,
+                        remote,
+                        folded,
+                        forced,
+                        leaf,
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// Builds the element for one visible list item.
@@ -1562,6 +1973,16 @@ fn item_element(
             count,
             open,
         } => section_header(*section, *count, *open, busy, colors, entity),
+        SidebarItem::Folder {
+            key,
+            segment,
+            count,
+            open,
+            depth,
+            section,
+        } => folder_row(
+            key, segment, *count, *open, *depth, *section, colors, entity,
+        ),
         SidebarItem::RemoteGroup {
             name,
             fetch_url,
@@ -1578,13 +1999,17 @@ fn item_element(
         ),
         SidebarItem::LocalBranch {
             name,
+            label,
             index,
+            depth,
             upstream,
             upstream_gone,
             upstream_note,
         } => local_row(
             name,
+            label,
             *index,
+            *depth,
             head == Some(name.as_str()),
             upstream.as_deref(),
             *upstream_gone,
@@ -1599,12 +2024,16 @@ fn item_element(
         ),
         SidebarItem::RemoteBranch {
             name,
+            label,
             index,
+            depth,
             local_name,
             existing,
         } => remote_row(
             name,
+            label,
             *index,
+            *depth,
             local_name.as_deref(),
             *existing,
             reveal.is_ref(RefKind::RemoteBranch, name),
@@ -1613,9 +2042,16 @@ fn item_element(
             colors,
             entity,
         ),
-        SidebarItem::Tag { name, index } => tag_row(
+        SidebarItem::Tag {
             name,
+            label,
+            index,
+            depth,
+        } => tag_row(
+            name,
+            label,
             *index,
+            *depth,
             reveal.is_ref(RefKind::Tag, name),
             enabled,
             busy,
@@ -1678,8 +2114,8 @@ fn item_element(
                 entity,
             )
         }
-        SidebarItem::Placeholder { text, place } => {
-            empty_row_at(text, place.indent(), colors).into_any_element()
+        SidebarItem::Placeholder { text, .. } => {
+            empty_row_at(text, px(42.0), colors).into_any_element()
         }
     }
 }
@@ -1740,6 +2176,91 @@ fn section_header(
         }
         _ => header.into_any_element(),
     }
+}
+
+/// A folder built from the path segments several refs share. The row folds and
+/// unfolds on click; the chevron and the folder glyph say which way it is.
+#[allow(clippy::too_many_arguments)]
+fn folder_row(
+    key: &str,
+    segment: &str,
+    count: usize,
+    open: bool,
+    depth: usize,
+    section: Section,
+    colors: &Colors,
+    entity: Entity<RepoView>,
+) -> AnyElement {
+    let click_key = key.to_owned();
+    let hover_key = key.to_owned();
+    let hover_entity = entity.clone();
+    let base = if section == Section::Remote {
+        42.0
+    } else {
+        0.0
+    };
+    crate::ui::list_row(
+        ElementId::Name(format!("branch-folder-{key}").into()),
+        crate::ui::RowState::NORMAL,
+        &colors.design,
+    )
+    .h(px(ITEM_HEIGHT))
+    .w_full()
+    .min_w_0()
+    .overflow_hidden()
+    .mx(px(0.0))
+    .pr(px(18.0))
+    .pl(px(base + depth as f32 * 14.0))
+    .rounded(px(7.0))
+    .text_size(px(colors.design.small()))
+    .text_color(colors.sidebar_foreground)
+    .cursor_pointer()
+    .child(
+        Icon::new(if open {
+            IconName::ChevronDown
+        } else {
+            IconName::ChevronRight
+        })
+        .with_size(px(12.0))
+        .text_color(colors.muted_foreground),
+    )
+    .child(
+        Icon::new(if open {
+            IconName::FolderOpen
+        } else {
+            IconName::FolderClosed
+        })
+        .with_size(px(13.0))
+        .text_color(colors.muted_foreground),
+    )
+    .child(
+        div()
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .child(segment.to_owned()),
+    )
+    .child(
+        div()
+            .flex_none()
+            .text_size(px(colors.design.tiny()))
+            .text_color(colors.muted_foreground)
+            .child(count.to_string()),
+    )
+    .on_hover(move |hovered, _, cx| {
+        if *hovered {
+            hover_entity.update(cx, |view, _| view.branches.focus_folder(hover_key.clone()));
+        }
+    })
+    .on_click(move |_, window, cx| {
+        let key = click_key.clone();
+        entity.update(cx, |view, cx| {
+            view.branches.toggle_folder(key);
+            view.branches.focus_list(window, cx);
+            cx.notify();
+        });
+    })
+    .into_any_element()
 }
 
 /// The section-level actions of the two lists git stores outside the refs.
@@ -1975,7 +2496,9 @@ fn remote_group_header(
 #[allow(clippy::too_many_arguments)]
 fn local_row(
     name: &str,
+    label: &str,
     index: usize,
+    depth: usize,
     active: bool,
     upstream: Option<&str>,
     upstream_gone: bool,
@@ -1991,10 +2514,11 @@ fn local_row(
     let mut row = row_with_icon(
         ("local-branch", index),
         Some(style::glyph::BRANCH),
-        name,
+        label,
         crate::ui::RowState::NORMAL.head(active).revealed(revealed),
         colors,
     )
+    .pl(px(depth as f32 * 14.0))
     .cursor_pointer();
     if upstream_gone {
         let mut marker = div()
@@ -2316,7 +2840,9 @@ fn branch_blocked(active: bool, active_reason: impl Into<String>, busy: bool) ->
 #[allow(clippy::too_many_arguments)]
 fn remote_row(
     name: &str,
+    label: &str,
     index: usize,
+    depth: usize,
     local_name: Option<&str>,
     existing: bool,
     revealed: bool,
@@ -2325,14 +2851,13 @@ fn remote_row(
     colors: &Colors,
     entity: Entity<RepoView>,
 ) -> AnyElement {
-    let label = local_name.unwrap_or(name);
     let row_element = row(
         ("remote-branch", index),
         label,
         crate::ui::RowState::NORMAL.revealed(revealed),
         colors,
     )
-    .pl(px(42.0));
+    .pl(px(42.0 + depth as f32 * 14.0));
     let Some(local_name) = local_name.map(str::to_owned) else {
         return row_element.into_any_element();
     };
@@ -2466,9 +2991,12 @@ fn remote_row(
     .into_any_element()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn tag_row(
     name: &str,
+    label: &str,
     index: usize,
+    depth: usize,
     revealed: bool,
     enabled: bool,
     busy: bool,
@@ -2481,10 +3009,11 @@ fn tag_row(
     let row_element = row_with_icon(
         ("tag", index),
         Some(style::glyph::TAG),
-        name,
+        label,
         crate::ui::RowState::NORMAL.revealed(revealed),
         colors,
     )
+    .pl(px(depth as f32 * 14.0))
     .cursor_pointer()
     .on_click(move |_, window, cx| {
         entity.update(cx, |view, cx| {
@@ -4902,7 +5431,7 @@ mod tests {
     }
 
     #[test]
-    fn sections_flatten_into_headings_rows_and_placeholders() {
+    fn sections_flatten_into_headings_and_rows() {
         let branches = Branches::default();
         let mut upstreams = HashMap::new();
         upstreams.insert("main".to_owned(), upstream("origin/main", 2, 1, false));
@@ -4925,14 +5454,18 @@ mod tests {
                 },
                 SidebarItem::LocalBranch {
                     name: "main".into(),
+                    label: "main".into(),
                     index: 0,
+                    depth: 0,
                     upstream: Some("↑2 ↓1".into()),
                     upstream_gone: false,
                     upstream_note: None,
                 },
                 SidebarItem::LocalBranch {
                     name: "topic".into(),
+                    label: "topic".into(),
                     index: 1,
+                    depth: 0,
                     upstream: None,
                     upstream_gone: true,
                     upstream_note: Some("The upstream branch was deleted on the remote".into()),
@@ -4942,29 +5475,18 @@ mod tests {
                     count: 0,
                     open: true,
                 },
-                SidebarItem::Placeholder {
-                    text: "no remotes".to_string(),
-                    place: PlaceholderPlace::Section(Section::Remote),
-                },
                 SidebarItem::SectionHeader {
                     section: Section::Tags,
                     count: 0,
                     open: true,
-                },
-                SidebarItem::Placeholder {
-                    text: "no tags".to_string(),
-                    place: PlaceholderPlace::Section(Section::Tags),
                 },
                 SidebarItem::SectionHeader {
                     section: Section::Stashes,
                     count: 0,
                     open: true,
                 },
-                SidebarItem::Placeholder {
-                    text: "no stashes".to_string(),
-                    place: PlaceholderPlace::Section(Section::Stashes),
-                },
-            ]
+            ],
+            "an empty section is its heading and a zero, with no placeholder row"
         );
     }
 
@@ -4988,12 +5510,6 @@ mod tests {
                 .iter()
                 .any(|item| matches!(item, SidebarItem::Tag { .. })),
             "a collapsed section draws no rows"
-        );
-        assert!(
-            !items
-                .iter()
-                .any(|item| item.is(&ItemKey::SectionEmpty(Section::Tags))),
-            "a collapsed section draws no placeholder either"
         );
         assert!(
             items
@@ -5088,7 +5604,7 @@ mod tests {
                 },
                 &SidebarItem::Placeholder {
                     text: "no branches fetched yet".to_string(),
-                    place: PlaceholderPlace::Remote("backup".into()),
+                    remote: "backup".into(),
                 },
                 &SidebarItem::RemoteGroup {
                     name: "origin".into(),
@@ -5098,19 +5614,25 @@ mod tests {
                 },
                 &SidebarItem::RemoteBranch {
                     name: "origin/feature".into(),
+                    label: "feature".into(),
                     index: 0,
+                    depth: 0,
                     local_name: Some("feature".into()),
                     existing: false,
                 },
                 &SidebarItem::RemoteBranch {
                     name: "origin/HEAD".into(),
+                    label: "HEAD".into(),
                     index: 1,
+                    depth: 0,
                     local_name: None,
                     existing: false,
                 },
                 &SidebarItem::RemoteBranch {
                     name: "origin/main".into(),
+                    label: "main".into(),
                     index: 2,
+                    depth: 0,
                     local_name: Some("main".into()),
                     existing: true,
                 },
@@ -5148,6 +5670,363 @@ mod tests {
                 .any(|item| item.is(&ItemKey::RemoteEmpty("origin".to_owned()))),
             "a folded remote draws no placeholder either"
         );
+    }
+
+    fn tree(names: &[&str]) -> Vec<RefNode<()>> {
+        ref_tree(names.iter().map(|name| ((*name).to_owned(), ())).collect())
+    }
+
+    fn leaf_labels<T>(nodes: &[RefNode<T>]) -> Vec<&str> {
+        nodes
+            .iter()
+            .map(|node| match node {
+                RefNode::Leaf { label, .. } => label.as_str(),
+                RefNode::Folder { segment, .. } => segment.as_str(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn refs_sharing_a_path_segment_nest_under_a_folder() {
+        let nodes = tree(&["t3/fast-blame", "t3/blame-view", "main"]);
+
+        assert_eq!(leaf_labels(&nodes), ["main", "t3"]);
+        let RefNode::Folder {
+            path,
+            segment,
+            children,
+        } = &nodes[1]
+        else {
+            panic!("the t3 refs belong in a folder");
+        };
+        assert_eq!(segment, "t3");
+        assert_eq!(path, "t3");
+        assert_eq!(leaf_labels(children), ["blame-view", "fast-blame"]);
+    }
+
+    #[test]
+    fn deeper_segments_nest_inside_each_other() {
+        let nodes = tree(&[
+            "feature/auth/login",
+            "feature/auth/logout",
+            "feature/ui",
+            "main",
+        ]);
+
+        assert_eq!(leaf_labels(&nodes), ["feature", "main"]);
+        let RefNode::Folder { children, .. } = &nodes[0] else {
+            panic!("feature is a folder");
+        };
+        assert_eq!(leaf_labels(children), ["auth", "ui"]);
+        let RefNode::Folder { children: auth, .. } = &children[0] else {
+            panic!("auth is a folder under feature");
+        };
+        assert_eq!(leaf_labels(auth), ["login", "logout"]);
+    }
+
+    #[test]
+    fn a_folder_holding_one_branch_shows_the_whole_name_instead() {
+        assert_eq!(
+            tree(&["t3/blame-view"]),
+            vec![RefNode::Leaf {
+                label: "t3/blame-view".into(),
+                path: "t3/blame-view".into(),
+                value: (),
+            }],
+            "a one-branch folder would only hide the name"
+        );
+        assert_eq!(
+            tree(&["a/b/c"]),
+            vec![RefNode::Leaf {
+                label: "a/b/c".into(),
+                path: "a/b/c".into(),
+                value: (),
+            }],
+            "a chain of one-branch folders collapses to one row"
+        );
+        // The folder exists once a sibling gives it something to group.
+        let nodes = tree(&["a/b/c", "a/b/d"]);
+        let RefNode::Folder { children, .. } = &nodes[0] else {
+            panic!("a is a folder");
+        };
+        let RefNode::Folder {
+            children: inner, ..
+        } = &children[0]
+        else {
+            panic!("b is a folder under a");
+        };
+        assert_eq!(leaf_labels(inner), ["c", "d"]);
+    }
+
+    #[test]
+    fn folders_and_leaves_keep_natural_order() {
+        let nodes = tree(&[
+            "topic-10",
+            "topic-2",
+            "feature-10/x",
+            "feature-2/x",
+            "zebra/x",
+        ]);
+
+        assert_eq!(
+            leaf_labels(&nodes),
+            [
+                "feature-2/x",
+                "feature-10/x",
+                "topic-2",
+                "topic-10",
+                "zebra/x"
+            ]
+        );
+    }
+
+    #[test]
+    fn flatten_draws_folder_rows_above_their_leaves() {
+        let items = flatten(
+            &Branches::default(),
+            sidebar_data(&["t3/fast-blame", "main", "t3/blame-view"], &[], &[], &[]),
+        );
+
+        assert_eq!(
+            items,
+            vec![
+                SidebarItem::SectionHeader {
+                    section: Section::Local,
+                    count: 3,
+                    open: true,
+                },
+                SidebarItem::LocalBranch {
+                    name: "main".into(),
+                    label: "main".into(),
+                    index: 0,
+                    depth: 0,
+                    upstream: None,
+                    upstream_gone: false,
+                    upstream_note: None,
+                },
+                SidebarItem::Folder {
+                    key: "local:t3".into(),
+                    segment: "t3".into(),
+                    count: 2,
+                    open: true,
+                    depth: 0,
+                    section: Section::Local,
+                },
+                SidebarItem::LocalBranch {
+                    name: "t3/blame-view".into(),
+                    label: "blame-view".into(),
+                    index: 1,
+                    depth: 1,
+                    upstream: None,
+                    upstream_gone: false,
+                    upstream_note: None,
+                },
+                SidebarItem::LocalBranch {
+                    name: "t3/fast-blame".into(),
+                    label: "fast-blame".into(),
+                    index: 2,
+                    depth: 1,
+                    upstream: None,
+                    upstream_gone: false,
+                    upstream_note: None,
+                },
+                SidebarItem::SectionHeader {
+                    section: Section::Remote,
+                    count: 0,
+                    open: true,
+                },
+                SidebarItem::SectionHeader {
+                    section: Section::Tags,
+                    count: 0,
+                    open: true,
+                },
+                SidebarItem::SectionHeader {
+                    section: Section::Stashes,
+                    count: 0,
+                    open: true,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn remote_branches_fold_under_their_remote() {
+        let items = flatten_with(
+            &Branches::default(),
+            sidebar_data(
+                &[],
+                &["origin/t3/a", "origin/t3/b", "origin/main"],
+                &[],
+                &[],
+            ),
+            &HashMap::new(),
+            &[remote("origin", None)],
+        );
+
+        assert!(items.contains(&SidebarItem::Folder {
+            key: "remote:origin:t3".into(),
+            segment: "t3".into(),
+            count: 2,
+            open: true,
+            depth: 0,
+            section: Section::Remote,
+        }));
+        let labels: Vec<String> = items
+            .iter()
+            .filter_map(|item| match item {
+                SidebarItem::RemoteBranch { label, depth, .. } => Some(format!("{label}/{depth}")),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            labels,
+            ["main/0", "a/1", "b/1"],
+            "the folder groups origin's t3 refs, and only those"
+        );
+    }
+
+    #[test]
+    fn a_folder_folds_like_a_section_and_stays_folded() {
+        let mut branches = Branches::default();
+        assert!(!branches.folder_folded("local:t3"));
+        branches.toggle_folder("local:t3".into());
+
+        let folded = |items: &[SidebarItem]| {
+            items.iter().any(|item| {
+                matches!(item, SidebarItem::Folder { key, open: false, .. } if key == "local:t3")
+            })
+        };
+        let items = flatten(&branches, sidebar_data(&["t3/a", "t3/b"], &[], &[], &[]));
+        assert!(folded(&items), "a folded folder starts closed");
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item, SidebarItem::LocalBranch { .. })),
+            "a folded folder draws no leaves"
+        );
+
+        let refreshed = flatten(
+            &branches,
+            sidebar_data(&["t3/a", "t3/b", "t3/c"], &[], &[], &[]),
+        );
+        assert!(
+            folded(&refreshed),
+            "the fold survives the snapshot that adds a ref"
+        );
+
+        branches.toggle_folder("local:t3".into());
+        let open = flatten(
+            &branches,
+            sidebar_data(&["t3/a", "t3/b", "t3/c"], &[], &[], &[]),
+        );
+        assert!(open.contains(&SidebarItem::Folder {
+            key: "local:t3".into(),
+            segment: "t3".into(),
+            count: 3,
+            open: true,
+            depth: 0,
+            section: Section::Local,
+        }));
+        assert_eq!(
+            open.iter()
+                .filter(|item| matches!(item, SidebarItem::LocalBranch { .. }))
+                .count(),
+            3
+        );
+    }
+
+    #[test]
+    fn the_current_branch_folder_opens_when_head_moves_into_it() {
+        let mut branches = Branches::default();
+        branches.toggle_folder("local:t3".into());
+        let main = sidebar_data(&["main", "t3/a", "t3/b"], &[], &[], &[]);
+        let items = flatten(&branches, main);
+        assert!(
+            items.iter().any(|item| matches!(
+                item,
+                SidebarItem::Folder { key, open: false, .. } if key == "local:t3"
+            )),
+            "the folder folds while HEAD is elsewhere"
+        );
+
+        let mut on_t3 = sidebar_data(&["main", "t3/a", "t3/b"], &[], &[], &[]);
+        on_t3.head_branch = Some("t3/a".into());
+        let items = flatten(&branches, on_t3);
+        assert!(
+            items.iter().any(|item| matches!(
+                item,
+                SidebarItem::Folder { key, open: true, .. } if key == "local:t3"
+            )),
+            "the checked-out branch's folder opens itself"
+        );
+        assert!(
+            items.iter().any(
+                |item| matches!(item, SidebarItem::LocalBranch { name, .. } if name == "t3/a")
+            )
+        );
+    }
+
+    #[test]
+    fn a_filter_lists_matching_leaves_by_their_full_path_without_folders() {
+        let mut branches = Branches::default();
+        branches.set_filter(Some("t3/blame".into()));
+
+        let items = flatten(
+            &branches,
+            sidebar_data(&["t3/blame-view", "t3/fast-blame", "main"], &[], &[], &[]),
+        );
+
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item, SidebarItem::Folder { .. })),
+            "a filter shows the leaves directly"
+        );
+        let rows: Vec<(String, String, usize)> = items
+            .iter()
+            .filter_map(|item| match item {
+                SidebarItem::LocalBranch {
+                    name, label, depth, ..
+                } => Some((name.clone(), label.clone(), *depth)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            rows,
+            [("t3/blame-view".to_owned(), "t3/blame-view".to_owned(), 0)],
+            "the match keeps its whole path and no indent"
+        );
+    }
+
+    #[test]
+    fn a_filter_hides_remotes_without_a_match() {
+        let mut branches = Branches::default();
+        branches.set_filter(Some("origin/t3/a".into()));
+
+        let items = flatten_with(
+            &branches,
+            sidebar_data(
+                &[],
+                &["origin/t3/a", "origin/t3/b", "backup/main"],
+                &[],
+                &[],
+            ),
+            &HashMap::new(),
+            &[],
+        );
+
+        assert!(!items.iter().any(|item| matches!(
+            item,
+            SidebarItem::RemoteGroup { name, .. } if name == "backup"
+        )));
+        let labels: Vec<&str> = items
+            .iter()
+            .filter_map(|item| match item {
+                SidebarItem::RemoteBranch { label, .. } => Some(label.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(labels, ["t3/a"]);
     }
 
     #[test]
@@ -5739,6 +6618,8 @@ mod tests {
                     .flex_col()
                     .child(local_row(
                         "feature/extremely-long-branch-with-ahead-behind-counters-and-pr",
+                        "feature/extremely-long-branch-with-ahead-behind-counters-and-pr",
+                        0,
                         0,
                         false,
                         Some("↑2 ↓1"),
@@ -5754,7 +6635,9 @@ mod tests {
                     ))
                     .child(local_row(
                         "feature/extremely-long-branch-with-deleted-upstream-and-pr",
+                        "feature/extremely-long-branch-with-deleted-upstream-and-pr",
                         1,
+                        0,
                         false,
                         None,
                         true,
@@ -5769,7 +6652,9 @@ mod tests {
                     ))
                     .child(local_row(
                         "feature/extremely-long-branch-with-shallow-question-mark-and-pr",
+                        "feature/extremely-long-branch-with-shallow-question-mark-and-pr",
                         2,
+                        0,
                         false,
                         Some("?"),
                         false,
@@ -5779,6 +6664,18 @@ mod tests {
                         false,
                         true,
                         false,
+                        &colors,
+                        self.repo.clone(),
+                    ))
+                    // A folder row draws in the same narrow list without
+                    // overflowing or painting over its own hover.
+                    .child(folder_row(
+                        "local:feature",
+                        "feature",
+                        3,
+                        true,
+                        0,
+                        Section::Local,
                         &colors,
                         self.repo.clone(),
                     ))
@@ -5809,7 +6706,7 @@ mod tests {
         });
 
         let rows = row_bounds.borrow();
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), 4);
         for (i, bounds) in rows.iter().enumerate() {
             assert!(
                 bounds.size.width <= px(152.5),
