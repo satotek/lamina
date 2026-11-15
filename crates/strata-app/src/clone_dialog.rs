@@ -165,7 +165,7 @@ fn open_repository(
     cx: &mut App,
 ) -> Result<(), String> {
     let Some(workspace) = workspace.upgrade() else {
-        return Err("The window that started this is gone.".to_owned());
+        return Err(t!("clone.window_gone").to_string());
     };
     workspace.update(cx, |workspace, cx| match target {
         OpenTarget::Current => workspace.open_path(path, window, cx),
@@ -990,7 +990,7 @@ impl InitDialog {
         self.error = None;
         let folder = self.folder.read(cx).value().trim().to_owned();
         if folder.is_empty() {
-            self.error = Some("Choose the folder for the new repository.".to_owned());
+            self.error = Some(t!("init.choose_hint").to_string());
             cx.notify();
             return;
         }
@@ -1067,7 +1067,7 @@ impl Render for InitDialog {
                         div()
                             .text_size(px(design.tiny()))
                             .text_color(design.muted)
-                            .child("FOLDER"),
+                            .child(t!("init.folder").to_string()),
                     )
                     .child(
                         div()

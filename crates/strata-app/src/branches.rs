@@ -3420,7 +3420,10 @@ fn create_card(
             div()
                 .text_size(px(11.0))
                 .text_color(colors.muted_foreground)
-                .child(format!("New branch {}", form.start.label)),
+                .child(t!(
+                    "branch.dialog.new_branch_start",
+                    start = form.start.label
+                )),
         )
         .child(Input::new(&form.input).w_full())
         .child(
@@ -3562,7 +3565,7 @@ fn rename_card(
             div()
                 .text_size(px(11.0))
                 .text_color(colors.muted_foreground)
-                .child(format!("Renaming {}", form.branch)),
+                .child(t!("branch.dialog.renaming", branch = form.branch)),
         )
         .child(Input::new(&form.input).w_full());
     match &form.upstream_label {
@@ -3571,7 +3574,7 @@ fn rename_card(
                 div()
                     .text_size(px(11.0))
                     .text_color(colors.muted_foreground)
-                    .child(format!("Current upstream: {label}")),
+                    .child(t!("branch.dialog.current_upstream", label = label)),
             );
             if form.upstream.is_some() {
                 card = card
@@ -3827,7 +3830,7 @@ fn edit_remote_card(
             div()
                 .text_size(px(13.0))
                 .font_weight(FontWeight::SEMIBOLD)
-                .child(format!("Edit remote {}", form.name)),
+                .child(t!("branch.dialog.edit_remote", name = form.name)),
         )
         .child(
             div()

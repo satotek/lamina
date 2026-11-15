@@ -78,25 +78,27 @@ impl RepoView {
         let argv = match commands::expand(&command.spec.command, &variables) {
             Ok(argv) => argv,
             Err(reason) => {
-                self.report_custom_command_error(format!("{}: {reason}", command.spec.title), cx);
+                self.report_custom_command_error(
+                    t!(
+                        "commands.failed",
+                        title = command.spec.title,
+                        detail = reason
+                    )
+                    .to_string(),
+                    cx,
+                );
                 return;
             }
         };
         let dir = match variables.repo.as_deref().map(PathBuf::from) {
             Some(dir) => dir,
             None => {
-                self.report_custom_command_error(
-                    "open a repository before running a custom command".to_owned(),
-                    cx,
-                );
+                self.report_custom_command_error(t!("commands.no_repository").to_string(), cx);
                 return;
             }
         };
         let Some(session) = self.session.as_ref() else {
-            self.report_custom_command_error(
-                "open a repository before running a custom command".to_owned(),
-                cx,
-            );
+            self.report_custom_command_error(t!("commands.no_repository").to_string(), cx);
             return;
         };
         let log = session.git().log_handle();
@@ -117,9 +119,12 @@ impl RepoView {
             ui::confirm(
                 window,
                 cx,
-                ui::Confirm::new(format!("Run {}?", command.spec.title), detail)
-                    .ok_label("Run")
-                    .always_ask(),
+                ui::Confirm::new(
+                    t!("commands.run_confirm", title = command.spec.title).to_string(),
+                    detail,
+                )
+                .ok_label(t!("commands.run").to_string())
+                .always_ask(),
                 run,
             );
         } else {
@@ -139,15 +144,19 @@ impl RepoView {
         }
         match finished.exit_code {
             Some(0) => {
-                self.status_note = Some(format!("{} finished", finished.title));
+                self.status_note =
+                    Some(t!("commands.finished", title = finished.title).to_string());
                 self.status_error = None;
             }
             _ => {
-                self.status_error = Some(format!(
-                    "{}: {}",
-                    finished.title,
-                    commands::failure_line(&finished)
-                ));
+                self.status_error = Some(
+                    t!(
+                        "commands.failed",
+                        title = finished.title,
+                        detail = commands::failure_line(&finished)
+                    )
+                    .to_string(),
+                );
             }
         }
         cx.notify();

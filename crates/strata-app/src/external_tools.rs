@@ -81,7 +81,7 @@ fn split_command(command: &str) -> Result<Vec<String>, String> {
     }
 
     if quote.is_some() {
-        return Err(format!("unterminated quote in command: {command}"));
+        return Err(t!("external.unterminated_quote", command = command).to_string());
     }
     if started {
         arguments.push(current);
@@ -139,10 +139,23 @@ fn spawn_detached(mut command: Command, what: &str) -> Result<(), String> {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    // The caller names the program kind so the log line stays stable; the
+    // message the user reads gets the translated noun.
     let program = command.get_program().to_string_lossy().into_owned();
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("could not start the {what} ({program}): {error}"))?;
+    let what_label = match what {
+        "terminal" => t!("external.terminal").to_string(),
+        "editor" => t!("external.editor").to_string(),
+        other => other.to_owned(),
+    };
+    let mut child = command.spawn().map_err(|error| {
+        t!(
+            "external.start_failed",
+            what = what_label,
+            program = program,
+            error = error
+        )
+        .to_string()
+    })?;
 
     // Dropping a `Child` does not reap it on Unix; wait on a thread so the UI
     // never blocks on a program that stays open for as long as the user uses

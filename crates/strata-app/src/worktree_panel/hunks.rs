@@ -255,10 +255,12 @@ impl WorktreePanel {
                 (Some(error), _) => {
                     crate::ui::message(error, colors.danger, &colors.design).into_any_element()
                 }
-                (None, None) => {
-                    crate::ui::message("computing diff…", colors.muted_foreground, &colors.design)
-                        .into_any_element()
-                }
+                (None, None) => crate::ui::message(
+                    t!("worktree.computing_diff").to_string(),
+                    colors.muted_foreground,
+                    &colors.design,
+                )
+                .into_any_element(),
                 (None, Some(view)) if view.lfs.is_some() => {
                     let summary = view.lfs.clone().expect("checked above");
                     let missing = summary.old.as_ref().is_some_and(|side| !side.present)
@@ -278,7 +280,7 @@ impl WorktreePanel {
                                 entity.update(cx, |this, cx| {
                                     this.run_operation(
                                         Operation::LfsPull { path },
-                                        "Download LFS object",
+                                        t!("worktree.download_lfs").to_string(),
                                         window,
                                         cx,
                                     );
@@ -289,18 +291,22 @@ impl WorktreePanel {
                     let body = if !self.rows.is_empty() {
                         self.diff_list(entity.clone(), view, theme, colors)
                     } else if view.diff.binary {
-                        crate::ui::message("Binary file", colors.muted_foreground, &colors.design)
-                            .into_any_element()
+                        crate::ui::message(
+                            t!("worktree.binary_file").to_string(),
+                            colors.muted_foreground,
+                            &colors.design,
+                        )
+                        .into_any_element()
                     } else if missing {
                         crate::ui::message(
-                            "The object is not downloaded",
+                            t!("worktree.not_downloaded").to_string(),
                             colors.muted_foreground,
                             &colors.design,
                         )
                         .into_any_element()
                     } else {
                         crate::ui::message(
-                            "No textual changes",
+                            t!("worktree.no_text_changes").to_string(),
                             colors.muted_foreground,
                             &colors.design,
                         )
@@ -315,12 +321,14 @@ impl WorktreePanel {
                         .child(body)
                         .into_any_element()
                 }
-                (None, Some(view)) if view.diff.binary => {
-                    crate::ui::message("Binary file", colors.muted_foreground, &colors.design)
-                        .into_any_element()
-                }
+                (None, Some(view)) if view.diff.binary => crate::ui::message(
+                    t!("worktree.binary_file").to_string(),
+                    colors.muted_foreground,
+                    &colors.design,
+                )
+                .into_any_element(),
                 (None, Some(_)) if self.rows.is_empty() => crate::ui::message(
-                    "No textual changes",
+                    t!("worktree.no_text_changes").to_string(),
                     colors.muted_foreground,
                     &colors.design,
                 )

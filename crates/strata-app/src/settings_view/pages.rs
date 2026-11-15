@@ -437,7 +437,7 @@ fn tools(control: f32, design: &Design) -> SettingPage {
         design,
     )
     .groups(
-        card("Git").item(
+        card(t!("settings.tools.git").to_string()).item(
             SettingItem::new(
                 t!("settings.tools.git_executable").to_string(),
                 git_field(control),
@@ -585,12 +585,13 @@ fn keyboard(design: &Design) -> SettingPage {
 }
 
 fn commands_page(design: &Design) -> SettingPage {
+    let file = t!("settings.commands.file").to_string();
     shell_no_reset(
         Section::Commands,
         t!("settings.commands.description").to_string(),
         design,
     )
-    .groups(card("File").item(SettingItem::render(|_, _, cx| {
+    .groups(card(file).item(SettingItem::render(|_, _, cx| {
         let design = Design::new(cx.theme(), Settings::get(cx));
         let state = crate::commands::CommandState::get(cx);
         let path = state.path.as_ref().map_or_else(
@@ -953,22 +954,28 @@ fn action_row(row: crate::keymap::ActionRow, design: &Design) -> AnyElement {
             .w(px(84.0))
             .gap_1()
             .child(
-                crate::ui::button(SharedString::from(format!("edit-{}", row.name)), "Edit")
-                    .size(crate::ui::ButtonSize::Tiny)
-                    .ghost()
-                    .on_click(move |_, _, cx| crate::keymap::begin_capture(cx, spec)),
+                crate::ui::button(
+                    SharedString::from(format!("edit-{}", row.name)),
+                    t!("common.edit").to_string(),
+                )
+                .size(crate::ui::ButtonSize::Tiny)
+                .ghost()
+                .on_click(move |_, _, cx| crate::keymap::begin_capture(cx, spec)),
             )
             .child(
-                crate::ui::button(SharedString::from(format!("reset-{}", row.name)), "Reset")
-                    .size(crate::ui::ButtonSize::Tiny)
-                    .ghost()
-                    .disabled(!changed)
-                    .on_click(move |_, _, cx| {
-                        if let Err(error) = crate::keymap::reset_binding(cx, spec) {
-                            crate::keymap::KeymapState::get_mut(cx).errors.push(error);
-                            cx.refresh_windows();
-                        }
-                    }),
+                crate::ui::button(
+                    SharedString::from(format!("reset-{}", row.name)),
+                    t!("common.reset").to_string(),
+                )
+                .size(crate::ui::ButtonSize::Tiny)
+                .ghost()
+                .disabled(!changed)
+                .on_click(move |_, _, cx| {
+                    if let Err(error) = crate::keymap::reset_binding(cx, spec) {
+                        crate::keymap::KeymapState::get_mut(cx).errors.push(error);
+                        cx.refresh_windows();
+                    }
+                }),
             ),
     );
     element.into_any_element()

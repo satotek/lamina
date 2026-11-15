@@ -100,7 +100,7 @@ impl RepoView {
         self.commit_graph_writing = true;
         self.run_operation(
             Operation::WriteCommitGraph,
-            "write commit-graph",
+            t!("history.commit_graph_op").to_string(),
             window,
             cx,
         );

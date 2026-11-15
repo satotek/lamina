@@ -632,9 +632,9 @@ impl Picker {
         self.path_mode = !self.path_mode;
         self.error = None;
         let placeholder = if self.path_mode {
-            "Path to a repository"
+            t!("picker.placeholder.path").to_string()
         } else {
-            "Filter repositories"
+            t!("picker.filter").to_string()
         };
         let focus = self.input.focus_handle(cx);
         self.input.update(cx, |state, cx| {
@@ -817,9 +817,9 @@ impl Picker {
             } else if ghq_count == 0 {
                 column = column.child(div().text_size(px(11.5)).text_color(design.muted).child(
                     if ghq_paths.is_empty() {
-                        "No ghq repositories yet."
+                        t!("picker.empty.ghq").to_string()
                     } else {
-                        "No ghq repository matches that filter."
+                        t!("picker.empty.ghq_filter").to_string()
                     },
                 ));
             } else {
@@ -860,8 +860,11 @@ impl Picker {
                     .pt_1()
                     .text_size(px(10.5))
                     .text_color(design.muted)
-                    .child(format!(
-                        "↑/↓ choose · Enter open · {MODIFIER}+Enter new tab · {MODIFIER}+O open… · {MODIFIER}+L type a path"
+                    .child(t!(
+                        "picker.hint",
+                        tab = MODIFIER,
+                        open = MODIFIER,
+                        path = MODIFIER
                     )),
             );
         }

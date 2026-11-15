@@ -132,15 +132,21 @@ fn load(cx: &mut App) {
                         .take(index)
                         .any(|other| other.spec.title == command.spec.title)
                     {
-                        warnings.push(format!("duplicate title `{}`", command.spec.title));
+                        warnings.push(
+                            t!("commands.duplicate_title", title = command.spec.title).to_string(),
+                        );
                     }
                     if let Some(key) = &command.spec.key
                         && Keystroke::parse_with_os(key, os).is_err()
                     {
-                        warnings.push(format!(
-                            "{}: `{key}` is not a keystroke",
-                            command.spec.title
-                        ));
+                        warnings.push(
+                            t!(
+                                "commands.not_a_keystroke",
+                                title = command.spec.title,
+                                key = key
+                            )
+                            .to_string(),
+                        );
                     }
                 }
                 state.commands = std::mem::take(&mut commands);
@@ -149,7 +155,9 @@ fn load(cx: &mut App) {
             Err(error) => state.errors.push(error),
         },
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => state.errors.push(format!("cannot read: {error}")),
+        Err(error) => state
+            .errors
+            .push(t!("commands.read_failed", error = error).to_string()),
     }
     for problem in state.errors.iter().chain(state.warnings.iter()) {
         log::warn!("{}: {problem}", path.display());
@@ -159,22 +167,23 @@ fn load(cx: &mut App) {
 
 /// Parses the file, or names the line it could not be parsed at.
 fn parse(content: &str) -> Result<(Vec<CustomCommand>, Vec<String>), String> {
-    let specs: Vec<CommandSpec> =
-        serde_json::from_str(content).map_err(|error| format!("line {}: {error}", error.line()))?;
+    let specs: Vec<CommandSpec> = serde_json::from_str(content).map_err(|error| {
+        t!("commands.parse_line", line = error.line(), error = error).to_string()
+    })?;
     let mut commands = Vec::with_capacity(specs.len());
     let mut warnings = Vec::new();
     for (index, mut spec) in specs.into_iter().enumerate() {
         let number = index + 1;
         if spec.title.trim().is_empty() {
-            warnings.push(format!("entry {number}: `title` is empty"));
+            warnings.push(t!("commands.entry_title_empty", number = number).to_string());
             continue;
         }
         if spec.command.is_empty() {
-            warnings.push(format!("{}: `command` is empty", spec.title));
+            warnings.push(t!("commands.command_empty", title = spec.title).to_string());
             continue;
         }
         if spec.command[0].is_empty() {
-            warnings.push(format!("{}: the program is empty", spec.title));
+            warnings.push(t!("commands.program_empty", title = spec.title).to_string());
             continue;
         }
         spec.title = spec.title.trim().to_owned();
@@ -312,7 +321,9 @@ pub fn expand(argv: &[String], variables: &Variables) -> Result<Vec<String>, Str
                 out.push_str(&rest[..start]);
                 let after = &rest[start + 2..];
                 let Some(end) = after.find('}') else {
-                    return Err(format!("unterminated variable in `{argument}`"));
+                    return Err(
+                        t!("commands.unterminated_variable", argument = argument).to_string()
+                    );
                 };
                 let name = &after[..end];
                 out.push_str(value(name, variables)?);
@@ -326,14 +337,16 @@ pub fn expand(argv: &[String], variables: &Variables) -> Result<Vec<String>, Str
 
 fn value<'a>(name: &str, variables: &'a Variables) -> Result<&'a str, String> {
     let (slot, missing) = match name {
-        "repo" => (&variables.repo, "no repository is open"),
-        "branch" => (&variables.branch, "no branch is checked out"),
-        "commit" => (&variables.commit, "no commit is selected"),
-        "file" => (&variables.file, "no file is selected"),
-        "remote" => (&variables.remote, "the branch has no upstream remote"),
-        other => return Err(format!("unknown variable `${{{other}}}`")),
+        "repo" => (&variables.repo, t!("history_ops.no_repository")),
+        "branch" => (&variables.branch, t!("commands.var_branch")),
+        "commit" => (&variables.commit, t!("commands.var_commit")),
+        "file" => (&variables.file, t!("commands.var_file")),
+        "remote" => (&variables.remote, t!("commands.var_remote")),
+        other => {
+            return Err(t!("commands.unknown_variable", name = other).to_string());
+        }
     };
-    slot.as_deref().ok_or_else(|| missing.to_owned())
+    slot.as_deref().ok_or_else(|| missing.to_string())
 }
 
 /// The command line as the confirmation dialog shows it. Arguments with spaces
@@ -379,22 +392,27 @@ pub fn submenu(
     if entries.is_empty() {
         return menu;
     }
-    menu.submenu("Custom", window, cx, move |menu, _, _| {
-        entries.iter().fold(menu, |menu, (index, title, reason)| {
-            let label = match reason {
-                Some(reason) => format!("{title} ({reason})"),
-                None => title.clone(),
-            };
-            let index = *index;
-            menu.item(
-                PopupMenuItem::new(label)
-                    .disabled(reason.is_some())
-                    .on_click(move |_, window, cx| {
-                        window.dispatch_action(Box::new(RunCustomCommand { index }), cx);
-                    }),
-            )
-        })
-    })
+    menu.submenu(
+        t!("commands.menu").to_string(),
+        window,
+        cx,
+        move |menu, _, _| {
+            entries.iter().fold(menu, |menu, (index, title, reason)| {
+                let label = match reason {
+                    Some(reason) => format!("{title} ({reason})"),
+                    None => title.clone(),
+                };
+                let index = *index;
+                menu.item(
+                    PopupMenuItem::new(label)
+                        .disabled(reason.is_some())
+                        .on_click(move |_, window, cx| {
+                            window.dispatch_action(Box::new(RunCustomCommand { index }), cx);
+                        }),
+                )
+            })
+        },
+    )
 }
 
 /// One finished run.
@@ -513,7 +531,13 @@ pub fn failure_line(finished: &Finished) -> String {
         .map(str::trim)
         .find(|line| !line.is_empty())
         .map_or_else(
-            || format!("exit {}", finished.exit_code.unwrap_or(-1)),
+            || {
+                t!(
+                    "commands.exit_code",
+                    code = finished.exit_code.unwrap_or(-1)
+                )
+                .to_string()
+            },
             str::to_owned,
         )
 }
@@ -521,15 +545,26 @@ pub fn failure_line(finished: &Finished) -> String {
 /// Creates `commands.json` with an empty list so the settings button has a file
 /// to open on a fresh install.
 pub fn ensure_file() -> Result<PathBuf, String> {
-    let path =
-        commands_file().ok_or_else(|| "the configuration directory is unknown".to_owned())?;
+    let path = commands_file().ok_or_else(|| t!("commands.no_config_dir").to_string())?;
     if !path.exists() {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+            std::fs::create_dir_all(parent).map_err(|error| {
+                t!(
+                    "commands.create_failed",
+                    path = parent.display(),
+                    error = error
+                )
+                .to_string()
+            })?;
         }
-        std::fs::write(&path, b"[]\n")
-            .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+        std::fs::write(&path, b"[]\n").map_err(|error| {
+            t!(
+                "commands.write_failed",
+                path = path.display(),
+                error = error
+            )
+            .to_string()
+        })?;
     }
     Ok(path)
 }

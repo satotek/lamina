@@ -104,7 +104,7 @@ pub(crate) fn branch_items(
     let pull_request = entity.read(cx).pull_request_for_branch(branch);
     let open_pr = pull_request.as_ref().map(|pull_request| {
         let url = pull_request.url.clone();
-        let label = format!("Open Pull Request #{} on GitHub", pull_request.number);
+        let label = t!("github.open_pull_request", number = pull_request.number).to_string();
         PopupMenuItem::new(label).on_click(
             move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| {
                 cx.open_with_system(std::path::Path::new(&url));
@@ -189,7 +189,7 @@ fn open_item(url: String) -> PopupMenuItem {
 fn create_pr_item(entity: &Entity<RepoView>, branch: &str, cx: &App) -> PopupMenuItem {
     let blocked = gh_blocked(cx);
     let label = match &blocked {
-        Some(reason) => format!("Create Pull Request… ({reason})"),
+        Some(reason) => t!("github.create_pr_blocked", reason = reason).to_string(),
         None => t!("github.create_pr").to_string().to_owned(),
     };
     let mut item = PopupMenuItem::new(label).disabled(blocked.is_some());
@@ -218,10 +218,10 @@ fn checkout_pr_item(entity: &Entity<RepoView>, remote: &GitHubRemote, cx: &App) 
             .read(cx)
             .pull_requests
             .is_checking_out()
-            .then(|| "a checkout is running".to_owned())
+            .then(|| t!("github.checkout_running").to_string())
     });
     let label = match &blocked {
-        Some(reason) => format!("Check out Pull Request… ({reason})"),
+        Some(reason) => t!("github.checkout_pr_blocked", reason = reason).to_string(),
         None => t!("github.checkout_pr").to_string().to_owned(),
     };
     let mut item = PopupMenuItem::new(label).disabled(blocked.is_some());
@@ -263,7 +263,7 @@ pub(crate) fn gh_for(host: &str, cx: &App) -> Result<PathBuf, String> {
             Ok(gh.binary.clone())
         }
         Some(gh) if !gh.logged_in => Err(t!("github.gh_not_logged_in").to_string().to_owned()),
-        Some(_) => Err(format!("gh is not logged in to {host}")),
+        Some(_) => Err(t!("github.not_logged_in_host", host = host).to_string()),
         None => Err(tooling.gh_reason()),
     }
 }
@@ -293,8 +293,8 @@ fn create_pull_request(
         };
         let _ = handle.update(cx, |_, window, cx| {
             window.push_notification(
-                Notification::error(format!("Could not create the pull request: {error}"))
-                    .title("GitHub"),
+                Notification::error(t!("github.create_pr_error", error = error).to_string())
+                    .title(t!("github.title").to_string()),
                 cx,
             );
         });

@@ -147,7 +147,7 @@ pub fn install_hint() -> String {
     } else if cfg!(target_os = "windows") {
         "winget install GitHub.GitLFS"
     } else {
-        "your package manager"
+        return t!("lfs.install_hint", install = t!("lfs.package_manager")).to_string();
     };
-    format!("Install Git LFS to work with this repository's LFS files (for example `{install}`).")
+    t!("lfs.install_hint", install = install).to_string()
 }

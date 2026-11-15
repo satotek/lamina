@@ -48,17 +48,17 @@ impl RepoView {
                 .map(|file| file.path.clone()),
         };
         let Some(path) = path else {
-            self.report_in_status("select a file to open in the editor".to_owned(), cx);
+            self.report_in_status(t!("title_bar.select_file_to_open").to_string(), cx);
             return;
         };
 
         let present = details::in_working_tree(self.work_dir().as_deref(), &path);
         match choice(present, self.selection_is_head()) {
             Choice::Missing => {
-                self.report_in_status(format!("cannot open {path}: not in the working tree"), cx);
+                self.report_in_status(t!("editor.not_in_worktree", path = path).to_string(), cx);
             }
             Choice::WorkingCopy => {
-                self.status_note = Some(format!("Opened the working copy of {path}"));
+                self.status_note = Some(t!("editor.opened_working_copy", path = path).to_string());
                 // The note is the newest thing the user asked for, so it must
                 // not stay hidden behind an older failure.
                 self.status_error = None;

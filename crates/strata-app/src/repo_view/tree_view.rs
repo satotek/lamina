@@ -759,7 +759,8 @@ impl RepoView {
                 .into_any_element();
         }
         let Some(entries) = &self.tree.entries else {
-            return crate::ui::message("reading tree…", design.muted, design).into_any_element();
+            return crate::ui::message(t!("tree.reading_tree").to_string(), design.muted, design)
+                .into_any_element();
         };
         if entries.is_empty() {
             return crate::ui::message(t!("tree.empty_dir").to_string(), design.muted, design)
@@ -820,7 +821,8 @@ impl RepoView {
     fn tree_file_view(&self, file: &OpenFile, design: &Design, cx: &mut App) -> AnyElement {
         match &file.content {
             FileContent::Loading => {
-                crate::ui::message("reading file…", design.muted, design).into_any_element()
+                crate::ui::message(t!("tree.reading_file").to_string(), design.muted, design)
+                    .into_any_element()
             }
             FileContent::Notice(notice) => {
                 crate::ui::message(notice.clone(), design.muted, design).into_any_element()

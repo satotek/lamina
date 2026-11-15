@@ -108,12 +108,13 @@ impl ImageDiffMode {
         ImageDiffMode::OnionSkin,
     ];
 
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            ImageDiffMode::SideBySide => "Side by side",
-            ImageDiffMode::Swipe => "Swipe",
-            ImageDiffMode::OnionSkin => "Onion skin",
+            ImageDiffMode::SideBySide => t!("image_diff.mode.side_by_side"),
+            ImageDiffMode::Swipe => t!("image_diff.mode.swipe"),
+            ImageDiffMode::OnionSkin => t!("image_diff.mode.onion_skin"),
         }
+        .to_string()
     }
 
     /// The stable id used in element ids and the saved file.

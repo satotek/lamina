@@ -71,19 +71,19 @@ pub(super) fn open(
         let footer = footer.clone();
         let confirm = confirm.clone();
         let blocked = confirm.read(cx).blocked_reason();
-        let mut ok = ui::button("rebase-ok", "Rewrite history")
+        let mut ok = ui::button("rebase-ok", t!("rebase_edit.confirm").to_string())
             .size(ui::ButtonSize::Medium)
             .disabled(blocked.is_some());
         if let Some(reason) = blocked {
             ok = ok.tooltip(reason);
         }
-        card.title("Edit history")
+        card.title(t!("rebase_edit.title").to_string())
             .w(px(700.0))
             .content(move |body, _, _| body.child(content.clone()))
             .footer(
                 DialogFooter::new()
                     .child(
-                        ui::button("rebase-cancel", "Cancel")
+                        ui::button("rebase-cancel", t!("common.cancel").to_string())
                             .size(ui::ButtonSize::Medium)
                             .on_click(|_, window, cx| window.close_dialog(cx)),
                     )
@@ -242,7 +242,14 @@ impl RebaseDialog {
             None => match self.repo.commit_message(row.commit) {
                 Ok(message) => message,
                 Err(error) => {
-                    self.error = Some(format!("cannot read commit {}: {error}", row.short));
+                    self.error = Some(
+                        t!(
+                            "history_ops.read_commit_failed",
+                            id = row.short,
+                            error = error
+                        )
+                        .to_string(),
+                    );
                     return;
                 }
             },
@@ -260,23 +267,26 @@ impl RebaseDialog {
             let footer = footer.clone();
             let confirm = confirm.clone();
             let empty = confirm.read(cx).is_empty(cx);
-            card.title("Reword commit")
+            card.title(t!("edit_dialog.title").to_string())
                 .w(px(520.0))
                 .content(move |body, _, _| body.child(content.clone()))
                 .footer(
                     DialogFooter::new()
                         .child(
-                            ui::button("rebase-reword-cancel", "Cancel")
+                            ui::button("rebase-reword-cancel", t!("common.cancel").to_string())
                                 .size(ui::ButtonSize::Medium)
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
-                            ui::button("rebase-reword-ok", "Use message")
-                                .size(ui::ButtonSize::Medium)
-                                .disabled(empty)
-                                .on_click(move |_, window, cx| {
-                                    footer.update(cx, |prompt, cx| prompt.submit(window, cx));
-                                }),
+                            ui::button(
+                                "rebase-reword-ok",
+                                t!("rebase_edit.reword_button").to_string(),
+                            )
+                            .size(ui::ButtonSize::Medium)
+                            .disabled(empty)
+                            .on_click(move |_, window, cx| {
+                                footer.update(cx, |prompt, cx| prompt.submit(window, cx));
+                            }),
                         ),
                 )
                 .on_ok(move |_, window, cx| {
@@ -308,7 +318,7 @@ impl RebaseDialog {
             return;
         }
         let onto = self.onto;
-        let label = format!("edit history ({})", self.plan.summary().text());
+        let label = t!("rebase_edit.op", summary = self.plan.summary().text()).to_string();
         // The rewrite replaces every commit it replays, so the row the user
         // was on is found again by its distance from the new tip.
         let selection = self
@@ -323,7 +333,8 @@ impl RebaseDialog {
                 .as_ref()
                 .and_then(|state| state.blocked(HistoryAction::Reset))
             {
-                view.status_error = Some(format!("cannot edit history: {reason}"));
+                view.status_error =
+                    Some(t!("rebase_edit.cannot_start", reason = reason).to_string());
                 cx.notify();
                 return;
             }
@@ -359,7 +370,7 @@ impl RebaseDialog {
                     (false, _) => ui::ButtonKind::Ghost,
                 };
                 let button = ui::button(
-                    SharedString::from(format!("rebase-{index}-{}", action.label())),
+                    SharedString::from(format!("rebase-{index}-{}", action.id())),
                     action.label(),
                 )
                 .size(ui::ButtonSize::Tiny)
@@ -419,11 +430,15 @@ impl RebaseDialog {
                 .child(summary),
         )
         .when(row.action == ActionKind::Reword, |row| {
-            row.child(ui::status_badge("reworded", ui::BadgeTone::Accent, design))
+            row.child(ui::status_badge(
+                t!("rebase_edit.badge.reworded").to_string(),
+                ui::BadgeTone::Accent,
+                design,
+            ))
         })
         .when(orphan, |row| {
             row.child(ui::status_badge(
-                "nothing above",
+                t!("rebase_edit.badge.nothing_above").to_string(),
                 ui::BadgeTone::Danger,
                 design,
             ))
@@ -467,19 +482,16 @@ impl Render for RebaseDialog {
                 div()
                     .text_size(px(design.small()))
                     .text_color(design.muted)
-                    .child(format!(
-                        "Oldest commit first, applied top to bottom, on top of {}. Squash and fixup join the row above. Drag a row or press Alt+↑ / Alt+↓ to reorder; P R S F D pick the action.",
-                        short_oid(self.onto)
-                    )),
+                    .child(t!("rebase_edit.description", short = short_oid(self.onto))),
             )
             .child(list)
             .when(!self.pushed.is_empty(), |body| {
                 body.child(
                     ui::banner(
                         ui::BannerKind::Warning,
-                        format!(
-                            "Already pushed to {}. Rewriting these commits needs a force push.",
-                            self.pushed.join(", ")
+                        t!(
+                            "rebase_edit.pushed_warning",
+                            remotes = self.pushed.join(", ")
                         ),
                         &design,
                     )
@@ -570,10 +582,7 @@ impl Render for RewordPrompt {
                 div()
                     .text_size(px(design.small()))
                     .text_color(design.muted)
-                    .child(format!(
-                        "Commit {}. The whole message replaces the current one, summary and body.",
-                        self.short
-                    )),
+                    .child(t!("edit_dialog.description", short = self.short)),
             )
             .child(
                 Textarea::new(&self.message)

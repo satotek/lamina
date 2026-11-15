@@ -52,8 +52,8 @@ impl Tooling {
     pub fn ghq_reason(&self) -> String {
         match (&self.ghq_error, self.detecting) {
             (Some(error), _) => error.clone(),
-            (None, true) => "Detecting ghq…".to_owned(),
-            (None, false) => "ghq is not installed.".to_owned(),
+            (None, true) => t!("settings.tools.detecting_ghq").to_string(),
+            (None, false) => t!("settings.tools.ghq_missing").to_string(),
         }
     }
 
@@ -61,13 +61,11 @@ impl Tooling {
     /// logged-out install.
     pub fn gh_reason(&self) -> String {
         match (&self.gh, &self.gh_error, self.detecting) {
-            (Some(gh), _, _) if !gh.logged_in => {
-                "gh is not logged in: run gh auth login".to_owned()
-            }
+            (Some(gh), _, _) if !gh.logged_in => t!("github.gh_not_logged_in").to_string(),
             (Some(_), _, _) => String::new(),
             (None, Some(error), _) => error.clone(),
-            (None, None, true) => "Detecting GitHub CLI…".to_owned(),
-            (None, None, false) => "gh is not installed.".to_owned(),
+            (None, None, true) => t!("settings.tools.detecting_gh").to_string(),
+            (None, None, false) => t!("settings.tools.gh_missing").to_string(),
         }
     }
 }

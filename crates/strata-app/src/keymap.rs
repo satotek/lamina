@@ -1150,14 +1150,12 @@ pub fn parse(content: &str) -> LoadedKeymap {
         Err(error) => {
             loaded
                 .errors
-                .push(format!("line {}: {error}", error.line()));
+                .push(t!("keymap.parse_line", line = error.line(), error = error).to_string());
             return loaded;
         }
     };
     let Some(entries) = value.as_array() else {
-        loaded
-            .errors
-            .push("the file must contain a JSON array of bindings".to_owned());
+        loaded.errors.push(t!("keymap.not_array").to_string());
         return loaded;
     };
     for (index, entry) in entries.iter().enumerate() {
@@ -1165,7 +1163,7 @@ pub fn parse(content: &str) -> LoadedKeymap {
         let Some(object) = entry.as_object() else {
             loaded
                 .errors
-                .push(format!("entry {number}: expected an object"));
+                .push(t!("keymap.entry_object", number = number).to_string());
             continue;
         };
         let key = match object.get("key").and_then(|value| value.as_str()) {
@@ -1173,7 +1171,7 @@ pub fn parse(content: &str) -> LoadedKeymap {
             None => {
                 loaded
                     .errors
-                    .push(format!("entry {number}: `key` is required"));
+                    .push(t!("keymap.entry_key", number = number).to_string());
                 continue;
             }
         };
@@ -1183,7 +1181,7 @@ pub fn parse(content: &str) -> LoadedKeymap {
             Some(_) => {
                 loaded
                     .errors
-                    .push(format!("entry {number}: `action` must be a string or null"));
+                    .push(t!("keymap.entry_action", number = number).to_string());
                 continue;
             }
         };
@@ -1193,7 +1191,7 @@ pub fn parse(content: &str) -> LoadedKeymap {
             Some(_) => {
                 loaded
                     .errors
-                    .push(format!("entry {number}: `context` must be a string"));
+                    .push(t!("keymap.entry_context", number = number).to_string());
                 continue;
             }
         };
@@ -1213,7 +1211,7 @@ pub fn validate(loaded: &mut LoadedKeymap, os: OperatingSystem) {
         if Keystroke::parse_with_os(&entry.key, os).is_err() {
             loaded
                 .warnings
-                .push(format!("{} is not a keystroke", entry.key));
+                .push(t!("keymap.not_keystroke", key = entry.key).to_string());
             continue;
         }
         if let Some(context) = entry.context.as_deref()
@@ -1221,14 +1219,16 @@ pub fn validate(loaded: &mut LoadedKeymap, os: OperatingSystem) {
         {
             loaded
                 .warnings
-                .push(format!("`{context}` is not a key context"));
+                .push(t!("keymap.not_context", context = context).to_string());
             continue;
         }
         match entry.action.as_deref() {
             // An unbind names no action, so nothing else has to resolve.
             None => loaded.entries.push(entry),
             Some(action) if resolve(action).is_some() => loaded.entries.push(entry),
-            Some(action) => loaded.warnings.push(format!("unknown action `{action}`")),
+            Some(action) => loaded
+                .warnings
+                .push(t!("keymap.unknown_action", action = action).to_string()),
         }
     }
 }
@@ -1290,7 +1290,9 @@ fn load(cx: &mut App, report: bool) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => LoadedKeymap::default(),
         Err(error) => {
             let mut loaded = LoadedKeymap::default();
-            loaded.errors.push(format!("cannot read: {error}"));
+            loaded
+                .errors
+                .push(t!("keymap.read_failed", error = error).to_string());
             loaded
         }
     };
@@ -1427,7 +1429,7 @@ pub fn rows(os: OperatingSystem, state: &KeymapState) -> Vec<ActionRow> {
                 context: spec
                     .context
                     .map(str::to_owned)
-                    .unwrap_or_else(|| "everywhere".to_owned()),
+                    .unwrap_or_else(|| t!("keymap.context_everywhere").to_string()),
                 defaults: if defaults.is_empty() {
                     "—".to_owned()
                 } else {
@@ -1480,7 +1482,7 @@ pub fn record_binding(
     key: &str,
     context: Option<String>,
 ) -> Result<(), String> {
-    let path = keymap_file().ok_or_else(|| "the configuration directory is unknown".to_owned())?;
+    let path = keymap_file().ok_or_else(|| t!("keymap.no_config_dir").to_string())?;
     let mut entries = read_entries(&path)?;
     entries.retain(|entry| !same_action(entry, spec));
     entries.push(UserBinding {
@@ -1495,7 +1497,7 @@ pub fn record_binding(
 
 /// Removes the user's bindings for `spec`, so its defaults apply again.
 pub fn reset_binding(cx: &mut App, spec: &'static ActionSpec) -> Result<(), String> {
-    let path = keymap_file().ok_or_else(|| "the configuration directory is unknown".to_owned())?;
+    let path = keymap_file().ok_or_else(|| t!("keymap.no_config_dir").to_string())?;
     let mut entries = read_entries(&path)?;
     entries.retain(|entry| !same_action(entry, spec));
     write_entries(&path, &entries)?;
@@ -1516,26 +1518,41 @@ fn read_entries(path: &Path) -> Result<Vec<UserBinding>, String> {
         Ok(content) => {
             let loaded = parse(&content);
             if let Some(error) = loaded.errors.first() {
-                return Err(format!(
-                    "{} has an error ({error}); fix it before changing bindings",
-                    path.display()
-                ));
+                return Err(t!(
+                    "keymap.file_has_error",
+                    path = path.display(),
+                    error = error
+                )
+                .to_string());
             }
             Ok(loaded.entries)
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(error) => Err(format!("cannot read {}: {error}", path.display())),
+        Err(error) => Err(t!(
+            "keymap.read_path_failed",
+            path = path.display(),
+            error = error
+        )
+        .to_string()),
     }
 }
 
 fn write_entries(path: &Path, entries: &[UserBinding]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("cannot create {}: {error}", parent.display()))?;
+        std::fs::create_dir_all(parent).map_err(|error| {
+            t!(
+                "keymap.create_failed",
+                path = parent.display(),
+                error = error
+            )
+            .to_string()
+        })?;
     }
     let json = serde_json::to_vec_pretty(entries)
-        .map_err(|error| format!("cannot encode the keymap: {error}"))?;
-    std::fs::write(path, json).map_err(|error| format!("cannot write {}: {error}", path.display()))
+        .map_err(|error| t!("keymap.encode_failed", error = error).to_string())?;
+    std::fs::write(path, json).map_err(|error| {
+        t!("keymap.write_failed", path = path.display(), error = error).to_string()
+    })
 }
 
 /// Rewrites the keystroke a captured event produced, using `secondary-` for
@@ -1796,7 +1813,7 @@ fn is_ime_composition(keystroke: &Keystroke) -> bool {
 
 /// Creates `keymap.json` with an empty list when it does not exist yet.
 pub fn ensure_file() -> Result<PathBuf, String> {
-    let path = keymap_file().ok_or_else(|| "the configuration directory is unknown".to_owned())?;
+    let path = keymap_file().ok_or_else(|| t!("keymap.no_config_dir").to_string())?;
     if !path.exists() {
         write_entries(&path, &[])?;
     }

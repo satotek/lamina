@@ -152,7 +152,7 @@ pub(crate) fn svg_toggle(
     let rendered = !state.svg_text.get();
     let cell = state.svg_text.clone();
     Some(
-        ui::button("toggle-svg-rendered", "Rendered")
+        ui::button("toggle-svg-rendered", t!("image_diff.rendered").to_string())
             .size(ButtonSize::Tiny)
             .ghost()
             .selected(rendered)
@@ -226,22 +226,29 @@ impl State {
 
         let actual = self.actual.clone();
         row = row.child(
-            ui::button("image-zoom", if self.actual.get() { "1:1" } else { "Fit" })
-                .size(ButtonSize::Tiny)
-                .ghost()
-                .selected(self.actual.get())
-                .tooltip(if self.actual.get() {
-                    t!("image_diff.fit_tooltip").to_string()
+            ui::button(
+                "image-zoom",
+                if self.actual.get() {
+                    "1:1".to_owned()
                 } else {
-                    t!("image_diff.actual_tooltip").to_string()
-                })
-                .on_click(move |_event, _window, cx| {
-                    let actual = actual.clone();
-                    entity.update(cx, |_this, cx| {
-                        actual.set(!actual.get());
-                        cx.notify();
-                    });
-                }),
+                    t!("image_diff.fit").to_string()
+                },
+            )
+            .size(ButtonSize::Tiny)
+            .ghost()
+            .selected(self.actual.get())
+            .tooltip(if self.actual.get() {
+                t!("image_diff.fit_tooltip").to_string()
+            } else {
+                t!("image_diff.actual_tooltip").to_string()
+            })
+            .on_click(move |_event, _window, cx| {
+                let actual = actual.clone();
+                entity.update(cx, |_this, cx| {
+                    actual.set(!actual.get());
+                    cx.notify();
+                });
+            }),
         );
         row.into_any_element()
     }

@@ -194,11 +194,11 @@ fn open_window(launch: Option<Launch>, gallery: bool, mut debug: DebugLaunch, cx
     };
 
     let title = if gallery {
-        "Strata UI gallery".to_owned()
+        t!("app.gallery_title").to_string()
     } else {
         launch
             .as_ref()
-            .map_or_else(|| "Strata".to_owned(), Launch::title)
+            .map_or_else(|| t!("app.name").to_string(), Launch::title)
     };
 
     let window_size = if let Some(requested) = debug.window_size {

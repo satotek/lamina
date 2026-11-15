@@ -196,14 +196,14 @@ impl RepoView {
         let previous = ui::icon_button("history-strip-previous", IconName::ChevronUp)
             .size(ButtonSize::Tiny)
             .ghost()
-            .tooltip("Previous commit")
+            .tooltip(t!("split.previous_commit"))
             .on_click(move |_event, _window, cx| {
                 previous_entity.update(cx, |this, cx| this.move_selection(-1, cx));
             });
         let next = ui::icon_button("history-strip-next", IconName::ChevronDown)
             .size(ButtonSize::Tiny)
             .ghost()
-            .tooltip("Next commit")
+            .tooltip(t!("split.next_commit"))
             .on_click(move |_event, _window, cx| {
                 next_entity.update(cx, |this, cx| this.move_selection(1, cx));
             });
@@ -229,7 +229,7 @@ impl RepoView {
                 .flex_1()
                 .text_size(px(design.small()))
                 .text_color(design.muted)
-                .child("No commit selected")
+                .child(t!("split.no_commit_selected"))
                 .into_any_element(),
         };
 

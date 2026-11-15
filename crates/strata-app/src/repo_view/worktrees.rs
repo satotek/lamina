@@ -50,9 +50,9 @@ impl RepoView {
         cx: &mut Context<Self>,
     ) {
         let label = if init {
-            format!("initialise and update submodule {path}")
+            t!("worktree.op.init_submodule", path = path)
         } else {
-            format!("update submodule {path}")
+            t!("worktree.op.update_submodule", path = path)
         };
         self.run_operation(
             Operation::SubmoduleUpdate {
@@ -75,14 +75,19 @@ impl RepoView {
                 paths: Vec::new(),
                 init: true,
             },
-            "update all submodules",
+            t!("worktree.op.update_all_submodules"),
             window,
             cx,
         );
     }
 
     pub(crate) fn prune_worktrees(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.run_operation(Operation::WorktreePrune, "prune worktrees", window, cx);
+        self.run_operation(
+            Operation::WorktreePrune,
+            t!("worktree.op.prune"),
+            window,
+            cx,
+        );
     }
 
     /// Removes a linked worktree; `force` is the retry offered after git
@@ -96,9 +101,9 @@ impl RepoView {
     ) {
         let name = crate::branches::worktree_name(&path);
         let label = if force {
-            format!("force-remove worktree {name}")
+            t!("worktree.op.force_remove", name = name)
         } else {
-            format!("remove worktree {name}")
+            t!("worktree.op.remove", name = name)
         };
         self.run_operation(Operation::WorktreeRemove { path, force }, label, window, cx);
     }
@@ -125,10 +130,10 @@ impl RepoView {
             window,
             cx,
             crate::ui::Confirm::new(
-                format!("Remove worktree {name}?"),
-                "The checkout directory is deleted. Its branch and commits stay in the repository.",
+                t!("branch.confirm.remove_worktree", path = name).to_string(),
+                t!("worktree.confirm.remove_detail").to_string(),
             )
-            .ok_label("Remove"),
+            .ok_label(t!("common.remove").to_string()),
             move |window, cx| {
                 let path = path.clone();
                 let _ = entity.update(cx, |view, cx| view.remove_worktree(path, false, window, cx));
@@ -168,7 +173,7 @@ impl RepoView {
             });
             if let Ok(Err(message)) = result {
                 window.push_notification(
-                    Notification::error(message).title("Cannot open repository"),
+                    Notification::error(message).title(t!("chrome.could_not_open").to_string()),
                     cx,
                 );
             }
@@ -194,7 +199,7 @@ impl RepoView {
             });
             if let Ok(Err(message)) = result {
                 window.push_notification(
-                    Notification::error(message).title("Cannot open repository"),
+                    Notification::error(message).title(t!("chrome.could_not_open").to_string()),
                     cx,
                 );
             }
@@ -215,7 +220,7 @@ impl RepoView {
         match crate::picker::resolve_repository(&resolved) {
             Ok(root) => open_repository_window(root, cx),
             Err(message) => window.push_notification(
-                Notification::error(message).title("Cannot open repository"),
+                Notification::error(message).title(t!("chrome.could_not_open").to_string()),
                 cx,
             ),
         }
@@ -230,7 +235,7 @@ impl RepoView {
             let result = workspace.update(cx, |workspace, cx| workspace.navigate_back(window, cx));
             if let Ok(Err(message)) = result {
                 window.push_notification(
-                    Notification::error(message).title("Cannot open repository"),
+                    Notification::error(message).title(t!("chrome.could_not_open").to_string()),
                     cx,
                 );
             }
@@ -313,10 +318,16 @@ impl RepoView {
         });
         let start = selected_commit.or(head_commit);
         let start_label = match (selected_commit, snapshot.head.as_ref()) {
-            (Some(commit), _) => format!("from commit {}", crate::data::short_oid(commit)),
-            (None, Some(HeadInfo::Branch { short_name, .. })) => format!("from {short_name}"),
-            (None, Some(HeadInfo::Detached { .. })) => "from the current commit".to_owned(),
-            (None, None) => "from HEAD".to_owned(),
+            (Some(commit), _) => t!(
+                "history_ops.menu.from_commit",
+                short = crate::data::short_oid(commit)
+            )
+            .to_string(),
+            (None, Some(HeadInfo::Branch { short_name, .. })) => {
+                t!("branch.op.from", branch = short_name).to_string()
+            }
+            (None, Some(HeadInfo::Detached { .. })) => t!("history.from_current").to_string(),
+            (None, None) => t!("history.from_head").to_string(),
         };
         let root = self.add_worktree_root();
 
@@ -331,22 +342,28 @@ impl RepoView {
             let content = content.clone();
             let footer = footer.clone();
             let confirm = confirm.clone();
-            card.title("Add worktree")
+            card.title(t!("worktree.add.title").to_string())
                 .w(px(520.0))
                 .content(move |body, _, _| body.child(content.clone()))
                 .footer(
                     DialogFooter::new()
                         .child(
-                            crate::ui::button("worktree-add-cancel", "Cancel")
-                                .size(crate::ui::ButtonSize::Medium)
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
+                            crate::ui::button(
+                                "worktree-add-cancel",
+                                t!("common.cancel").to_string(),
+                            )
+                            .size(crate::ui::ButtonSize::Medium)
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
                         )
                         .child(
-                            crate::ui::button("worktree-add-submit", "Add worktree")
-                                .size(crate::ui::ButtonSize::Medium)
-                                .on_click(move |_, window, cx| {
-                                    footer.update(cx, |dialog, cx| dialog.submit(window, cx));
-                                }),
+                            crate::ui::button(
+                                "worktree-add-submit",
+                                t!("worktree.add.title").to_string(),
+                            )
+                            .size(crate::ui::ButtonSize::Medium)
+                            .on_click(move |_, window, cx| {
+                                footer.update(cx, |dialog, cx| dialog.submit(window, cx));
+                            }),
                         ),
                 )
                 .on_ok(move |_, window, cx| {
@@ -447,11 +464,15 @@ impl AddWorktreeDialog {
             .to_string();
 
         let path = cx.new(|cx| {
-            let mut state = InputState::new(window, cx).placeholder("Directory for the worktree");
+            let mut state = InputState::new(window, cx)
+                .placeholder(t!("worktree.add.path_placeholder").to_string());
             state.set_value(default_path, window, cx);
             state
         });
-        let new_branch = cx.new(|cx| InputState::new(window, cx).placeholder("New branch name"));
+        let new_branch = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(t!("worktree.add.branch_placeholder").to_string())
+        });
         let _path_events = cx.subscribe(&path, |this, _input, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 this.path_edited = true;
@@ -532,7 +553,7 @@ impl AddWorktreeDialog {
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let text = self.path.read(cx).value().trim().to_owned();
         if text.is_empty() {
-            self.fail("Enter a directory for the worktree.", cx);
+            self.fail(&t!("worktree.add.path_required"), cx);
             return;
         }
         // git resolves a relative path against the repository, so the dialog
@@ -545,7 +566,7 @@ impl AddWorktreeDialog {
         };
         if std::fs::read_dir(&path).is_ok_and(|mut entries| entries.next().is_some()) {
             self.fail(
-                &format!("{} already exists and is not empty.", path.display()),
+                &t!("worktree.add.path_not_empty", path = path.display()),
                 cx,
             );
             return;
@@ -558,19 +579,19 @@ impl AddWorktreeDialog {
                 return;
             }
             let Some(commit) = self.start else {
-                self.fail("There is no commit to start the new branch from.", cx);
+                self.fail(&t!("worktree.add.no_start_commit"), cx);
                 return;
             };
             (None, Some(name), Some(commit))
         } else {
             let Some(branch) = self.branches.get(self.selected).cloned() else {
-                self.fail("Choose a branch for the worktree.", cx);
+                self.fail(&t!("worktree.add.choose_branch"), cx);
                 return;
             };
             (Some(branch), None, None)
         };
 
-        let label = format!("add worktree {}", path.display());
+        let label = t!("worktree.op.add", path = path.display());
         let operation = Operation::WorktreeAdd {
             path,
             branch,
@@ -616,20 +637,20 @@ impl Render for AddWorktreeDialog {
                 div()
                     .text_size(px(11.0))
                     .text_color(muted)
-                    .child("A linked worktree checks a branch out in a directory of its own."),
+                    .child(t!("worktree.add.description").to_string()),
             )
             .child(
                 div()
                     .text_size(px(11.0))
                     .font_weight(FontWeight::MEDIUM)
-                    .child("Directory"),
+                    .child(t!("worktree.add.directory").to_string()),
             )
             .child(Input::new(&self.path))
             .child(
                 Checkbox::new("worktree-create-branch")
                     .checked(create_branch)
                     .disabled(!branches_available)
-                    .label("Create a new branch")
+                    .label(t!("worktree.add.create_branch").to_string())
                     .on_change(toggle),
             );
 
@@ -638,14 +659,14 @@ impl Render for AddWorktreeDialog {
                 div()
                     .text_size(px(11.0))
                     .text_color(muted)
-                    .child(format!("The new branch starts {start_label}.")),
+                    .child(t!("worktree.add.start_description", start = start_label).to_string()),
             );
         } else if self.branches.is_empty() {
             form = form.child(
                 div()
                     .text_size(px(11.0))
                     .text_color(muted)
-                    .child("Every branch is already checked out in a worktree."),
+                    .child(t!("worktree.add.all_checked_out").to_string()),
             );
         } else {
             let rows = self

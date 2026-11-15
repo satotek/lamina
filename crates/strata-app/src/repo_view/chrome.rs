@@ -350,7 +350,7 @@ impl RepoView {
                 div()
                     .text_size(px(11.0))
                     .text_color(design.muted)
-                    .child("usage: strata [PATH] · strata --fake [N]"),
+                    .child(t!("chrome.usage").to_string()),
             )
             .into_any_element()
     }

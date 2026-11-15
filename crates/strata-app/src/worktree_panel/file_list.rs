@@ -174,7 +174,7 @@ impl WorktreePanel {
                         .h(px(24.0))
                         .text_size(px(11.0))
                         .text_color(colors.muted_foreground)
-                        .child("none"),
+                        .child(t!("common.none").to_string()),
                 )
                 .into_any_element();
         }
@@ -344,9 +344,10 @@ fn file_row(
                             menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
                                 let path = unlock_path.clone();
                                 unlock_entity.update(cx, |this, cx| {
+                                    let label = t!("lfs.op_unlock", path = path).to_string();
                                     this.run_operation(
                                         Operation::LfsUnlock { path },
-                                        "LFS unlock",
+                                        label,
                                         window,
                                         cx,
                                     );
@@ -360,9 +361,10 @@ fn file_row(
                             move |_, window, cx| {
                                 let path = lock_path.clone();
                                 lock_entity.update(cx, |this, cx| {
+                                    let label = t!("lfs.op_lock", path = path).to_string();
                                     this.run_operation(
                                         Operation::LfsLock { path },
-                                        "LFS lock",
+                                        label,
                                         window,
                                         cx,
                                     );

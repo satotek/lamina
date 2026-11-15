@@ -45,18 +45,18 @@ pub(super) fn open(
         let footer = footer.clone();
         let confirm = confirm.clone();
         let empty = confirm.read(cx).is_empty(cx);
-        card.title("Reword commit")
+        card.title(t!("edit_dialog.title"))
             .w(px(520.0))
             .content(move |body, _, _| body.child(content.clone()))
             .footer(
                 DialogFooter::new()
                     .child(
-                        ui::button("reword-cancel", "Cancel")
+                        ui::button("reword-cancel", t!("common.cancel"))
                             .size(ui::ButtonSize::Medium)
                             .on_click(|_, window, cx| window.close_dialog(cx)),
                     )
                     .child(
-                        ui::button("reword-ok", "Reword")
+                        ui::button("reword-ok", t!("edit_dialog.reword").to_string())
                             .size(ui::ButtonSize::Medium)
                             .disabled(empty)
                             .on_click(move |_, window, cx| {
@@ -148,10 +148,7 @@ impl Render for RewordDialog {
                 div()
                     .text_size(px(design.small()))
                     .text_color(design.muted)
-                    .child(format!(
-                        "Commit {}. The whole message replaces the current one, summary and body.",
-                        self.short
-                    )),
+                    .child(t!("edit_dialog.description", short = self.short)),
             )
             .child(
                 Textarea::new(&self.message)

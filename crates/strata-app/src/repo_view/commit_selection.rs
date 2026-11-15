@@ -239,12 +239,24 @@ pub(super) fn applied_note(total: usize, skipped: &[String]) -> Option<String> {
         return None;
     }
     let applied = total.saturating_sub(skipped.len());
-    let commits = if applied == 1 { "commit" } else { "commits" };
-    Some(format!(
-        "{applied} {commits} applied, {} skipped (already applied): {}",
-        skipped.len(),
-        skipped.join(", ")
-    ))
+    let ids = skipped.join(", ");
+    Some(if applied == 1 {
+        t!(
+            "commit_selection.applied.one",
+            applied = applied,
+            skipped = skipped.len(),
+            ids = ids
+        )
+        .to_string()
+    } else {
+        t!(
+            "commit_selection.applied.other",
+            applied = applied,
+            skipped = skipped.len(),
+            ids = ids
+        )
+        .to_string()
+    })
 }
 
 #[cfg(test)]

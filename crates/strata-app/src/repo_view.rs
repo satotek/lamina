@@ -2151,7 +2151,7 @@ impl RepoView {
             let head: Option<HeadInfo> = self.source().and_then(|source| source.head().cloned());
             data::window_title(name, head.as_ref())
         } else {
-            "Strata".to_owned()
+            t!("app.name").to_string()
         };
         if title != self.title {
             self.title = title.clone();

@@ -285,7 +285,7 @@ impl Workspace {
         let view = cx.new(|cx| Picker::new(Mode::Page, OpenTarget::Current, workspace, window, cx));
         let input = view.read(cx).input().clone();
         crate::ui::focus_input(&input, window, cx);
-        window.set_window_title("Strata");
+        window.set_window_title(&t!("app.name"));
         let window_id = window.window_handle().window_id();
         track_window_release(&cx.entity(), cx);
         Self {
@@ -1154,7 +1154,7 @@ fn slot_display_name(slot: &RepoSlot, cx: &App) -> String {
         .repo_display_name()
         .map(str::to_owned)
         .or_else(|| slot.path.as_deref().map(recent::repository_name))
-        .unwrap_or_else(|| "Repository".to_owned())
+        .unwrap_or_else(|| t!("workspace.repository_tab").to_string())
 }
 
 /// Opens `root` in a new Strata window.
@@ -1188,7 +1188,7 @@ pub(crate) fn open_tabs_window(
     };
     let title = launches
         .get(clamped)
-        .map_or_else(|| "Strata".to_owned(), Launch::title);
+        .map_or_else(|| t!("app.name").to_string(), Launch::title);
     let bounds = Bounds::centered(None, size(px(window_size.0), px(window_size.1)), cx);
     let min_size = size(
         px(crate::style::MIN_WINDOW_SIZE.0),

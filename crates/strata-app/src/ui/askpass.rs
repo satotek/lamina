@@ -94,7 +94,7 @@ pub fn askpass_prompt(
                                 }),
                         )
                         .child(
-                            button("askpass-ok", "OK")
+                            button("askpass-ok", t!("common.ok").to_string())
                                 .kind(ButtonKind::Primary)
                                 .size(ButtonSize::Medium)
                                 .on_click(move |_, window, cx| {

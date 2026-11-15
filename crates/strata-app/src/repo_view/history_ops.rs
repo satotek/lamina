@@ -896,7 +896,12 @@ fn multi_commit_menu(
             .separator();
     }
     let label = menu_label(
-        format!("Cherry-pick {} commits onto {}", multi.count, multi.branch),
+        t!(
+            "history_ops.menu.cherry_pick_many",
+            count = multi.count,
+            onto = multi.branch
+        )
+        .to_string(),
         multi.blocked.as_ref(),
     );
     let mut item = PopupMenuItem::new(label).disabled(multi.blocked.is_some());
@@ -1239,7 +1244,8 @@ impl RepoView {
                 .ok_label(t!("history_ops.hard_reset").to_string())
                 .always_ask(),
             ResetMode::Soft | ResetMode::Mixed => {
-                let mut confirm = ui::Confirm::new(title, detail).ok_label("Reset");
+                let mut confirm =
+                    ui::Confirm::new(title, detail).ok_label(t!("common.reset").to_string());
                 confirm.danger = false;
                 confirm
             }
@@ -1263,7 +1269,12 @@ impl RepoView {
             ResetMode::Mixed => "mixed",
             ResetMode::Hard => "hard",
         };
-        let label = format!("reset --{flag} to {}", crate::data::short_oid(target));
+        let label = t!(
+            "history_ops.op.reset",
+            flag = flag,
+            short = crate::data::short_oid(target)
+        )
+        .to_string();
         self.run_operation(Operation::Reset { target, mode }, label, window, cx);
     }
 
@@ -1377,7 +1388,7 @@ impl RepoView {
                 t!("history_ops.tag.delete_title", name = name).to_string(),
                 t!("history_ops.tag.delete_detail").to_string(),
             )
-            .ok_label("Delete tag"),
+            .ok_label(t!("history_ops.tag.delete_button").to_string()),
             move |window, cx| {
                 let name = name.clone();
                 let _ = entity.update(cx, |view, cx| {
@@ -1474,8 +1485,14 @@ impl RepoView {
         let message = match session.repo().commit_message(commit) {
             Ok(message) => message,
             Err(error) => {
-                self.status_error =
-                    Some(format!("cannot read commit {}: {error}", short_oid(commit)));
+                self.status_error = Some(
+                    t!(
+                        "history_ops.read_commit_failed",
+                        id = short_oid(commit),
+                        error = error
+                    )
+                    .to_string(),
+                );
                 cx.notify();
                 return;
             }
@@ -1496,13 +1513,25 @@ impl RepoView {
         let above = edit.distance.unwrap_or(0);
         let branch = state.branch_label();
         let detail = match above {
-            0 => format!(
-                "\"{summary}\" is removed from {branch}. HEAD moves to the previous commit."
-            ),
-            1 => format!("\"{summary}\" is removed from {branch}. 1 commit above it is rewritten."),
-            count => format!(
-                "\"{summary}\" is removed from {branch}. {count} commits above it are rewritten."
-            ),
+            0 => t!(
+                "history_ops.drop_detail",
+                summary = summary,
+                branch = branch
+            )
+            .to_string(),
+            1 => t!(
+                "history_ops.drop_rewrites.one",
+                summary = summary,
+                branch = branch
+            )
+            .to_string(),
+            count => t!(
+                "history_ops.drop_rewrites.other",
+                summary = summary,
+                branch = branch,
+                count = count
+            )
+            .to_string(),
         };
         self.focus_root(window, cx);
         let entity = cx.weak_entity();
@@ -1510,7 +1539,7 @@ impl RepoView {
             window,
             cx,
             ui::Confirm::new(EditAction::Drop.title(&short_oid(commit)), detail)
-                .ok_label("Drop commit"),
+                .ok_label(t!("history_ops.drop_button").to_string()),
             move |window, cx| {
                 let _ = entity.update(cx, |view, cx| {
                     view.run_edit(EditAction::Drop, commit, None, window, cx)
@@ -1534,17 +1563,14 @@ impl RepoView {
             self.run_edit(action, commit, None, window, cx);
             return;
         }
-        let detail = format!(
-            "These commits are already pushed to {}. Rewriting them needs a force push, and anyone who pulled them will have to reset.",
-            remotes.join(", ")
-        );
+        let detail = t!("history_ops.force_push_note", remote = remotes.join(", ")).to_string();
         self.focus_root(window, cx);
         let entity = cx.weak_entity();
         ui::confirm(
             window,
             cx,
             ui::Confirm::new(action.title(&short_oid(commit)), detail)
-                .ok_label("Rewrite")
+                .ok_label(t!("history_ops.rewrite").to_string())
                 .always_ask(),
             move |window, cx| {
                 let _ = entity.update(cx, |view, cx| {
@@ -1571,11 +1597,15 @@ impl RepoView {
             return;
         };
         if let Some(reason) = edit_blocked(&state, Some(&edit), action) {
-            self.status_error = Some(format!(
-                "cannot {} {}: {reason}",
-                action.verb(),
-                short_oid(commit)
-            ));
+            self.status_error = Some(
+                t!(
+                    "history_ops.cannot_action",
+                    action = action.verb(),
+                    target = short_oid(commit),
+                    reason = reason
+                )
+                .to_string(),
+            );
             cx.notify();
             return;
         }
@@ -1586,7 +1616,7 @@ impl RepoView {
             EditAction::Reword => {
                 let message = message.unwrap_or_default();
                 if message.trim().is_empty() {
-                    self.status_error = Some("a commit message cannot be empty".to_owned());
+                    self.status_error = Some(t!("history_ops.empty_message").to_string());
                     cx.notify();
                     return;
                 }
@@ -1601,7 +1631,9 @@ impl RepoView {
         let steps = match steps {
             Ok(steps) => steps,
             Err(error) => {
-                self.status_error = Some(format!("cannot {}: {error}", action.verb()));
+                self.status_error = Some(
+                    t!("history_ops.cannot", action = action.verb(), error = error).to_string(),
+                );
                 cx.notify();
                 return;
             }
@@ -1672,8 +1704,12 @@ impl TagDialog {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let name = cx.new(|cx| InputState::new(window, cx).placeholder("tag name"));
-        let message = cx.new(|cx| InputState::new(window, cx).placeholder("Annotation (optional)"));
+        let name = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(t!("history_ops.tag.placeholder").to_string())
+        });
+        let message = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(t!("history_ops.tag.annotation").to_string())
+        });
         let events = [&name, &message]
             .into_iter()
             .map(|input| {
@@ -1746,10 +1782,7 @@ impl Render for TagDialog {
                 div()
                     .text_size(px(design.small()))
                     .text_color(design.muted)
-                    .child(format!(
-                        "Tag commit {}. A message creates an annotated tag.",
-                        self.short
-                    )),
+                    .child(t!("history_ops.tag.target", short = self.short)),
             )
             .child(Input::new(&self.name))
             .child(Input::new(&self.message));

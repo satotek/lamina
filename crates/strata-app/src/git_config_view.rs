@@ -1373,12 +1373,12 @@ impl ConfigEditor {
         let value = change.value().unwrap_or_default().to_owned();
         let key_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("section[.subsection].name")
+                .placeholder(t!("git_config.key_placeholder").to_string())
                 .default_value(key.clone())
         });
         let value_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("value")
+                .placeholder(t!("git_config.value_placeholder").to_string())
                 .default_value(value.clone())
         });
         let key_events = cx.subscribe(&key_input, |this, input, event: &InputEvent, cx| {
@@ -1470,7 +1470,9 @@ impl ConfigEditor {
     /// a curated value is wrong.
     fn write(&self) -> strata_core::Result<ConfigWrite> {
         let Some(choice) = self.targets.get(self.target) else {
-            return Err(strata_core::Error::other("no target file was chosen"));
+            return Err(strata_core::Error::other(
+                t!("git_config.no_target").to_string(),
+            ));
         };
         let change = match self.kind {
             WriteKind::Set => ConfigChange::Set(self.value.clone()),

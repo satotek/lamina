@@ -513,7 +513,7 @@ fn format_banner_tooltip(details: &InProgressDetails, conflicts: usize) -> Strin
                 lines.push(t!("progress.bad_line", count = bad).to_string());
             }
             if let Some(commit) = current_commit {
-                lines.push(format!("Current: {}", format_commit_full(commit)));
+                lines.push(t!("progress.current", commit = format_commit_full(commit)).to_string());
             }
         }
         InProgressDetails::ApplyingPatches {

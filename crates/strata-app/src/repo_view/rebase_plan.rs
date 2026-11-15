@@ -35,8 +35,20 @@ impl ActionKind {
         Self::Drop,
     ];
 
-    /// The word git's todo uses, which is also the selector's label.
-    pub(super) fn label(self) -> &'static str {
+    /// The word git's todo uses, shown on the selector through the catalogue.
+    pub(super) fn label(self) -> String {
+        match self {
+            Self::Pick => t!("rebase_edit.action.pick"),
+            Self::Reword => t!("rebase_edit.action.reword"),
+            Self::Squash => t!("rebase_edit.action.squash"),
+            Self::Fixup => t!("rebase_edit.action.fixup"),
+            Self::Drop => t!("rebase_edit.action.drop"),
+        }
+        .to_string()
+    }
+
+    /// The stable id of this action, the same in every language, for element ids.
+    pub(super) fn id(self) -> &'static str {
         match self {
             Self::Pick => "pick",
             Self::Reword => "reword",
@@ -124,16 +136,15 @@ impl PlanProblem {
                 position,
                 short,
                 action,
-            } => format!(
-                "Row {position} ({short}) is a {} with nothing above it to join. Make it pick or reword.",
-                action.label()
-            ),
-            Self::NothingRemains => {
-                "Every commit is dropped. Reset the branch instead to remove them all.".to_owned()
-            }
-            Self::NoChanges => {
-                "Nothing to rewrite yet. Change an action or reorder a row.".to_owned()
-            }
+            } => t!(
+                "rebase_edit.plan.orphan",
+                position = position,
+                short = short,
+                action = action.label()
+            )
+            .to_string(),
+            Self::NothingRemains => t!("rebase_edit.plan.nothing_remains").to_string(),
+            Self::NoChanges => t!("rebase_edit.plan.no_changes").to_string(),
         }
     }
 
@@ -161,19 +172,20 @@ impl PlanSummary {
     /// then only the edits that happened, so an untouched plan reads plainly.
     pub(super) fn text(&self) -> String {
         let mut text = format!("{} → {}", count(self.before), count(self.after));
-        let parts = [
-            (self.dropped, "dropped"),
-            (self.squashed, "squashed"),
-            (self.fixed_up, "fixed up"),
-            (self.reworded, "reworded"),
-        ];
-        for (number, word) in parts {
-            if number > 0 {
-                text.push_str(&format!(", {number} {word}"));
-            }
+        if self.dropped > 0 {
+            text.push_str(&t!("rebase_edit.summary.dropped", count = self.dropped));
+        }
+        if self.squashed > 0 {
+            text.push_str(&t!("rebase_edit.summary.squashed", count = self.squashed));
+        }
+        if self.fixed_up > 0 {
+            text.push_str(&t!("rebase_edit.summary.fixed_up", count = self.fixed_up));
+        }
+        if self.reworded > 0 {
+            text.push_str(&t!("rebase_edit.summary.reworded", count = self.reworded));
         }
         if self.reordered {
-            text.push_str(", reordered");
+            text.push_str(&t!("rebase_edit.summary.reordered"));
         }
         text
     }
@@ -181,8 +193,8 @@ impl PlanSummary {
 
 fn count(number: usize) -> String {
     match number {
-        1 => "1 commit".to_owned(),
-        number => format!("{number} commits"),
+        1 => t!("rebase_edit.summary.count.one").to_string(),
+        number => t!("rebase_edit.summary.count.other", count = number).to_string(),
     }
 }
 
@@ -497,7 +509,7 @@ mod tests {
             let problem = plan.problem().expect("an orphan combine is a problem");
             assert!(problem.is_error());
             assert!(problem.reason().starts_with("Row 1 ("));
-            assert!(problem.reason().contains(action.label()));
+            assert!(problem.reason().contains(&action.label()));
             assert!(plan.steps().is_err());
         }
     }
