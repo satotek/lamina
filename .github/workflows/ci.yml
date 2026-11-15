@@ -102,8 +102,10 @@ jobs:
 
       # `cargo clippy` still compiles and runs build scripts, and
       # crates/strata-term/build.rs builds libghostty-vt with Zig.
+      # This setup action runs on Node 24; the more common one still targets
+      # the deprecated Node 20 runtime.
       - name: Install Zig
-        uses: mlugg/setup-zig@v2.2.1
+        uses: vercel-labs/setup-zig@v1.0.2
         with:
           version: ${{ env.ZIG_VERSION }}
 
@@ -195,8 +197,10 @@ jobs:
 
       # libghostty-vt is built from source by crates/strata-term/build.rs, which
       # checks the toolchain version before downloading anything.
+      # This setup action runs on Node 24; the more common one still targets
+      # the deprecated Node 20 runtime.
       - name: Install Zig
-        uses: mlugg/setup-zig@v2.2.1
+        uses: vercel-labs/setup-zig@v1.0.2
         with:
           version: ${{ env.ZIG_VERSION }}
 
