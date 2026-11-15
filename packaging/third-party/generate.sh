@@ -59,7 +59,7 @@ trap 'rm -rf "$tmp"' EXIT
 cd "$root"
 "$cargo_about" generate --locked --config about.toml about.hbs -o "$tmp/rust.md"
 
-cat "$tmp/rust.md" packaging/third-party/libghostty-vt.md > "$tmp/notices.md"
+cat "$tmp/rust.md" packaging/third-party/libghostty-vt.md packaging/third-party/catppuccin.md > "$tmp/notices.md"
 mv "$tmp/notices.md" "$out"
 
 echo "wrote $out"

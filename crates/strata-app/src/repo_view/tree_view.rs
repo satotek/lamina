@@ -20,7 +20,6 @@ use gpui::{
     AnyElement, App, Context, HighlightStyle, IntoElement, KeyBinding, ParentElement, StyledText,
     UniformListScrollHandle, Window, actions, div, px, uniform_list,
 };
-use gpui_component::ActiveTheme as _;
 use gpui_kit_assets::IconName;
 use strata_core::encoding::{TextEncoding, decode_for_display};
 use strata_core::highlight::{Highlighter, LineHighlights, language_for_path};
@@ -829,7 +828,7 @@ impl RepoView {
             }
             FileContent::Text { lines, encoding: _ } => {
                 let lines = Arc::clone(lines);
-                let colors = DiffColors::from_theme(cx.theme());
+                let colors = DiffColors::from_design(design);
                 // The same font and size source as the diff list, so the tree
                 // viewer and the diff pane never drift apart.
                 let style = DiffStyle::from_settings(cx, &design.mono);

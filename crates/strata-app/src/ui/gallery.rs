@@ -14,7 +14,7 @@ use strata_core::{ChangeKind, RefKind};
 use super::{
     BadgeTone, BannerKind, ButtonKind, ButtonSize, Confirm, RowState, banner, button, change_badge,
     content_button, count_pill, empty_state, icon_button, kbd, list_row, message, rail, rail_item,
-    ref_badge, section_header, status_badge, tab, tab_strip,
+    ref_badge, section_header, status_badge, swatch_label, swatch_strip, tab, tab_strip,
 };
 use crate::settings::Settings;
 use crate::style::{self, Design};
@@ -422,6 +422,21 @@ impl Render for Gallery {
                         ),
                 ),
         ));
+        column =
+            column.child(section(
+                "Theme swatches",
+                &design,
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(swatch_strip(design.lane, &design))
+                    .child(div().flex().flex_wrap().items_center().gap_4().children(
+                        style::theme::all().iter().map(|theme| {
+                            swatch_label(theme.name.clone(), theme.swatches(), &design)
+                        }),
+                    )),
+            ));
 
         column = column.child(section(
             "Confirmation",

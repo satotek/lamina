@@ -26,6 +26,7 @@ use gpui::{
     UniformListScrollHandle, Window, div, list, prelude::FluentBuilder as _, px, uniform_list,
 };
 use gpui_component::scroll::Scrollbar;
+#[cfg(test)]
 use gpui_component::theme::Theme;
 use strata_core::diff::{
     DiffLine, Expansion, FileDiff, Gap, GapAction, LineKind, REVEAL_STEP, gap_view,
@@ -392,6 +393,7 @@ impl DiffColors {
     /// carries never reach a diff row, so the defaults are enough to resolve
     /// the light or dark table from `theme`. Panes that already hold a
     /// [`Design`] can call [`Self::from_design`] instead.
+    #[cfg(test)]
     pub fn from_theme(theme: &Theme) -> Self {
         Self::from_design(&Design::new(theme, &Settings::default()))
     }

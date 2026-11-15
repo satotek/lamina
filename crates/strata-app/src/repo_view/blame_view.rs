@@ -20,7 +20,6 @@ use gpui::{
     AnyElement, App, ClickEvent, ClipboardItem, Context, FontWeight, IntoElement, KeyBinding,
     ParentElement, UniformListScrollHandle, Window, actions, div, px, uniform_list,
 };
-use gpui_component::ActiveTheme as _;
 use gpui_component::menu::PopupMenuItem;
 use gpui_component::tooltip::Tooltip;
 use gpui_kit_assets::IconName;
@@ -908,7 +907,7 @@ impl RepoView {
     fn blame_rows(&self, design: &Design, cx: &mut App) -> AnyElement {
         let count = self.blame.row_count();
         let entity = self.entity();
-        let colors = DiffColors::from_theme(cx.theme());
+        let colors = DiffColors::from_design(design);
         let style = DiffStyle::from_settings(cx, &design.mono);
         let design = design.clone();
         let target_path = self.blame.path().map(str::to_owned);

@@ -14,6 +14,7 @@ output lands in `dist/`, which is git-ignored.
 | `windows/package.ps1` | Builds and zips `strata.exe`, the README, the licences and the notices. |
 | `third-party/generate.sh` | Writes the third-party notices that every artifact carries. |
 | `third-party/libghostty-vt.md` | The part of those notices that cargo-about cannot see: the Zig side of the terminal backend. |
+| `third-party/catppuccin.md` | MIT notice for the bundled Catppuccin colour palettes. |
 
 The app icon lives with the other resources, not here:
 `crates/strata-app/resources/icon/`. `generate.sh` there renders every platform
@@ -159,9 +160,10 @@ nix shell nixpkgs#cargo-about --command \
 
 The script renders `about.hbs` through `cargo-about` (configuration in
 `about.toml`, which accepts only the licences actually present in the
-lockfile), appends `third-party/libghostty-vt.md`, and writes the result. It
-needs `cargo-about` on PATH; the Nix package and `cargo install cargo-about`
-both work, and CI installs it with `taiki-e/install-action`.
+lockfile), appends `third-party/libghostty-vt.md` and
+`third-party/catppuccin.md`, and writes the result. It needs `cargo-about` on
+PATH; the Nix package and `cargo install cargo-about` both work, and CI installs
+it with `taiki-e/install-action`.
 
 The appended section matters because `cargo-about` only walks Cargo's graph:
 libghostty-vt, its Zig packages (Highway, Wuffs, Aro, `translate_c`, uucode) and

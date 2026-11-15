@@ -644,52 +644,12 @@ pub fn ime_cursor_bounds(
 }
 
 /// Maps the app's [`Design`] tokens to a `strata-term` [`TerminalTheme`].
-pub fn terminal_theme(design: &Design, is_dark: bool) -> TerminalTheme {
-    let palette = if is_dark {
-        [
-            hsla_to_rgb(design.panel),
-            hsla_to_rgb(design.remove_text),
-            hsla_to_rgb(design.add_text),
-            hsla_to_rgb(design.tag_text),
-            hsla_to_rgb(design.accent),
-            hsla_to_rgb(design.syntax_keyword),
-            hsla_to_rgb(design.syntax_number),
-            hsla_to_rgb(design.remote_text),
-            Rgb::new(0x73, 0x7a, 0x88),
-            Rgb::new(0xff, 0x9e, 0x96),
-            Rgb::new(0x7e, 0xe0, 0xa8),
-            Rgb::new(0xfa, 0xd4, 0x93),
-            Rgb::new(0x9c, 0xb2, 0xf8),
-            Rgb::new(0xf0, 0xb3, 0xda),
-            Rgb::new(0x9c, 0xe3, 0xf2),
-            hsla_to_rgb(design.text),
-        ]
-    } else {
-        [
-            hsla_to_rgb(design.text),
-            hsla_to_rgb(design.remove_text),
-            hsla_to_rgb(design.add_text),
-            hsla_to_rgb(design.tag_text),
-            hsla_to_rgb(design.accent_text),
-            hsla_to_rgb(design.syntax_keyword),
-            hsla_to_rgb(design.syntax_number),
-            hsla_to_rgb(design.muted),
-            Rgb::new(0x63, 0x6a, 0x78),
-            Rgb::new(0xc9, 0x3b, 0x2f),
-            Rgb::new(0x1a, 0x88, 0x4d),
-            Rgb::new(0x9b, 0x64, 0x0e),
-            hsla_to_rgb(design.accent),
-            Rgb::new(0xb2, 0x43, 0x84),
-            Rgb::new(0x19, 0x7e, 0x9e),
-            hsla_to_rgb(design.remote_text),
-        ]
-    };
-
+pub fn terminal_theme(design: &Design) -> TerminalTheme {
     TerminalTheme {
-        foreground: hsla_to_rgb(design.text),
-        background: hsla_to_rgb(design.background),
-        cursor: Some(hsla_to_rgb(design.accent)),
-        palette: Some(palette),
+        foreground: hsla_to_rgb(design.terminal_foreground),
+        background: hsla_to_rgb(design.terminal_background),
+        cursor: Some(hsla_to_rgb(design.terminal_cursor)),
+        palette: Some(design.terminal_ansi.map(hsla_to_rgb)),
     }
 }
 
@@ -902,7 +862,7 @@ mod tests {
     fn terminal_theme_is_readable_in_both_light_and_dark() {
         let settings = Settings::default();
         let light_design = Design::default();
-        let light = terminal_theme(&light_design, false);
+        let light = terminal_theme(&light_design);
         assert!(contrast_ratio(light.foreground, light.background) >= 10.0);
         let light_pal = light.palette.expect("light palette");
         for (idx, color) in light_pal.iter().enumerate() {
@@ -916,7 +876,7 @@ mod tests {
         let mut dark_theme = Theme::default();
         dark_theme.mode = ThemeMode::Dark;
         let dark_design = Design::new(&dark_theme, &settings);
-        let dark = terminal_theme(&dark_design, true);
+        let dark = terminal_theme(&dark_design);
         assert!(contrast_ratio(dark.foreground, dark.background) >= 10.0);
         let dark_pal = dark.palette.expect("dark palette");
         // Non-black ANSI colors (1..16) must read cleanly against dark background.
@@ -926,6 +886,34 @@ mod tests {
                 "dark palette[{idx}] ({color:?}) lacks contrast on {:?}",
                 dark.background
             );
+        }
+
+        for (id, is_dark) in [
+            ("catppuccin-latte", false),
+            ("catppuccin-frappe", true),
+            ("catppuccin-macchiato", true),
+            ("catppuccin-mocha", true),
+        ] {
+            let mut mode_theme = Theme::default();
+            mode_theme.mode = if is_dark {
+                ThemeMode::Dark
+            } else {
+                ThemeMode::Light
+            };
+            let mut s = Settings::default();
+            if is_dark {
+                s.appearance.dark_theme = id.to_owned();
+            } else {
+                s.appearance.light_theme = id.to_owned();
+            }
+            let design = Design::new(&mode_theme, &s);
+            let term = terminal_theme(&design);
+            assert!(
+                contrast_ratio(term.foreground, term.background) >= 7.0,
+                "{id} terminal fg/bg contrast is too low"
+            );
+            assert_eq!(term.cursor, Some(hsla_to_rgb(design.terminal_cursor)));
+            assert!(term.palette.is_some());
         }
     }
 }

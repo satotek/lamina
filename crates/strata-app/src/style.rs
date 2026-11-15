@@ -5,6 +5,8 @@
 //! module still defines the subset of colours it paints with, but the values
 //! come from here so a change lands in one place.
 
+pub mod theme;
+
 use gpui::{
     AnyElement, App, FontFallbacks, Hsla, IntoElement, ParentElement as _, SharedString,
     Styled as _, div, px, rgb,
@@ -14,6 +16,7 @@ use gpui_component::{Colorize as _, Icon, Sizable as _, Theme};
 use strata_core::ChangeKind;
 use strata_core::highlight::HighlightKind;
 
+use self::theme::ThemePalette;
 use crate::data::format_time;
 use crate::settings::{DateFormat, Settings};
 
@@ -77,6 +80,17 @@ pub struct Design {
     pub syntax_type: Hsla,
     pub syntax_number: Hsla,
     pub syntax_tag: Hsla,
+    /// Embedded terminal colours resolved from the active theme.
+    #[cfg(feature = "terminal")]
+    pub terminal_foreground: Hsla,
+    #[cfg(feature = "terminal")]
+    pub terminal_background: Hsla,
+    #[cfg(feature = "terminal")]
+    pub terminal_cursor: Hsla,
+    #[cfg(feature = "terminal")]
+    pub terminal_selection: Hsla,
+    #[cfg(feature = "terminal")]
+    pub terminal_ansi: [Hsla; 16],
     /// UI font family, when the user picked one.
     pub ui_font: Option<SharedString>,
     /// The family UI text draws with: [`Self::ui_font`] when the user picked
@@ -107,11 +121,13 @@ pub struct Design {
 
 impl Design {
     pub fn new(theme: &Theme, settings: &Settings) -> Self {
-        let palette = if theme.is_dark() {
-            Palette::dark()
+        let is_dark = theme.is_dark();
+        let theme_id = if is_dark {
+            &settings.appearance.dark_theme
         } else {
-            Palette::light()
+            &settings.appearance.light_theme
         };
+        let palette = theme::resolve(theme_id, is_dark);
         Self::from_palette(
             palette,
             settings,
@@ -120,9 +136,9 @@ impl Design {
         )
     }
 
-    /// Fills the settings-dependent fields around one appearance's colours.
+    /// Fills the settings-dependent fields around one resolved theme's colours.
     fn from_palette(
-        palette: Palette,
+        palette: &ThemePalette,
         settings: &Settings,
         fallback_ui: SharedString,
         fallback_mono: SharedString,
@@ -141,7 +157,7 @@ impl Design {
             accent: palette.accent,
             accent_soft: palette.accent_soft,
             accent_text: palette.accent_text,
-            on_accent: hex(0xffffff),
+            on_accent: palette.on_accent,
             add_background: palette.add_background,
             add_text: palette.add_text,
             remove_background: palette.remove_background,
@@ -164,6 +180,16 @@ impl Design {
             syntax_type: palette.syntax_type,
             syntax_number: palette.syntax_number,
             syntax_tag: palette.syntax_tag,
+            #[cfg(feature = "terminal")]
+            terminal_foreground: palette.terminal_foreground,
+            #[cfg(feature = "terminal")]
+            terminal_background: palette.terminal_background,
+            #[cfg(feature = "terminal")]
+            terminal_cursor: palette.terminal_cursor,
+            #[cfg(feature = "terminal")]
+            terminal_selection: palette.terminal_selection,
+            #[cfg(feature = "terminal")]
+            terminal_ansi: palette.terminal_ansi,
             ui_font: settings
                 .appearance
                 .ui_font
@@ -289,7 +315,7 @@ impl Default for Design {
         // gpui-component's sans family) and `Settings::default`, so the default
         // design is the light palette with no user choices applied.
         Self::from_palette(
-            Palette::light(),
+            theme::default_for(false),
             &Settings::default(),
             ".SystemUIFont".into(),
             "monospace".into(),
@@ -322,174 +348,6 @@ fn contrast_ratio(first: Hsla, second: Hsla) -> f32 {
     }
     let (first, second) = (luminance(first), luminance(second));
     (first.max(second) + 0.05) / (first.min(second) + 0.05)
-}
-
-/// The colour half of one appearance.
-///
-/// Named fields rather than an array of slots: a new token is one line per
-/// theme, and reading a value does not mean counting indices.
-struct Palette {
-    background: Hsla,
-    chrome: Hsla,
-    sidebar: Hsla,
-    panel: Hsla,
-    field: Hsla,
-    border: Hsla,
-    text: Hsla,
-    muted: Hsla,
-    selected: Hsla,
-    row_selected: Hsla,
-    accent: Hsla,
-    accent_soft: Hsla,
-    accent_text: Hsla,
-    add_background: Hsla,
-    add_text: Hsla,
-    remove_background: Hsla,
-    remove_text: Hsla,
-    remote_background: Hsla,
-    remote_text: Hsla,
-    tag_background: Hsla,
-    tag_text: Hsla,
-    diff_added_bg: Hsla,
-    diff_removed_bg: Hsla,
-    diff_added_word: Hsla,
-    diff_removed_word: Hsla,
-    diff_hunk_header: Hsla,
-    diff_gutter_fg: Hsla,
-    diff_whitespace: Hsla,
-    syntax_keyword: Hsla,
-    syntax_string: Hsla,
-    syntax_comment: Hsla,
-    syntax_function: Hsla,
-    syntax_type: Hsla,
-    syntax_number: Hsla,
-    syntax_tag: Hsla,
-    lane: [Hsla; LANES],
-    avatar: [Hsla; AVATARS],
-}
-
-impl Palette {
-    fn light() -> Self {
-        Self {
-            background: hex(0xffffff),
-            chrome: hex(0xf7f8fa),
-            sidebar: hex(0xf7f8fa),
-            panel: hex(0xfafbfc),
-            field: hex(0xeef0f3),
-            border: hex(0xe3e6eb),
-            text: hex(0x1b1d22),
-            muted: hex(0x5b616e),
-            selected: hex(0xe3e9fb),
-            row_selected: hex(0xe9eefc),
-            accent: hex(0x3d63dd),
-            accent_soft: hex(0xe3e9fb),
-            accent_text: hex(0x2a4bb8),
-            add_background: hex(0xe7f6ec),
-            add_text: hex(0x1d7a45),
-            remove_background: hex(0xfdecec),
-            remove_text: hex(0xb4352a),
-            remote_background: hex(0xeceef2),
-            remote_text: hex(0x3f4450),
-            tag_background: hex(0xfbf0dc),
-            tag_text: hex(0x8a5a12),
-            // The washes are light enough that the body text keeps 12:1 or
-            // better, and the word tint is one step stronger so the changed
-            // token still reads as the change.
-            diff_added_bg: hex(0xe6f5eb),
-            diff_removed_bg: hex(0xfcebea),
-            diff_added_word: hex(0xd2efdd),
-            diff_removed_word: hex(0xfde1df),
-            diff_hunk_header: hex(0xf0f2f6),
-            // Darker than `muted` so line numbers clear 4.5:1 on the washes.
-            diff_gutter_fg: hex(0x5f6674),
-            // Decorative, but still 3:1 on the line it marks.
-            diff_whitespace: hex(0x7d8592),
-            // Each class clears 4.5:1 on the washes and on the word tints.
-            syntax_keyword: hex(0xa03a75),
-            syntax_string: hex(0x18703d),
-            syntax_comment: hex(0x5b616e),
-            syntax_function: hex(0x2a4bb8),
-            syntax_type: hex(0x8a5a12),
-            syntax_number: hex(0x1f6f8b),
-            syntax_tag: hex(0xb4352a),
-            lane: lanes(),
-            avatar: avatars(),
-        }
-    }
-
-    fn dark() -> Self {
-        Self {
-            background: hex(0x16181d),
-            chrome: hex(0x1b1e24),
-            sidebar: hex(0x1b1e24),
-            panel: hex(0x1d2027),
-            field: hex(0x262a32),
-            border: hex(0x2c3039),
-            text: hex(0xe6e8ec),
-            muted: hex(0xa0a6b1),
-            selected: hex(0x2a3350),
-            row_selected: hex(0x243052),
-            accent: hex(0x6d8cf0),
-            accent_soft: hex(0x26314f),
-            accent_text: hex(0xb8c8ff),
-            add_background: hex(0x173022),
-            add_text: hex(0x5fd08f),
-            remove_background: hex(0x3a1f22),
-            remove_text: hex(0xf08a80),
-            remote_background: hex(0x2a2e36),
-            remote_text: hex(0xc9ced8),
-            tag_background: hex(0x3b2f1a),
-            tag_text: hex(0xf1c27d),
-            // Deep enough to stay a wash under the light body text, strong
-            // enough to separate an added line from the panel behind it.
-            diff_added_bg: hex(0x12291c),
-            diff_removed_bg: hex(0x331a1e),
-            diff_added_word: hex(0x173a24),
-            diff_removed_word: hex(0x4a2126),
-            diff_hunk_header: hex(0x23262e),
-            // Pale enough for 6:1 on the washes, as line numbers are small.
-            diff_gutter_fg: hex(0x9aa2af),
-            // Decorative, but still 3:1 on the line it marks.
-            diff_whitespace: hex(0x78818f),
-            // Each class clears 4.5:1 on the washes and on the word tints.
-            syntax_keyword: hex(0xe59ac9),
-            syntax_string: hex(0x5fd08f),
-            syntax_comment: hex(0xb0b6c1),
-            syntax_function: hex(0xb8c8ff),
-            syntax_type: hex(0xf1c27d),
-            syntax_number: hex(0x7fd6e8),
-            syntax_tag: hex(0xf49a91),
-            lane: lanes(),
-            avatar: avatars(),
-        }
-    }
-}
-
-/// Lane colours, in the order the graph assigns them; the same in both
-/// appearances, because a lane keeps its identity across a theme change.
-fn lanes() -> [Hsla; LANES] {
-    [
-        hex(0x3d63dd),
-        hex(0x2fa58d),
-        hex(0xe0913a),
-        hex(0xc2508a),
-        hex(0x7a5cd6),
-        hex(0x2f9fd0),
-        hex(0x8a9a2e),
-        hex(0xd0553f),
-    ]
-}
-
-/// Avatar colours, kept in the same order in both appearances.
-fn avatars() -> [Hsla; AVATARS] {
-    [
-        hex(0x3d63dd),
-        hex(0x2fa58d),
-        hex(0xe0913a),
-        hex(0xc2508a),
-        hex(0x7a5cd6),
-        hex(0x2f9fd0),
-    ]
 }
 
 /// FNV-1a over the email, so every appearance gives an author the same colour
@@ -876,11 +734,25 @@ mod tests {
     }
 
     fn dark_design() -> Design {
-        // `Design` reads only the mode from the theme; loading the dark theme
-        // file would need a running app.
         let mut theme = Theme::default();
         theme.mode = ThemeMode::Dark;
         Design::new(&theme, &Settings::default())
+    }
+
+    fn design_for_theme(id: &str, is_dark: bool) -> Design {
+        let mut theme = Theme::default();
+        theme.mode = if is_dark {
+            ThemeMode::Dark
+        } else {
+            ThemeMode::Light
+        };
+        let mut settings = Settings::default();
+        if is_dark {
+            settings.appearance.dark_theme = id.to_owned();
+        } else {
+            settings.appearance.light_theme = id.to_owned();
+        }
+        Design::new(&theme, &settings)
     }
 
     const SYNTAX_CLASSES: [HighlightKind; 16] = [
@@ -916,6 +788,22 @@ mod tests {
     }
 
     #[test]
+    fn design_selects_configured_themes_from_settings() {
+        let latte = design_for_theme("catppuccin-latte", false);
+        assert_eq!(latte.background, hex(0xeff1f5));
+        assert_eq!(latte.accent, hex(0x8839ef));
+
+        let mocha = design_for_theme("catppuccin-mocha", true);
+        assert_eq!(mocha.background, hex(0x1e1e2e));
+        assert_eq!(mocha.accent, hex(0xcba6f7));
+
+        let fallback_light = design_for_theme("missing-theme", false);
+        assert_eq!(fallback_light.background, Design::default().background);
+        let fallback_dark = design_for_theme("missing-theme", true);
+        assert_eq!(fallback_dark.background, dark_design().background);
+    }
+
+    #[test]
     fn diff_text_is_readable_on_every_line_tint() {
         for design in [Design::default(), dark_design()] {
             for background in [
@@ -934,6 +822,26 @@ mod tests {
                 assert!(
                     ratio >= 3.0,
                     "the whitespace markers are {ratio:.2}:1 on a diff tint"
+                );
+            }
+        }
+
+        for palette in theme::all() {
+            let design = design_for_theme(
+                &palette.id,
+                palette.appearance == theme::ThemeAppearance::Dark,
+            );
+            for background in [
+                design.diff_added_bg,
+                design.diff_removed_bg,
+                design.diff_added_word,
+                design.diff_removed_word,
+            ] {
+                let ratio = contrast_ratio(design.text, background);
+                assert!(
+                    ratio >= 4.5,
+                    "{} body text is {ratio:.2}:1 on a diff tint",
+                    palette.id
                 );
             }
         }
@@ -979,16 +887,20 @@ mod tests {
 
         // The tint strengthens away from the surface: darker in the light
         // theme, lighter in the dark one.
-        for (design, darker) in [(light, true), (dark, false)] {
+        for palette in theme::all() {
+            let darker = palette.appearance == theme::ThemeAppearance::Light;
+            let design = design_for_theme(&palette.id, !darker);
             assert_eq!(
                 design.diff_added_word.l < design.diff_added_bg.l,
                 darker,
-                "the changed word is a stronger tint than its line"
+                "{}: the changed word is a stronger tint than its line",
+                palette.id
             );
             assert_eq!(
                 design.diff_removed_word.l < design.diff_removed_bg.l,
                 darker,
-                "the changed word is a stronger tint than its line"
+                "{}: the changed word is a stronger tint than its line",
+                palette.id
             );
         }
     }

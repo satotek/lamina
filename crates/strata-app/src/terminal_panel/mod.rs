@@ -178,7 +178,7 @@ impl TerminalPanel {
         let font_family = design.mono.clone();
         let font_size = px(design.code);
         let cell_size = measure_cell_size(window, &font_family, font_size);
-        let theme = terminal_theme(&design, cx.theme().is_dark());
+        let theme = terminal_theme(&design);
         let scrollbar = TerminalScrollbarHandle::new(|_| {});
 
         let in_sub = cx.on_focus_in(&focus_handle, window, |this, _window, cx| {
@@ -276,7 +276,7 @@ impl TerminalPanel {
     /// Re-applies font metrics and `TerminalTheme` when appearance or settings change.
     pub fn sync_appearance(&mut self, window: Option<&Window>, cx: &mut Context<Self>) {
         let design = Design::new(cx.theme(), Settings::get(cx));
-        let theme = terminal_theme(&design, cx.theme().is_dark());
+        let theme = terminal_theme(&design);
         let mut changed = false;
 
         if self.last_theme.as_ref() != Some(&theme) {
@@ -313,7 +313,7 @@ impl TerminalPanel {
     /// Restarts the shell process in the same working directory using current settings.
     pub fn restart(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let design = Design::new(cx.theme(), Settings::get(cx));
-        let theme = terminal_theme(&design, cx.theme().is_dark());
+        let theme = terminal_theme(&design);
         self.last_theme = Some(theme.clone());
         self.spawn_session(theme, cx);
         window.focus(&self.focus_handle, cx);
@@ -963,8 +963,7 @@ impl EntityInputHandler for TerminalPanel {
 impl Render for TerminalPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let design = Design::new(cx.theme(), Settings::get(cx));
-        let is_dark = cx.theme().is_dark();
-        let expected_theme = terminal_theme(&design, is_dark);
+        let expected_theme = terminal_theme(&design);
         if self.last_theme.as_ref() != Some(&expected_theme) {
             self.last_theme = Some(expected_theme.clone());
             if let Some(session) = &self.session {
@@ -980,13 +979,13 @@ impl Render for TerminalPanel {
         let focused = self.focus_handle.is_focused(window);
         let entity = cx.entity().clone();
         let weak = cx.weak_entity();
-        let bg = design.background;
+        let bg = design.terminal_background;
 
         let grid = TerminalGrid::new(TerminalGridProps {
             snapshot: self.snapshot.clone(),
             selection: self.selection,
-            selection_color: design.selected.opacity(0.8),
-            default_cursor_color: design.accent,
+            selection_color: design.terminal_selection,
+            default_cursor_color: design.terminal_cursor,
             ime_bg: design.field,
             ime_fg: design.text,
             font_family: self.font_family.clone(),

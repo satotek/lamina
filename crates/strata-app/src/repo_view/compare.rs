@@ -656,7 +656,7 @@ impl RepoView {
             return div().into_any_element();
         };
         let design = Design::new(cx.theme(), crate::settings::Settings::get(cx));
-        let diff_colors = DiffColors::from_theme(cx.theme());
+        let diff_colors = DiffColors::from_design(&design);
 
         let header = self.compare_header(&compare.a, &compare.b, compare.mode, entity.clone(), cx);
         let list = self.compare_file_list(entity.clone(), &design);

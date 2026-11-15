@@ -109,6 +109,20 @@ pub fn theme(settings: &mut Settings, theme: ThemeMode) {
     settings.appearance.theme = theme;
 }
 
+pub fn light_theme(settings: &mut Settings, id: &str) {
+    let id = id.trim();
+    if !id.is_empty() {
+        settings.appearance.light_theme = id.to_owned();
+    }
+}
+
+pub fn dark_theme(settings: &mut Settings, id: &str) {
+    let id = id.trim();
+    if !id.is_empty() {
+        settings.appearance.dark_theme = id.to_owned();
+    }
+}
+
 pub fn language(settings: &mut Settings, language: crate::i18n::Language) {
     settings.appearance.language = language;
 }
@@ -402,6 +416,31 @@ mod tests {
         assert_eq!(
             settings.behaviour.git_executable,
             Some(PathBuf::from("/usr/local/bin/git"))
+        );
+    }
+
+    #[test]
+    fn light_and_dark_theme_ids_update_and_reset() {
+        let mut settings = Settings::default();
+        light_theme(&mut settings, "catppuccin-latte");
+        dark_theme(&mut settings, "catppuccin-mocha");
+        assert_eq!(settings.appearance.light_theme, "catppuccin-latte");
+        assert_eq!(settings.appearance.dark_theme, "catppuccin-mocha");
+
+        // Blank values leave the active selection intact.
+        light_theme(&mut settings, "   ");
+        dark_theme(&mut settings, "");
+        assert_eq!(settings.appearance.light_theme, "catppuccin-latte");
+        assert_eq!(settings.appearance.dark_theme, "catppuccin-mocha");
+
+        reset_section(&mut settings, Section::Appearance);
+        assert_eq!(
+            settings.appearance.light_theme,
+            crate::style::theme::DEFAULT_LIGHT_THEME_ID
+        );
+        assert_eq!(
+            settings.appearance.dark_theme,
+            crate::style::theme::DEFAULT_DARK_THEME_ID
         );
     }
 }

@@ -1,0 +1,76 @@
+id = "catppuccin-mocha"
+name = "Catppuccin Mocha"
+appearance = "dark"
+
+[colors]
+background = "#1e1e2e"
+chrome = "#181825"
+sidebar = "#181825"
+panel = "#11111b"
+field = "#313244"
+border = "#45475a"
+text = "#cdd6f4"
+muted = "#a6adc8"
+selected = "#443c5a"
+row_selected = "#38324c"
+accent = "#cba6f7"
+accent_soft = "#38324c"
+accent_text = "#cba6f7"
+on_accent = "#11111b"
+add_background = "#313a3e"
+add_text = "#a6e3a1"
+remove_background = "#3c2d3f"
+remove_text = "#f38ba8"
+remote_background = "#313244"
+remote_text = "#bac2de"
+tag_background = "#3d3940"
+tag_text = "#f9e2af"
+diff_added_bg = "#2c323a"
+diff_removed_bg = "#33293a"
+diff_added_word = "#394545"
+diff_removed_word = "#493446"
+diff_hunk_header = "#313244"
+diff_gutter_fg = "#a6adc8"
+diff_whitespace = "#6c7086"
+syntax_keyword = "#cba6f7"
+syntax_string = "#a6e3a1"
+syntax_comment = "#9399b2"
+syntax_function = "#89b4fa"
+syntax_type = "#f9e2af"
+syntax_number = "#fab387"
+syntax_tag = "#f38ba8"
+avatar = ["#89b4fa", "#94e2d5", "#fab387", "#f5c2e7", "#cba6f7", "#74c7ec"]
+
+[terminal]
+foreground = "#cdd6f4"
+background = "#1e1e2e"
+cursor = "#f5e0dc"
+selection = "#585b70cc"
+black = "#45475a"
+red = "#f38ba8"
+green = "#a6e3a1"
+yellow = "#f9e2af"
+blue = "#89b4fa"
+magenta = "#f5c2e7"
+cyan = "#94e2d5"
+white = "#bac2de"
+bright_black = "#585b70"
+bright_red = "#f38ba8"
+bright_green = "#a6e3a1"
+bright_yellow = "#f9e2af"
+bright_blue = "#89b4fa"
+bright_magenta = "#f5c2e7"
+bright_cyan = "#94e2d5"
+bright_white = "#a6adc8"
+
+[graph]
+lanes = [
+    "#89b4fa",
+    "#94e2d5",
+    "#fab387",
+    "#f5c2e7",
+    "#cba6f7",
+    "#74c7ec",
+    "#a6e3a1",
+    "#f38ba8",
+]

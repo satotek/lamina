@@ -7,7 +7,6 @@ use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Axis, FontWeight, Hsla, IntoElement, ParentElement, Styled, div, px, relative,
 };
-use gpui_component::ActiveTheme as _;
 use gpui_component::Selectable as _;
 use gpui_kit_assets::IconName;
 use strata_core::session::{DiffView, Operation};
@@ -421,7 +420,7 @@ impl RepoView {
                 id: "diff",
                 rows,
                 view,
-                colors: DiffColors::from_theme(cx.theme()),
+                colors: DiffColors::from_design(design),
                 mono: design.mono.clone(),
                 scroll: &self.diff_scroll,
                 on_gap: self.gap_handler(),

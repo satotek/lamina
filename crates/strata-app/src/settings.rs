@@ -50,6 +50,10 @@ pub enum ThemeMode {
 #[serde(default)]
 pub struct Appearance {
     pub theme: ThemeMode,
+    /// Theme id selected when the resolved appearance is light.
+    pub light_theme: String,
+    /// Theme id selected when the resolved appearance is dark.
+    pub dark_theme: String,
     /// The interface language. `System` follows the operating system; a file
     /// written before this key existed takes the default.
     pub language: Language,
@@ -66,6 +70,8 @@ impl Default for Appearance {
     fn default() -> Self {
         Self {
             theme: ThemeMode::System,
+            light_theme: crate::style::theme::DEFAULT_LIGHT_THEME_ID.to_owned(),
+            dark_theme: crate::style::theme::DEFAULT_DARK_THEME_ID.to_owned(),
             language: Language::System,
             ui_font: None,
             ui_font_size: 13.0,
@@ -708,6 +714,21 @@ mod tests {
         let settings = Settings::load(&path);
         assert_eq!(settings.appearance.language, crate::i18n::Language::System);
         assert_eq!(settings.appearance.theme, ThemeMode::Dark);
+        assert_eq!(settings.appearance.light_theme, "strata-light");
+        assert_eq!(settings.appearance.dark_theme, "strata-dark");
+    }
+
+    #[test]
+    fn selected_themes_survive_a_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut settings = Settings::default();
+        settings.appearance.light_theme = "catppuccin-latte".to_owned();
+        settings.appearance.dark_theme = "catppuccin-mocha".to_owned();
+        settings.save(&path).unwrap();
+        let loaded = Settings::load(&path);
+        assert_eq!(loaded.appearance.light_theme, "catppuccin-latte");
+        assert_eq!(loaded.appearance.dark_theme, "catppuccin-mocha");
     }
 
     #[test]

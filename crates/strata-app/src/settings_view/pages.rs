@@ -11,17 +11,19 @@ use std::path::Path;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, Entity, FontWeight, IntoElement, ParentElement,
+    Anchor, AnyElement, App, AppContext as _, Entity, FontWeight, IntoElement, ParentElement,
     PathPromptOptions, SharedString, StyleRefinement, Styled, Subscription, Window, div, px,
     relative,
 };
+use gpui_component::button::Button;
 use gpui_component::group_box::GroupBoxVariant;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::label::Label;
+use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::setting::{
     NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage,
 };
-use gpui_component::{ActiveTheme as _, Sizable as _, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit_assets::IconName;
 
 use super::SIDEBAR_MAX;
@@ -29,6 +31,7 @@ use super::change::{self, Section};
 use crate::actions::OpenGitConfig;
 use crate::settings::{self, DateFormat, DiffLayout, Settings, ThemeMode};
 use crate::style::Design;
+use crate::style::theme::{self, ThemeAppearance};
 use crate::tools::Tooling;
 
 /// Font families offered beside the free-text font fields.
@@ -117,10 +120,20 @@ fn appearance(control: f32, design: &Design) -> SettingPage {
         design,
     )
     .groups(
-        card(t!("settings.theme.card").to_string()).item(
-            SettingItem::new(t!("settings.theme.card").to_string(), theme_field(control))
+        card(t!("settings.theme.card").to_string()).items([
+            SettingItem::new(t!("settings.theme.mode").to_string(), theme_field(control))
                 .description(t!("settings.theme.description").to_string()),
-        ),
+            SettingItem::new(
+                t!("settings.theme.light_theme").to_string(),
+                palette_field(ThemeAppearance::Light, control),
+            )
+            .description(t!("settings.theme.light_theme_description").to_string()),
+            SettingItem::new(
+                t!("settings.theme.dark_theme").to_string(),
+                palette_field(ThemeAppearance::Dark, control),
+            )
+            .description(t!("settings.theme.dark_theme_description").to_string()),
+        ]),
     )
     .groups(
         card(t!("settings.appearance.language").to_string()).item(
@@ -1116,6 +1129,10 @@ fn heading(section: Section, description: impl Into<String>, design: &Design) ->
                                 settings::update(cx, |settings| {
                                     change::reset_section(settings, section);
                                 });
+                                if section == Section::Appearance {
+                                    settings::apply_theme(None, cx);
+                                    crate::i18n::apply(cx);
+                                }
                                 cx.refresh_windows();
                             }),
                         ),
@@ -1214,6 +1231,66 @@ fn theme_field(control: f32) -> SettingField<SharedString> {
         },
     )
     .w(px(control))
+}
+
+fn palette_field(appearance: ThemeAppearance, control: f32) -> SettingField<SharedString> {
+    let is_dark = appearance == ThemeAppearance::Dark;
+    let element_id: &'static str = if is_dark {
+        "dark-theme-picker"
+    } else {
+        "light-theme-picker"
+    };
+    SettingField::render(move |options, _window, cx| {
+        let design = Design::new(cx.theme(), Settings::get(cx));
+        let active_id = if is_dark {
+            &Settings::get(cx).appearance.dark_theme
+        } else {
+            &Settings::get(cx).appearance.light_theme
+        };
+        let active = theme::resolve(active_id, is_dark);
+        let active_id_owned = active.id.clone();
+
+        Button::new(element_id)
+            .w(px(control))
+            .child(crate::ui::swatch_label(
+                active.name.clone(),
+                active.swatches(),
+                &design,
+            ))
+            .dropdown_caret(true)
+            .outline()
+            .disabled(options.is_disabled())
+            .with_size(options.size())
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                theme::for_appearance(appearance)
+                    .fold(menu, |menu, palette| {
+                        let checked = palette.id == active_id_owned;
+                        let id = palette.id.clone();
+                        let name = palette.name.clone();
+                        let swatches = palette.swatches();
+                        menu.item(
+                            PopupMenuItem::element(move |_, cx| {
+                                let design = Design::new(cx.theme(), Settings::get(cx));
+                                crate::ui::swatch_label(name.clone(), swatches, &design)
+                            })
+                            .checked(checked)
+                            .on_click(move |_, _, cx| {
+                                let id = id.clone();
+                                settings::update(cx, |settings| {
+                                    if is_dark {
+                                        change::dark_theme(settings, &id);
+                                    } else {
+                                        change::light_theme(settings, &id);
+                                    }
+                                });
+                                settings::apply_theme(None, cx);
+                            }),
+                        )
+                    })
+                    .min_w(px(control))
+            })
+            .into_any_element()
+    })
 }
 
 /// The language dropdown. A change is applied to every open window at once,

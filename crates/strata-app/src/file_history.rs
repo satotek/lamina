@@ -644,7 +644,7 @@ impl RepoView {
                     .child(count),
             );
 
-        let diff_colors = DiffColors::from_theme(cx.theme());
+        let diff_colors = DiffColors::from_design(&colors.design);
         let list = self.file_history_list(entity.clone(), &colors);
         let diff = self.file_history_diff(&colors, &diff_colors, cx);
 

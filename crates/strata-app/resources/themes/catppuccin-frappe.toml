@@ -1,0 +1,76 @@
+id = "catppuccin-frappe"
+name = "Catppuccin Frappé"
+appearance = "dark"
+
+[colors]
+background = "#303446"
+chrome = "#292c3c"
+sidebar = "#292c3c"
+panel = "#232634"
+field = "#414559"
+border = "#51576d"
+text = "#c6d0f5"
+muted = "#a5adce"
+selected = "#524b69"
+row_selected = "#47445e"
+accent = "#ca9ee6"
+accent_soft = "#47445e"
+accent_text = "#ca9ee6"
+on_accent = "#232634"
+add_background = "#414a4f"
+add_text = "#a6d189"
+remove_background = "#4a3f4f"
+remove_text = "#e78284"
+remote_background = "#414559"
+remote_text = "#b5bfe2"
+tag_background = "#494950"
+tag_text = "#e5c890"
+diff_added_bg = "#3c444d"
+diff_removed_bg = "#423c4c"
+diff_added_word = "#485353"
+diff_removed_word = "#554452"
+diff_hunk_header = "#414559"
+diff_gutter_fg = "#a5adce"
+diff_whitespace = "#737994"
+syntax_keyword = "#ca9ee6"
+syntax_string = "#a6d189"
+syntax_comment = "#949cbb"
+syntax_function = "#8caaee"
+syntax_type = "#e5c890"
+syntax_number = "#ef9f76"
+syntax_tag = "#e78284"
+avatar = ["#8caaee", "#81c8be", "#ef9f76", "#f4b8e4", "#ca9ee6", "#85c1dc"]
+
+[terminal]
+foreground = "#c6d0f5"
+background = "#303446"
+cursor = "#f2d5cf"
+selection = "#626880cc"
+black = "#51576d"
+red = "#e78284"
+green = "#a6d189"
+yellow = "#e5c890"
+blue = "#8caaee"
+magenta = "#f4b8e4"
+cyan = "#81c8be"
+white = "#b5bfe2"
+bright_black = "#626880"
+bright_red = "#e78284"
+bright_green = "#a6d189"
+bright_yellow = "#e5c890"
+bright_blue = "#8caaee"
+bright_magenta = "#f4b8e4"
+bright_cyan = "#81c8be"
+bright_white = "#a5adce"
+
+[graph]
+lanes = [
+    "#8caaee",
+    "#81c8be",
+    "#ef9f76",
+    "#f4b8e4",
+    "#ca9ee6",
+    "#85c1dc",
+    "#a6d189",
+    "#e78284",
+]

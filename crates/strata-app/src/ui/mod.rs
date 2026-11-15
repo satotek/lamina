@@ -24,6 +24,7 @@ mod rail;
 mod row;
 mod signature;
 mod split;
+mod swatch;
 mod tab;
 #[cfg(feature = "terminal")]
 mod terminal_grid;
@@ -46,6 +47,7 @@ pub use rail::{RAIL_WIDTH, rail, rail_item};
 pub use row::{RowState, RowTipExt, list_row, row_surface};
 pub use signature::{CommitSignatureState, signature_badge, signature_details};
 pub use split::{SplitExtent, clamp_fraction, split_handle, split_pixels};
+pub use swatch::{swatch_label, swatch_strip};
 pub use tab::{tab, tab_strip};
 #[cfg(feature = "terminal")]
 pub use terminal_grid::{

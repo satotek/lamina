@@ -11,7 +11,6 @@ use gpui::{
     AnyElement, App, Entity, FontWeight, IntoElement, ParentElement, Styled, div, px, uniform_list,
 };
 use gpui_component::Selectable as _;
-use gpui_component::Theme;
 use strata_core::ChangeKind;
 use strata_core::diff::{Expansion, FileDiff, Gap, LineKind};
 use strata_core::highlight::LineHighlights;
@@ -128,7 +127,6 @@ impl WorktreePanel {
         &self,
         entity: Entity<RepoView>,
         snapshot: &RepoSnapshot,
-        theme: &Theme,
         colors: &Colors,
         cx: &mut App,
     ) -> AnyElement {
@@ -289,7 +287,7 @@ impl WorktreePanel {
                         );
                     }
                     let body = if !self.rows.is_empty() {
-                        self.diff_list(entity.clone(), view, theme, colors)
+                        self.diff_list(entity.clone(), view, colors)
                     } else if view.diff.binary {
                         crate::ui::message(
                             t!("worktree.binary_file").to_string(),
@@ -334,7 +332,7 @@ impl WorktreePanel {
                 )
                 .into_any_element(),
                 (None, Some(view)) => {
-                    let list = self.diff_list(entity, view, theme, colors);
+                    let list = self.diff_list(entity, view, colors);
                     match self.context.notice() {
                         Some(notice) => div()
                             .flex()
@@ -420,12 +418,11 @@ impl WorktreePanel {
         &self,
         entity: Entity<RepoView>,
         view: &Arc<DiffView>,
-        theme: &Theme,
         colors: &Colors,
     ) -> AnyElement {
         let rows = Rc::clone(&self.rows);
         let picked = self.picked.clone();
-        let diff_colors = DiffColors::from_theme(theme);
+        let diff_colors = DiffColors::from_design(&colors.design);
         let mono = colors.mono.clone();
         let view = Arc::clone(view);
         let side = self.selected.as_ref().map(|selected| selected.side);

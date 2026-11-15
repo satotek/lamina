@@ -1892,10 +1892,7 @@ impl WorktreePanel {
                 &self.image_diff,
                 cx,
             ),
-            None => {
-                let theme = cx.theme().clone();
-                self.diff_pane(entity.clone(), snapshot, &theme, &colors, cx)
-            }
+            None => self.diff_pane(entity.clone(), snapshot, &colors, cx),
         });
         if let Some(focus) = &self.focus {
             body = body.track_focus(focus);

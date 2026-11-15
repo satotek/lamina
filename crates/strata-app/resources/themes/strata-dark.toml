@@ -1,0 +1,76 @@
+id = "strata-dark"
+name = "Strata Dark"
+appearance = "dark"
+
+[colors]
+background = "#16181d"
+chrome = "#1b1e24"
+sidebar = "#1b1e24"
+panel = "#1d2027"
+field = "#262a32"
+border = "#2c3039"
+text = "#e6e8ec"
+muted = "#a0a6b1"
+selected = "#2a3350"
+row_selected = "#243052"
+accent = "#6d8cf0"
+accent_soft = "#26314f"
+accent_text = "#b8c8ff"
+on_accent = "#ffffff"
+add_background = "#173022"
+add_text = "#5fd08f"
+remove_background = "#3a1f22"
+remove_text = "#f08a80"
+remote_background = "#2a2e36"
+remote_text = "#c9ced8"
+tag_background = "#3b2f1a"
+tag_text = "#f1c27d"
+diff_added_bg = "#12291c"
+diff_removed_bg = "#331a1e"
+diff_added_word = "#173a24"
+diff_removed_word = "#4a2126"
+diff_hunk_header = "#23262e"
+diff_gutter_fg = "#9aa2af"
+diff_whitespace = "#78818f"
+syntax_keyword = "#e59ac9"
+syntax_string = "#5fd08f"
+syntax_comment = "#b0b6c1"
+syntax_function = "#b8c8ff"
+syntax_type = "#f1c27d"
+syntax_number = "#7fd6e8"
+syntax_tag = "#f49a91"
+avatar = ["#3d63dd", "#2fa58d", "#e0913a", "#c2508a", "#7a5cd6", "#2f9fd0"]
+
+[terminal]
+foreground = "#e6e8ec"
+background = "#16181d"
+cursor = "#6d8cf0"
+selection = "#2a3350cc"
+black = "#1d2027"
+red = "#f08a80"
+green = "#5fd08f"
+yellow = "#f1c27d"
+blue = "#6d8cf0"
+magenta = "#e59ac9"
+cyan = "#7fd6e8"
+white = "#c9ced8"
+bright_black = "#737a88"
+bright_red = "#ff9e96"
+bright_green = "#7ee0a8"
+bright_yellow = "#fad493"
+bright_blue = "#9cb2f8"
+bright_magenta = "#f0b3da"
+bright_cyan = "#9ce3f2"
+bright_white = "#e6e8ec"
+
+[graph]
+lanes = [
+    "#3d63dd",
+    "#2fa58d",
+    "#e0913a",
+    "#c2508a",
+    "#7a5cd6",
+    "#2f9fd0",
+    "#8a9a2e",
+    "#d0553f",
+]

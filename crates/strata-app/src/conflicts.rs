@@ -1432,7 +1432,7 @@ impl Colors {
             side_b: design.add_text,
             side_b_soft: design.add_background,
             side_b_selected: design.diff_added_word,
-            diff: DiffColors::from_theme(theme),
+            diff: DiffColors::from_design(&design),
             design,
         }
     }
