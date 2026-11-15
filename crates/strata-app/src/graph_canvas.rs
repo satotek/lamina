@@ -112,7 +112,9 @@ pub fn graph_column(
     fade: Hsla,
     muted: Hsla,
 ) -> impl IntoElement {
-    let lanes = row_lanes(row);
+    // A row above MERGE_HEAD's node may not have that lane yet, and the dashed
+    // run would fall outside the row's indent and never be painted.
+    let lanes = row_lanes(row).max(merge_edge.map_or(0, |edge| edge.lane.saturating_add(1)));
     let width = px(indent(lanes));
     // The paint closure must own its data; only visible rows are copied.
     let row = OwnedRow {
