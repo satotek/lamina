@@ -208,7 +208,7 @@ impl Git {
     fn pick_sequence(&self, mut args: Vec<String>, empty: EmptyPicks) -> Result<CherryPickOutcome> {
         let mut skipped = Vec::new();
         loop {
-            let output = self.run_output(&args, None)?;
+            let output = self.run_output(&args, None, false)?;
             if output.status.success() {
                 if matches!(empty, EmptyPicks::Drop) {
                     skipped.extend(dropped_commits(&output.stderr));

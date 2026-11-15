@@ -1174,8 +1174,12 @@ impl RepoView {
                 self.reflog_ready(ticket, &entries, cx);
             }
             SessionEvent::CommandLogged(record) => {
-                self.last_command = Some(command_line(&record));
-                self.notify_if_active(cx);
+                // Probes stay in the command log, but only a command the user
+                // asked for belongs in the status line.
+                if let Some(line) = status_command(&record) {
+                    self.last_command = Some(line);
+                    self.notify_if_active(cx);
+                }
             }
             SessionEvent::LoadFailed { error } => {
                 if self.debug_launch.is_some()
@@ -2727,6 +2731,14 @@ fn one_line(text: &str) -> String {
         .join(" · ")
 }
 
+/// The status line's entry for a finished command, or `None` for a capability
+/// probe. A probe such as `git lfs version` fails whenever that optional tool
+/// is missing, and showing it as the user's last command reads like an error
+/// they caused.
+fn status_command(record: &CommandRecord) -> Option<String> {
+    (!record.internal).then(|| command_line(record))
+}
+
 /// `git <args> · 12.3 ms`, with a non-zero exit code kept visible.
 fn command_line(record: &CommandRecord) -> String {
     let mut line = String::from("git");
@@ -2969,6 +2981,7 @@ mod tests {
             exit_code: Some(0),
             stdout: String::new(),
             stderr: String::new(),
+            internal: false,
         };
         assert_eq!(command_line(&record), "git status --porcelain=v2 · 12.0 ms");
 
@@ -2979,6 +2992,30 @@ mod tests {
         assert_eq!(
             command_line(&failed),
             "git status --porcelain=v2 (exit 128) · 12.0 ms"
+        );
+    }
+
+    #[test]
+    fn a_capability_probe_is_logged_but_never_becomes_the_last_command() {
+        let probe = CommandRecord {
+            args: vec!["lfs".into(), "version".into()],
+            started_at: SystemTime::now(),
+            duration: Duration::from_millis(6),
+            exit_code: Some(1),
+            stdout: String::new(),
+            stderr: "git: 'lfs' is not a git command".into(),
+            internal: true,
+        };
+        assert_eq!(status_command(&probe), None);
+
+        // The same argv from the user (a custom command, say) still shows.
+        let asked = CommandRecord {
+            internal: false,
+            ..probe
+        };
+        assert_eq!(
+            status_command(&asked).as_deref(),
+            Some("git lfs version (exit 1) · 6.0 ms")
         );
     }
 

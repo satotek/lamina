@@ -25,6 +25,12 @@ pub struct CommandRecord {
     pub stdout: String,
     /// Captured output, truncated to [`MAX_CAPTURE_BYTES`] and lossily decoded.
     pub stderr: String,
+    /// A capability probe (`git lfs version`, `git --version`) that the app ran
+    /// on its own rather than because the user asked for it.
+    ///
+    /// Probes stay in the log, but the status line leaves them out: an optional
+    /// tool that is not installed must not look like a failure the user caused.
+    pub internal: bool,
 }
 
 impl CommandRecord {
@@ -33,6 +39,7 @@ impl CommandRecord {
         started_at: SystemTime,
         duration: Duration,
         output: &Output,
+        internal: bool,
     ) -> Self {
         Self::capture(
             args,
@@ -41,9 +48,14 @@ impl CommandRecord {
             output.status.code(),
             &output.stdout,
             &output.stderr,
+            internal,
         )
     }
 
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the record mirrors the process result field by field"
+    )]
     pub(crate) fn capture(
         args: Vec<String>,
         started_at: SystemTime,
@@ -51,6 +63,7 @@ impl CommandRecord {
         exit_code: Option<i32>,
         stdout: &[u8],
         stderr: &[u8],
+        internal: bool,
     ) -> Self {
         Self {
             args,
@@ -59,6 +72,7 @@ impl CommandRecord {
             exit_code,
             stdout: truncated(stdout),
             stderr: truncated(stderr),
+            internal,
         }
     }
 }

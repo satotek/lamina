@@ -490,6 +490,7 @@ fn run(
                 exit_code: output.status.code(),
                 stdout,
                 stderr: stderr.clone(),
+                internal: false,
             };
             (
                 Finished {
@@ -510,6 +511,7 @@ fn run(
                 exit_code: None,
                 stdout: String::new(),
                 stderr: stderr.clone(),
+                internal: false,
             };
             (
                 Finished {

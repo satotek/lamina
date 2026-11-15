@@ -34,7 +34,7 @@ impl Git {
     /// opened. `--path` expands `~` the way git does.
     pub fn signature_config_hints(&self) -> Result<SignatureConfigHints> {
         let args = to_args(&["config", "--path", "--get", "gpg.ssh.allowedSignersFile"]);
-        let output = self.run_output(&args, None)?;
+        let output = self.run_output(&args, None, false)?;
         // Exit 1 means the key is unset; anything else is a real failure.
         if output.status.code() == Some(1) {
             return Ok(SignatureConfigHints::default());

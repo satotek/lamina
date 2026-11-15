@@ -12,15 +12,17 @@ use crate::lfs::{LfsLock, parse_locks_json};
 impl Git {
     /// Whether `git lfs` is installed and runnable.
     pub fn lfs_available(&self) -> bool {
-        self.run(&["lfs", "version"], None).is_ok()
+        self.run_internal(&["lfs", "version"], None).is_ok()
     }
 
     /// The `git lfs version` line, for the notice that says what to install.
     pub fn lfs_version(&self) -> Option<String> {
-        self.run(&["lfs", "version"], None).ok().and_then(|output| {
-            let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-            (!text.is_empty()).then_some(text)
-        })
+        self.run_internal(&["lfs", "version"], None)
+            .ok()
+            .and_then(|output| {
+                let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+                (!text.is_empty()).then_some(text)
+            })
     }
 
     /// Locks the remote reports, from `git lfs locks --json`.

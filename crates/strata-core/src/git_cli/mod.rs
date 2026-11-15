@@ -167,8 +167,27 @@ impl Git {
     /// Run `git` and return its output. A non-zero exit becomes
     /// [`Error::GitCommand`] carrying the captured stderr.
     pub fn run<S: AsRef<str>>(&self, args: &[S], stdin: Option<&[u8]>) -> Result<Output> {
+        self.run_logged(args, stdin, false)
+    }
+
+    /// Run a capability probe such as `git lfs version`.
+    ///
+    /// The invocation is recorded like any other, but flagged as internal so
+    /// the UI does not present it as the user's last command. A probe fails
+    /// whenever the optional tool is missing, which is not an error the user
+    /// caused.
+    pub fn run_internal<S: AsRef<str>>(&self, args: &[S], stdin: Option<&[u8]>) -> Result<Output> {
+        self.run_logged(args, stdin, true)
+    }
+
+    fn run_logged<S: AsRef<str>>(
+        &self,
+        args: &[S],
+        stdin: Option<&[u8]>,
+        internal: bool,
+    ) -> Result<Output> {
         let args = to_args(args);
-        let output = self.run_output(&args, stdin)?;
+        let output = self.run_output(&args, stdin, internal)?;
         if output.status.success() {
             Ok(output)
         } else {
@@ -182,12 +201,12 @@ impl Git {
     /// A multi-commit cherry-pick expects exit 1 both for a conflict and for an
     /// empty pick, and needs the streams to tell them apart, so it cannot use
     /// [`run`](Self::run), which folds a failure into a message.
-    fn run_output(&self, args: &[String], stdin: Option<&[u8]>) -> Result<Output> {
+    fn run_output(&self, args: &[String], stdin: Option<&[u8]>, internal: bool) -> Result<Output> {
         let started_at = SystemTime::now();
         let (mut command, _askpass) = match self.prepared(args) {
             Ok(prepared) => prepared,
             Err(error) => {
-                self.log_spawn_failure(args, started_at, &error);
+                self.log_spawn_failure(args, started_at, &error, internal);
                 return Err(error);
             }
         };
@@ -198,7 +217,7 @@ impl Git {
             Ok(child) => child,
             Err(error) => {
                 let error = Error::from(error);
-                self.log_spawn_failure(args, started_at, &error);
+                self.log_spawn_failure(args, started_at, &error, internal);
                 return Err(error);
             }
         };
@@ -213,7 +232,7 @@ impl Git {
             });
         }
         let output = child.wait_with_output()?;
-        self.log_output(args, started_at, &output);
+        self.log_output(args, started_at, &output, internal);
         Ok(output)
     }
 
@@ -233,7 +252,7 @@ impl Git {
         let (mut command, _askpass) = match self.prepared(&args) {
             Ok(prepared) => prepared,
             Err(error) => {
-                self.log_spawn_failure(&args, started_at, &error);
+                self.log_spawn_failure(&args, started_at, &error, false);
                 return Err(error);
             }
         };
@@ -244,7 +263,7 @@ impl Git {
             Ok(child) => child,
             Err(error) => {
                 let error = Error::from(error);
-                self.log_spawn_failure(&args, started_at, &error);
+                self.log_spawn_failure(&args, started_at, &error, false);
                 return Err(error);
             }
         };
@@ -343,7 +362,7 @@ impl Git {
             stdout: stdout_bytes,
             stderr: stderr_bytes,
         };
-        self.log_output(&args, started_at, &output);
+        self.log_output(&args, started_at, &output, false);
 
         if state.killed.load(Ordering::SeqCst) || cancelled() {
             return Ok(None);
@@ -366,7 +385,7 @@ impl Git {
         let (mut command, _askpass) = match self.prepared(&args) {
             Ok(prepared) => prepared,
             Err(error) => {
-                self.log_spawn_failure(&args, started_at, &error);
+                self.log_spawn_failure(&args, started_at, &error, false);
                 return Err(error);
             }
         };
@@ -374,7 +393,7 @@ impl Git {
             Ok(child) => child,
             Err(error) => {
                 let error = Error::from(error);
-                self.log_spawn_failure(&args, started_at, &error);
+                self.log_spawn_failure(&args, started_at, &error, false);
                 return Err(error);
             }
         };
@@ -405,7 +424,7 @@ impl Git {
             stdout: stdout_bytes,
             stderr: stderr_bytes,
         };
-        self.log_output(&args, started_at, &output);
+        self.log_output(&args, started_at, &output, false);
         if output.status.success() {
             Ok(output)
         } else {
@@ -433,7 +452,7 @@ impl Git {
         let (mut command, _askpass) = match self.prepared(&args) {
             Ok(prepared) => prepared,
             Err(error) => {
-                self.log_spawn_failure(&args, started_at, &error);
+                self.log_spawn_failure(&args, started_at, &error, false);
                 return Err(error);
             }
         };
@@ -441,7 +460,7 @@ impl Git {
             Ok(child) => child,
             Err(error) => {
                 let error = Error::from(error);
-                self.log_spawn_failure(&args, started_at, &error);
+                self.log_spawn_failure(&args, started_at, &error, false);
                 return Err(error);
             }
         };
@@ -554,7 +573,7 @@ impl Git {
             stdout: stdout_sample,
             stderr: stderr_bytes,
         };
-        self.log_output(&args, started_at, &output);
+        self.log_output(&args, started_at, &output, false);
 
         if was_cancelled || state.killed.load(Ordering::SeqCst) || cancelled() {
             return Ok(false);
@@ -588,7 +607,7 @@ impl Git {
         let (mut command, _askpass) = match self.prepared(&args) {
             Ok(prepared) => prepared,
             Err(error) => {
-                self.log_spawn_failure(&args, started_at, &error);
+                self.log_spawn_failure(&args, started_at, &error, false);
                 return Err(error);
             }
         };
@@ -596,7 +615,7 @@ impl Git {
             Ok(child) => child,
             Err(error) => {
                 let error = Error::from(error);
-                self.log_spawn_failure(&args, started_at, &error);
+                self.log_spawn_failure(&args, started_at, &error, false);
                 return Err(error);
             }
         };
@@ -684,7 +703,7 @@ impl Git {
             stdout: stdout_bytes,
             stderr: stderr_bytes,
         };
-        self.log_output(&args, started_at, &output);
+        self.log_output(&args, started_at, &output, false);
 
         if state.killed.load(Ordering::SeqCst) || cancelled() {
             return Ok(false);
@@ -699,7 +718,7 @@ impl Git {
 
     /// Parse `git --version`, e.g. `2.39.3 (Apple Git-145)` into `(2, 39, 3)`.
     pub fn version(&self) -> Result<(u32, u32, u32)> {
-        let output = self.run(&["--version"], None)?;
+        let output = self.run_internal(&["--version"], None)?;
         let text = String::from_utf8_lossy(&output.stdout);
         parse_version(&text).ok_or_else(|| {
             Error::other(format!(
@@ -793,17 +812,24 @@ impl Git {
         command
     }
 
-    fn log_output(&self, args: &[String], started_at: SystemTime, output: &Output) {
+    fn log_output(&self, args: &[String], started_at: SystemTime, output: &Output, internal: bool) {
         let duration = started_at.elapsed().unwrap_or_default();
         self.log.record(CommandRecord::from_output(
             args.to_vec(),
             started_at,
             duration,
             output,
+            internal,
         ));
     }
 
-    fn log_spawn_failure(&self, args: &[String], started_at: SystemTime, error: &Error) {
+    fn log_spawn_failure(
+        &self,
+        args: &[String],
+        started_at: SystemTime,
+        error: &Error,
+        internal: bool,
+    ) {
         let duration = started_at.elapsed().unwrap_or_default();
         let text = error.to_string();
         self.log.record(CommandRecord::capture(
@@ -813,6 +839,7 @@ impl Git {
             None,
             &[],
             text.as_bytes(),
+            internal,
         ));
     }
 }
@@ -957,6 +984,34 @@ fn checked_ref<'a>(name: &'a str, what: &str) -> Result<&'a str> {
 #[cfg(test)]
 mod tests {
     use super::parse_version;
+    use crate::test_support::TestRepo;
+
+    #[test]
+    fn capability_probes_are_logged_as_internal() {
+        let test = TestRepo::new();
+        let git = test.git_handle();
+        git.run(&["status"], None).expect("status");
+        // Without git-lfs this fails; the record must still be written.
+        let _ = git.run_internal(&["lfs", "version"], None);
+
+        let log = git.log();
+        assert_eq!(log.len(), 2);
+        assert!(!log[0].internal, "a command the user ran stays visible");
+        assert!(log[1].internal, "a probe must not reach the status line");
+        assert_eq!(log[1].args, ["lfs", "version"]);
+    }
+
+    #[test]
+    fn the_version_and_lfs_probes_are_internal() {
+        let test = TestRepo::new();
+        let git = test.git_handle();
+        git.version().expect("git --version");
+        let _ = git.lfs_available();
+
+        let log = git.log();
+        assert_eq!(log.len(), 2);
+        assert!(log.iter().all(|record| record.internal));
+    }
 
     #[test]
     fn parses_plain_and_vendor_versions() {

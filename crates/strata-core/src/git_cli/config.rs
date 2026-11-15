@@ -241,7 +241,7 @@ impl Git {
     /// Run one configuration command, treating "key not found" on an unset as
     /// success: the wanted state is already there.
     fn run_config(&self, args: &[String], write: &ConfigWrite) -> Result<()> {
-        let output = self.run_output(args, None)?;
+        let output = self.run_output(args, None, false)?;
         if output.status.success() {
             return Ok(());
         }
