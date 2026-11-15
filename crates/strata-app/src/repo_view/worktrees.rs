@@ -334,46 +334,50 @@ impl RepoView {
         let view = cx.weak_entity();
         let dialog = cx
             .new(|cx| AddWorktreeDialog::new(view, root, branches, start, start_label, window, cx));
-        let focus = dialog.read(cx).input_focus(cx);
-        let content = dialog.clone();
-        let footer = dialog.clone();
-        let confirm = dialog;
-        window.open_dialog(cx, move |card, _, _| {
-            let content = content.clone();
-            let footer = footer.clone();
-            let confirm = confirm.clone();
-            card.title(t!("worktree.add.title").to_string())
-                .w(px(520.0))
-                .content(move |body, _, _| body.child(content.clone()))
-                .footer(
-                    DialogFooter::new()
-                        .child(
-                            crate::ui::button(
-                                "worktree-add-cancel",
-                                t!("common.cancel").to_string(),
-                            )
-                            .size(crate::ui::ButtonSize::Medium)
-                            .on_click(|_, window, cx| window.close_dialog(cx)),
-                        )
-                        .child(
-                            crate::ui::button(
-                                "worktree-add-submit",
-                                t!("worktree.add.title").to_string(),
-                            )
-                            .size(crate::ui::ButtonSize::Medium)
-                            .on_click(move |_, window, cx| {
-                                footer.update(cx, |dialog, cx| dialog.submit(window, cx));
-                            }),
-                        ),
-                )
-                .on_ok(move |_, window, cx| {
-                    // The dialog closes itself once the operation is on its
-                    // way, so the confirm does not close it a second time.
-                    confirm.update(cx, |dialog, cx| dialog.submit(window, cx));
-                    false
-                })
+        show_worktree_dialog(dialog, window, cx);
+    }
+
+    /// The commit menu's "Create worktree from this commit…": the same form,
+    /// started at the commit and with the branch name optional.
+    pub(crate) fn open_worktree_from_commit(
+        &mut self,
+        commit: Oid,
+        short: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session.is_none() || self.is_busy() {
+            return;
+        }
+        let root = self.add_worktree_root();
+        let view = cx.weak_entity();
+        let dialog =
+            cx.new(|cx| AddWorktreeDialog::from_commit(view, root, commit, short, window, cx));
+        show_worktree_dialog(dialog, window, cx);
+    }
+
+    /// Offers the checkout a just-finished `worktree add` created in a new tab.
+    pub(crate) fn offer_open_worktree(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let Some(handle) = self.window_handle else {
+            return;
+        };
+        let entity = cx.weak_entity();
+        let name = crate::branches::worktree_name(&path);
+        let detail = t!("worktree.offer.detail", path = path.display()).to_string();
+        let _ = handle.update(cx, |_, window, cx| {
+            let mut confirm = crate::ui::Confirm::new(
+                t!("worktree.offer.title", name = name).to_string(),
+                detail,
+            )
+            .ok_label(t!("branch.menu.open_new_tab").to_string());
+            confirm.danger = false;
+            crate::ui::confirm(window, cx, confirm, move |window, cx| {
+                let path = path.clone();
+                let _ = entity.update(cx, |view, cx| {
+                    view.open_repository_in_new_tab(&path, window, cx)
+                });
+            });
         });
-        window.defer(cx, move |window, cx| focus.focus(window, cx));
     }
 
     /// The directory a new worktree's default path is a sibling of: the main
@@ -392,6 +396,54 @@ impl RepoView {
             .and_then(|session| session.repo().workdir().map(Path::to_path_buf))
             .unwrap_or_else(|| PathBuf::from("."))
     }
+}
+
+/// Opens the worktree form in a dialog over `window`.
+///
+/// The sidebar's "Add worktree…" and the commit menu's form differ only in the
+/// dialog's defaults, so they share the window plumbing.
+fn show_worktree_dialog(
+    dialog: Entity<AddWorktreeDialog>,
+    window: &mut Window,
+    cx: &mut Context<RepoView>,
+) {
+    let focus = dialog.read(cx).input_focus(cx);
+    let content = dialog.clone();
+    let footer = dialog.clone();
+    let confirm = dialog;
+    window.open_dialog(cx, move |card, _, _| {
+        let content = content.clone();
+        let footer = footer.clone();
+        let confirm = confirm.clone();
+        card.title(t!("worktree.add.title").to_string())
+            .w(px(520.0))
+            .content(move |body, _, _| body.child(content.clone()))
+            .footer(
+                DialogFooter::new()
+                    .child(
+                        crate::ui::button("worktree-add-cancel", t!("common.cancel").to_string())
+                            .size(crate::ui::ButtonSize::Medium)
+                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                    )
+                    .child(
+                        crate::ui::button(
+                            "worktree-add-submit",
+                            t!("worktree.add.title").to_string(),
+                        )
+                        .size(crate::ui::ButtonSize::Medium)
+                        .on_click(move |_, window, cx| {
+                            footer.update(cx, |dialog, cx| dialog.submit(window, cx));
+                        }),
+                    ),
+            )
+            .on_ok(move |_, window, cx| {
+                // The dialog closes itself once the operation is on its way, so
+                // the confirm does not close it a second time.
+                confirm.update(cx, |dialog, cx| dialog.submit(window, cx));
+                false
+            })
+    });
+    window.defer(cx, move |window, cx| focus.focus(window, cx));
 }
 
 /// The default checkout directory for `branch`: a sibling of the repository
@@ -441,6 +493,12 @@ pub(crate) struct AddWorktreeDialog {
     error: Option<String>,
     /// Once the user edits the path, choosing another branch leaves it alone.
     path_edited: bool,
+    /// A branch may be left blank, which checks the commit out detached. Only
+    /// the commit menu's form offers that; the sidebar's form always needs a
+    /// branch.
+    allow_detached: bool,
+    /// The name the default path uses while the branch field is empty.
+    default_name: String,
     _path_events: Subscription,
     _branch_events: Subscription,
 }
@@ -458,11 +516,69 @@ impl AddWorktreeDialog {
         // With no branch that could be checked out again, the dialog has to
         // create one; that is also the useful default for a first worktree.
         let create_branch = branches.is_empty();
-        let default_branch = branches.first().map(String::as_str).unwrap_or("worktree");
-        let default_path = default_worktree_path(&root, default_branch)
+        let default_name = branches
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "worktree".to_owned());
+        let default_path = default_worktree_path(&root, &default_name)
             .display()
             .to_string();
+        Self::build(
+            view,
+            root,
+            branches,
+            start,
+            start_label,
+            create_branch,
+            false,
+            default_name,
+            default_path,
+            window,
+            cx,
+        )
+    }
 
+    /// The commit menu's form: a worktree at `commit` with either a new branch
+    /// or, when the name is left blank, a detached checkout.
+    fn from_commit(
+        view: WeakEntity<RepoView>,
+        root: PathBuf,
+        commit: Oid,
+        short: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let default_path = default_worktree_path(&root, &short).display().to_string();
+        let start_label = t!("history_ops.menu.from_commit", short = short).to_string();
+        Self::build(
+            view,
+            root,
+            Vec::new(),
+            Some(commit),
+            start_label,
+            true,
+            true,
+            short,
+            default_path,
+            window,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        view: WeakEntity<RepoView>,
+        root: PathBuf,
+        branches: Vec<String>,
+        start: Option<Oid>,
+        start_label: String,
+        create_branch: bool,
+        allow_detached: bool,
+        default_name: String,
+        default_path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let path = cx.new(|cx| {
             let mut state = InputState::new(window, cx)
                 .placeholder(t!("worktree.add.path_placeholder").to_string());
@@ -505,6 +621,8 @@ impl AddWorktreeDialog {
             start_label,
             error: None,
             path_edited: false,
+            allow_detached,
+            default_name,
             _path_events,
             _branch_events,
         }
@@ -531,7 +649,7 @@ impl AddWorktreeDialog {
         }
         let branch = self
             .branch_name(cx)
-            .unwrap_or_else(|| "worktree".to_owned());
+            .unwrap_or_else(|| self.default_name.clone());
         let default = default_worktree_path(&self.root, &branch)
             .display()
             .to_string();
@@ -574,15 +692,25 @@ impl AddWorktreeDialog {
 
         let (branch, new_branch, commit) = if self.create_branch {
             let name = self.new_branch.read(cx).value().trim().to_owned();
-            if let Err(message) = crate::branches::validate_branch_name(&name) {
-                self.fail(&message, cx);
-                return;
+            if name.is_empty() && self.allow_detached {
+                // The commit menu's form leaves the name optional; a blank one
+                // checks the commit out detached instead of inventing a name.
+                let Some(commit) = self.start else {
+                    self.fail(&t!("worktree.add.no_start_commit"), cx);
+                    return;
+                };
+                (None, None, Some(commit))
+            } else {
+                if let Err(message) = crate::branches::validate_branch_name(&name) {
+                    self.fail(&message, cx);
+                    return;
+                }
+                let Some(commit) = self.start else {
+                    self.fail(&t!("worktree.add.no_start_commit"), cx);
+                    return;
+                };
+                (None, Some(name), Some(commit))
             }
-            let Some(commit) = self.start else {
-                self.fail(&t!("worktree.add.no_start_commit"), cx);
-                return;
-            };
-            (None, Some(name), Some(commit))
         } else {
             let Some(branch) = self.branches.get(self.selected).cloned() else {
                 self.fail(&t!("worktree.add.choose_branch"), cx);
@@ -593,13 +721,17 @@ impl AddWorktreeDialog {
 
         let label = t!("worktree.op.add", path = path.display());
         let operation = Operation::WorktreeAdd {
-            path,
+            path: path.clone(),
             branch,
             new_branch,
             commit,
         };
+        let offer_open = self.allow_detached;
         let _ = self.view.update(cx, |view, cx| {
-            view.run_operation(operation, label, window, cx)
+            let started = view.run_operation(operation, label, window, cx);
+            if offer_open && started.is_some() {
+                view.pending_worktree_open = Some(path);
+            }
         });
         // Closing here would drop this dialog while it is being updated.
         window.defer(cx, |window, cx| window.close_dialog(cx));
@@ -661,6 +793,11 @@ impl Render for AddWorktreeDialog {
                     .text_color(muted)
                     .child(t!("worktree.add.start_description", start = start_label).to_string()),
             );
+            if self.allow_detached {
+                form = form.child(div().text_size(px(11.0)).text_color(muted).child(
+                    t!("worktree.add.detached_hint", short = self.default_name).to_string(),
+                ));
+            }
         } else if self.branches.is_empty() {
             form = form.child(
                 div()

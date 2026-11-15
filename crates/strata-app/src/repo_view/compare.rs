@@ -47,6 +47,8 @@ pub(crate) struct CompareSide {
     /// A branch name when the side came from one. The header shows it beside
     /// the short id, because two branch tips of the same commit look alike.
     pub(crate) label: Option<String>,
+    /// The files on disk instead of a commit's tree.
+    pub(crate) worktree: bool,
 }
 
 impl CompareSide {
@@ -54,6 +56,7 @@ impl CompareSide {
         Self {
             oid: Some(oid),
             label: None,
+            worktree: false,
         }
     }
 
@@ -61,6 +64,7 @@ impl CompareSide {
         Self {
             oid: Some(oid),
             label: Some(name.into()),
+            worktree: false,
         }
     }
 
@@ -69,12 +73,25 @@ impl CompareSide {
         Self {
             oid: None,
             label: Some(t!("compare.empty_tree").to_string()),
+            worktree: false,
+        }
+    }
+
+    /// The uncommitted files on disk, for a comparison with the working tree.
+    pub(crate) fn worktree() -> Self {
+        Self {
+            oid: None,
+            label: Some(t!("compare.working_tree").to_string()),
+            worktree: true,
         }
     }
 
     /// The name the header leads with: the branch, or the short id. The short
     /// id follows a branch name, but is not repeated when it is the title.
     fn title(&self) -> String {
+        if self.worktree {
+            return t!("compare.working_tree").to_string();
+        }
         match (&self.label, self.oid) {
             (Some(label), _) => label.clone(),
             (None, Some(oid)) => data::short_oid(oid),
@@ -173,6 +190,17 @@ pub(crate) fn with_head_blocked(
     }
     if head.is_none() {
         return Some(t!("compare.no_head").to_string());
+    }
+    None
+}
+
+/// Why "Compare with working tree" cannot run, or `None` when it can.
+pub(crate) fn with_worktree_blocked(repo_open: bool, commit: Option<Oid>) -> Option<String> {
+    if !repo_open {
+        return Some(t!("compare.no_repository").to_string());
+    }
+    if commit.is_none() {
+        return Some(t!("compare.no_commit").to_string());
     }
     None
 }
@@ -283,6 +311,23 @@ impl RepoView {
         );
     }
 
+    /// "Compare with working tree": the commit on the left, the files on disk
+    /// on the right.
+    pub(crate) fn open_compare_with_worktree(
+        &mut self,
+        commit: Oid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_compare(
+            CompareSide::commit(commit),
+            CompareSide::worktree(),
+            CompareMode::TwoDot,
+            window,
+            cx,
+        );
+    }
+
     /// "Compare with current branch": the branch on the left, HEAD on the
     /// right, three-dot by default so the list is what the branch adds.
     pub(crate) fn open_compare_with_current_branch(
@@ -355,12 +400,19 @@ impl RepoView {
         if let Some(ticket) = previous_diff {
             session.cancel_diff(ticket);
         }
-        let ticket = match (compare.a.oid, compare.b.oid) {
-            (Some(a), Some(b)) => Some(session.request_compare(a, b, compare.mode)),
-            (None, Some(b)) => Some(session.request_compare_from(None, b)),
-            // An empty right side never comes from a menu; the three-dot mode
-            // has nothing to resolve either.
-            (_, None) => None,
+        let ticket = if compare.b.worktree {
+            compare
+                .a
+                .oid
+                .map(|base| session.request_compare_with_worktree(base))
+        } else {
+            match (compare.a.oid, compare.b.oid) {
+                (Some(a), Some(b)) => Some(session.request_compare(a, b, compare.mode)),
+                (None, Some(b)) => Some(session.request_compare_from(None, b)),
+                // An empty right side never comes from a menu; the three-dot
+                // mode has nothing to resolve either.
+                (_, None) => None,
+            }
         };
         let Some(ticket) = ticket else {
             compare.ticket = None;
@@ -638,11 +690,21 @@ impl RepoView {
         let Some(file) = compare.selected_file() else {
             return;
         };
-        let request = DiffRequest::Compare {
-            base: comparison.base,
-            head: comparison.head,
-            old_path: file.stat.old_path.clone(),
-            path: file.stat.path.clone(),
+        let request = if compare.b.worktree {
+            let Some(base) = compare.a.oid else {
+                return;
+            };
+            DiffRequest::CompareWorktree {
+                base,
+                path: file.stat.path.clone(),
+            }
+        } else {
+            DiffRequest::Compare {
+                base: comparison.base,
+                head: comparison.head,
+                old_path: file.stat.old_path.clone(),
+                path: file.stat.path.clone(),
+            }
         };
         let ticket = session.request_diff_with(request, options);
         if let Some(previous) = compare.diff_ticket.replace(ticket) {
@@ -748,7 +810,7 @@ impl RepoView {
                     entity.update(cx, |this, cx| this.close_compare(window, cx));
                 })
         };
-        let swap = if a.oid.is_some() && b.oid.is_some() {
+        let swap = if a.oid.is_some() && b.oid.is_some() && !a.worktree && !b.worktree {
             let entity = entity.clone();
             ui::icon_button("compare-swap", IconName::Replace)
                 .size(ButtonSize::Tiny)
@@ -763,7 +825,7 @@ impl RepoView {
             // comparison has no tree to diff against.
             div().into_any_element()
         };
-        let toggle = if a.oid.is_none() {
+        let toggle = if a.oid.is_none() || b.worktree {
             div().into_any_element()
         } else {
             let two_entity = entity.clone();
@@ -855,7 +917,10 @@ impl RepoView {
     /// "3 ahead · 2 behind", or nothing while the comparison is in flight.
     fn compare_counts(&self, design: &Design) -> Option<AnyElement> {
         let compare = self.compare.as_ref()?;
-        // The empty tree has no history to count.
+        // The empty tree and the working tree have no history to count.
+        if compare.b.worktree {
+            return None;
+        }
         compare.a.oid?;
         let comparison = compare.comparison.as_ref()?;
         let mut row = div()
@@ -1183,6 +1248,19 @@ mod tests {
             "an unborn branch has nothing to compare against"
         );
         assert_eq!(with_head_blocked(true, Some(oid(1)), Some(oid(2))), None);
+    }
+
+    #[test]
+    fn compare_with_worktree_needs_a_repository_and_a_commit() {
+        assert_eq!(
+            with_worktree_blocked(false, Some(oid(1))),
+            Some(t!("compare.no_repository").to_string())
+        );
+        assert_eq!(
+            with_worktree_blocked(true, None),
+            Some(t!("compare.no_commit").to_string())
+        );
+        assert_eq!(with_worktree_blocked(true, Some(oid(1))), None);
     }
 
     #[test]

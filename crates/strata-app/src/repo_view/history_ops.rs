@@ -1016,6 +1016,10 @@ pub(crate) fn commit_menu(
                         ResetMode::Hard,
                         t!("history_ops.menu.hard").to_string(),
                     ))
+                    .item(entry(
+                        ResetMode::Keep,
+                        t!("history_ops.menu.keep").to_string(),
+                    ))
             })
         }
     };
@@ -1089,6 +1093,54 @@ pub(crate) fn commit_menu(
             }
         }),
     );
+    let worktree_compare_blocked = super::compare::with_worktree_blocked(true, Some(commit));
+    menu = menu.item(
+        PopupMenuItem::new(menu_label(
+            t!("history_ops.menu.compare_worktree").to_string(),
+            worktree_compare_blocked.as_ref(),
+        ))
+        .disabled(worktree_compare_blocked.is_some())
+        .on_click({
+            let entity = entity.clone();
+            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                entity.update(cx, |view, cx| {
+                    view.open_compare_with_worktree(commit, window, cx)
+                });
+            }
+        }),
+    );
+
+    let busy_reason = state.busy().then(|| t!("branch.reason.busy").to_string());
+    let worktree_short = short.clone();
+    let create_worktree = {
+        let entity = entity.clone();
+        PopupMenuItem::new(menu_label(
+            t!("history_ops.menu.create_worktree").to_string(),
+            busy_reason.as_ref(),
+        ))
+        .disabled(busy_reason.is_some())
+        .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+            entity.update(cx, |view, cx| {
+                view.open_worktree_from_commit(commit, worktree_short.clone(), window, cx)
+            });
+        })
+    };
+    let save_patch = {
+        let entity = entity.clone();
+        let short = short.clone();
+        PopupMenuItem::new(menu_label(
+            t!("history_ops.menu.save_patch").to_string(),
+            busy_reason.as_ref(),
+        ))
+        .disabled(busy_reason.is_some())
+        .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+            let short = short.clone();
+            entity.update(cx, |view, cx| {
+                view.save_commit_as_patch(commit, short, window, cx)
+            });
+        })
+    };
+    menu = menu.separator().item(create_worktree).item(save_patch);
 
     let edit = entity.read(cx).edit_context(commit);
     menu = menu.separator();
@@ -1241,6 +1293,12 @@ fn reset_detail(
             )
             .to_string()
         }
+        ResetMode::Keep => t!(
+            "history_ops.reset.keep_detail",
+            branch = branch,
+            short = short
+        )
+        .to_string(),
     }
 }
 
@@ -1501,14 +1559,21 @@ impl RepoView {
                 short = short
             )
             .to_string(),
+            ResetMode::Keep => t!(
+                "history_ops.confirm.keep_reset",
+                branch = branch,
+                short = short
+            )
+            .to_string(),
         };
         let confirm = match mode {
-            // Only a hard reset deletes work: the other two keep the changes in
-            // the index or the working tree, and the reflog keeps the commits.
+            // Only a hard reset deletes work: the other modes keep the changes
+            // in the index or the working tree, and the reflog keeps the
+            // commits. A keep reset aborts instead of overwriting a change.
             ResetMode::Hard => ui::Confirm::new(title, detail)
                 .ok_label(t!("history_ops.hard_reset").to_string())
                 .always_ask(),
-            ResetMode::Soft | ResetMode::Mixed => {
+            ResetMode::Soft | ResetMode::Mixed | ResetMode::Keep => {
                 let mut confirm =
                     ui::Confirm::new(title, detail).ok_label(t!("common.reset").to_string());
                 confirm.danger = false;
@@ -1533,6 +1598,7 @@ impl RepoView {
             ResetMode::Soft => "soft",
             ResetMode::Mixed => "mixed",
             ResetMode::Hard => "hard",
+            ResetMode::Keep => "keep",
         };
         let label = t!(
             "history_ops.op.reset",

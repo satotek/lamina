@@ -187,6 +187,34 @@ impl Git {
         self.run_unit(&args, Some(patch.to_vec()))
     }
 
+    /// Apply a whole patch file to the working tree.
+    ///
+    /// `--3way` falls back to the blobs the patch names, which is what makes a
+    /// patch from another checkout apply when the context has drifted. When
+    /// those blobs are not in this repository either, the plain form is tried
+    /// so a small context shift still applies; both messages are reported when
+    /// that fails too.
+    pub fn apply_patch_file(&self, patch: &[u8]) -> Result<()> {
+        let attempt = |three_way: bool| {
+            let mut args = vec!["apply".to_owned()];
+            if three_way {
+                args.push("--3way".to_owned());
+            }
+            args.push("--recount".to_owned());
+            args.push("--whitespace=nowarn".to_owned());
+            args.push("-".to_owned());
+            self.run_unit(&args, Some(patch.to_vec()))
+        };
+        match attempt(true) {
+            Ok(()) => Ok(()),
+            Err(three_way) => attempt(false).map_err(|plain| {
+                Error::other(format!(
+                    "git apply --3way failed:\n{three_way}\n\ngit apply failed:\n{plain}"
+                ))
+            }),
+        }
+    }
+
     /// Commit with the message on stdin (`-F -`). This keeps multi-line
     /// messages, quotes and non-ASCII text away from shell-style quoting.
     pub fn commit(&self, message: &str, options: CommitOptions) -> Result<()> {
@@ -660,4 +688,78 @@ fn chunks_by_bytes(paths: &[PathBuf], max_items: usize, max_bytes: usize) -> Vec
         chunks.push(&paths[start..]);
     }
     chunks
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::test_support::TestRepo;
+
+    fn read(repo: &TestRepo, path: &str) -> String {
+        std::fs::read_to_string(repo.path().join(path)).expect("read worktree file")
+    }
+
+    #[test]
+    fn an_applied_patch_changes_the_worktree() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "one\n");
+        repo.commit("base");
+        repo.write("a.txt", "two\n");
+        let patch_commit = repo.commit("change a");
+        let patch = repo
+            .git_handle()
+            .format_patch(patch_commit)
+            .expect("format-patch");
+        repo.git(&["reset", "--hard", "HEAD~1"]);
+
+        repo.git_handle()
+            .apply_patch_file(&patch)
+            .expect("the patch applies to the parent");
+
+        assert_eq!(read(&repo, "a.txt"), "two\n");
+        assert!(
+            repo.git(&["status", "--porcelain=v2"]).contains("a.txt"),
+            "git apply --3way leaves the applied path for the user to review"
+        );
+    }
+
+    #[test]
+    fn a_worktree_at_a_new_branch_checks_it_out() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "one\n");
+        let head = repo.commit("base");
+        let path = repo
+            .path()
+            .parent()
+            .expect("the repository sits in a temp dir")
+            .join("topic-checkout");
+
+        repo.git_handle()
+            .worktree_add(&path, None, Some("topic"), Some(head))
+            .expect("worktree add");
+
+        assert_eq!(
+            std::fs::read_to_string(path.join("a.txt")).expect("the checkout has the file"),
+            "one\n"
+        );
+        assert_eq!(
+            repo.git(&["rev-parse", "topic"]).trim(),
+            head.to_string(),
+            "the new branch starts at the commit"
+        );
+    }
+
+    #[test]
+    fn a_patch_that_does_not_apply_reports_both_attempts() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "one\n");
+        repo.commit("base");
+
+        let error = repo
+            .git_handle()
+            .apply_patch_file(b"this is not a patch\n")
+            .expect_err("garbage cannot apply");
+        let message = error.to_string();
+        assert!(message.contains("git apply --3way failed"), "{message}");
+        assert!(message.contains("git apply failed"), "{message}");
+    }
 }

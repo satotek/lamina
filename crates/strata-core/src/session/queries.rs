@@ -55,6 +55,10 @@ pub(crate) enum QueryKind {
         base: Option<Oid>,
         head: Oid,
     },
+    /// The working tree against `base`, for a commit's uncommitted changes.
+    CompareWorktree {
+        base: Oid,
+    },
     /// Submodules and linked worktrees, read directly from the repository.
     SubmodulesAndWorktrees,
     /// Details of an unfinished merge/rebase/cherry-pick/revert/bisect/am.
@@ -148,6 +152,16 @@ fn answer(shared: Arc<Shared>, state: Arc<QueryState>, job: &QueryJob) -> Result
         }
         QueryKind::CompareFrom { base, head } => {
             let comparison = shared.repo.comparison_from(*base, *head)?;
+            if state.is_cancelled(job.ticket) || shared.is_shutdown() {
+                return Ok(());
+            }
+            shared.emit(SessionEvent::CompareReady {
+                ticket: job.ticket,
+                comparison: Arc::new(comparison),
+            });
+        }
+        QueryKind::CompareWorktree { base } => {
+            let comparison = shared.repo.comparison_with_worktree(*base)?;
             if state.is_cancelled(job.ticket) || shared.is_shutdown() {
                 return Ok(());
             }

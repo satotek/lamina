@@ -115,6 +115,9 @@ actions!(
         /// Shows every line of the diff on screen, or only the changes again.
         /// Handled on `RepoView` by the diff panes.
         ToggleWholeFile,
+        /// Applies a patch file chosen by the user. Handled on `RepoView` by
+        /// `repo_view::patch`.
+        ApplyPatch,
     ]
 );
 

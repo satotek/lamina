@@ -374,6 +374,7 @@ fn execute(shared: &Arc<Shared>, id: OperationId, operation: &Operation) -> Resu
             autostash,
         } => git.rebase(*onto, *upstream, *autostash),
         Operation::Reset { target, mode } => git.reset(*target, *mode),
+        Operation::ApplyPatch { patch } => git.apply_patch_file(patch),
         Operation::UndoReflog { entry } => git.undo_reflog(entry.as_ref()).map(|_| ()),
         Operation::RedoReflog { entry } => git.redo_reflog(entry),
         Operation::CreateTag {

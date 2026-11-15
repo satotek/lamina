@@ -233,6 +233,10 @@ fn read_sides(repo: &Repo, request: &DiffRequest) -> Result<Sides> {
             };
             Ok((old, repo.file_at_commit(*head, path)?))
         }
+        DiffRequest::CompareWorktree { base, path } => Ok((
+            repo.file_at_commit(*base, path)?,
+            worktree_as_git(repo, path)?,
+        )),
     }
 }
 
@@ -241,6 +245,7 @@ fn path_of(request: &DiffRequest) -> &str {
         DiffRequest::Commit { path, .. }
         | DiffRequest::Staged { path }
         | DiffRequest::Unstaged { path }
-        | DiffRequest::Compare { path, .. } => path,
+        | DiffRequest::Compare { path, .. }
+        | DiffRequest::CompareWorktree { path, .. } => path,
     }
 }

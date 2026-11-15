@@ -165,10 +165,10 @@ macro_rules! action {
 #[cfg(feature = "terminal")]
 use crate::actions::ToggleTerminal;
 use crate::actions::{
-    CloneRepository, CloseCompare, CloseTab, ExtendSelectionNext, ExtendSelectionPrevious,
-    GoToChild, GoToHead, GoToParent, GoToSecondParent, NavigateBack, NavigateForward,
-    NewRepository, NewTab, NextTab, OpenGitConfig, OpenInEditor, OpenRepository, OpenSettings,
-    OpenTerminalHere, PreviousTab, Quit, REPO_VIEW, REPO_VIEW_LIST, RedoLastAction,
+    ApplyPatch, CloneRepository, CloseCompare, CloseTab, ExtendSelectionNext,
+    ExtendSelectionPrevious, GoToChild, GoToHead, GoToParent, GoToSecondParent, NavigateBack,
+    NavigateForward, NewRepository, NewTab, NextTab, OpenGitConfig, OpenInEditor, OpenRepository,
+    OpenSettings, OpenTerminalHere, PreviousTab, Quit, REPO_VIEW, REPO_VIEW_LIST, RedoLastAction,
     ReopenClosedTab, SelectFirst, SelectLast, SelectNext, SelectPageDown, SelectPageUp,
     SelectPrevious, SelectTab1, SelectTab2, SelectTab3, SelectTab4, SelectTab5, SelectTab6,
     SelectTab7, SelectTab8, SelectTab9, StashChanges, SwitchBranch, ToggleDetailsMaximized,
@@ -263,6 +263,16 @@ pub static ACTIONS: &[ActionSpec] = &[
         ToggleWholeFile,
         [binding("w", Some(REPO_VIEW_LIST))],
         31,
+        true
+    ),
+    action!(
+        "strata::ApplyPatch",
+        "Apply Patch…",
+        Actions,
+        Some(REPO_VIEW),
+        ApplyPatch,
+        [],
+        50,
         true
     ),
     action!(
@@ -2260,7 +2270,7 @@ mod tests {
             }
         }
         // Every built-in palette entry has a registry row.
-        let expected_count = if cfg!(feature = "terminal") { 48 } else { 47 };
+        let expected_count = if cfg!(feature = "terminal") { 49 } else { 48 };
         assert_eq!(orders.len(), expected_count);
     }
 

@@ -13,7 +13,10 @@ use gix::revwalk::graph::Commit;
 use super::Repo;
 use super::log::Shallow;
 use super::renames;
-use super::stat::{BlobCache, StatScratch, file_stat_with, tree_changes};
+use super::stat::{
+    BlobCache, StatScratch, changed_file, count_changed_lines, count_lines, file_stat_with,
+    is_binary, tree_changes,
+};
 use super::upstream::{count_exclusive, count_exclusive_shallow, exclusive_counts_shallow};
 use crate::{ChangeKind, Error, FileStat, Oid, Result};
 
@@ -85,6 +88,93 @@ impl Repo {
             None => None,
         };
         self.comparison_of(base, head, merge_base, base)
+    }
+
+    /// The files changed between `commit` and the working tree, with their line
+    /// counts.
+    ///
+    /// The right side is the files on disk, not HEAD: an uncommitted edit shows
+    /// up even when HEAD already moved past the commit. The candidate paths are
+    /// the ones the commit's tree versus HEAD and the index/worktree status
+    /// name, which covers every path where the working tree can differ from the
+    /// commit; a candidate whose bytes match is dropped.
+    pub fn comparison_with_worktree(&self, commit: Oid) -> Result<Comparison> {
+        let repo = self.local();
+        let head = match self.head()? {
+            crate::HeadInfo::Branch {
+                target: Some(target),
+                ..
+            }
+            | crate::HeadInfo::Detached { target } => target,
+            crate::HeadInfo::Branch { target: None, .. } => commit,
+        };
+        let commit_tree = repo
+            .find_commit(commit)
+            .map_err(Error::gix)?
+            .tree()
+            .map_err(Error::gix)?;
+        let head_tree = repo
+            .find_commit(head)
+            .map_err(Error::gix)?
+            .tree()
+            .map_err(Error::gix)?;
+
+        let mut paths = std::collections::BTreeSet::new();
+        for change in tree_changes(&repo, &commit_tree, &head_tree)? {
+            if let Some(file) = changed_file(&change) {
+                paths.insert(file.path);
+            }
+        }
+        let status = self.status()?;
+        for change in status.staged.iter().chain(status.unstaged.iter()) {
+            paths.insert(change.path.clone());
+        }
+
+        let mut files = Vec::new();
+        for path in paths {
+            let old = self.file_at_commit(commit, &path)?;
+            let new = self.file_in_worktree_as_git(&path)?;
+            if old == new {
+                continue;
+            }
+            let kind = match (&old, &new) {
+                (None, Some(_)) => ChangeKind::Added,
+                (Some(_), None) => ChangeKind::Deleted,
+                _ => ChangeKind::Modified,
+            };
+            let (added, removed, binary) = match (old.as_deref(), new.as_deref()) {
+                (Some(old), Some(new)) if is_binary(old) || is_binary(new) => (0, 0, true),
+                (Some(old), Some(new)) => {
+                    let (added, removed) = count_changed_lines(old, new);
+                    (added, removed, false)
+                }
+                (Some(old), None) => (0, count_lines(old), false),
+                (None, Some(new)) => (count_lines(new), 0, false),
+                (None, None) => continue,
+            };
+            files.push(CompareFile {
+                stat: FileStat {
+                    path,
+                    old_path: None,
+                    added,
+                    removed,
+                    binary,
+                },
+                kind,
+            });
+        }
+        let added = files.iter().map(|file| file.stat.added).sum();
+        let removed = files.iter().map(|file| file.stat.removed).sum();
+        Ok(Comparison {
+            base: Some(commit),
+            head: commit,
+            merge_base: Some(commit),
+            ahead: 0,
+            behind: 0,
+            files,
+            added,
+            removed,
+        })
     }
 
     /// The best merge base of `a` and `b`, or `None` for unrelated histories.
@@ -302,6 +392,47 @@ mod tests {
         );
         assert_eq!(file(&comparison, "new.txt").stat.added, 1);
         assert_eq!(file(&comparison, "new.txt").stat.removed, 0);
+    }
+
+    #[test]
+    fn a_worktree_comparison_lists_uncommitted_edits() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "one\ntwo\n");
+        repo.write("keep.txt", "same\n");
+        let commit = repo.commit("base");
+        repo.write("a.txt", "one\nTWO\n");
+        repo.write("new.txt", "new\n");
+
+        let comparison = repo
+            .open()
+            .comparison_with_worktree(commit)
+            .expect("compare");
+        let paths: Vec<&str> = comparison
+            .files
+            .iter()
+            .map(|file| file.stat.path.as_str())
+            .collect();
+        assert_eq!(paths, ["a.txt", "new.txt"]);
+        assert_eq!(file(&comparison, "a.txt").kind, ChangeKind::Modified);
+        assert_eq!(file(&comparison, "a.txt").stat.added, 1);
+        assert_eq!(file(&comparison, "a.txt").stat.removed, 1);
+        assert_eq!(file(&comparison, "new.txt").kind, ChangeKind::Added);
+        assert_eq!(file(&comparison, "new.txt").stat.added, 1);
+
+        // A file the user edited back to the commit's content is not a change.
+        repo.write("a.txt", "one\ntwo\n");
+        repo.write_bytes("new.txt", b"");
+        let comparison = repo
+            .open()
+            .comparison_with_worktree(commit)
+            .expect("compare");
+        assert!(
+            !comparison
+                .files
+                .iter()
+                .any(|file| file.stat.path == "a.txt"),
+            "a file that matches the commit is not listed"
+        );
     }
 
     #[test]

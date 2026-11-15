@@ -697,7 +697,7 @@ mod tests {
             .iter()
             .filter(|spec| spec.palette.is_some())
             .collect();
-        let expected_count = if cfg!(feature = "terminal") { 48 } else { 47 };
+        let expected_count = if cfg!(feature = "terminal") { 49 } else { 48 };
         assert_eq!(specs.len(), expected_count);
         for (index, spec) in specs.iter().enumerate() {
             assert!(

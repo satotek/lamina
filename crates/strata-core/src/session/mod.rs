@@ -448,6 +448,11 @@ pub enum Operation {
         target: Oid,
         mode: ResetMode,
     },
+    /// A patch file applied to the working tree. Bytes, not a path, because the
+    /// file was chosen in the window and the worker should not need it.
+    ApplyPatch {
+        patch: Vec<u8>,
+    },
     /// Restore the state before a reflog entry: `None` undoes the newest HEAD
     /// action strata can restore, `Some(entry)` restores that row. A branch
     /// move runs `git reset --keep`; a checkout switches back to its source.
@@ -536,6 +541,9 @@ pub enum ResetMode {
     Mixed,
     /// Move the branch and discard index and worktree changes.
     Hard,
+    /// Move the branch and the index, but abort when a local change would be
+    /// overwritten, which is `git reset --keep`.
+    Keep,
 }
 
 /// Which pair of sides to diff.
@@ -558,6 +566,10 @@ pub enum DiffRequest {
         old_path: Option<String>,
         path: String,
     },
+    /// `path` in `base` vs the file on disk, for the per-file diff of a
+    /// comparison with the working tree (see
+    /// [`Session::request_compare_with_worktree`]).
+    CompareWorktree { base: Oid, path: String },
 }
 
 /// A diff ready to render. Highlights are per line of the full old/new text,
@@ -1028,6 +1040,13 @@ impl Session {
     /// handle both alike.
     pub fn request_compare_from(&self, base: Option<Oid>, head: Oid) -> QueryTicket {
         self.queue_query(queries::QueryKind::CompareFrom { base, head })
+    }
+
+    /// Compares `base` with the files on disk, for a commit's uncommitted
+    /// changes. Answers with [`SessionEvent::CompareReady`], like the other
+    /// comparisons, so the view guards every reply with its ticket.
+    pub fn request_compare_with_worktree(&self, base: Oid) -> QueryTicket {
+        self.queue_query(queries::QueryKind::CompareWorktree { base })
     }
 
     /// Lists submodules and linked worktrees off the UI thread; answers with

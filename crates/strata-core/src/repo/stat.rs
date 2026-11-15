@@ -1144,8 +1144,7 @@ fn count_changed_lines_with(old: &[u8], new: &[u8], diff: &mut Diff) -> (u64, u6
     (diff.count_additions() as u64, diff.count_removals() as u64)
 }
 
-#[cfg(test)]
-fn count_changed_lines(old: &[u8], new: &[u8]) -> (u64, u64) {
+pub(crate) fn count_changed_lines(old: &[u8], new: &[u8]) -> (u64, u64) {
     let mut diff = Diff::default();
     count_changed_lines_with(old, new, &mut diff)
 }

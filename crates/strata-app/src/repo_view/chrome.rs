@@ -20,11 +20,11 @@ use super::{PAGE, RepoView};
 #[cfg(feature = "terminal")]
 use crate::actions::ToggleTerminal;
 use crate::actions::{
-    self, CloseCompare, ExtendSelectionNext, ExtendSelectionPrevious, GoToChild, GoToHead,
-    GoToParent, GoToSecondParent, NavigateBack, NavigateForward, OpenInEditor, OpenTerminalHere,
-    RedoLastAction, SelectFirst, SelectLast, SelectNext, SelectPageDown, SelectPageUp,
-    SelectPrevious, StashChanges, SwitchBranch, ToggleDetailsMaximized, ToggleFrameStats,
-    ToggleSidebar, ToggleWholeFile, UndoLastAction,
+    self, ApplyPatch, CloseCompare, ExtendSelectionNext, ExtendSelectionPrevious, GoToChild,
+    GoToHead, GoToParent, GoToSecondParent, NavigateBack, NavigateForward, OpenInEditor,
+    OpenTerminalHere, RedoLastAction, SelectFirst, SelectLast, SelectNext, SelectPageDown,
+    SelectPageUp, SelectPrevious, StashChanges, SwitchBranch, ToggleDetailsMaximized,
+    ToggleFrameStats, ToggleSidebar, ToggleWholeFile, UndoLastAction,
 };
 use crate::branches::CreateBranchFromHead;
 use crate::commands::RunCustomCommand;
@@ -124,6 +124,9 @@ impl Render for RepoView {
             .on_action(cx.listener(|this, _: &OpenTerminalHere, _, cx| this.open_terminal_here(cx)))
             .on_action(
                 cx.listener(|this, _: &OpenInEditor, _, cx| this.open_selected_file_in_editor(cx)),
+            )
+            .on_action(
+                cx.listener(|this, _: &ApplyPatch, window, cx| this.open_apply_patch(window, cx)),
             )
             .on_action(cx.listener(|this, _: &CreateBranchFromHead, window, cx| {
                 this.create_branch_from_head(window, cx)

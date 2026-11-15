@@ -149,6 +149,7 @@ pub static PLACEMENTS: &[Placement] = &[
     item("CreateBranchFromHead", MenuKind::Repository, 1),
     item("OpenTerminalHere", MenuKind::Repository, 2),
     item("OpenInEditor", MenuKind::Repository, 2),
+    item("ApplyPatch", MenuKind::Repository, 2),
     item("OpenGitConfig", MenuKind::Repository, 3),
     item("NavigateBack", MenuKind::Navigate, 0),
     item("FocusSearch", MenuKind::Navigate, 1),

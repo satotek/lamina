@@ -22,6 +22,7 @@ mod editor;
 mod history_ops;
 mod in_progress;
 mod navigation;
+mod patch;
 mod rebase_dialog;
 pub(crate) mod rebase_onto;
 mod rebase_plan;
@@ -409,6 +410,12 @@ pub struct RepoView {
     /// Full ref names the history graph leaves out. The refs themselves stay in
     /// the sidebar; only the commits reachable from them alone leave the walk.
     pub(crate) hidden_refs: Vec<String>,
+    /// A worktree the commit menu started adding; the finished operation offers
+    /// to open it in a new tab.
+    pub(crate) pending_worktree_open: Option<PathBuf>,
+    /// The apply the "Apply patch…" action started, so its success is reported
+    /// as a notice rather than only through the command log.
+    pending_apply_patch: Option<strata_core::session::OperationId>,
 
     /// Running maximum of graph widths, updated as chunks arrive.
     lanes: LaneWidth,
@@ -630,6 +637,8 @@ impl RepoView {
             commit_graph_dismissed: false,
             repository_key: None,
             hidden_refs: Vec::new(),
+            pending_worktree_open: None,
+            pending_apply_patch: None,
             lanes: LaneWidth::default(),
             selected: None,
             uncommitted_selected: false,
@@ -1245,6 +1254,7 @@ impl RepoView {
                 self.notify_if_active(cx);
             }
             SessionEvent::OperationFinished { id, error } => {
+                let failed = error.is_some();
                 // The session refreshed the status before it reported the end,
                 // so this snapshot already has the conflicts the command left.
                 let conflicts = self
@@ -1308,6 +1318,17 @@ impl RepoView {
                     // The offer opens from an operation result, which has no
                     // window of its own, so it is routed through the active one.
                     crate::branches::offer_force(cx.entity(), retry, cx);
+                }
+                if let Some(path) = self.pending_worktree_open.take()
+                    && !failed
+                {
+                    self.offer_open_worktree(path, cx);
+                }
+                if self.pending_apply_patch == Some(id) {
+                    self.pending_apply_patch = None;
+                    if !failed {
+                        self.status_note = Some(t!("patch.applied").to_string());
+                    }
                 }
                 self.notify_tab_state(cx);
             }

@@ -362,9 +362,21 @@ impl Git {
             ResetMode::Soft => "--soft",
             ResetMode::Mixed => "--mixed",
             ResetMode::Hard => "--hard",
+            ResetMode::Keep => "--keep",
         };
         self.run(&["reset", flag, &target.to_string()], None)
             .map(|_| ())
+    }
+
+    /// `git format-patch -1 <commit> --stdout`, as the bytes of a mailable
+    /// patch. The output is kept off the command log's argument list; only the
+    /// commit id is in it.
+    pub fn format_patch(&self, commit: Oid) -> Result<Vec<u8>> {
+        let output = self.run(
+            &["format-patch", "-1", &commit.to_string(), "--stdout"],
+            None,
+        )?;
+        Ok(output.stdout)
     }
 
     /// Create a lightweight tag, or an annotated one when `message` is set.
@@ -544,6 +556,56 @@ mod tests {
 
     fn worktree_bytes(repo: &TestRepo, path: &str) -> Vec<u8> {
         fs::read(repo.path().join(path)).expect("read worktree file")
+    }
+
+    #[test]
+    fn format_patch_returns_a_mailable_patch_for_one_commit() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "one\n");
+        repo.commit("base");
+        repo.write("a.txt", "two\n");
+        let commit = repo.commit("change a");
+
+        let patch = repo
+            .git_handle()
+            .format_patch(commit)
+            .expect("format-patch");
+        let text = String::from_utf8_lossy(&patch);
+        assert!(text.contains("Subject: [PATCH] change a"), "{text}");
+        assert!(text.contains("diff --git a/a.txt b/a.txt"), "{text}");
+        assert!(
+            text.contains("-one") && text.contains("+two"),
+            "the patch carries the change: {text}"
+        );
+    }
+
+    #[test]
+    fn a_keep_reset_refuses_to_overwrite_a_local_change() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "one\n");
+        let base = repo.commit("base");
+        repo.write("a.txt", "two\n");
+        let tip = repo.commit("two");
+        // The worktree edit differs from both trees, so `--keep` must stop
+        // rather than discard it the way `--hard` would.
+        repo.write("a.txt", "local\n");
+
+        let error = repo
+            .git_handle()
+            .reset(base, ResetMode::Keep)
+            .expect_err("keep must refuse");
+        assert!(
+            error.to_string().contains("not uptodate")
+                || error.to_string().contains("overwritten")
+                || error.to_string().contains("local changes"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(repo.head(), tip, "the refused reset left the branch alone");
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("a.txt")).expect("read"),
+            "local\n",
+            "the local change survives"
+        );
     }
 
     #[test]
