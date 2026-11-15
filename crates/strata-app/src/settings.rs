@@ -171,6 +171,20 @@ pub enum DateFormat {
     Absolute,
 }
 
+/// How the details pane's changed-file list is arranged.
+///
+/// A preference rather than per-commit state: a user who reads changes as a
+/// tree wants the next commit's files that way too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum FileListMode {
+    /// One row per file, with its directory trailing the name.
+    #[default]
+    List,
+    /// Rows grouped under collapsible directories.
+    Tree,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct HistorySettings {
@@ -179,6 +193,7 @@ pub struct HistorySettings {
     pub show_stashes: bool,
     pub show_commit_signatures: bool,
     pub date_format: DateFormat,
+    pub file_list_mode: FileListMode,
 }
 
 impl Default for HistorySettings {
@@ -189,6 +204,7 @@ impl Default for HistorySettings {
             show_stashes: true,
             show_commit_signatures: true,
             date_format: DateFormat::Relative,
+            file_list_mode: FileListMode::List,
         }
     }
 }

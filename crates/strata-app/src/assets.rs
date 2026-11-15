@@ -13,7 +13,9 @@ gpui_kit_assets::icon_assets!(
     [
         ClockArrowDown,
         FileSearch,
+        FolderTree,
         Keyboard,
+        List,
         ListChecks,
         Regex,
         Shield,

@@ -428,6 +428,9 @@ pub struct RepoView {
     /// LFS metadata for the changed files of the selected commit, keyed by
     /// path. Read with the file list so a badge never blocks a frame.
     files_lfs: Arc<HashMap<String, LfsInfo>>,
+    /// Directories the details pane's tree view has collapsed, by path. Kept
+    /// across commits so stepping through history keeps the same folders open.
+    file_tree_collapsed: std::collections::HashSet<String>,
     /// LFS metadata for the worktree rows, keyed by path.
     pub(crate) worktree_lfs: Arc<HashMap<String, LfsInfo>>,
     worktree_lfs_epoch: u64,
@@ -621,6 +624,7 @@ impl RepoView {
             focus,
             files: None,
             files_lfs: Arc::new(HashMap::new()),
+            file_tree_collapsed: std::collections::HashSet::new(),
             worktree_lfs: Arc::new(HashMap::new()),
             worktree_lfs_epoch: 0,
             files_epoch: 0,

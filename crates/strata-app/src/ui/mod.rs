@@ -16,6 +16,7 @@ mod banner;
 mod button;
 mod checkbox;
 mod confirm;
+pub mod file_tree;
 mod focus;
 pub(crate) mod gallery;
 pub mod lfs;

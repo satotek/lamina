@@ -397,6 +397,8 @@ history.cherry_pick_hint: "選択範囲を右クリックすると、このブ�
 history.files_changed.one: "%{count} ファイル"
 history.files_changed.other: "%{count} ファイル"
 history.show_file_history: "ファイルの履歴を表示"
+history.file_list.list: "一覧表示"
+history.file_list.tree: "ツリー表示"
 history.blame_at_commit: "このコミットで行ごとの履歴 (blame)"
 history.open_in_editor: "エディタで開く"
 history.open_in_editor_missing: "エディタで開く（ワーキングツリーにありません）"

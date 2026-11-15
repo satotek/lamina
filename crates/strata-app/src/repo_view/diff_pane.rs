@@ -55,16 +55,16 @@ impl RepoView {
             // The reflog row is the commit on screen: the history selection is
             // left where it was, so its details must not stand in.
             left.child(self.reflog_details(design))
-                .child(self.files_summary(design))
-                .child(self.file_list(design))
+                .child(self.files_summary(design, cx))
+                .child(self.file_list(design, cx))
         } else if self.selection.is_multi() {
             let mut summary = left.child(self.commit_selection_summary(design));
             // Until the range's file list arrives there is nothing to show;
             // the diff side says what it is waiting for.
             if self.files.is_some() {
                 summary = summary
-                    .child(self.files_summary(design))
-                    .child(self.file_list(design));
+                    .child(self.files_summary(design, cx))
+                    .child(self.file_list(design, cx));
             }
             summary
         } else {
@@ -73,8 +73,8 @@ impl RepoView {
                 .selected
                 .and_then(|index| source.as_ref().and_then(|source| source.commit(index)));
             left.child(self.commit_details(commit, design))
-                .child(self.files_summary(design))
-                .child(self.file_list(design))
+                .child(self.files_summary(design, cx))
+                .child(self.file_list(design, cx))
         };
 
         let drag_entity = self.entity();

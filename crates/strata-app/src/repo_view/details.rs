@@ -22,7 +22,9 @@ use super::common::icon;
 use crate::data;
 use crate::data::Source;
 use crate::scrollbar::WithScrollbar as _;
+use crate::settings::{self, FileListMode, Settings};
 use crate::style::{self, Design};
+use crate::ui::file_tree::{self, TreeRow};
 
 /// The commit-wide added/removed counts the details pane is waiting for.
 ///
@@ -390,10 +392,11 @@ impl RepoView {
     }
 
     /// "N files" and the commit's line counts once the stat has arrived; the
-    /// selected file's counts stand in until then.
-    pub(super) fn files_summary(&self, design: &Design) -> AnyElement {
+    /// selected file's counts stand in until then. The trailing buttons switch
+    /// the list below between one row per file and a grouped tree.
+    pub(super) fn files_summary(&self, design: &Design, cx: &App) -> AnyElement {
         let files = self.files.as_ref().map_or(0, Vec::len);
-        let mut row = div()
+        let row = div()
             .flex()
             .items_center()
             .justify_between()
@@ -412,8 +415,9 @@ impl RepoView {
                 )
                 .into_any_element();
         }
-        row = row.child(
+        let mut left = div().flex().items_center().gap_2().min_w_0().child(
             div()
+                .flex_none()
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(design.muted)
                 .child(if files == 1 {
@@ -438,8 +442,9 @@ impl RepoView {
                 })
         };
         if let Some((added, removed)) = totals {
-            row = row.child(
+            left = left.child(
                 div()
+                    .flex_none()
                     .flex()
                     .gap_1()
                     .child(div().text_color(design.add_text).child(format!("+{added}")))
@@ -450,7 +455,58 @@ impl RepoView {
                     ),
             );
         }
-        row.into_any_element()
+        row.child(left)
+            .child(self.file_list_mode_toggle(Settings::get(cx).history.file_list_mode))
+            .into_any_element()
+    }
+
+    /// The two-state list/tree switch above the changed files.
+    fn file_list_mode_toggle(&self, current: FileListMode) -> AnyElement {
+        let mut group = div().flex().items_center().gap_1();
+        for (mode, icon_name, tooltip, id) in [
+            (
+                FileListMode::List,
+                IconName::List,
+                t!("history.file_list.list").to_string(),
+                "file-list-mode-list",
+            ),
+            (
+                FileListMode::Tree,
+                IconName::FolderTree,
+                t!("history.file_list.tree").to_string(),
+                "file-list-mode-tree",
+            ),
+        ] {
+            let entity = self.entity();
+            group = group.child(
+                crate::ui::icon_button(id, icon_name)
+                    .size(crate::ui::ButtonSize::Tiny)
+                    .ghost()
+                    .selected(current == mode)
+                    .tooltip(tooltip)
+                    .on_click(move |_event, _window, cx| {
+                        entity.update(cx, |this, cx| this.set_file_list_mode(mode, cx));
+                    }),
+            );
+        }
+        group.into_any_element()
+    }
+
+    /// The user's list/tree choice is a preference, not per-commit state.
+    fn set_file_list_mode(&mut self, mode: FileListMode, cx: &mut Context<Self>) {
+        if Settings::get(cx).history.file_list_mode == mode {
+            return;
+        }
+        settings::update(cx, |settings| settings.history.file_list_mode = mode);
+        cx.notify();
+    }
+
+    /// Opens or closes one directory in the tree view of the changed files.
+    fn toggle_file_tree_dir(&mut self, path: String, cx: &mut Context<Self>) {
+        if !self.file_tree_collapsed.remove(&path) {
+            self.file_tree_collapsed.insert(path);
+        }
+        cx.notify();
     }
 
     /// Added and removed lines in the diff on screen. The session loads one
@@ -471,7 +527,7 @@ impl RepoView {
         Some((added, removed))
     }
 
-    pub(super) fn file_list(&self, design: &Design) -> AnyElement {
+    pub(super) fn file_list(&self, design: &Design, cx: &App) -> AnyElement {
         let Some(files) = &self.files else {
             return div().into_any_element();
         };
@@ -494,11 +550,12 @@ impl RepoView {
         let work_dir = Arc::new(self.work_dir());
         let lfs = Arc::clone(&self.files_lfs);
         let list_design = design.clone();
-        let count = files.len();
-        let entries: Vec<(String, ChangeKind)> = files
-            .iter()
-            .map(|change: &FileChange| (change.path.clone(), change.kind))
-            .collect();
+        let entries: Arc<Vec<(String, ChangeKind)>> = Arc::new(
+            files
+                .iter()
+                .map(|change: &FileChange| (change.path.clone(), change.kind))
+                .collect(),
+        );
         // The stat is keyed by path and sorted, while the file list keeps the
         // commit's change order, so align the two once per frame. A range gets
         // its counts from the comparison, which already lists matching files.
@@ -526,113 +583,186 @@ impl RepoView {
                 })
                 .collect()
         };
+        let counts = Arc::new(counts);
 
-        uniform_list("changed-files", count, move |range, _window, _cx| {
+        let tree_mode = Settings::get(cx).history.file_list_mode == FileListMode::Tree;
+        // Both modes draw the same rows; the list mode simply has no directory
+        // rows, so the selection stays an index into `files` either way.
+        let rows: Arc<Vec<TreeRow>> = Arc::new(if tree_mode {
+            let indexed = entries
+                .iter()
+                .enumerate()
+                .map(|(index, (path, _))| (index, path.as_str()))
+                .collect::<Vec<_>>();
+            file_tree::rows(&indexed, &self.file_tree_collapsed)
+        } else {
+            entries
+                .iter()
+                .enumerate()
+                .map(|(index, (path, _))| {
+                    let (name, _) = style::path_parts(path);
+                    TreeRow::File {
+                        index,
+                        path: path.clone(),
+                        name: name.to_owned(),
+                        depth: 0,
+                    }
+                })
+                .collect()
+        });
+
+        uniform_list("changed-files", rows.len(), move |range, _window, _cx| {
             range
-                .map(|index| {
-                    let entity = entity.clone();
-                    let (path, kind) = &entries[index];
-                    let (name, dir) = style::path_parts(path);
-                    let is_selected = selected == Some(index);
-                    let row = crate::ui::list_row(
-                        ("changed-file", index),
-                        crate::ui::RowState::NORMAL.selected(is_selected),
-                        &list_design,
-                    )
-                    .child(crate::ui::change_badge(*kind, &list_design))
-                    .child(div().flex_1().min_w_0().truncate().child(name.to_owned()))
-                    .when(lfs.contains_key(path), |row| {
-                        row.child(crate::ui::lfs_badge(&list_design))
-                    })
-                    .when_some(dir, |row, dir| {
-                        row.child(
-                            div()
-                                .max_w(px(110.0))
-                                .flex_none()
-                                .truncate()
-                                .text_size(px(11.0))
-                                .text_color(list_design.muted)
-                                .child(dir.to_owned()),
+                .map(|row_index| match &rows[row_index] {
+                    TreeRow::Directory {
+                        path,
+                        name,
+                        depth,
+                        collapsed,
+                    } => {
+                        let entity = entity.clone();
+                        let dir = path.clone();
+                        let chevron = if *collapsed {
+                            IconName::ChevronRight
+                        } else {
+                            IconName::ChevronDown
+                        };
+                        crate::ui::list_row(
+                            ("changed-file-dir", row_index),
+                            crate::ui::RowState::NORMAL,
+                            &list_design,
                         )
-                    })
-                    .when_some(counts.get(index).and_then(Option::as_ref), |row, file| {
-                        row.child(file_stat_label(file, &list_design))
-                    });
-                    let click_entity = entity.clone();
-                    let menu_entity = entity;
-                    let menu_path = path.clone();
-                    let menu_work_dir = work_dir.clone();
-                    let trigger = row.cursor_pointer().on_click(move |_event, _window, cx| {
-                        click_entity.update(cx, |this, cx| this.select_file(index, cx));
-                    });
-                    crate::ui::context_menu(
-                        ("changed-file-menu", index),
-                        &list_design,
-                        trigger,
-                        move |menu, window, cx| {
-                            let variables = menu_entity.read(cx).custom_variables();
-                            let entity = menu_entity.clone();
-                            let path = menu_path.clone();
-                            let present = in_working_tree(menu_work_dir.as_deref(), &path);
-                            let mut menu = menu.item(
-                                PopupMenuItem::new(editor_entry_label(at_head, present))
-                                    .disabled(!present)
-                                    .on_click(
-                                        move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
-                                            let path = path.clone();
-                                            entity.update(cx, |this, cx| {
-                                                this.open_file_in_editor(&path, None, cx);
-                                            });
-                                        },
-                                    ),
-                            );
-                            let entity = menu_entity.clone();
-                            let path = menu_path.clone();
-                            menu = menu.item(
-                                PopupMenuItem::new(t!("history.show_file_history").to_string())
-                                    .on_click(
-                                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                                            let path = path.clone();
-                                            entity.update(cx, |this, cx| {
-                                                this.open_file_history(path, window, cx);
-                                            });
-                                        },
-                                    ),
-                            );
-                            if let Some(commit) = blame_commit {
+                        .pl(px(8.0 + *depth as f32 * 12.0))
+                        .cursor_pointer()
+                        .on_click(move |_event, _window, cx| {
+                            let dir = dir.clone();
+                            entity.update(cx, |this, cx| this.toggle_file_tree_dir(dir, cx));
+                        })
+                        .child(icon(chevron, 12.0, list_design.muted))
+                        .child(icon(IconName::Folder, 14.0, list_design.muted))
+                        .child(div().flex_1().min_w_0().truncate().child(name.clone()))
+                        .into_any_element()
+                    }
+                    TreeRow::File {
+                        index,
+                        path,
+                        name,
+                        depth,
+                    } => {
+                        let index = *index;
+                        let entity = entity.clone();
+                        let kind = entries[index].1;
+                        // The directory trails the name in the flat list only;
+                        // in the tree its row already says where the file is.
+                        let dir = (!tree_mode).then(|| style::path_parts(path).1).flatten();
+                        let is_selected = selected == Some(index);
+                        let row = crate::ui::list_row(
+                            ("changed-file", index),
+                            crate::ui::RowState::NORMAL.selected(is_selected),
+                            &list_design,
+                        )
+                        .pl(px(8.0 + *depth as f32 * 12.0))
+                        .child(crate::ui::change_badge(kind, &list_design))
+                        .child(div().flex_1().min_w_0().truncate().child(name.clone()))
+                        .when(lfs.contains_key(path), |row| {
+                            row.child(crate::ui::lfs_badge(&list_design))
+                        })
+                        .when_some(dir, |row, dir| {
+                            row.child(
+                                div()
+                                    .max_w(px(110.0))
+                                    .flex_none()
+                                    .truncate()
+                                    .text_size(px(11.0))
+                                    .text_color(list_design.muted)
+                                    .child(dir.to_owned()),
+                            )
+                        })
+                        .when_some(counts.get(index).and_then(Option::as_ref), |row, file| {
+                            row.child(file_stat_label(file, &list_design))
+                        });
+                        let click_entity = entity.clone();
+                        let menu_entity = entity;
+                        let menu_path = path.clone();
+                        let menu_work_dir = work_dir.clone();
+                        let trigger = row.cursor_pointer().on_click(move |_event, _window, cx| {
+                            click_entity.update(cx, |this, cx| this.select_file(index, cx));
+                        });
+                        crate::ui::context_menu(
+                            ("changed-file-menu", index),
+                            &list_design,
+                            trigger,
+                            move |menu, window, cx| {
+                                let variables = menu_entity.read(cx).custom_variables();
+                                let entity = menu_entity.clone();
+                                let path = menu_path.clone();
+                                let present = in_working_tree(menu_work_dir.as_deref(), &path);
+                                let mut menu = menu.item(
+                                    PopupMenuItem::new(editor_entry_label(at_head, present))
+                                        .disabled(!present)
+                                        .on_click(
+                                            move |_: &ClickEvent,
+                                                  _window: &mut Window,
+                                                  cx: &mut App| {
+                                                let path = path.clone();
+                                                entity.update(cx, |this, cx| {
+                                                    this.open_file_in_editor(&path, None, cx);
+                                                });
+                                            },
+                                        ),
+                                );
                                 let entity = menu_entity.clone();
                                 let path = menu_path.clone();
                                 menu = menu.item(
-                                    PopupMenuItem::new(t!("history.blame_at_commit").to_string())
+                                    PopupMenuItem::new(t!("history.show_file_history").to_string())
                                         .on_click(
-                                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                                            let path = path.clone();
-                                            entity.update(cx, |this, cx| {
-                                                this.open_blame(commit, path, window, cx);
-                                            });
-                                        },
-                                    ),
+                                            move |_: &ClickEvent,
+                                                  window: &mut Window,
+                                                  cx: &mut App| {
+                                                let path = path.clone();
+                                                entity.update(cx, |this, cx| {
+                                                    this.open_file_history(path, window, cx);
+                                                });
+                                            },
+                                        ),
                                 );
-                                if let Some(item) = crate::github::file_item(
-                                    &menu_entity,
-                                    commit,
-                                    &menu_path,
-                                    None,
-                                    cx,
-                                ) {
-                                    menu = menu.item(item);
+                                if let Some(commit) = blame_commit {
+                                    let entity = menu_entity.clone();
+                                    let path = menu_path.clone();
+                                    menu = menu.item(
+                                        PopupMenuItem::new(t!("history.blame_at_commit").to_string())
+                                            .on_click(
+                                            move |_: &ClickEvent,
+                                                  window: &mut Window,
+                                                  cx: &mut App| {
+                                                let path = path.clone();
+                                                entity.update(cx, |this, cx| {
+                                                    this.open_blame(commit, path, window, cx);
+                                                });
+                                            },
+                                        ),
+                                    );
+                                    if let Some(item) = crate::github::file_item(
+                                        &menu_entity,
+                                        commit,
+                                        &menu_path,
+                                        None,
+                                        cx,
+                                    ) {
+                                        menu = menu.item(item);
+                                    }
                                 }
-                            }
-                            crate::commands::submenu(
-                                menu.separator(),
-                                crate::commands::Context::File,
-                                &variables,
-                                window,
-                                cx,
-                            )
-                        },
-                    )
-                    .into_any_element()
+                                crate::commands::submenu(
+                                    menu.separator(),
+                                    crate::commands::Context::File,
+                                    &variables,
+                                    window,
+                                    cx,
+                                )
+                            },
+                        )
+                        .into_any_element()
+                    }
                 })
                 .collect::<Vec<_>>()
         })
