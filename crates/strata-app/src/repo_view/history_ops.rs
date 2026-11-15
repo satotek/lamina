@@ -698,7 +698,7 @@ pub(crate) fn commit_menu(
     let branch_blocked = state.blocked(HistoryAction::CreateBranch);
     let rebase = entity.read(cx).rebase_target(
         commit,
-        t!("history_ops.menu.from_commit", short = short).to_string(),
+        t!("history_ops.menu.commit_label", short = short).to_string(),
     );
 
     // A merge commit is picked or reverted against its first parent (`-m 1` in
@@ -781,7 +781,7 @@ pub(crate) fn commit_menu(
     let create_branch = {
         let entity = entity.clone();
         let point = commit.to_string();
-        let from = format!("from commit {short}");
+        let from = t!("history_ops.menu.from_commit", short = short).to_string();
         PopupMenuItem::new(menu_label(
             t!("history_ops.menu.create_branch").to_string(),
             branch_blocked.as_ref(),

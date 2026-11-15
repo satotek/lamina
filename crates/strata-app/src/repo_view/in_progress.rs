@@ -371,10 +371,12 @@ fn format_banner_text(
             total_steps,
             subject,
         }) => {
-            let mut parts = vec!["Applying patches".to_owned()];
+            let mut parts = vec![t!("progress.applying_patches").to_string()];
             match (step, total_steps) {
-                (Some(step), Some(total)) => parts.push(format!("patch {step}/{total}")),
-                (Some(step), None) => parts.push(format!("patch {step}")),
+                (Some(step), Some(total)) => {
+                    parts.push(t!("progress.patch_of", step = step, total = total).to_string())
+                }
+                (Some(step), None) => parts.push(t!("progress.patch", step = step).to_string()),
                 _ => {}
             }
             if let Some(subject) = subject {

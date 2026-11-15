@@ -3636,8 +3636,13 @@ fn upstream_card(
                 .text_size(px(11.0))
                 .text_color(colors.muted_foreground)
                 .child(match &form.current {
-                    Some(current) => format!("{} now tracks {current}.", form.branch),
-                    None => format!("{} has no upstream.", form.branch),
+                    Some(current) => t!(
+                        "branch.dialog.tracks",
+                        branch = form.branch,
+                        current = current
+                    )
+                    .to_string(),
+                    None => t!("branch.dialog.has_no_upstream", branch = form.branch).to_string(),
                 }),
         );
 
