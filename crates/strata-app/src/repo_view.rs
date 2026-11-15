@@ -397,6 +397,10 @@ pub struct RepoView {
     reflog: reflog::ReflogState,
     /// The commit jumps Back and Forward walk through.
     navigation: navigation::NavigationHistory,
+    /// The place the active search filter was entered from, so a jump to a
+    /// result records the commit the user was reading rather than the result
+    /// the filter had already selected.
+    search_origin: Option<navigation::Place>,
     /// The history loader suggested writing a commit-graph and the user has
     /// not answered yet.
     commit_graph_offer: bool,
@@ -632,6 +636,7 @@ impl RepoView {
             in_progress: InProgress::default(),
             reflog: reflog::ReflogState::default(),
             navigation: navigation::NavigationHistory::default(),
+            search_origin: None,
             commit_graph_offer: false,
             commit_graph_writing: false,
             commit_graph_dismissed: false,
@@ -2410,12 +2415,18 @@ impl RepoView {
         cx.notify();
     }
 
+    /// Selects and scrolls to the commit another pane or the sidebar asked
+    /// for. A reveal is a jump, so Back returns to the commit that was on
+    /// screen before it.
     fn reveal_commit(&mut self, target: Option<Oid>, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(index) = target.and_then(|id| {
-            self.session
-                .as_ref()
-                .and_then(|session| session.snapshot().commit_index.get(&id).copied())
-        }) else {
+        let Some(target) = target else {
+            return;
+        };
+        let Some(index) = self
+            .session
+            .as_ref()
+            .and_then(|session| session.snapshot().commit_index.get(&target).copied())
+        else {
             // Not loaded yet (the walk is still streaming) or outside the
             // walked refs; there is nothing to scroll to.
             return;
@@ -2429,9 +2440,10 @@ impl RepoView {
         if self.search.is_active() {
             self.clear_search(window, cx);
         }
+        self.record_jump(target);
         self.jump(index, cx);
         // Set after the jump: `select` clears a mark that points elsewhere.
-        self.revealed_commit = target;
+        self.revealed_commit = Some(target);
     }
 
     /// Scrolls the commit list to a row without changing the selection. While a

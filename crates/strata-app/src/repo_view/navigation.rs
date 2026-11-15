@@ -175,6 +175,13 @@ fn parent(commits: &CommitList, id: Oid, which: usize) -> Option<Oid> {
     parents_of(commits, id)?.get(which).copied()
 }
 
+/// The place a jump to `target` records, or `None` when the target is already
+/// the commit on screen: a route that reveals the selection again did not
+/// move, and Back must not return to where the user already is.
+fn jump_origin(target: Oid, current: Option<Oid>, from: Place) -> Option<Place> {
+    (current != Some(target)).then_some(from)
+}
+
 /// The first commit in display order that has `id` as a parent.
 fn child(commits: &CommitList, id: Oid) -> Option<Oid> {
     (0..commits.len()).find_map(|index| {
@@ -189,6 +196,54 @@ impl RepoView {
         Place {
             commit: self.selection_commit,
             index: self.selected,
+        }
+    }
+
+    /// Records the place a jump to `target` leaves behind, so Back returns to
+    /// the commit the user was reading. Every route that selects another
+    /// commit programmatically calls this before it moves.
+    pub(crate) fn record_jump(&mut self, target: Oid) {
+        if let Some(from) = jump_origin(target, self.selection_commit, self.current_place()) {
+            self.navigation.record(from);
+        }
+    }
+
+    /// Remembers where the current search started. The filter selects its
+    /// first match by itself, so when Enter commits to a result the selection
+    /// already sits there; the place Back returns to is the one the user left
+    /// when they started typing.
+    pub(crate) fn mark_search_origin(&mut self) {
+        // The synthetic uncommitted row has no id to return to; `Place` only
+        // addresses commits, so a search started from it records nothing.
+        if self.search_origin.is_none() && self.selected.is_some() {
+            self.search_origin = Some(self.current_place());
+        }
+    }
+
+    /// Forgets the pre-search place once the filter is gone.
+    pub(crate) fn clear_search_origin(&mut self) {
+        self.search_origin = None;
+    }
+
+    /// Enter in a filtered list: a deliberate jump to the next match. The
+    /// arrow keys walk the same rows without recording, because they are
+    /// browsing; Enter is the user committing to the result.
+    pub(crate) fn jump_to_result(&mut self, delta: isize, cx: &mut Context<Self>) {
+        let Some(index) = self.search.step(self.selected, delta) else {
+            return;
+        };
+        let origin = self.search_origin.take();
+        if let Some(from) = origin {
+            self.navigation.record(from);
+        }
+        if let Some(position) = self.search.position(index) {
+            self.scroll_to_position(position);
+        }
+        self.select(Some(index), cx);
+        if origin.is_some() {
+            // The jump may not have moved the selection, so nothing else has
+            // repainted the title bar's Back button as enabled yet.
+            self.notify_if_active(cx);
         }
     }
 
@@ -251,8 +306,7 @@ impl RepoView {
             // dead end.
             return;
         };
-        let from = self.current_place();
-        self.navigation.record(from);
+        self.record_jump(target);
         self.reveal_place(
             Place {
                 commit: Some(target),
@@ -544,5 +598,168 @@ mod tests {
         let merge = Some(oid(5));
         let label = menu_label(&commits, None, merge, GraphMove::SecondParent);
         assert_eq!(label, t!("navigation.go_second_parent").to_string());
+    }
+
+    #[test]
+    fn a_jump_to_the_commit_already_on_screen_records_nothing() {
+        assert_eq!(
+            jump_origin(oid(2), Some(oid(2)), place(2)),
+            None,
+            "revealing the selection again leaves no place to return to"
+        );
+        assert_eq!(
+            jump_origin(oid(2), Some(oid(1)), place(1)),
+            Some(place(1)),
+            "a jump from another commit records where it left"
+        );
+        assert_eq!(
+            jump_origin(oid(2), None, place(0)),
+            Some(place(0)),
+            "the first jump still has a place to return to"
+        );
+    }
+
+    #[test]
+    fn the_back_stack_forgets_jumps_older_than_the_limit() {
+        let mut history = NavigationHistory::default();
+        for index in 0..LIMIT + 5 {
+            history.record(place(index));
+        }
+        assert_eq!(history.lengths(), (LIMIT, 0));
+
+        // Walking back stops at the oldest kept jump instead of landing on a
+        // place the history no longer holds.
+        let mut current = place(LIMIT + 4);
+        let mut walked = Vec::new();
+        while let Some(place) = history.back(current) {
+            walked.push(place);
+            current = place;
+        }
+        assert_eq!(walked.len(), LIMIT);
+        assert_eq!(walked.first(), Some(&place(LIMIT + 4)));
+        assert_eq!(walked.last(), Some(&place(5)));
+    }
+
+    /// Two commits, with `topic` left on the first one, so a sidebar reveal
+    /// and Back land on different rows.
+    fn scratch_repo() -> (tempfile::TempDir, std::path::PathBuf, Oid, Oid) {
+        let dir = tempfile::TempDir::new().expect("temporary directory");
+        let config = dir.path().join("gitconfig");
+        std::fs::write(
+            &config,
+            "[user]\n\tname = Strata Test\n\temail = strata@example.invalid\n\
+             [commit]\n\tgpgsign = false\n[init]\n\tdefaultBranch = main\n",
+        )
+        .expect("write test git config");
+        let work = dir.path().join("work");
+        std::fs::create_dir(&work).expect("work directory");
+        let git = |args: &[&str]| -> String {
+            let output = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&work)
+                .env("GIT_CONFIG_GLOBAL", &config)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+                .expect("run git");
+            assert!(
+                output.status.success(),
+                "git {args:?} failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        git(&["init", "-q"]);
+        std::fs::write(work.join("README.md"), "one\n").expect("write file");
+        git(&["add", "README.md"]);
+        git(&["commit", "-q", "-m", "one"]);
+        let topic: Oid = git(&["rev-parse", "HEAD"]).parse().expect("hex object id");
+        git(&["branch", "topic"]);
+        std::fs::write(work.join("README.md"), "two\n").expect("write file");
+        git(&["add", "README.md"]);
+        git(&["commit", "-q", "-m", "two"]);
+        let head: Oid = git(&["rev-parse", "HEAD"]).parse().expect("hex object id");
+        (dir, work, head, topic)
+    }
+
+    /// A sidebar ref click is one of the jump routes; Back must return to the
+    /// commit that was selected before it, and the title bar's flags must
+    /// follow.
+    #[gpui::test]
+    fn a_sidebar_reveal_is_a_jump_that_back_returns_from(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            gpui_component::init(cx);
+            cx.set_global(crate::settings::Settings::default());
+            crate::actions::bind(cx);
+        });
+        let (_dir, work, head, topic) = scratch_repo();
+        let window = cx.add_window(|window, cx| {
+            RepoView::new(
+                crate::repo_view::Launch::open_quiet(&work, None),
+                window,
+                cx,
+            )
+        });
+        let view = window.root(cx).expect("the window's root view");
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+
+        // The history walk runs on its own thread, and this view has no event
+        // bridge, so wait for the snapshot it publishes.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while view.read_with(&vcx, |view, _| view.commit_count()) < 2 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the history did not load"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        vcx.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.select(Some(0), cx);
+                // Arrow moves browse the list; they must not become jumps.
+                view.move_selection(1, cx);
+                view.move_selection(-1, cx);
+            });
+        });
+        assert!(
+            !view.read_with(&vcx, |view, _| view.can_navigate_back()),
+            "browsing the list must not fill the back stack"
+        );
+
+        vcx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                view.reveal_ref(strata_core::RefKind::LocalBranch, "topic", window, cx);
+            });
+        });
+        let ok = view.read_with(&vcx, |view, _| {
+            (
+                view.selected,
+                view.selection_commit,
+                view.can_navigate_back(),
+            )
+        });
+        assert_eq!(ok.0, Some(1), "the topic ref points at the older commit");
+        assert_eq!(ok.1, Some(topic));
+        assert!(ok.2, "a sidebar reveal enables Back");
+
+        // The title bar reads the same flags this draw paints.
+        vcx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+
+        vcx.dispatch_action(crate::actions::NavigateBack);
+        let back = view.read_with(&vcx, |view, _| {
+            (
+                view.selected,
+                view.selection_commit,
+                view.can_navigate_back(),
+                view.can_navigate_forward(),
+            )
+        });
+        assert_eq!(back.0, Some(0));
+        assert_eq!(back.1, Some(head), "Back returns to the commit it left");
+        assert!(!back.2, "the back stack is empty again");
+        assert!(back.3, "the commit just left is where Forward goes");
     }
 }

@@ -640,7 +640,9 @@ impl RepoView {
             return;
         };
         let text = input.read(cx).value().to_string();
+        let was_active = self.search.is_active();
         let Some(epoch) = self.search.edit(&text) else {
+            self.clear_search_origin();
             if let (Some(session), Some(ticket)) =
                 (self.session.as_ref(), self.search.slot.cancel())
             {
@@ -650,6 +652,12 @@ impl RepoView {
             return;
         };
 
+        // The keystroke that starts a query marks the commit the search will
+        // jump away from, before the filter can move the selection; later
+        // edits of the same query keep that place.
+        if !was_active {
+            self.mark_search_origin();
+        }
         self.schedule_search_debounce(epoch, cx);
         cx.notify();
     }
@@ -881,6 +889,7 @@ impl RepoView {
             return;
         }
         let ticket = self.search.reset();
+        self.clear_search_origin();
         if let (Some(session), Some(ticket)) = (self.session.as_ref(), ticket) {
             session.cancel_query(ticket);
         }
@@ -963,8 +972,12 @@ impl RepoView {
     /// Enter walks search results while active, or opens the working-tree view
     /// when pressed on the synthetic uncommitted row in the plain history list.
     pub(crate) fn submit_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.file_history.is_some() || self.search.is_active() {
+        if self.file_history.is_some() {
+            // The file history owns its own rows; Enter there is not a jump in
+            // the commit list.
             self.step_results(1, cx);
+        } else if self.search.is_active() {
+            self.jump_to_result(1, cx);
         } else if self.mode == crate::worktree_panel::MainMode::History && self.uncommitted_selected
         {
             self.open_worktree(window, cx);

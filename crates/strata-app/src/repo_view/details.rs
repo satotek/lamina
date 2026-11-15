@@ -104,13 +104,7 @@ impl RepoView {
         let id = row.id.to_string();
         let copy_id = id.clone();
         let parents = commit
-            .map(|commit| {
-                commit
-                    .parents
-                    .iter()
-                    .map(|parent| data::short_oid(*parent))
-                    .collect::<Vec<_>>()
-            })
+            .map(|commit| commit.parents.clone())
             .unwrap_or_default();
 
         let mut block = div()
@@ -173,11 +167,34 @@ impl RepoView {
                             .child(icon(IconName::Copy, 13.0, design.muted)),
                     )
                     .when(!parents.is_empty(), |row| {
-                        row.child(
-                            div().min_w_0().truncate().child(
-                                t!("history.parent", parents = parents.join(" · ")).to_string(),
-                            ),
-                        )
+                        let entity = self.entity();
+                        let hover = design.field;
+                        let mut links = div()
+                            .flex()
+                            .min_w_0()
+                            .items_center()
+                            .gap(px(4.0))
+                            .child(t!("history.parent").to_string());
+                        for (slot, parent) in parents.iter().copied().enumerate() {
+                            let click = entity.clone();
+                            links = links.child(
+                                div()
+                                    .id(("commit-parent-link", slot))
+                                    .flex_none()
+                                    .rounded(px(3.0))
+                                    .px(px(2.0))
+                                    .cursor_pointer()
+                                    .text_color(design.accent)
+                                    .hover(move |style| style.bg(hover))
+                                    .on_click(move |_, window, cx| {
+                                        click.update(cx, |view, cx| {
+                                            view.navigate_to_commit(parent, window, cx);
+                                        });
+                                    })
+                                    .child(data::short_oid(parent)),
+                            );
+                        }
+                        row.child(links)
                     }),
             );
 
