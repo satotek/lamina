@@ -14,6 +14,18 @@ const BASE: u8 = 1 << 0;
 const OURS: u8 = 1 << 1;
 const THEIRS: u8 = 1 << 2;
 
+/// The external merge tool the repository's configuration selects.
+///
+/// `merge.guitool` is reported before `merge.tool` because git uses it for
+/// `git mergetool --gui`, which is the mode a desktop app runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MergeTool {
+    /// The configured tool name, e.g. `meld` or a custom `mergetool.<name>`.
+    pub name: String,
+    /// Whether the name came from `merge.guitool`, so git needs `--gui`.
+    pub gui: bool,
+}
+
 impl Repo {
     /// Which multi-step operation, if any, is in progress.
     pub fn state(&self) -> Result<RepoState> {
@@ -76,6 +88,24 @@ impl Repo {
             .unwrap_or_default()
     }
 
+    /// The merge tool `git mergetool` would run, and whether it is the GUI one.
+    ///
+    /// An empty value counts as unset: git treats it the same way, and a button
+    /// that opened git's fallback list is exactly what the UI must not offer.
+    pub fn merge_tool(&self) -> Option<MergeTool> {
+        let mut repo = self.local();
+        // The configuration may have changed since the repository was opened.
+        let _ = repo.reload();
+        let config = repo.config_snapshot();
+        let read = |key: &str| {
+            config
+                .string(key)
+                .map(|value| String::from_utf8_lossy(value.as_ref()).into_owned())
+                .filter(|value| !value.trim().is_empty())
+        };
+        merge_tool_from(read("merge.guitool"), read("merge.tool"))
+    }
+
     /// Contents of the index stages of a conflicted `path`.
     pub fn conflict_sides(&self, path: &str) -> Result<ConflictSides> {
         let repo = self.local();
@@ -110,6 +140,18 @@ fn stage_bit(stage: Stage) -> u8 {
     }
 }
 
+/// The tool git would pick from the two configured names.
+///
+/// A GUI tool wins even when a terminal one is also set: the app runs
+/// `git mergetool --gui`, which is what `merge.guitool` configures.
+fn merge_tool_from(guitool: Option<String>, tool: Option<String>) -> Option<MergeTool> {
+    match (guitool, tool) {
+        (Some(name), _) => Some(MergeTool { name, gui: true }),
+        (None, Some(name)) => Some(MergeTool { name, gui: false }),
+        (None, None) => None,
+    }
+}
+
 /// Map the stages present on a path to the kind `git status` reports for it.
 fn conflict_kind(stages: u8) -> ConflictKind {
     match (stages & BASE != 0, stages & OURS != 0, stages & THEIRS != 0) {
@@ -129,6 +171,7 @@ fn conflict_kind(stages: u8) -> ConflictKind {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TestRepo;
 
     /// The combinations git writes, with the `git status` code for each.
     #[test]
@@ -151,6 +194,62 @@ mod tests {
             conflict_kind(BASE | OURS),
             ConflictKind::DeletedByThem,
             "UD"
+        );
+    }
+
+    /// The header offers the external tool only when one is configured.
+    #[test]
+    fn merge_tool_gating_follows_the_configured_names() {
+        assert_eq!(merge_tool_from(None, None), None);
+        assert_eq!(
+            merge_tool_from(None, Some("meld".to_owned())),
+            Some(MergeTool {
+                name: "meld".to_owned(),
+                gui: false,
+            })
+        );
+        assert_eq!(
+            merge_tool_from(Some("kdiff3".to_owned()), None),
+            Some(MergeTool {
+                name: "kdiff3".to_owned(),
+                gui: true,
+            })
+        );
+        assert_eq!(
+            merge_tool_from(Some("kdiff3".to_owned()), Some("meld".to_owned())),
+            Some(MergeTool {
+                name: "kdiff3".to_owned(),
+                gui: true,
+            }),
+            "a GUI tool wins because the app runs git mergetool --gui"
+        );
+    }
+
+    #[test]
+    fn the_repository_config_selects_the_merge_tool() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "a\n");
+        repo.commit("a");
+        let open = repo.open();
+        // A repository-local value beats anything the host's global config may
+        // set, so this asserts the read order without depending on the machine.
+        repo.git(&["config", "merge.tool", "meld"]);
+        assert_eq!(
+            open.merge_tool(),
+            Some(MergeTool {
+                name: "meld".to_owned(),
+                gui: false,
+            })
+        );
+
+        repo.git(&["config", "merge.guitool", "kdiff3"]);
+        assert_eq!(
+            open.merge_tool(),
+            Some(MergeTool {
+                name: "kdiff3".to_owned(),
+                gui: true,
+            }),
+            "merge.guitool is the one --gui uses"
         );
     }
 }

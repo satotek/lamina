@@ -407,7 +407,7 @@ fn mergetool_resolves_the_path_with_the_configured_tool() {
     repo.git(&["config", "mergetool.strata-test.trustExitCode", "true"]);
 
     let git = repo.git_handle();
-    git.mergetool("conflict.txt").expect("run mergetool");
+    git.mergetool("conflict.txt", false).expect("run mergetool");
     assert_eq!(repo.read("conflict.txt"), "theirs\n");
     assert!(repo.open().conflicts().expect("conflicts").is_empty());
     assert!(

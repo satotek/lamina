@@ -331,7 +331,12 @@ fn execute(shared: &Arc<Shared>, id: OperationId, operation: &Operation) -> Resu
         }
         Operation::MarkResolved(paths) => git.mark_resolved(paths),
         Operation::MergeContinue => git.merge_continue(),
-        Operation::OpenMergetool { path } => git.mergetool(path),
+        Operation::OpenMergetool { path } => {
+            // The app reads the same configuration to decide whether to offer
+            // the button; --gui is what makes git use merge.guitool.
+            let gui = shared.repo.merge_tool().is_some_and(|tool| tool.gui);
+            git.mergetool(path, gui)
+        }
         Operation::ResolveWithContent {
             path,
             content,

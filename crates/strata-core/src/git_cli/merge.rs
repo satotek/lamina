@@ -1,6 +1,8 @@
 //! Merge and conflict resolution commands.
 
-use std::path::PathBuf;
+use std::collections::BTreeSet;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 
 use crate::{Error, Result};
 
@@ -87,15 +89,26 @@ impl Git {
     ///
     /// `--no-prompt` keeps a GUI from waiting on a terminal question. git still
     /// decides whether the tool resolved the path, and stages it when it did.
-    pub fn mergetool(&self, path: &str) -> Result<()> {
-        let args = vec![
-            "mergetool".to_owned(),
-            "--no-prompt".to_owned(),
-            "--".to_owned(),
-            path.to_owned(),
-        ];
-        self.run(&args, None)?;
-        Ok(())
+    ///
+    /// A run that never reaches a tool (no `merge.tool` configured, or every
+    /// fallback missing) exits non-zero after leaving git's stage files in the
+    /// working tree. Those are removed here so they cannot show up as
+    /// untracked files on top of a failed attempt.
+    pub fn mergetool(&self, path: &str, gui: bool) -> Result<()> {
+        let merged = self.workdir().join(path);
+        let directory = merged.parent().unwrap_or_else(|| self.workdir());
+        let before = directory_names(directory);
+        let mut args = vec!["mergetool".to_owned(), "--no-prompt".to_owned()];
+        if gui {
+            args.push("--gui".to_owned());
+        }
+        args.push("--".to_owned());
+        args.push(path.to_owned());
+        let result = self.run(&args, None);
+        if result.is_err() {
+            remove_mergetool_leftovers(directory, &merged, &before);
+        }
+        result.map(|_| ())
     }
 
     /// Whether `path` has an unmerged index entry in `stage` (1, 2 or 3).
@@ -157,4 +170,143 @@ fn push_pathspecs(args: &mut Vec<String>, paths: &[String]) -> Option<Vec<u8>> {
         stdin.push(0);
     }
     Some(stdin)
+}
+
+/// The entry names of `directory`, or an empty set when it cannot be read.
+fn directory_names(directory: &Path) -> BTreeSet<OsString> {
+    std::fs::read_dir(directory)
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.file_name())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Deletes the stage files a failed merge tool run left beside `merged`.
+///
+/// git writes `<stem>_BASE_<pid><ext>` (and `_LOCAL_`, `_REMOTE_`, `_BACKUP_`)
+/// next to the file while a tool runs and removes them when the run ends. A
+/// run that never reached a tool leaves them behind, so only names that were
+/// absent before the run and carry one of those markers are removed.
+fn remove_mergetool_leftovers(directory: &Path, merged: &Path, before: &BTreeSet<OsString>) {
+    let Some(stem) = merged.file_stem().and_then(|stem| stem.to_str()) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if before.contains(&name) {
+            continue;
+        }
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if is_mergetool_temp(name, stem) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Whether `name` is one of the stage files git writes for `merged`'s stem.
+///
+/// The pattern is `<stem>_<MARKER>_<pid><ext>`: the stem keeps a neighbour of
+/// another file from matching, and the digits after the marker are git's pid.
+fn is_mergetool_temp(name: &str, stem: &str) -> bool {
+    let Some(rest) = name.strip_prefix(stem) else {
+        return false;
+    };
+    ["_BACKUP_", "_BASE_", "_LOCAL_", "_REMOTE_"]
+        .iter()
+        .any(|marker| {
+            let Some(after) = rest.strip_prefix(marker) else {
+                return false;
+            };
+            let digits = after
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>();
+            if digits.is_empty() {
+                return false;
+            }
+            let tail = &after[digits.len()..];
+            tail.is_empty() || tail.starts_with('.')
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+    use std::fs;
+
+    use tempfile::TempDir;
+
+    use super::{directory_names, is_mergetool_temp, remove_mergetool_leftovers};
+
+    #[test]
+    fn mergetool_temp_names_carry_the_stem_marker_and_pid() {
+        assert!(is_mergetool_temp("greeting_BACKUP_87732.txt", "greeting"));
+        assert!(is_mergetool_temp("greeting_BASE_87732.txt", "greeting"));
+        assert!(is_mergetool_temp("greeting_LOCAL_87732.txt", "greeting"));
+        assert!(is_mergetool_temp("greeting_REMOTE_87732.txt", "greeting"));
+        assert!(
+            is_mergetool_temp("greeting_LOCAL_87732", "greeting"),
+            "a file without an extension has no tail"
+        );
+        assert!(
+            !is_mergetool_temp("greeting_BASE.txt", "greeting"),
+            "the pid is what tells git's stage file from a user's file"
+        );
+        assert!(
+            !is_mergetool_temp("other_BASE_87732.txt", "greeting"),
+            "another file's stage file must not match this stem"
+        );
+        assert!(!is_mergetool_temp("greeting.txt", "greeting"));
+        assert!(!is_mergetool_temp("greeting_backup_87732.txt", "greeting"));
+    }
+
+    #[test]
+    fn cleanup_removes_only_the_files_the_failed_run_created() {
+        let dir = TempDir::new().expect("temporary directory");
+        let merged = dir.path().join("greeting.txt");
+        fs::write(&merged, "x\n").expect("write the conflicted file");
+        // Present before the run: neither may be touched.
+        fs::write(dir.path().join("greeting_BASE_111.txt"), "old\n").expect("write");
+        fs::write(dir.path().join("other_BASE_999.txt"), "old\n").expect("write");
+        let before = directory_names(dir.path());
+
+        for name in [
+            "greeting_BACKUP_42.txt",
+            "greeting_BASE_42.txt",
+            "greeting_LOCAL_42.txt",
+            "greeting_REMOTE_42.txt",
+            // A neighbour's stage file and an unrelated file are not ours.
+            "other_BASE_42.txt",
+            "notes.txt",
+        ] {
+            fs::write(dir.path().join(name), "temp\n").expect("write leftover");
+        }
+
+        remove_mergetool_leftovers(dir.path(), &merged, &before);
+
+        let left: BTreeSet<String> = fs::read_dir(dir.path())
+            .expect("read the directory")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        let expected: BTreeSet<String> = [
+            "greeting.txt",
+            "greeting_BASE_111.txt",
+            "other_BASE_999.txt",
+            "other_BASE_42.txt",
+            "notes.txt",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        assert_eq!(left, expected, "only the run's own stage files are removed");
+    }
 }

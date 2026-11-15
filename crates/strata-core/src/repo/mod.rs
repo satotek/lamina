@@ -48,6 +48,7 @@ pub use config::{
     ConfigSources, ConfigValue, GitConfig, IncludeConditionKind, ValueRule, WELL_KNOWN_KEYS,
     WellKnownKey, validate_key_name, validate_value, well_known_key,
 };
+pub use conflicts::MergeTool;
 pub use content_search::{
     ContentSearchEntries, ContentSearchEntry, ContentSearchMode, ContentSearchProgress,
     ContentSearchQuery,

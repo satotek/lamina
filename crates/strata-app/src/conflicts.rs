@@ -41,7 +41,7 @@ use strata_core::encoding::TextEncoding;
 use strata_core::highlight::{Highlighter, LineHighlights, language_for_path};
 use strata_core::image::{ImageKind, ImageSide};
 use strata_core::merge::{ConflictStyle, ContentHash, MergeAnalysis, SegmentKind};
-use strata_core::repo::{InProgressCommit, InProgressDetails};
+use strata_core::repo::{InProgressCommit, InProgressDetails, MergeTool};
 use strata_core::session::{ConflictSide, Operation, OperationId, RepoSnapshot};
 use strata_core::{
     ChangeKind, ConflictEntry, ConflictKind, ConflictSides, HeadInfo, Oid, RepoState,
@@ -106,6 +106,23 @@ pub(crate) fn kind_label(kind: ConflictKind) -> String {
         ConflictKind::AddedByThem => t!("conflict.kind.added_by_them").to_string(),
         ConflictKind::DeletedByUs => t!("conflict.kind.deleted_by_us").to_string(),
         ConflictKind::DeletedByThem => t!("conflict.kind.deleted_by_them").to_string(),
+    }
+}
+
+/// Folds a command's multi-line message into the one line a banner shows.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Whether the header offers the external merge tool, and the tooltip that
+/// explains the state. A disabled button still needs to say what is missing.
+pub(crate) fn merge_tool_state(tool: Option<&MergeTool>) -> (bool, String) {
+    match tool {
+        Some(tool) => (
+            true,
+            t!("conflict.merge_tool_configured", tool = tool.name.clone()).to_string(),
+        ),
+        None => (false, t!("conflict.merge_tool_missing").to_string()),
     }
 }
 
@@ -462,6 +479,9 @@ pub(crate) struct ConflictData {
     pub(crate) too_large: bool,
     /// The stage pictures of a conflicted raster image.
     pub(crate) images: Option<ConflictImages>,
+    /// The external merge tool the repository configures, when it sets one.
+    /// Without it the header does not offer git's fallback tool list.
+    pub(crate) merge_tool: Option<MergeTool>,
     /// Visual rows of the side panes.
     pub(crate) rows: Arc<Vec<MergeRow>>,
     /// First visual row of each conflict, for scrolling to it.
@@ -484,6 +504,7 @@ impl ConflictData {
         path: &str,
         kind: Option<ConflictKind>,
         style: ConflictStyle,
+        merge_tool: Option<MergeTool>,
     ) -> Self {
         let images = conflict_images(path, &sides);
         let mut analysis = MergeAnalysis::analyze(&sides, style);
@@ -556,6 +577,7 @@ impl ConflictData {
             encoding,
             too_large,
             images,
+            merge_tool,
             rows,
             conflict_rows,
             ours_lines,
@@ -646,6 +668,10 @@ pub(crate) struct Conflicts {
     marker_warning: Option<String>,
     notice: Option<String>,
     error: Option<String>,
+    /// A failed external merge tool run. Kept apart from [`Self::error`] so
+    /// the notice sits above the editor instead of replacing it: the tool runs
+    /// against the same worktree file and leaves the result the user has.
+    merge_tool_error: Option<String>,
     list_scroll: UniformListScrollHandle,
     /// Shared by both side panes: one list, so one offset.
     merge_scroll: UniformListScrollHandle,
@@ -669,6 +695,7 @@ impl Conflicts {
         self.marker_warning = None;
         self.notice = None;
         self.error = None;
+        self.merge_tool_error = None;
         self.full_window = false;
     }
 
@@ -708,6 +735,7 @@ impl Conflicts {
             self.epoch = self.epoch.wrapping_add(1);
             self.error = None;
             self.notice = None;
+            self.merge_tool_error = None;
         }
     }
 
@@ -727,6 +755,7 @@ impl Conflicts {
         self.loading = Some(path.to_owned());
         self.error = None;
         self.notice = None;
+        self.merge_tool_error = None;
         self.marker_warning = None;
         self.epoch
     }
@@ -787,6 +816,7 @@ impl Conflicts {
         self.pending = Some((id, action));
         self.notice = None;
         self.error = None;
+        self.merge_tool_error = None;
         self.marker_warning = None;
     }
 
@@ -802,6 +832,9 @@ impl Conflicts {
         match error {
             // A failed write leaves the loaded result alone: the stale-file
             // refusal must not also throw away the merge the user typed.
+            Some(error) if action == PendingAction::Mergetool => {
+                self.merge_tool_error = Some(error.to_owned());
+            }
             Some(error) => self.error = Some(error.to_owned()),
             None => {
                 // The stages of the path just changed; the next selection reads
@@ -994,6 +1027,7 @@ impl RepoView {
                 .spawn(async move {
                     let sides = repo.conflict_sides(&read_path)?;
                     let style = repo.conflict_style();
+                    let merge_tool = repo.merge_tool();
                     let worktree = repo.file_in_worktree(&read_path).ok().flatten();
                     Ok(ConflictData::new(
                         sides,
@@ -1001,6 +1035,7 @@ impl RepoView {
                         &read_path,
                         kind,
                         style,
+                        merge_tool,
                     ))
                 })
                 .await;
@@ -1368,6 +1403,11 @@ impl RepoView {
         cx.notify();
     }
 
+    pub(crate) fn dismiss_merge_tool_error(&mut self, cx: &mut Context<Self>) {
+        self.worktree.conflicts.merge_tool_error = None;
+        cx.notify();
+    }
+
     pub(crate) fn open_merge_tool(&mut self, cx: &mut Context<Self>) {
         if self.worktree.conflicts.pending.is_some() {
             return;
@@ -1375,6 +1415,16 @@ impl RepoView {
         let Some(path) = self.worktree.selected_conflict().map(str::to_owned) else {
             return;
         };
+        // The header disables the button without a configured tool; keep a
+        // programmatic call from reaching git's fallback list as well.
+        if !self
+            .worktree
+            .conflicts
+            .data_for(&path)
+            .is_some_and(|loaded| loaded.data.merge_tool.is_some())
+        {
+            return;
+        }
         let Some(session) = self.session.as_ref() else {
             return;
         };
@@ -1617,6 +1667,30 @@ impl Conflicts {
             ));
         }
 
+        // An external tool can fail without touching the result the editor
+        // holds, so its failure is a banner above the editor rather than an
+        // error page in place of it.
+        if let Some(error) = &self.merge_tool_error {
+            column = column.child(
+                crate::ui::banner(
+                    crate::ui::BannerKind::Danger,
+                    t!("conflict.merge_tool_failed").to_string(),
+                    &colors.design,
+                )
+                .detail(one_line(error))
+                .action(
+                    crate::ui::button("merge-tool-dismiss", t!("common.close").to_string())
+                        .size(crate::ui::ButtonSize::Tiny)
+                        .on_click({
+                            let entity = entity.clone();
+                            move |_, _, cx| {
+                                entity.update(cx, |this, cx| this.dismiss_merge_tool_error(cx));
+                            }
+                        }),
+                ),
+            );
+        }
+
         column = column.child(match (&self.error, loaded) {
             (Some(error), _) => {
                 crate::ui::message(error, colors.danger, &colors.design).into_any_element()
@@ -1807,13 +1881,15 @@ impl Conflicts {
             row = row.child(conflict_menu(entity.clone(), colors, busy));
         }
 
-        if loaded.is_some() {
+        if let Some(loaded) = loaded {
+            let (tool_ready, tool_hint) = merge_tool_state(loaded.data.merge_tool.as_ref());
             row = row
                 .child(
                     crate::ui::button("conflict-mergetool", t!("conflict.merge_tool").to_string())
                         .size(crate::ui::ButtonSize::Tiny)
                         .ghost()
-                        .disabled(!ready)
+                        .disabled(!ready || !tool_ready)
+                        .tooltip(tool_hint)
                         .on_click({
                             let entity = entity.clone();
                             move |_, _, cx| {
@@ -2552,7 +2628,14 @@ mod tests {
     }
 
     fn data(sides: ConflictSides, kind: ConflictKind) -> ConflictData {
-        ConflictData::new(sides, None, "src/lib.rs", Some(kind), ConflictStyle::Merge)
+        ConflictData::new(
+            sides,
+            None,
+            "src/lib.rs",
+            Some(kind),
+            ConflictStyle::Merge,
+            None,
+        )
     }
 
     #[test]
@@ -2585,6 +2668,25 @@ mod tests {
             kind_label(ConflictKind::DeletedByThem),
             t!("conflict.kind.deleted_by_them").to_string()
         );
+    }
+
+    #[test]
+    fn the_merge_tool_button_names_the_configured_tool_or_what_is_missing() {
+        let (ready, tooltip) = merge_tool_state(None);
+        assert!(!ready, "without a configured tool the button is disabled");
+        assert_eq!(tooltip, t!("conflict.merge_tool_missing").to_string());
+
+        let tool = MergeTool {
+            name: "meld".to_owned(),
+            gui: false,
+        };
+        let (ready, tooltip) = merge_tool_state(Some(&tool));
+        assert!(ready);
+        assert_eq!(
+            tooltip,
+            t!("conflict.merge_tool_configured", tool = tool.name.clone()).to_string()
+        );
+        assert!(tooltip.contains("meld"), "the tooltip names the tool");
     }
 
     #[test]
@@ -2909,6 +3011,7 @@ mod tests {
             "assets/logo.png",
             Some(ConflictKind::BothModified),
             ConflictStyle::Merge,
+            None,
         );
         assert!(data.binary);
         assert!(data.images.is_some());
@@ -2929,6 +3032,7 @@ mod tests {
             "設定.txt",
             Some(ConflictKind::BothModified),
             ConflictStyle::Merge,
+            None,
         );
         assert!(data.text);
         assert_eq!(data.encoding.label(), "Shift_JIS");
