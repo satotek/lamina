@@ -239,7 +239,7 @@ impl TerminalPanel {
         panel
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(windows)))]
     pub(crate) fn snapshot(&self) -> &TerminalSnapshot {
         &self.snapshot
     }
@@ -259,7 +259,8 @@ impl TerminalPanel {
         self.last_theme.as_ref()
     }
 
-    #[cfg(test)]
+    // Only the PTY event test uses it, and that test needs a Unix shell.
+    #[cfg(all(test, not(windows)))]
     pub(crate) fn flush_quiet_events(&mut self, cx: &mut Context<Self>) {
         let mut pending = Vec::new();
         if let Some(rx) = &self.quiet_rx {
