@@ -24,6 +24,8 @@ mod row;
 mod signature;
 mod split;
 mod tab;
+#[cfg(feature = "terminal")]
+mod terminal_grid;
 mod text;
 
 mod askpass;
@@ -43,4 +45,10 @@ pub use row::{RowState, RowTipExt, list_row, row_surface};
 pub use signature::{CommitSignatureState, signature_badge, signature_details};
 pub use split::{SplitExtent, clamp_fraction, split_handle, split_pixels};
 pub use tab::{tab, tab_strip};
+#[cfg(feature = "terminal")]
+pub use terminal_grid::{
+    TerminalGrid, TerminalGridProps, TerminalScrollbarHandle, grid_dimensions_for_bounds,
+    ime_cursor_bounds, measure_cell_size, pixel_to_viewport_cell, terminal_theme,
+    terminal_viewport,
+};
 pub use text::{empty_state, message, section_header};

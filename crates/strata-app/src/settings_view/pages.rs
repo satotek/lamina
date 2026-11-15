@@ -524,8 +524,9 @@ fn tools(control: f32, design: &Design) -> SettingPage {
                 .into_any_element()
         })),
     )
-    .groups(
-        card(t!("settings.tools.editor_terminal").to_string()).items([
+    .groups({
+        #[cfg_attr(not(feature = "terminal"), allow(unused_mut))]
+        let mut items = vec![
             SettingItem::new(
                 t!("settings.tools.editor_command").to_string(),
                 text_field(
@@ -548,8 +549,23 @@ fn tools(control: f32, design: &Design) -> SettingPage {
                 ),
             )
             .description(t!("settings.tools.terminal_description").to_string()),
-        ]),
-    )
+        ];
+        #[cfg(feature = "terminal")]
+        items.push(
+            SettingItem::new(
+                t!("settings.tools.embedded_shell").to_string(),
+                text_field(
+                    "/bin/zsh -l",
+                    &[],
+                    control,
+                    |settings| settings.tools.embedded_shell.clone(),
+                    change::embedded_shell,
+                ),
+            )
+            .description(t!("settings.tools.embedded_shell_description").to_string()),
+        );
+        card(t!("settings.tools.editor_terminal").to_string()).items(items)
+    })
 }
 
 fn privacy(_control: f32, design: &Design) -> SettingPage {

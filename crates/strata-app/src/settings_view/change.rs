@@ -221,6 +221,11 @@ pub fn terminal(settings: &mut Settings, command: &str) {
     settings.tools.terminal = optional_text(command);
 }
 
+#[cfg_attr(not(feature = "terminal"), allow(dead_code))]
+pub fn embedded_shell(settings: &mut Settings, command: &str) {
+    settings.tools.embedded_shell = optional_text(command);
+}
+
 pub fn ghq_enabled(settings: &mut Settings, enabled: bool) {
     settings.tools.ghq.enabled = enabled;
 }
@@ -279,6 +284,7 @@ mod tests {
         restore_last_repository(&mut settings, false);
         editor(&mut settings, "code --goto {path}:{line}");
         terminal(&mut settings, "alacritty --working-directory {path}");
+        embedded_shell(&mut settings, "/bin/zsh -l");
         external_avatars(&mut settings, true);
 
         let loaded = round_trip(&settings);
@@ -294,6 +300,7 @@ mod tests {
             loaded.tools.editor.as_deref(),
             Some("code --goto {path}:{line}")
         );
+        assert_eq!(loaded.tools.embedded_shell.as_deref(), Some("/bin/zsh -l"));
         assert!(loaded.privacy.external_avatars);
     }
 
@@ -304,11 +311,13 @@ mod tests {
         code_font(&mut settings, "");
         editor(&mut settings, "  ");
         terminal(&mut settings, "\t");
+        embedded_shell(&mut settings, "  \t ");
         git_executable(&mut settings, "");
         assert_eq!(settings.appearance.ui_font, None);
         assert_eq!(settings.appearance.code_font, None);
         assert_eq!(settings.tools.editor, None);
         assert_eq!(settings.tools.terminal, None);
+        assert_eq!(settings.tools.embedded_shell, None);
         assert_eq!(settings.behaviour.git_executable, None);
 
         // The padding around a real value is dropped, an inner space is kept.

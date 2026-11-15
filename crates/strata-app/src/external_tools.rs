@@ -51,7 +51,7 @@ pub fn open_in_editor(path: &Path, line: Option<u32>, settings: &Settings) -> Re
 /// contains it, and adjacent quoted and unquoted pieces form one argument.
 /// Backslashes are literal, so a Windows path in the settings survives. There
 /// is no variable expansion, command substitution or other shell syntax.
-fn split_command(command: &str) -> Result<Vec<String>, String> {
+pub(crate) fn split_command(command: &str) -> Result<Vec<String>, String> {
     let mut arguments = Vec::new();
     let mut current = String::new();
     let mut started = false;

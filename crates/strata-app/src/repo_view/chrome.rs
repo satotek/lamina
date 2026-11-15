@@ -11,9 +11,13 @@ use gpui::{
     AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, Render,
     Styled, Window, div, px,
 };
+#[cfg(feature = "terminal")]
+use gpui::{Axis, Bounds, Pixels, relative};
 use gpui_component::ActiveTheme as _;
 
 use super::{PAGE, RepoView};
+#[cfg(feature = "terminal")]
+use crate::actions::ToggleTerminal;
 use crate::actions::{
     self, CloseCompare, ExtendSelectionNext, ExtendSelectionPrevious, NavigateBack, OpenInEditor,
     OpenTerminalHere, SelectFirst, SelectLast, SelectNext, SelectPageDown, SelectPageUp,
@@ -135,6 +139,13 @@ impl Render for RepoView {
             .on_action(cx.listener(|this, action: &RunCustomCommand, window, cx| {
                 this.run_custom_command(action.index, window, cx)
             }));
+        #[cfg(feature = "terminal")]
+        {
+            root =
+                root.on_action(cx.listener(|this, _: &ToggleTerminal, window, cx| {
+                    this.toggle_terminal(window, cx)
+                }));
+        }
         if self.parent_name.is_some() {
             root = root.on_action(cx.listener(|this, _: &NavigateBack, window, cx| {
                 this.navigate_back_to_parent(window, cx);
@@ -226,9 +237,80 @@ impl Render for RepoView {
             if !merge_full_window {
                 columns = columns.child(sidebar);
             }
-            root = root
-                .child(columns.child(main.child(content)))
-                .child(self.status_bar(&design));
+            let main_area = columns.child(main.child(content));
+            #[cfg(feature = "terminal")]
+            let body = if self.terminal_open
+                && let Some(terminal) = self.terminal.clone()
+            {
+                let top_fraction = self.terminal_top_fraction;
+                let measured = self.terminal_split.get();
+                let mut top_pane = div()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .min_w_0()
+                    .min_h_0()
+                    .flex_none()
+                    .child(main_area);
+                top_pane = match measured {
+                    Some(area) => top_pane.h(px(crate::ui::split_pixels(
+                        top_fraction,
+                        area.size(),
+                        Self::MAIN_MIN_HEIGHT,
+                        Self::TERMINAL_MIN_HEIGHT,
+                    ))),
+                    None => top_pane.flex_basis(relative(top_fraction)),
+                };
+                let drag_entity = entity.clone();
+                let extent = self.terminal_split.clone();
+                let reset_entity = entity.clone();
+                top_pane = top_pane.child(crate::ui::split_handle(
+                    "terminal-split-handle",
+                    Axis::Vertical,
+                    move |event, _window, cx| {
+                        let Some(area) = extent.get() else {
+                            return;
+                        };
+                        let fraction = area.fraction_at(event.event.position.y);
+                        drag_entity.update(cx, |this, cx| {
+                            this.set_terminal_top_fraction(fraction, area.size(), cx);
+                        });
+                    },
+                    move |_event, _window, cx| {
+                        reset_entity.update(cx, |this, cx| this.reset_terminal_top_fraction(cx));
+                    },
+                ));
+
+                let measured_cell = self.terminal_split.clone();
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .on_children_prepainted(move |bounds: Vec<Bounds<Pixels>>, _, _| {
+                        if let Some(area) = super::split::measure(&bounds, Axis::Vertical) {
+                            measured_cell.set(Some(area));
+                        }
+                    })
+                    .child(top_pane)
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_h_0()
+                            .min_w_0()
+                            .child(terminal),
+                    )
+                    .into_any_element()
+            } else {
+                main_area.into_any_element()
+            };
+            #[cfg(not(feature = "terminal"))]
+            let body = main_area;
+            root = root.child(body).child(self.status_bar(&design));
         }
 
         if self.overlay {

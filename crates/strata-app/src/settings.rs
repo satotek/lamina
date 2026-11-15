@@ -262,6 +262,9 @@ pub struct Tools {
     /// Command to open a terminal in the repository; `{path}` is substituted.
     /// `None` uses the platform's default terminal.
     pub terminal: Option<String>,
+    /// Shell command and optional arguments for the embedded terminal panel.
+    /// `None` launches the platform's default shell.
+    pub embedded_shell: Option<String>,
     pub ghq: GhqSettings,
     pub gh: GhSettings,
 }

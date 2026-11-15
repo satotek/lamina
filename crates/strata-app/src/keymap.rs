@@ -156,6 +156,8 @@ macro_rules! action {
     };
 }
 
+#[cfg(feature = "terminal")]
+use crate::actions::ToggleTerminal;
 use crate::actions::{
     CloneRepository, CloseCompare, CloseTab, ExtendSelectionNext, ExtendSelectionPrevious,
     NavigateBack, NewRepository, NewTab, NextTab, OpenGitConfig, OpenInEditor, OpenRepository,
@@ -577,6 +579,17 @@ pub static ACTIONS: &[ActionSpec] = &[
         OpenGitConfig,
         [],
         18,
+        true
+    ),
+    #[cfg(feature = "terminal")]
+    action!(
+        "strata::ToggleTerminal",
+        "Toggle terminal",
+        Actions,
+        Some(REPO_VIEW),
+        ToggleTerminal,
+        [binding("ctrl-`", Some(REPO_VIEW))],
+        36,
         true
     ),
     // --- settings_view::bind ---------------------------------------------
@@ -1881,6 +1894,8 @@ mod tests {
             ("secondary-shift-p", "TogglePalette", ""),
             ("f1", "TogglePalette", ""),
             ("secondary-q", "Quit", ""),
+            #[cfg(feature = "terminal")]
+            ("ctrl-`", "ToggleTerminal", "RepoView"),
             ("escape", "CloseSettings", "SettingsView"),
             ("secondary-w", "CloseSettings", "SettingsView"),
             ("escape", "CloseGitConfig", "GitConfigView"),
@@ -2024,7 +2039,8 @@ mod tests {
             }
         }
         // Every built-in palette entry has a registry row.
-        assert_eq!(orders.len(), 36);
+        let expected_count = if cfg!(feature = "terminal") { 37 } else { 36 };
+        assert_eq!(orders.len(), expected_count);
     }
 
     #[test]

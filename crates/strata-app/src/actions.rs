@@ -98,6 +98,15 @@ actions!(
     ]
 );
 
+#[cfg(feature = "terminal")]
+actions!(
+    strata,
+    [
+        /// Opens or closes the embedded terminal panel for the active tab.
+        ToggleTerminal,
+    ]
+);
+
 pub fn bind(cx: &mut App) {
     crate::keymap::bind_group(cx, crate::keymap::Group::Actions);
     cx.on_action(|_: &Quit, cx| cx.quit());

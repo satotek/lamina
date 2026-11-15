@@ -56,6 +56,8 @@ mod settings_view;
 mod stash;
 mod style;
 mod tabs;
+#[cfg(feature = "terminal")]
+mod terminal_panel;
 mod tools;
 mod ui;
 mod workspace;
@@ -125,6 +127,8 @@ fn main() {
         search::bind(cx);
         picker::bind(cx);
         palette::bind(cx);
+        #[cfg(feature = "terminal")]
+        terminal_panel::bind(cx);
 
         // User bindings go on top of every default, so a keymap entry wins a
         // tied keystroke and a null entry can unbind a default.

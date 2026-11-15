@@ -501,6 +501,16 @@ pub struct RepoView {
     window_handle: Option<AnyWindowHandle>,
     autofetch: Option<Task<()>>,
     last_autofetch: Instant,
+    #[cfg(feature = "terminal")]
+    pub(crate) terminal: Option<Entity<crate::terminal_panel::TerminalPanel>>,
+    #[cfg(feature = "terminal")]
+    pub(crate) terminal_open: bool,
+    #[cfg(feature = "terminal")]
+    pub(crate) terminal_top_fraction: f32,
+    #[cfg(feature = "terminal")]
+    pub(crate) terminal_split: Rc<std::cell::Cell<Option<crate::ui::SplitExtent>>>,
+    #[cfg(all(test, feature = "terminal"))]
+    pub(crate) quiet_terminal: bool,
 }
 
 /// Hands a session to a background thread that drops it.
@@ -513,7 +523,7 @@ pub(crate) fn drop_session_in_background(session: Session) {
     drop_in_background(session);
 }
 
-fn drop_in_background<T: Send + 'static>(value: T) {
+pub(crate) fn drop_in_background<T: Send + 'static>(value: T) {
     if let Err(error) = std::thread::Builder::new()
         .name("strata-session-drop".to_owned())
         .spawn(move || drop(value))
@@ -656,6 +666,16 @@ impl RepoView {
             window_handle: Some(window.window_handle()),
             autofetch: None,
             last_autofetch: Instant::now(),
+            #[cfg(feature = "terminal")]
+            terminal: None,
+            #[cfg(feature = "terminal")]
+            terminal_open: false,
+            #[cfg(feature = "terminal")]
+            terminal_top_fraction: Self::DEFAULT_TERMINAL_TOP_FRACTION,
+            #[cfg(feature = "terminal")]
+            terminal_split: Rc::new(std::cell::Cell::new(None)),
+            #[cfg(all(test, feature = "terminal"))]
+            quiet_terminal: false,
         };
         view.branches.set_dialog_focus(cx.focus_handle());
         view.branches.set_list_focus(cx.focus_handle());
@@ -896,7 +916,116 @@ impl RepoView {
             }
         }
         self._bridge.take();
+        #[cfg(feature = "terminal")]
+        {
+            self.terminal.take();
+            self.terminal_open = false;
+        }
         self.session.take()
+    }
+
+    #[cfg(feature = "terminal")]
+    pub(crate) const DEFAULT_TERMINAL_TOP_FRACTION: f32 = 0.68;
+    #[cfg(feature = "terminal")]
+    pub(crate) const MAIN_MIN_HEIGHT: f32 = 160.0;
+    #[cfg(feature = "terminal")]
+    pub(crate) const TERMINAL_MIN_HEIGHT: f32 = 120.0;
+
+    #[cfg(feature = "terminal")]
+    pub(crate) fn terminal_working_dir(&self) -> Option<PathBuf> {
+        self.work_dir().or_else(|| {
+            self.session
+                .as_ref()
+                .map(|s| s.repo().git_dir().to_path_buf())
+        })
+    }
+
+    #[cfg(feature = "terminal")]
+    pub(crate) fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.terminal_open {
+            self.close_terminal(window, cx);
+            return;
+        }
+        if self.error.is_some() {
+            return;
+        }
+        if self.terminal.is_none() {
+            let Some(dir) = self.terminal_working_dir() else {
+                return;
+            };
+            let parent_focus = self.focus.clone();
+            let weak = self.entity.clone();
+            let on_close: crate::terminal_panel::CloseHandler = Rc::new(move |window, cx| {
+                let _ = weak.update(cx, |this, cx| this.close_terminal(window, cx));
+            });
+            #[cfg(test)]
+            let quiet = self.quiet_terminal;
+            let panel = cx.new(|cx| {
+                #[cfg(test)]
+                if quiet {
+                    return crate::terminal_panel::TerminalPanel::new_quiet(
+                        dir,
+                        parent_focus,
+                        Some(on_close),
+                        window,
+                        cx,
+                    );
+                }
+                crate::terminal_panel::TerminalPanel::new(
+                    dir,
+                    parent_focus,
+                    Some(on_close),
+                    window,
+                    cx,
+                )
+            });
+            self.terminal = Some(panel);
+        }
+        self.terminal_open = true;
+        if let Some(panel) = &self.terminal {
+            let handle = gpui::Focusable::focus_handle(panel.read(cx), cx);
+            window.focus(&handle, cx);
+        }
+        cx.notify();
+    }
+
+    #[cfg(feature = "terminal")]
+    pub(crate) fn close_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.terminal_open {
+            return;
+        }
+        self.terminal_open = false;
+        window.focus(&self.focus, cx);
+        cx.notify();
+    }
+
+    #[cfg(feature = "terminal")]
+    pub(crate) fn set_terminal_top_fraction(
+        &mut self,
+        fraction: f32,
+        total: f32,
+        cx: &mut Context<Self>,
+    ) {
+        let clamped = crate::ui::clamp_fraction(
+            fraction,
+            total,
+            Self::MAIN_MIN_HEIGHT,
+            Self::TERMINAL_MIN_HEIGHT,
+        );
+        if (self.terminal_top_fraction - clamped).abs() < f32::EPSILON {
+            return;
+        }
+        self.terminal_top_fraction = clamped;
+        cx.notify();
+    }
+
+    #[cfg(feature = "terminal")]
+    pub(crate) fn reset_terminal_top_fraction(&mut self, cx: &mut Context<Self>) {
+        if (self.terminal_top_fraction - Self::DEFAULT_TERMINAL_TOP_FRACTION).abs() < f32::EPSILON {
+            return;
+        }
+        self.terminal_top_fraction = Self::DEFAULT_TERMINAL_TOP_FRACTION;
+        cx.notify();
     }
 
     pub(crate) fn source(&self) -> Option<Source> {
@@ -2861,5 +2990,221 @@ mod tests {
 
         let elsewhere = PathBuf::from("/definitely/not/here");
         assert_eq!(display_path(&elsewhere), "/definitely/not/here");
+    }
+
+    #[cfg(feature = "terminal")]
+    mod terminal_tests {
+        use super::*;
+        use crate::actions::ToggleTerminal;
+        use gpui::{QuitMode, VisualTestContext};
+        use gpui_component::ThemeMode;
+        use strata_term::{TermKey, TermKeyAction, TermKeyEvent, TermModifiers};
+
+        struct ScratchRepo {
+            dir: tempfile::TempDir,
+            config: PathBuf,
+        }
+
+        impl ScratchRepo {
+            fn new() -> Self {
+                let dir = tempfile::TempDir::new().expect("temporary directory");
+                let config = dir.path().join("gitconfig");
+                std::fs::write(
+                    &config,
+                    "[user]\n\tname = Strata Test\n\temail = strata@example.invalid\n\
+                     [commit]\n\tgpgsign = false\n[init]\n\tdefaultBranch = main\n",
+                )
+                .expect("write test git config");
+                let scratch = Self { dir, config };
+                std::fs::create_dir(scratch.work()).expect("work directory");
+                scratch.git(scratch.work(), &["init", "-q"]);
+                std::fs::write(scratch.work().join("README.md"), "hello\n").expect("write file");
+                scratch.git(scratch.work(), &["add", "README.md"]);
+                scratch.git(scratch.work(), &["commit", "-q", "-m", "initial"]);
+                scratch
+            }
+
+            fn work(&self) -> PathBuf {
+                self.dir.path().join("work")
+            }
+
+            fn add_worktree(&self, name: &str) -> PathBuf {
+                let wt = self.dir.path().join(name);
+                self.git(
+                    self.work(),
+                    &[
+                        "worktree",
+                        "add",
+                        "-q",
+                        "-b",
+                        name,
+                        wt.to_str().expect("utf8 path"),
+                    ],
+                );
+                wt
+            }
+
+            fn git(&self, cwd: PathBuf, args: &[&str]) -> String {
+                let output = std::process::Command::new("git")
+                    .args(args)
+                    .current_dir(cwd)
+                    .env("GIT_CONFIG_GLOBAL", &self.config)
+                    .env("GIT_CONFIG_NOSYSTEM", "1")
+                    .output()
+                    .expect("run git");
+                assert!(
+                    output.status.success(),
+                    "git {args:?} failed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                String::from_utf8_lossy(&output.stdout).into_owned()
+            }
+        }
+
+        fn prepare_app(cx: &mut App) {
+            cx.set_quit_mode(QuitMode::Explicit);
+            gpui_component::init(cx);
+            let mut settings = crate::settings::Settings::default();
+            #[cfg(unix)]
+            {
+                settings.tools.embedded_shell = Some("/bin/sh".to_owned());
+            }
+            cx.set_global(settings);
+            crate::actions::bind(cx);
+            crate::terminal_panel::bind(cx);
+        }
+
+        #[gpui::test]
+        fn toggle_terminal_is_lazy_focuses_panel_keeps_session_and_ignores_escape(
+            cx: &mut gpui::TestAppContext,
+        ) {
+            cx.update(prepare_app);
+            let repo = ScratchRepo::new();
+            let wt_path = repo.add_worktree("linked-wt");
+            let window = cx.add_window(|window, cx| {
+                RepoView::new(Launch::open_quiet(&wt_path, None), window, cx)
+            });
+            let view = window.root(cx).expect("the window's root view");
+            let mut vcx = VisualTestContext::from_window(window.into(), cx);
+            vcx.update(|_, cx| {
+                view.update(cx, |view, _| view.quiet_terminal = true);
+            });
+
+            // Session must be created lazily: nothing spawned until toggled open.
+            assert!(
+                view.read_with(&vcx, |view, _| !view.terminal_open
+                    && view.terminal.is_none()),
+                "terminal session must stay uncreated before first open"
+            );
+
+            vcx.dispatch_action(ToggleTerminal);
+            let panel = vcx.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                let repo_view = view.read(cx);
+                assert!(repo_view.terminal_open);
+                let panel = repo_view
+                    .terminal
+                    .clone()
+                    .expect("terminal created on open");
+                let actual = std::fs::canonicalize(panel.read(cx).working_dir())
+                    .expect("canonical worktree dir");
+                let expected = std::fs::canonicalize(&wt_path).expect("canonical expected");
+                assert_eq!(actual, expected, "terminal opens in linked worktree root");
+                assert!(panel.read(cx).has_session());
+                assert!(panel.read(cx).snapshot().cols >= 2);
+                assert!(
+                    panel.read(cx).focus_handle(cx).is_focused(window),
+                    "opening the terminal must move focus into it"
+                );
+                panel
+            });
+
+            // Pressing Escape while the terminal is focused must NOT close it
+            // or trigger RepoView's SearchDismiss handler.
+            vcx.simulate_keystrokes("escape");
+            assert!(
+                view.read_with(&vcx, |view, _| view.terminal_open),
+                "Escape must leave the terminal panel open"
+            );
+            assert!(view.read_with(&vcx, |view, _| {
+                let mapped = crate::terminal_panel::keystroke_to_term_event(
+                    &gpui::Keystroke::parse("escape").expect("escape"),
+                )
+                .expect("mapped escape");
+                assert_eq!(
+                    mapped,
+                    TermKeyEvent {
+                        action: TermKeyAction::Press,
+                        key: TermKey::Escape,
+                        modifiers: TermModifiers::default(),
+                        text: None,
+                        ..TermKeyEvent::default()
+                    }
+                );
+                view.terminal_open
+            }));
+
+            // Resize height and close; closing must preserve both entity and fraction
+            // and return focus to RepoView.
+            vcx.update(|_, cx| {
+                view.update(cx, |view, cx| {
+                    view.set_terminal_top_fraction(0.5, 600.0, cx);
+                });
+            });
+            let saved_fraction = view.read_with(&vcx, |view, _| view.terminal_top_fraction);
+
+            vcx.dispatch_action(ToggleTerminal);
+            vcx.update(|window, cx| {
+                assert!(!view.read(cx).terminal_open);
+                assert!(
+                    view.read(cx).focus.is_focused(window),
+                    "closing the terminal must return focus to RepoView"
+                );
+            });
+
+            // Reopening reuses the exact same TerminalPanel entity and saved height.
+            vcx.dispatch_action(ToggleTerminal);
+            vcx.update(|window, cx| {
+                let current = view.read(cx).terminal.as_ref().expect("reused panel");
+                assert_eq!(current.entity_id(), panel.entity_id());
+                assert!((view.read(cx).terminal_top_fraction - saved_fraction).abs() < 1e-6);
+                assert!(current.read(cx).focus_handle(cx).is_focused(window));
+                view.update(cx, |view, cx| view.reset_terminal_top_fraction(cx));
+                assert!(
+                    (view.read(cx).terminal_top_fraction - RepoView::DEFAULT_TERMINAL_TOP_FRACTION)
+                        .abs()
+                        < 1e-6
+                );
+            });
+
+            // Theme changes update the terminal panel's mapped TerminalTheme.
+            let initial_theme = panel.read_with(&vcx, |p, _| p.last_theme().cloned());
+            vcx.update(|window, cx| {
+                let target_mode = if gpui_component::ActiveTheme::theme(cx).is_dark() {
+                    ThemeMode::Light
+                } else {
+                    ThemeMode::Dark
+                };
+                gpui_component::Theme::change(target_mode, Some(window), cx);
+                panel.update(cx, |p, cx| p.sync_appearance(Some(window), cx));
+                window.draw(cx).clear(cx);
+            });
+            let updated_theme = panel.read_with(&vcx, |p, _| p.last_theme().cloned());
+            assert_ne!(
+                initial_theme, updated_theme,
+                "light/dark theme change must update TerminalTheme"
+            );
+
+            // Closing the window must release both RepoView and TerminalPanel
+            // without creating reference cycles.
+            let released_view = view.downgrade();
+            let released_panel = panel.downgrade();
+            drop(panel);
+            drop(view);
+            vcx.update(|window, _| window.remove_window());
+            vcx.run_until_parked();
+            assert!(released_view.upgrade().is_none(), "RepoView leaked");
+            assert!(released_panel.upgrade().is_none(), "TerminalPanel leaked");
+        }
     }
 }

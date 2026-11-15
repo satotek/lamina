@@ -9,8 +9,13 @@ description = "Lightweight cross-platform git client"
 name = "strata"
 path = "src/main.rs"
 
+[features]
+default = ["terminal"]
+terminal = ["dep:strata-term"]
+
 [dependencies]
 strata-core.workspace = true
+strata-term = { path = "../strata-term", optional = true }
 
 # GPUI itself is published to crates.io under `gpui-pre` by the GPUI Kit
 # maintainers; the library is still named `gpui`, so the package rename keeps
