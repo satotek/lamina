@@ -123,6 +123,9 @@ impl Ticked {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LineMark {
     Side(Side),
+    /// A change git merged without a conflict. It keeps a faint tint of its
+    /// side so it reads as merged context rather than a hand-made pick.
+    AutoMerged(Side),
     /// A line of a conflict that still holds its marker block.
     Unresolved,
 }
@@ -489,6 +492,21 @@ impl MergeModel {
         }
     }
 
+    /// Takes one side of `conflict` in one step.
+    ///
+    /// This is the hunk header's one-click action, so it settles on that side
+    /// instead of toggling: a second click keeps it. The result is the same as
+    /// the gutter checkbox's tick for the side.
+    pub(crate) fn take(&mut self, conflict: usize, side: Side) -> bool {
+        self.apply_at(
+            conflict,
+            match side {
+                Side::A => Choice::Ours,
+                Side::B => Choice::Theirs,
+            },
+        )
+    }
+
     /// Whether every conflict has `side` ticked. Also the header checkbox's
     /// state, so `false` for a merge with no conflicts.
     pub(crate) fn all_ticked(&self, side: Side) -> bool {
@@ -547,8 +565,8 @@ impl MergeModel {
                 // Automatic lines keep the side whose change they are;
                 // unchanged lines belong to neither.
                 None => match slot.kind {
-                    SegmentKind::Ours => Some(LineMark::Side(Side::A)),
-                    SegmentKind::Theirs => Some(LineMark::Side(Side::B)),
+                    SegmentKind::Ours => Some(LineMark::AutoMerged(Side::A)),
+                    SegmentKind::Theirs => Some(LineMark::AutoMerged(Side::B)),
                     SegmentKind::Unchanged | SegmentKind::Conflict => None,
                 },
             };
@@ -843,6 +861,46 @@ mod tests {
             Some(Resolution::TheirsThenOurs)
         );
         assert!(model.text().contains("TWO-b\nTWO-a"));
+    }
+
+    #[test]
+    fn a_hunk_header_take_settles_on_that_side() {
+        let mut model = two_conflicts();
+        assert!(model.take(0, Side::A));
+        assert_eq!(model.ticked(0), Some(Ticked { a: true, b: false }));
+        assert_eq!(model.selected_resolution(), Some(Resolution::Ours));
+
+        // Unlike the gutter checkbox, a second take keeps the pick; it is the
+        // one-click action, not a toggle.
+        model.take(0, Side::A);
+        assert_eq!(model.ticked(0), Some(Ticked { a: true, b: false }));
+        assert!(model.text().contains("TWO-a"));
+        assert!(!model.text().contains("TWO-b"));
+
+        // Taking the other side replaces the pick rather than appending.
+        model.take(0, Side::B);
+        assert_eq!(model.ticked(0), Some(Ticked { a: false, b: true }));
+        assert!(model.text().contains("TWO-b"));
+        assert!(!model.text().contains("TWO-a"));
+    }
+
+    #[test]
+    fn changes_git_merged_without_a_conflict_keep_a_faint_side_mark() {
+        let model = model(
+            "one\ntwo\nthree\n",
+            "one\nTWO-a\nthree\n",
+            "one\ntwo\nTHREE-b\n",
+        );
+        assert_eq!(model.conflict_count(), 0);
+        assert_eq!(
+            model.result_marks(),
+            vec![
+                None,
+                Some(LineMark::AutoMerged(Side::A)),
+                Some(LineMark::AutoMerged(Side::B)),
+            ],
+            "the unchanged line belongs to neither; each changed line keeps its side"
+        );
     }
 
     #[test]

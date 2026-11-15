@@ -41,7 +41,7 @@ pub use banner::{BannerKind, banner};
 pub use button::{
     ButtonKind, ButtonSize, UiButton, button, content_button, icon_button, icon_toggle,
 };
-pub use checkbox::checkbox;
+pub use checkbox::{checkbox, gutter_checkbox};
 pub use confirm::{Confirm, confirm, confirm_with};
 pub(crate) use focus::focus_input;
 pub use lfs::{install_hint, lfs_badge, lfs_card};

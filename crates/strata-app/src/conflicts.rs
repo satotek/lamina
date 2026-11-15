@@ -36,6 +36,7 @@ use gpui_component::input::{
     RangeDecorationCollection, RangeDecorationStyle,
 };
 use gpui_component::menu::PopupMenuItem;
+use gpui_component::tooltip::Tooltip;
 use gpui_kit_assets::IconName;
 use strata_core::encoding::TextEncoding;
 use strata_core::highlight::{Highlighter, LineHighlights, language_for_path};
@@ -52,7 +53,7 @@ use crate::merge_editor::{Choice as MergeChoice, LineMark, MergeModel, MergeRow,
 use crate::repo_view::RepoView;
 use crate::scrollbar::WithScrollbar as _;
 use crate::settings::Settings;
-use crate::style::{self, Design};
+use crate::style::{self, Design, LANES};
 
 actions!(
     strata_conflicts,
@@ -949,6 +950,14 @@ fn mark_colors(mark: LineMark, colors: &Colors) -> (Hsla, Hsla) {
     match mark {
         LineMark::Side(Side::A) => (colors.side_a_soft, colors.side_a),
         LineMark::Side(Side::B) => (colors.side_b_soft, colors.side_b),
+        // A change git merged on its own keeps its side's hue at a low alpha,
+        // so it reads as context next to the stronger hand-picked fills.
+        LineMark::AutoMerged(Side::A) => {
+            (colors.side_a_soft.opacity(0.45), colors.side_a.opacity(0.5))
+        }
+        LineMark::AutoMerged(Side::B) => {
+            (colors.side_b_soft.opacity(0.45), colors.side_b.opacity(0.5))
+        }
         LineMark::Unresolved => (colors.warning_soft, colors.warning),
     }
 }
@@ -1408,6 +1417,70 @@ impl RepoView {
         cx.notify();
     }
 
+    /// Takes one side of one hunk in a single click, the same result as ticking
+    /// that side's checkbox but without clearing an existing pick on a second
+    /// click.
+    pub(crate) fn take_conflict_side(
+        &mut self,
+        conflict: usize,
+        side: Side,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.worktree.conflicts.pending.is_some() {
+            return;
+        }
+        let changed = {
+            let Some(editor) = self
+                .worktree
+                .conflicts
+                .loaded
+                .as_mut()
+                .and_then(|loaded| loaded.editor.as_mut())
+            else {
+                return;
+            };
+            editor.model.take(conflict, side);
+            set_editor_text(editor, window, cx);
+            true
+        };
+        if changed {
+            self.worktree.conflicts.marker_warning = None;
+            self.notify_if_active(cx);
+        }
+    }
+
+    /// Applies a choice to one hunk, for the take button's both-sides entry.
+    pub(crate) fn take_conflict_both(
+        &mut self,
+        conflict: usize,
+        choice: MergeChoice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.worktree.conflicts.pending.is_some() {
+            return;
+        }
+        let changed = {
+            let Some(editor) = self
+                .worktree
+                .conflicts
+                .loaded
+                .as_mut()
+                .and_then(|loaded| loaded.editor.as_mut())
+            else {
+                return;
+            };
+            editor.model.apply_at(conflict, choice);
+            set_editor_text(editor, window, cx);
+            true
+        };
+        if changed {
+            self.worktree.conflicts.marker_warning = None;
+            self.notify_if_active(cx);
+        }
+    }
+
     pub(crate) fn open_merge_tool(&mut self, cx: &mut Context<Self>) {
         if self.worktree.conflicts.pending.is_some() {
             return;
@@ -1459,6 +1532,9 @@ struct Colors {
     /// The stronger tint of the selected conflict on each side.
     side_a_selected: Hsla,
     side_b_selected: Hsla,
+    /// One distinct colour per conflict index, for the matching left rules
+    /// that tie a hunk in the side panes to its counterpart in the result.
+    lanes: [Hsla; LANES],
     /// The diff palette, so conflict lines use the same add/remove tinting and
     /// syntax colours as the diff panes.
     diff: DiffColors,
@@ -1482,6 +1558,7 @@ impl Colors {
             side_b: design.add_text,
             side_b_soft: design.add_background,
             side_b_selected: design.diff_added_word,
+            lanes: design.lane,
             diff: DiffColors::from_design(&design),
             design,
         }
@@ -1503,6 +1580,13 @@ impl Colors {
             (Side::B, true) => self.side_b_selected,
             (Side::B, false) => self.side_b_soft,
         }
+    }
+
+    /// The left rule of one conflict. The graph lane palette already carries
+    /// distinct hues that work in both themes, so neighbouring hunks never
+    /// share one and the rule stays cheap to paint.
+    fn conflict_rule(&self, conflict: usize) -> Hsla {
+        self.lanes[conflict % LANES]
     }
 }
 
@@ -2232,6 +2316,15 @@ fn side_panes(
                     } else {
                         None
                     };
+                    // A matching rule on both panes ties a hunk together: the
+                    // result pane is a separate view, so a painted band between
+                    // them would have to sync two scroll offsets to stay right.
+                    let rule = row.conflict.map(|conflict| {
+                        (
+                            row_colors.conflict_rule(conflict),
+                            row.conflict == Some(selected),
+                        )
+                    });
                     let mut element = div()
                         .id(("conflict-merge-row", index))
                         .flex()
@@ -2247,18 +2340,30 @@ fn side_panes(
                             click.update(cx, |this, cx| this.select_conflict(conflict, cx));
                         });
                     }
-                    if row.conflict == Some(selected) {
-                        element = element.border_l_2().border_color(row_colors.side_a);
-                    }
 
                     let checkbox = |side: Side| {
                         row.conflict.map(|conflict| {
                             let ticked = ticks.get(conflict).copied().unwrap_or_default();
-                            tick_box(&row_entity, conflict, side, ticked, first_row)
+                            tick_box(
+                                &row_entity,
+                                conflict,
+                                side,
+                                ticked,
+                                first_row,
+                                row_colors.side(side),
+                                &row_colors.design,
+                            )
                         })
+                    };
+                    let actions = |side: Side| {
+                        row.conflict
+                            .filter(|_| first_row)
+                            .map(|conflict| take_actions(&row_entity, conflict, side, &row_colors))
                     };
                     let a_box = checkbox(Side::A);
                     let b_box = checkbox(Side::B);
+                    let a_actions = actions(Side::A);
+                    let b_actions = actions(Side::B);
                     element = element.child(side_cell(
                         row.ours,
                         &ours_lines,
@@ -2269,6 +2374,8 @@ fn side_panes(
                         Separator::Right,
                         &row_colors.design,
                         a_box,
+                        rule,
+                        a_actions,
                     ));
                     if show_base {
                         element = element.child(side_cell(
@@ -2280,6 +2387,8 @@ fn side_panes(
                             &row_style,
                             Separator::Right,
                             &row_colors.design,
+                            None,
+                            None,
                             None,
                         ));
                     }
@@ -2294,6 +2403,8 @@ fn side_panes(
                             Separator::None,
                             &row_colors.design,
                             b_box,
+                            rule,
+                            b_actions,
                         ))
                         .into_any_element()
                 })
@@ -2443,12 +2554,15 @@ fn pane_header(
 
 /// The gutter checkbox for one conflict. Only the first row of a conflict
 /// carries one; the rest of the block leaves the gutter empty.
+#[allow(clippy::too_many_arguments)]
 fn tick_box(
     entity: &Entity<RepoView>,
     conflict: usize,
     side: Side,
     ticked: Ticked,
     visible: bool,
+    color: Hsla,
+    design: &Design,
 ) -> AnyElement {
     let mut gutter = div()
         .flex_none()
@@ -2460,20 +2574,85 @@ fn tick_box(
     if visible {
         let entity = entity.clone();
         let tooltip = format!("{} · {}", side.letter(), t!("conflict.tick_side"));
-        gutter = gutter.child(
-            crate::ui::checkbox(
-                ("conflict-tick", conflict * 2 + usize::from(side == Side::B)),
-                ticked.has(side),
-            )
-            .tooltip(tooltip)
-            .on_click(move |_, window, cx| {
+        gutter = gutter.child(crate::ui::gutter_checkbox(
+            ("conflict-tick", conflict * 2 + usize::from(side == Side::B)),
+            ticked.has(side),
+            color,
+            design,
+            tooltip,
+            move |_, window, cx| {
                 entity.update(cx, |this, cx| {
                     this.toggle_conflict_side(conflict, side, window, cx)
                 });
-            }),
-        );
+            },
+        ));
     }
     gutter.into_any_element()
+}
+
+/// The one-click actions on a conflict block's first row.
+///
+/// The take button applies that side to the result; the small menu next to it
+/// offers both sides at once, where there is room for a second control.
+fn take_actions(
+    entity: &Entity<RepoView>,
+    conflict: usize,
+    side: Side,
+    colors: &Colors,
+) -> AnyElement {
+    let take_entity = entity.clone();
+    let take = crate::ui::button(
+        ("conflict-take", conflict * 2 + usize::from(side == Side::B)),
+        t!("conflict.take_side").to_string(),
+    )
+    .icon(IconName::ArrowLeft)
+    .size(crate::ui::ButtonSize::Tiny)
+    .ghost()
+    .tooltip(format!(
+        "{} · {}",
+        side.letter(),
+        t!("conflict.take_side_tooltip")
+    ))
+    .on_click(move |_, window, cx| {
+        take_entity.update(cx, |this, cx| {
+            this.take_conflict_side(conflict, side, window, cx)
+        });
+    });
+
+    let mut row = div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap_0p5()
+        .child(take);
+    if side == Side::A {
+        let both_entity = entity.clone();
+        row = row.child(crate::ui::context_menu(
+            ("conflict-take-menu", conflict),
+            &colors.design,
+            crate::ui::icon_button(("conflict-take-menu-trigger", conflict), IconName::Ellipsis)
+                .size(crate::ui::ButtonSize::Tiny)
+                .ghost()
+                .tooltip(t!("conflict.take_both_menu").to_string()),
+            move |menu, _, _| {
+                let entity = both_entity.clone();
+                let both = PopupMenuItem::new(t!("conflict.take_both").to_string()).on_click(
+                    move |_, window, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.take_conflict_both(
+                                conflict,
+                                MergeChoice::OursThenTheirs,
+                                window,
+                                cx,
+                            )
+                        });
+                    },
+                );
+                menu.item(both)
+            },
+        ));
+    }
+    row.into_any_element()
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -2494,6 +2673,8 @@ fn side_cell(
     separator: Separator,
     design: &Design,
     gutter: Option<AnyElement>,
+    rule: Option<(Hsla, bool)>,
+    actions: Option<AnyElement>,
 ) -> AnyElement {
     let cell = div()
         .flex()
@@ -2504,6 +2685,12 @@ fn side_cell(
         .h_full()
         .overflow_hidden()
         .when_some(tint, |cell, tint| cell.bg(tint))
+        .when_some(rule, |cell, (color, selected)| {
+            // The selected conflict keeps its rule at full strength; the others
+            // stay visible but step back.
+            cell.border_l_2()
+                .border_color(color.opacity(if selected { 1.0 } else { 0.55 }))
+        })
         .when(separator == Separator::Right, |cell| {
             cell.border_r_1().border_color(design.border)
         });
@@ -2511,7 +2698,7 @@ fn side_cell(
         Some(gutter) => cell.child(gutter),
         None => cell,
     };
-    match line {
+    let cell = match line {
         Some(number) => {
             let text = lines
                 .get(number as usize - 1)
@@ -2545,8 +2732,25 @@ fn side_cell(
                 .text_color(diff.gutter)
                 .child(""),
         ),
+    };
+    match actions {
+        Some(actions) => cell
+            .relative()
+            .child(
+                div()
+                    .absolute()
+                    .right_1()
+                    .top_0()
+                    .bottom_0()
+                    .flex()
+                    .items_center()
+                    .rounded(px(3.0))
+                    .bg(design.background)
+                    .child(actions),
+            )
+            .into_any_element(),
+        None => cell.into_any_element(),
     }
-    .into_any_element()
 }
 
 /// The editable result under the side panes.
@@ -2577,6 +2781,32 @@ fn result_pane(editor: &MergeEditor, colors: &Colors, style: &DiffStyle, busy: b
         div()
             .text_size(px(9.0))
             .child(t!("conflict.unresolved").to_string()),
+    );
+    // The faint fill on a change git merged by itself needs a name of its own;
+    // the chip carries the tooltip that explains the tint.
+    legend = legend.child(
+        div()
+            .id("conflict-auto-merged")
+            .flex()
+            .items_center()
+            .gap_1()
+            .px_1()
+            .rounded(px(3.0))
+            .bg(colors.side_a_soft.opacity(0.45))
+            .child(
+                div()
+                    .size(px(7.0))
+                    .rounded_full()
+                    .bg(colors.side_a.opacity(0.5)),
+            )
+            .child(
+                div()
+                    .text_size(px(9.0))
+                    .child(t!("conflict.auto_merged_legend").to_string()),
+            )
+            .tooltip(move |window, cx| {
+                Tooltip::new(t!("conflict.auto_merged").to_string()).build(window, cx)
+            }),
     );
 
     div()
