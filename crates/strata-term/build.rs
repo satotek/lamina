@@ -143,8 +143,17 @@ fn main() {
     cmd.current_dir(&source_dir)
         .env("ZIG_GLOBAL_CACHE_DIR", &zig_global_cache)
         .env("ZIG_LOCAL_CACHE_DIR", &zig_local_cache)
+        // The extracted tarball has no `.git`, so without a ceiling git walks up
+        // into whatever repository holds the target directory (Strata's own).
+        // A tag there, such as a release tag on CI, makes the version check in
+        // libghostty's build.zig panic because it does not match 1.0.1.
+        .env(
+            "GIT_CEILING_DIRECTORIES",
+            source_dir.parent().unwrap_or(&source_dir),
+        )
         .arg("build")
         .arg("-Demit-lib-vt")
+        .arg(format!("-Dlib-version-string={LIBGHOSTTY_VT_VERSION}"))
         .arg("--prefix")
         .arg(&prefix_dir)
         .arg("--system")
