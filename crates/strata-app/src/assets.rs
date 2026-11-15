@@ -12,13 +12,16 @@ gpui_kit_assets::icon_assets!(
     ExtraIcons,
     [
         ClockArrowDown,
+        FileSearch,
         Keyboard,
         ListChecks,
+        Regex,
         Shield,
         ShieldAlert,
         ShieldCheck,
         ShieldQuestionMark,
         ShieldX,
+        Unlink,
         X
     ]
 );

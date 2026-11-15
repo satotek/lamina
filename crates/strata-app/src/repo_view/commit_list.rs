@@ -13,6 +13,7 @@ use gpui::{
 };
 use gpui_component::Sizable as _;
 use gpui_component::input::Input;
+use gpui_kit_assets::IconName;
 use strata_core::{Oid, RefKind};
 
 use super::history_ops::{self, CommitTarget};
@@ -374,7 +375,7 @@ impl RepoView {
             .child(div().w(px(1.0)).h(px(14.0)).mx_0p5().bg(design.border))
             .child(search_mode_chip(
                 "content",
-                t!("history.search.content"),
+                IconName::FileSearch,
                 SearchMode::Content,
                 mode,
                 t!("history.search.content_tooltip"),
@@ -382,7 +383,7 @@ impl RepoView {
             ))
             .child(search_mode_chip(
                 "content-regex",
-                t!("history.search.regex"),
+                IconName::Regex,
                 SearchMode::ContentRegex,
                 mode,
                 t!("history.search.regex_tooltip"),
@@ -740,20 +741,15 @@ fn search_chip(
 /// Content / regex-content search mode toggle above the commit list.
 fn search_mode_chip(
     id: &'static str,
-    label: impl Into<gpui::SharedString>,
+    icon: IconName,
     target: SearchMode,
     current: SearchMode,
     tooltip: impl Into<gpui::SharedString>,
     entity: gpui::Entity<RepoView>,
 ) -> AnyElement {
     let on = current == target;
-    crate::ui::button(format!("search-mode-{id}"), label)
+    crate::ui::icon_toggle(format!("search-mode-{id}"), icon, on)
         .size(crate::ui::ButtonSize::Tiny)
-        .kind(if on {
-            crate::ui::ButtonKind::Primary
-        } else {
-            crate::ui::ButtonKind::Ghost
-        })
         .tooltip(tooltip)
         .on_click(move |_event, _window, cx| {
             entity.update(cx, |this, cx| this.toggle_search_mode(target, cx));

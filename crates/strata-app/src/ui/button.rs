@@ -59,6 +59,8 @@ pub struct UiButton {
     disabled: bool,
     /// The button is selected in a set, as a toggle would be.
     selected: bool,
+    /// Accessible toggle state (`aria-pressed`), for buttons that stay latched.
+    toggled: bool,
     /// The button is the trigger of an open popover or menu, which the
     /// component paints like a selection.
     open: bool,
@@ -79,6 +81,18 @@ pub fn icon_button(id: impl Into<ElementId>, icon: impl Into<Icon>) -> UiButton 
     UiButton::new(id).icon(icon)
 }
 
+/// A square, icon-only toggle button. Active uses `Primary`, inactive uses `Ghost`.
+pub fn icon_toggle(id: impl Into<ElementId>, icon: impl Into<Icon>, active: bool) -> UiButton {
+    icon_button(id, icon)
+        .kind(if active {
+            ButtonKind::Primary
+        } else {
+            ButtonKind::Ghost
+        })
+        .selected(active)
+        .toggled(active)
+}
+
 /// A button a caller fills with its own content, for the few shapes that are
 /// more than an icon and a label (the title bar's icon-over-label actions).
 pub fn content_button(id: impl Into<ElementId>) -> UiButton {
@@ -95,6 +109,7 @@ impl UiButton {
             size: ButtonSize::default(),
             disabled: false,
             selected: false,
+            toggled: false,
             open: false,
             tooltip: None,
             focus: None,
@@ -136,6 +151,13 @@ impl UiButton {
 
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    /// Marks the button's accessible toggle state (`aria-pressed`) without
+    /// changing its colour role.
+    pub fn toggled(mut self, toggled: bool) -> Self {
+        self.toggled = toggled;
         self
     }
 
@@ -205,6 +227,7 @@ impl RenderOnce for UiButton {
             size,
             disabled,
             selected,
+            toggled,
             open,
             tooltip,
             focus,
@@ -237,6 +260,7 @@ impl RenderOnce for UiButton {
         }
         button = button.disabled(disabled);
         button = button.selected(selected);
+        button = button.toggled(toggled);
         button = button.open(open);
         if let Some(tooltip) = tooltip {
             button = button.tooltip(tooltip.clone());

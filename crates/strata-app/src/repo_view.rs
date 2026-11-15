@@ -3208,5 +3208,117 @@ mod tests {
             assert!(released_view.upgrade().is_none(), "RepoView leaked");
             assert!(released_panel.upgrade().is_none(), "TerminalPanel leaked");
         }
+
+        #[gpui::test]
+        fn terminal_button_toggles_embedded_panel_and_formats_live_shortcut(
+            cx: &mut gpui::TestAppContext,
+        ) {
+            use std::cell::RefCell;
+            use std::rc::Rc;
+
+            use gpui::{Bounds, MouseButton, ParentElement as _, Pixels, Styled as _, point};
+            use gpui_component::Root;
+
+            cx.update(prepare_app);
+            let repo = ScratchRepo::new();
+            let repo_work = repo.work();
+            let repo_view = cx.update(|cx| {
+                cx.open_window(Default::default(), |window, cx| {
+                    cx.new(|cx| RepoView::new(Launch::open_quiet(&repo_work, None), window, cx))
+                })
+                .expect("repo window")
+            });
+            let view = repo_view.root(cx).expect("the window's root view");
+            let mut rcx = VisualTestContext::from_window(repo_view.into(), cx);
+            rcx.update(|window, cx| {
+                view.update(cx, |v, _| v.quiet_terminal = true);
+                window.draw(cx).clear(cx);
+            });
+            rcx.run_until_parked();
+
+            // After RepoView has drawn once with its key context, the tooltip
+            // reflects the live ToggleTerminal keybinding.
+            let bound_tip = rcx.update(|window, cx| view.read(cx).terminal_toggle_tooltip(window));
+            assert!(
+                bound_tip.starts_with("Toggle terminal panel (") && bound_tip.ends_with(')'),
+                "expected bound shortcut in tooltip, got {bound_tip:?}"
+            );
+
+            // Clearing bindings falls back to the unbound label.
+            rcx.update(|window, cx| {
+                cx.clear_key_bindings();
+                let unbound_tip = view.read(cx).terminal_toggle_tooltip(window);
+                assert_eq!(unbound_tip, "Toggle terminal");
+            });
+
+            // Host the title bar's terminal_button directly in a test root to
+            // capture its bounds and click it with real pointer events.
+            struct ButtonProbe {
+                repo: Entity<RepoView>,
+                bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
+            }
+            impl gpui::Render for ButtonProbe {
+                fn render(
+                    &mut self,
+                    window: &mut gpui::Window,
+                    cx: &mut gpui::Context<Self>,
+                ) -> impl gpui::IntoElement {
+                    let bounds_slot = self.bounds.clone();
+                    let btn = self
+                        .repo
+                        .read(cx)
+                        .terminal_button(&crate::style::Design::default(), window);
+                    gpui::div().size_full().child(
+                        gpui::div().flex().child(btn).on_children_prepainted(
+                            move |children, _, _| {
+                                *bounds_slot.borrow_mut() = children.first().copied();
+                            },
+                        ),
+                    )
+                }
+            }
+
+            let button_bounds: Rc<RefCell<Option<Bounds<Pixels>>>> = Rc::new(RefCell::new(None));
+            let probe_bounds = button_bounds.clone();
+            let probe_repo = view.clone();
+            let probe_win = rcx.update(|_, cx| {
+                cx.open_window(Default::default(), |window, cx| {
+                    let probe = cx.new(|_| ButtonProbe {
+                        repo: probe_repo,
+                        bounds: probe_bounds,
+                    });
+                    cx.new(|cx| Root::new(probe, window, cx))
+                })
+                .expect("probe window")
+            });
+            let mut pcx = VisualTestContext::from_window(probe_win.into(), cx);
+            pcx.update(|window, cx| window.draw(cx).clear(cx));
+
+            let bounds = button_bounds
+                .borrow()
+                .expect("terminal button bounds recorded");
+            let center = point(
+                bounds.origin.x + bounds.size.width / 2.0,
+                bounds.origin.y + bounds.size.height / 2.0,
+            );
+            assert!(!view.read_with(&pcx, |v, _| v.terminal_open));
+
+            pcx.simulate_mouse_move(center, None, Default::default());
+            pcx.simulate_mouse_down(center, MouseButton::Left, Default::default());
+            pcx.simulate_mouse_up(center, MouseButton::Left, Default::default());
+            pcx.run_until_parked();
+            assert!(
+                view.read_with(&pcx, |v, _| v.terminal_open),
+                "clicking the title bar terminal button must open the embedded terminal"
+            );
+
+            pcx.simulate_mouse_down(center, MouseButton::Left, Default::default());
+            pcx.simulate_mouse_up(center, MouseButton::Left, Default::default());
+            pcx.run_until_parked();
+            assert!(
+                !view.read_with(&pcx, |v, _| v.terminal_open),
+                "clicking the title bar terminal button again must close the embedded terminal"
+            );
+        }
     }
 }

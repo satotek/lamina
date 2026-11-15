@@ -27,12 +27,13 @@ use gpui::{
     uniform_list,
 };
 use gpui_component::{
-    Icon,
+    Icon, Sizable as _,
     checkbox::Checkbox,
     input::{Input, InputState},
     menu::{PopupMenu, PopupMenuItem},
     tooltip::Tooltip,
 };
+use gpui_kit_assets::IconName;
 use strata_core::repo::{SubmoduleInfo, SubmoduleStatus, WorktreeInfo};
 use strata_core::session::{HistoryScope, Operation, OperationId, RemoteBranch};
 use strata_core::{HeadInfo, RefInfo, RefKind, RemoteInfo, UpstreamInfo};
@@ -296,9 +297,11 @@ enum SidebarItem {
         name: String,
         /// Position in the section's natural order, for the element id.
         index: usize,
-        /// `↑2 ↓1`, `?`, `gone`, or nothing when level with the upstream.
+        /// `↑2 ↓1`, `?`, or nothing when level with or missing the upstream.
         upstream: Option<String>,
-        /// Why the label is `?`, for the label's tooltip.
+        /// Whether the tracked upstream branch was deleted on the remote.
+        upstream_gone: bool,
+        /// Why the upstream shows a marker, for its tooltip.
         upstream_note: Option<String>,
     },
     RemoteBranch {
@@ -939,6 +942,7 @@ impl Branches {
                             name: name.to_owned(),
                             index,
                             upstream: upstream.and_then(upstream_label),
+                            upstream_gone: upstream.is_some_and(|info| info.gone),
                             upstream_note: upstream.and_then(upstream_note),
                         });
                     }
@@ -1576,12 +1580,14 @@ fn item_element(
             name,
             index,
             upstream,
+            upstream_gone,
             upstream_note,
         } => local_row(
             name,
             *index,
             head == Some(name.as_str()),
             upstream.as_deref(),
+            *upstream_gone,
             upstream_note.clone(),
             pull_requests.get(name),
             pull_requests.note(),
@@ -1703,6 +1709,7 @@ fn section_header(
             // A list item is only as tall as the heading measured, so every
             // section heading must match a row's height.
             .h(px(ITEM_HEIGHT))
+            .pr(px(18.0))
             .on_click(move |_, cx| {
                 click_entity.update(cx, |view, cx| {
                     view.branches.toggle(index);
@@ -1971,6 +1978,7 @@ fn local_row(
     index: usize,
     active: bool,
     upstream: Option<&str>,
+    upstream_gone: bool,
     upstream_note: Option<String>,
     pull_request: Option<&strata_core::forge::PullRequestSummary>,
     pull_request_note: Option<&str>,
@@ -1988,7 +1996,23 @@ fn local_row(
         colors,
     )
     .cursor_pointer();
-    if let Some(label) = upstream {
+    if upstream_gone {
+        let mut marker = div()
+            .id(("local-branch-upstream-gone", index))
+            .flex_none()
+            .flex()
+            .items_center()
+            .child(
+                Icon::new(IconName::Unlink)
+                    .with_size(px(12.0))
+                    .text_color(colors.design.tag_text),
+            );
+        if let Some(note) = upstream_note.clone() {
+            marker =
+                marker.row_tooltip(move |window, cx| Tooltip::new(note.clone()).build(window, cx));
+        }
+        row = row.child(marker);
+    } else if let Some(label) = upstream {
         let mut label = div()
             .id(("local-branch-upstream", index))
             .flex_none()
@@ -2520,7 +2544,10 @@ fn submodule_row(
     )
     .h(px(ITEM_HEIGHT))
     .w_full()
+    .min_w_0()
+    .overflow_hidden()
     .mx(px(0.0))
+    .pr(px(18.0))
     .rounded(px(7.0))
     .text_size(px(colors.design.small()))
     .text_color(colors.sidebar_foreground)
@@ -2705,7 +2732,10 @@ fn worktree_row(
     )
     .h(px(ITEM_HEIGHT))
     .w_full()
+    .min_w_0()
+    .overflow_hidden()
     .mx(px(0.0))
+    .pr(px(18.0))
     .rounded(px(7.0))
     .text_size(px(colors.design.small()))
     .text_color(colors.sidebar_foreground)
@@ -3304,12 +3334,17 @@ fn row_with_icon(
         // A list item is laid out at its content width unless it is told to
         // fill, which would leave most of the row outside its hitbox.
         .w_full()
+        .min_w_0()
+        .overflow_hidden()
         .mx(px(0.0))
+        // Leave room on the right so trailing labels stay clear of the
+        // overlay vertical scrollbar.
+        .pr(px(18.0))
         .rounded(px(7.0))
         .text_size(px(colors.design.small()))
         .text_color(colors.sidebar_foreground);
     let row = match item_icon {
-        Some(item_icon) => row.child(glyph(item_icon, 14.0, colors.muted_foreground)),
+        Some(item_icon) => row.child(glyph(item_icon, 14.0, colors.muted_foreground).flex_none()),
         None => row,
     };
     row.child(div().flex_1().min_w_0().truncate().child(name.to_owned()))
@@ -4107,10 +4142,10 @@ pub(crate) fn validate_remote_url(url: &str) -> Result<&str, String> {
 }
 
 /// The sidebar label for a branch's upstream: `↑2 ↓1`, `↑3`, `↓1`, `?`,
-/// `gone`, or nothing when the branch is level with its upstream.
+/// or nothing when the branch is level with or missing its upstream.
 pub(crate) fn upstream_label(upstream: &UpstreamInfo) -> Option<String> {
     if upstream.gone {
-        return Some(t!("branch.upstream.gone").to_string().to_owned());
+        return None;
     }
     let (Some(ahead), Some(behind)) = (upstream.ahead, upstream.behind) else {
         return Some("?".to_owned());
@@ -4128,9 +4163,12 @@ pub(crate) fn upstream_label(upstream: &UpstreamInfo) -> Option<String> {
     (!label.is_empty()).then_some(label)
 }
 
-/// Why an upstream label is `?`, when it is.
+/// Why an upstream shows a marker, when it is `?` or gone.
 pub(crate) fn upstream_note(upstream: &UpstreamInfo) -> Option<String> {
-    (!upstream.gone && (upstream.ahead.is_none() || upstream.behind.is_none()))
+    if upstream.gone {
+        return Some(t!("branch.upstream.gone_tooltip").to_string());
+    }
+    (upstream.ahead.is_none() || upstream.behind.is_none())
         .then(|| t!("branch.upstream.shallow").to_string())
 }
 
@@ -4257,9 +4295,9 @@ mod tests {
             "a branch level with its upstream needs no label"
         );
         assert_eq!(
-            upstream_label(&upstream("origin/gone", 0, 0, true)).as_deref(),
-            Some("gone"),
-            "a deleted upstream is more important than the counts"
+            upstream_label(&upstream("origin/gone", 0, 0, true)),
+            None,
+            "a deleted upstream renders an icon rather than a text label"
         );
     }
 
@@ -4277,9 +4315,9 @@ mod tests {
             "a known count needs no explanation"
         );
         assert_eq!(
-            upstream_note(&upstream("origin/gone", 0, 0, true)),
-            None,
-            "a gone upstream says so instead of showing counts"
+            upstream_note(&upstream("origin/gone", 0, 0, true)).as_deref(),
+            Some("The upstream branch was deleted on the remote"),
+            "a gone upstream carries its explanation in its tooltip"
         );
     }
 
@@ -4868,6 +4906,7 @@ mod tests {
         let branches = Branches::default();
         let mut upstreams = HashMap::new();
         upstreams.insert("main".to_owned(), upstream("origin/main", 2, 1, false));
+        upstreams.insert("topic".to_owned(), upstream("origin/topic", 0, 0, true));
 
         let items = flatten_with(
             &branches,
@@ -4888,13 +4927,15 @@ mod tests {
                     name: "main".into(),
                     index: 0,
                     upstream: Some("↑2 ↓1".into()),
+                    upstream_gone: false,
                     upstream_note: None,
                 },
                 SidebarItem::LocalBranch {
                     name: "topic".into(),
                     index: 1,
                     upstream: None,
-                    upstream_note: None,
+                    upstream_gone: true,
+                    upstream_note: Some("The upstream branch was deleted on the remote".into()),
                 },
                 SidebarItem::SectionHeader {
                     section: Section::Remote,
@@ -5599,5 +5640,210 @@ mod tests {
         branches.reveal_stash(0);
         assert_eq!(branches.selected_extra(), None);
         assert!(branches.reveal.is_stash(0));
+    }
+
+    #[gpui::test]
+    fn narrow_sidebar_rows_truncate_and_keep_trailing_markers_clear_of_scrollbar(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::cell::RefCell;
+
+        use gpui::{Bounds, VisualTestContext};
+        use gpui_component::Root;
+        use strata_core::forge::{
+            ChecksState, PullRequestChecks, PullRequestState, PullRequestSummary, ReviewState,
+        };
+
+        use crate::Launch;
+
+        fn test_colors() -> Colors {
+            let design = Design::default();
+            Colors {
+                sidebar_foreground: design.text,
+                muted_foreground: design.muted,
+                border: design.border,
+                foreground: design.text,
+                danger: design.remove_text,
+                overlay: design.panel,
+                design,
+            }
+        }
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = temp.path().join("gitconfig");
+        std::fs::write(&config, "").expect("write gitconfig");
+        let dir = temp.path().join("repo");
+        std::fs::create_dir_all(&dir).expect("repo dir");
+        let init = std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&dir)
+            .env("GIT_CONFIG_GLOBAL", &config)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .expect("git init");
+        assert!(init.status.success());
+
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            gpui_component::init(cx);
+            cx.set_global(crate::settings::Settings::default());
+            crate::actions::bind(cx);
+        });
+
+        let repo_win = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), |window, cx| {
+                    cx.new(|cx| RepoView::new(Launch::open_quiet(&dir, None), window, cx))
+                })
+            })
+            .expect("repo window");
+        let repo_view = repo_win.root(cx).expect("repo root");
+
+        let long_branch = "feature/very-long-branch-name-that-must-ellipsize-in-the-narrow-sidebar";
+        let pr = PullRequestSummary {
+            number: 42,
+            title: "Long PR".into(),
+            state: PullRequestState::Open,
+            head_branch: long_branch.into(),
+            head_owner: None,
+            base: "main".into(),
+            url: "https://example.invalid/pr/42".into(),
+            review: ReviewState::Approved,
+            checks: PullRequestChecks {
+                state: ChecksState::Passing,
+                passing: 1,
+                failing: 0,
+                pending: 0,
+            },
+            updated_at: "2026-01-01T00:00:00Z".into(),
+        };
+
+        struct Probe {
+            repo: Entity<RepoView>,
+            pr: PullRequestSummary,
+            row_bounds: Rc<RefCell<Vec<Bounds<Pixels>>>>,
+        }
+        impl gpui::Render for Probe {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut gpui::Context<Self>,
+            ) -> impl IntoElement {
+                let colors = test_colors();
+                let slot = self.row_bounds.clone();
+                let list_width = px(152.0);
+                div()
+                    .w(list_width)
+                    .h(px(200.0))
+                    .flex()
+                    .flex_col()
+                    .child(local_row(
+                        "feature/extremely-long-branch-with-ahead-behind-counters-and-pr",
+                        0,
+                        false,
+                        Some("↑2 ↓1"),
+                        false,
+                        None,
+                        Some(&self.pr),
+                        None,
+                        false,
+                        true,
+                        false,
+                        &colors,
+                        self.repo.clone(),
+                    ))
+                    .child(local_row(
+                        "feature/extremely-long-branch-with-deleted-upstream-and-pr",
+                        1,
+                        false,
+                        None,
+                        true,
+                        Some("The upstream branch was deleted on the remote".to_owned()),
+                        Some(&self.pr),
+                        None,
+                        false,
+                        true,
+                        false,
+                        &colors,
+                        self.repo.clone(),
+                    ))
+                    .child(local_row(
+                        "feature/extremely-long-branch-with-shallow-question-mark-and-pr",
+                        2,
+                        false,
+                        Some("?"),
+                        false,
+                        Some("Counts unavailable: history is shallow".to_owned()),
+                        Some(&self.pr),
+                        None,
+                        false,
+                        true,
+                        false,
+                        &colors,
+                        self.repo.clone(),
+                    ))
+                    .on_children_prepainted(move |children, _, _| {
+                        *slot.borrow_mut() = children;
+                    })
+            }
+        }
+
+        let row_bounds: Rc<RefCell<Vec<Bounds<Pixels>>>> = Rc::new(RefCell::new(Vec::new()));
+        let probe_bounds = row_bounds.clone();
+        let probe_repo = repo_view.clone();
+        let probe_win = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), |window, cx| {
+                    let probe = cx.new(|_| Probe {
+                        repo: probe_repo,
+                        pr,
+                        row_bounds: probe_bounds,
+                    });
+                    cx.new(|cx| Root::new(probe, window, cx))
+                })
+            })
+            .expect("probe window");
+        let mut vcx = VisualTestContext::from_window(probe_win.into(), cx);
+        vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+
+        let rows = row_bounds.borrow();
+        assert_eq!(rows.len(), 3);
+        for (i, bounds) in rows.iter().enumerate() {
+            assert!(
+                bounds.size.width <= px(152.5),
+                "row {i} expanded past narrow sidebar width: {:?}",
+                bounds.size.width
+            );
+        }
+
+        // The PR badge sits at the far right of each row (after the upstream
+        // count / `?` / unlink icon) and paints an accent-soft pill quad.
+        // Checking every painted pill quad guarantees both the upstream marker
+        // and the PR badge stay inside the row and clear of the 16 px overlay
+        // vertical scrollbar.
+        let badge_bg: gpui::Background = test_colors().design.accent_soft.into();
+        vcx.update(|window, _| {
+            let scale = window.scale_factor();
+            let badge_quads: Vec<_> = window
+                .painted_quads()
+                .into_iter()
+                .filter(|quad| quad.background == badge_bg)
+                .collect();
+            assert_eq!(
+                badge_quads.len(),
+                3,
+                "all three trailing PR badges (and the upstream markers before them) must remain visible"
+            );
+            for (i, quad) in badge_quads.iter().enumerate() {
+                let row_right = rows[i].right();
+                let badge_right = px(quad.bounds.right().as_f32() / scale);
+                assert!(
+                    badge_right <= row_right - px(16.0),
+                    "row {i} trailing content ({badge_right:?}) overlapped the 16px scrollbar zone (row right {row_right:?})"
+                );
+            }
+        });
     }
 }

@@ -308,6 +308,11 @@ pub(crate) fn sidebar_row(
         &colors.design,
     )
     .h(px(28.0))
+    .w_full()
+    .min_w_0()
+    .overflow_hidden()
+    .mx(px(0.0))
+    .pr(px(18.0))
     .rounded(px(7.0))
     .text_size(px(colors.design.small()))
     .text_color(colors.sidebar_foreground)

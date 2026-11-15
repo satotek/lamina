@@ -13,8 +13,9 @@ use strata_core::{ChangeKind, RefKind};
 
 use super::{
     BadgeTone, BannerKind, ButtonKind, ButtonSize, Confirm, RowState, banner, button, change_badge,
-    content_button, count_pill, empty_state, icon_button, kbd, list_row, message, rail, rail_item,
-    ref_badge, section_header, status_badge, swatch_label, swatch_strip, tab, tab_strip,
+    content_button, count_pill, empty_state, icon_button, icon_toggle, kbd, list_row, message,
+    rail, rail_item, ref_badge, section_header, status_badge, swatch_label, swatch_strip, tab,
+    tab_strip,
 };
 use crate::settings::Settings;
 use crate::style::{self, Design};
@@ -111,6 +112,24 @@ impl Render for Gallery {
                             icon_button("gallery-icon-danger", gpui_kit_assets::IconName::Delete)
                                 .danger()
                                 .tooltip("Icon only, danger"),
+                        )
+                        .child(
+                            icon_toggle(
+                                "gallery-icon-toggle-off",
+                                gpui_kit_assets::IconName::FileSearch,
+                                false,
+                            )
+                            .size(ButtonSize::Tiny)
+                            .tooltip("Icon toggle (inactive)"),
+                        )
+                        .child(
+                            icon_toggle(
+                                "gallery-icon-toggle-on",
+                                gpui_kit_assets::IconName::Regex,
+                                true,
+                            )
+                            .size(ButtonSize::Tiny)
+                            .tooltip("Icon toggle (active)"),
                         )
                         .child(
                             content_button("gallery-content").ghost().child(

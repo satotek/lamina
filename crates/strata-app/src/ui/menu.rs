@@ -95,6 +95,7 @@ where
     div()
         .id(id)
         .flex_none()
+        .min_w_0()
         .font_family(design.ui_font_family.clone())
         .font_weight(FontWeight::NORMAL)
         .text_color(design.text)

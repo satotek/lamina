@@ -37,7 +37,9 @@ pub use badge::{
     BadgeTone, avatar, change_badge, check_dot, count_pill, kbd, ref_badge, status_badge,
 };
 pub use banner::{BannerKind, banner};
-pub use button::{ButtonKind, ButtonSize, UiButton, button, content_button, icon_button};
+pub use button::{
+    ButtonKind, ButtonSize, UiButton, button, content_button, icon_button, icon_toggle,
+};
 pub use checkbox::checkbox;
 pub use confirm::{Confirm, confirm, confirm_with};
 pub(crate) use focus::focus_input;

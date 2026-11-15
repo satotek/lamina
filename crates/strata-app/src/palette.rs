@@ -451,7 +451,7 @@ fn holds(available: &[Box<dyn Action>], action: &dyn Action) -> bool {
 }
 
 /// The key that runs `action`, as the platform spells shortcuts.
-fn shortcut(binding: &KeyBinding, os: OperatingSystem) -> String {
+pub(crate) fn shortcut(binding: &KeyBinding, os: OperatingSystem) -> String {
     binding
         .keystrokes()
         .iter()

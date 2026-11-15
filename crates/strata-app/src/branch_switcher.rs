@@ -72,9 +72,11 @@ pub(crate) struct LocalBranch {
     pub(crate) name: String,
     /// The branch HEAD is on. It is marked and selecting it is a no-op.
     pub(crate) current: bool,
-    /// `↑2 ↓1`, `?`, `gone`, or nothing when level with the upstream.
+    /// `↑2 ↓1`, `?`, or nothing when level with or missing the upstream.
     pub(crate) upstream: Option<String>,
-    /// Why the label is `?`, for its tooltip.
+    /// Whether the tracked upstream branch was deleted on the remote.
+    pub(crate) upstream_gone: bool,
+    /// Why the upstream shows a marker, for its tooltip.
     pub(crate) upstream_note: Option<String>,
 }
 
@@ -113,6 +115,7 @@ pub(crate) fn choices(
                 name: name.clone(),
                 current: head == Some(name.as_str()),
                 upstream: upstream.and_then(crate::branches::upstream_label),
+                upstream_gone: upstream.is_some_and(|info| info.gone),
                 upstream_note: upstream.and_then(crate::branches::upstream_note),
             }
         })
@@ -687,7 +690,23 @@ fn local_row(
             .child(branch.name.clone()),
     );
 
-    if let Some(upstream) = &branch.upstream {
+    if branch.upstream_gone {
+        let mut marker = div()
+            .id(("branch-switcher-upstream-gone", index))
+            .flex_none()
+            .flex()
+            .items_center()
+            .child(
+                gpui_component::Icon::new(gpui_kit_assets::IconName::Unlink)
+                    .with_size(px(12.0))
+                    .text_color(design.tag_text),
+            );
+        if let Some(note) = branch.upstream_note.clone() {
+            marker =
+                marker.row_tooltip(move |window, cx| Tooltip::new(note.clone()).build(window, cx));
+        }
+        row = row.child(marker);
+    } else if let Some(upstream) = &branch.upstream {
         let mut label = div()
             .id(("branch-switcher-upstream", index))
             .flex_none()
@@ -837,12 +856,14 @@ mod tests {
                     name: "feature".to_owned(),
                     current: true,
                     upstream: None,
+                    upstream_gone: false,
                     upstream_note: None,
                 },
                 LocalBranch {
                     name: "main".to_owned(),
                     current: false,
                     upstream: Some("↑2 ↓1".to_owned()),
+                    upstream_gone: false,
                     upstream_note: None,
                 },
             ]
@@ -881,12 +902,14 @@ mod tests {
                     name: "main".to_owned(),
                     current: true,
                     upstream: None,
+                    upstream_gone: false,
                     upstream_note: None,
                 },
                 LocalBranch {
                     name: "topic".to_owned(),
                     current: false,
                     upstream: None,
+                    upstream_gone: false,
                     upstream_note: None,
                 },
             ],
@@ -922,12 +945,14 @@ mod tests {
                     name: "fix/login".to_owned(),
                     current: false,
                     upstream: None,
+                    upstream_gone: false,
                     upstream_note: None,
                 },
                 LocalBranch {
                     name: "main".to_owned(),
                     current: true,
                     upstream: None,
+                    upstream_gone: false,
                     upstream_note: None,
                 },
             ],
@@ -981,12 +1006,14 @@ mod tests {
                     name: "alpha".to_owned(),
                     current: false,
                     upstream: None,
+                    upstream_gone: false,
                     upstream_note: None,
                 },
                 LocalBranch {
                     name: "main".to_owned(),
                     current: true,
                     upstream: None,
+                    upstream_gone: false,
                     upstream_note: None,
                 },
             ],
@@ -1060,12 +1087,14 @@ mod tests {
                     name: "main".to_owned(),
                     current: true,
                     upstream: None,
+                    upstream_gone: false,
                     upstream_note: None,
                 },
                 LocalBranch {
                     name: "topic".to_owned(),
                     current: false,
                     upstream: Some("↑2".to_owned()),
+                    upstream_gone: false,
                     upstream_note: None,
                 },
             ],

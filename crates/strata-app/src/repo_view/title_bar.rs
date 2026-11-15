@@ -61,6 +61,7 @@ impl RepoView {
             .as_ref()
             .and_then(crate::branches::upstream_label)
             .unwrap_or_default();
+        let track_gone = upstream.as_ref().is_some_and(|info| info.gone);
         let track_note = upstream.as_ref().and_then(crate::branches::upstream_note);
         // The chip carries the current branch's pull request the same way the
         // sidebar row does, so the window's most prominent branch and the list
@@ -142,6 +143,9 @@ impl RepoView {
                         .text_size(px(design.ui))
                         .child(glyph(style::glyph::BRANCH, 14.0, design.text))
                         .child(div().max_w(px(fit.branch_width)).truncate().child(branch))
+                        .when(fit.track && track_gone, |content| {
+                            content.child(icon(IconName::Unlink, 12.0, design.tag_text))
+                        })
                         .when(fit.track && !track.is_empty(), |content| {
                             content.child(
                                 div()
@@ -212,7 +216,7 @@ impl RepoView {
                 search
                     .child(search_mode_button(
                         "title-search-content",
-                        t!("title_bar.search_content").to_string(),
+                        IconName::FileSearch,
                         t!("title_bar.search_content_tooltip").to_string(),
                         crate::search::SearchMode::Content,
                         mode == crate::search::SearchMode::Content,
@@ -220,7 +224,7 @@ impl RepoView {
                     ))
                     .child(search_mode_button(
                         "title-search-content-regex",
-                        t!("title_bar.search_regex").to_string(),
+                        IconName::Regex,
                         t!("title_bar.search_regex_tooltip").to_string(),
                         crate::search::SearchMode::ContentRegex,
                         mode == crate::search::SearchMode::ContentRegex,
@@ -257,11 +261,7 @@ impl RepoView {
             ))
             .child(stash_button(design, fit.stash_label))
             .child(separator)
-            .child(terminal_button(
-                self.entity.clone(),
-                self.work_dir().is_some(),
-                design,
-            ))
+            .child(self.terminal_button(design, window))
             .child(
                 crate::ui::icon_button("open-settings", IconName::Settings)
                     .ghost()
@@ -647,28 +647,70 @@ impl RepoView {
         self.status_error = Some(error);
         cx.notify();
     }
-}
+    #[cfg(feature = "terminal")]
+    pub(super) fn terminal_toggle_tooltip(&self, window: &Window) -> String {
+        let os = if cfg!(target_os = "macos") {
+            gpui::OperatingSystem::Mac
+        } else if cfg!(target_os = "windows") {
+            gpui::OperatingSystem::Windows
+        } else {
+            gpui::OperatingSystem::Linux
+        };
+        match window
+            .bindings_for_action_in(&actions::ToggleTerminal, &self.focus)
+            .last()
+        {
+            Some(binding) => t!(
+                "title_bar.toggle_terminal_tooltip",
+                shortcut = crate::palette::shortcut(binding, os)
+            )
+            .to_string(),
+            None => t!("action.toggle_terminal").to_string(),
+        }
+    }
 
-/// The title bar's terminal action: opens a terminal in the repository's
-/// working tree, using the command from the settings when one is set.
-fn terminal_button(
-    entity: gpui::WeakEntity<RepoView>,
-    enabled: bool,
-    design: &Design,
-) -> AnyElement {
-    crate::ui::icon_button("open-terminal", IconName::SquareTerminal)
-        .ghost()
-        .w(px(32.0))
-        .h(px(32.0))
-        .text_color(design.muted)
-        .tooltip(t!("action.open_terminal_here").to_string())
-        .disabled(!enabled)
-        .on_click(move |_, _, cx| {
-            if let Some(entity) = entity.upgrade() {
-                entity.update(cx, |this, cx| this.open_terminal_here(cx));
-            }
-        })
-        .into_any_element()
+    /// The title bar's terminal button: toggles the embedded terminal panel
+    /// when built with `terminal`.
+    #[cfg(feature = "terminal")]
+    pub(super) fn terminal_button(&self, design: &Design, window: &Window) -> AnyElement {
+        let open = self.terminal_open;
+        let enabled = self.error.is_none() && self.terminal_working_dir().is_some();
+        let entity = self.entity.clone();
+        crate::ui::icon_toggle("open-terminal", IconName::SquareTerminal, open)
+            .ghost()
+            .w(px(32.0))
+            .h(px(32.0))
+            .text_color(if open { design.text } else { design.muted })
+            .tooltip(self.terminal_toggle_tooltip(window))
+            .disabled(!enabled)
+            .on_click(move |_, window, cx| {
+                if let Some(entity) = entity.upgrade() {
+                    entity.update(cx, |this, cx| this.toggle_terminal(window, cx));
+                }
+            })
+            .into_any_element()
+    }
+
+    /// The title bar's terminal action: opens a terminal in the repository's
+    /// working tree when the embedded terminal feature is disabled.
+    #[cfg(not(feature = "terminal"))]
+    fn terminal_button(&self, design: &Design, _window: &Window) -> AnyElement {
+        let enabled = self.work_dir().is_some();
+        let entity = self.entity.clone();
+        crate::ui::icon_button("open-terminal", IconName::SquareTerminal)
+            .ghost()
+            .w(px(32.0))
+            .h(px(32.0))
+            .text_color(design.muted)
+            .tooltip(t!("action.open_terminal_here").to_string())
+            .disabled(!enabled)
+            .on_click(move |_, _, cx| {
+                if let Some(entity) = entity.upgrade() {
+                    entity.update(cx, |this, cx| this.open_terminal_here(cx));
+                }
+            })
+            .into_any_element()
+    }
 }
 
 /// The title bar's Stash action: the same icon-over-label shape as the remote
@@ -702,19 +744,14 @@ fn stash_button(design: &Design, label: bool) -> AnyElement {
 
 fn search_mode_button(
     id: &'static str,
-    label: impl Into<gpui::SharedString>,
+    icon: IconName,
     tooltip: impl Into<gpui::SharedString>,
     mode: crate::search::SearchMode,
     active: bool,
     entity: gpui::WeakEntity<RepoView>,
 ) -> AnyElement {
-    crate::ui::button(id, label)
+    crate::ui::icon_toggle(id, icon, active)
         .size(crate::ui::ButtonSize::Tiny)
-        .kind(if active {
-            crate::ui::ButtonKind::Primary
-        } else {
-            crate::ui::ButtonKind::Ghost
-        })
         .tooltip(tooltip)
         .on_click(move |_event, _window, cx| {
             if let Some(entity) = entity.upgrade() {
