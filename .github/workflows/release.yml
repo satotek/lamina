@@ -17,6 +17,8 @@ env:
   RUST_BACKTRACE: "1"
   # crates/strata-term/build.rs refuses any other Zig version.
   ZIG_VERSION: "0.17.1"
+  # Linux releases build on ubuntu-22.04 for an older glibc floor. Its newest
+  # libstdc++ headers are version 12, matching the gcc 12 clang picks there.
   LINUX_PACKAGES: >-
     build-essential
     clang
@@ -34,7 +36,7 @@ env:
     libglib2.0-dev
     libsqlite3-dev
     libssl-dev
-    libstdc++-14-dev
+    libstdc++-12-dev
     libva-dev
     libvulkan-dev
     libwayland-dev
