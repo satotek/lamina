@@ -36,6 +36,9 @@ actions!(
         /// Gives the details area the whole history view, or restores the
         /// split. Handled on `RepoView` by `repo_view::split`.
         ToggleDetailsMaximized,
+        /// Folds the sidebar to its icon rail, or expands it again. Handled on
+        /// `RepoView` by `repo_view::sidebar`.
+        ToggleSidebar,
         Quit,
         /// Opens the settings window. Handled globally by `settings_view`.
         OpenSettings,

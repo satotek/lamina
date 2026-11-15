@@ -212,6 +212,9 @@ pub struct LayoutSettings {
     /// Whether the details area fills the history view and the commit list
     /// collapses to a one-row strip.
     pub history_details_maximized: bool,
+    /// Whether the sidebar is folded to its narrow icon rail, giving the
+    /// content the width it would take.
+    pub sidebar_collapsed: bool,
 }
 
 impl Default for LayoutSettings {
@@ -220,6 +223,7 @@ impl Default for LayoutSettings {
             history_list_fraction: DEFAULT_HISTORY_LIST_FRACTION,
             history_files_fraction: DEFAULT_HISTORY_FILES_FRACTION,
             history_details_maximized: false,
+            sidebar_collapsed: false,
         }
     }
 }
@@ -662,6 +666,25 @@ mod tests {
             (loaded.layout.history_list_fraction - 0.42).abs() < f32::EPSILON,
             "fractions are stored as fractions, not as the pixels of one window"
         );
+    }
+
+    #[test]
+    fn the_sidebar_collapsed_state_survives_a_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+
+        let mut settings = Settings::default();
+        assert!(
+            !settings.layout.sidebar_collapsed,
+            "the sidebar starts open"
+        );
+        settings.layout.sidebar_collapsed = true;
+        settings.save(&path).unwrap();
+        assert!(Settings::load(&path).layout.sidebar_collapsed);
+
+        // A file written before the key existed opens the sidebar again.
+        std::fs::write(&path, r#"{"layout":{"history_list_fraction":0.4}}"#).unwrap();
+        assert!(!Settings::load(&path).layout.sidebar_collapsed);
     }
 
     #[test]

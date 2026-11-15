@@ -13,8 +13,8 @@ use strata_core::{ChangeKind, RefKind};
 
 use super::{
     BadgeTone, BannerKind, ButtonKind, ButtonSize, Confirm, RowState, banner, button, change_badge,
-    content_button, count_pill, empty_state, icon_button, kbd, list_row, message, ref_badge,
-    section_header, status_badge, tab, tab_strip,
+    content_button, count_pill, empty_state, icon_button, kbd, list_row, message, rail, rail_item,
+    ref_badge, section_header, status_badge, tab, tab_strip,
 };
 use crate::settings::Settings;
 use crate::style::{self, Design};
@@ -350,6 +350,76 @@ impl Render for Gallery {
                         .tooltip("/work/docs-site")
                         .on_select(|_, _, _| {})
                         .on_close(|_, _| {}),
+                ),
+        ));
+
+        let mut rail_demo = rail(&design)
+            .child(
+                icon_button(
+                    "gallery-rail-expand",
+                    gpui_kit_assets::IconName::PanelLeftOpen,
+                )
+                .size(ButtonSize::Small)
+                .ghost()
+                .tooltip("Expand the pane"),
+            )
+            .child(
+                rail_item(
+                    "gallery-rail-working-tree",
+                    style::glyph_icon(style::glyph::COMMIT, 15.0, design.text),
+                    "Working tree",
+                    &design,
+                )
+                .count(3)
+                .on_click(|_, _, _| {}),
+            )
+            .child(
+                rail_item(
+                    "gallery-rail-branches",
+                    style::glyph_icon(style::glyph::BRANCH, 15.0, design.accent_text),
+                    "Branches",
+                    &design,
+                )
+                .count(12)
+                .selected(true)
+                .on_click(|_, _, _| {}),
+            )
+            .child(
+                rail_item(
+                    "gallery-rail-tags",
+                    style::glyph_icon(style::glyph::TAG, 15.0, design.text),
+                    "Tags",
+                    &design,
+                )
+                .count(0)
+                .on_click(|_, _, _| {}),
+            )
+            .child(
+                rail_item(
+                    "gallery-rail-history",
+                    style::glyph_icon(style::glyph::COMMIT, 15.0, design.text),
+                    "History",
+                    &design,
+                )
+                .on_click(|_, _, _| {}),
+            );
+        rail_demo = rail_demo.h(px(240.0));
+        column = column.child(section(
+            "Collapsed rail",
+            &design,
+            div()
+                .flex()
+                .items_start()
+                .gap_4()
+                .child(rail_demo)
+                .child(
+                    div()
+                        .max_w(px(360.0))
+                        .text_size(px(design.small()))
+                        .text_color(design.muted)
+                        .child(
+                            "A pane folded to icons: one entry per section, its count underneath, the name in the tooltip. The entry the pane is showing keeps the selection tint.",
+                        ),
                 ),
         ));
 

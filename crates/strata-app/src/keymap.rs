@@ -165,7 +165,7 @@ use crate::actions::{
     SelectLast, SelectNext, SelectPageDown, SelectPageUp, SelectPrevious, SelectTab1, SelectTab2,
     SelectTab3, SelectTab4, SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9,
     StashChanges, SwitchBranch, ToggleDetailsMaximized, ToggleFrameStats, TogglePalette,
-    ToggleWholeFile, UndoLastAction, WORKSPACE,
+    ToggleSidebar, ToggleWholeFile, UndoLastAction, WORKSPACE,
 };
 use crate::branch_switcher::{
     BranchSwitcherConfirm, BranchSwitcherDismiss, BranchSwitcherNext, BranchSwitcherPrevious,
@@ -252,6 +252,16 @@ pub static ACTIONS: &[ActionSpec] = &[
         ToggleWholeFile,
         [binding("w", Some(REPO_VIEW_LIST))],
         31,
+        true
+    ),
+    action!(
+        "strata::ToggleSidebar",
+        "Toggle sidebar",
+        Actions,
+        Some(REPO_VIEW),
+        ToggleSidebar,
+        [binding("secondary-alt-s", Some(REPO_VIEW))],
+        37,
         true
     ),
     action!(
@@ -1863,6 +1873,7 @@ mod tests {
             ("j", "SelectNext", "RepoView && !Input"),
             ("z", "ToggleDetailsMaximized", "RepoView && !Input"),
             ("w", "ToggleWholeFile", "RepoView && !Input"),
+            ("secondary-alt-s", "ToggleSidebar", "RepoView"),
             ("shift-up", "ExtendSelectionPrevious", "RepoView"),
             ("shift-down", "ExtendSelectionNext", "RepoView"),
             ("pageup", "SelectPageUp", "RepoView"),
@@ -2039,7 +2050,7 @@ mod tests {
             }
         }
         // Every built-in palette entry has a registry row.
-        let expected_count = if cfg!(feature = "terminal") { 37 } else { 36 };
+        let expected_count = if cfg!(feature = "terminal") { 38 } else { 37 };
         assert_eq!(orders.len(), expected_count);
     }
 

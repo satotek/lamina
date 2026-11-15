@@ -1,17 +1,26 @@
 //! The sidebar: the Working tree, History and Reflog entries, and the
 //! container that hosts the branch, remote, tag and stash sections.
+//!
+//! The sidebar has two shapes. Expanded, it is a column of named sections; the
+//! content beside it takes the rest of the window. Collapsed, the same entries
+//! become icons in a narrow rail, and the content takes the width the sidebar
+//! had. Which shape is showing is a layout preference, so it survives a
+//! restart along with the other split sizes.
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, ClickEvent, Context, Entity, FontWeight, InteractiveElement, IntoElement,
+    AnyElement, App, ClickEvent, Context, Entity, FontWeight, InteractiveElement, IntoElement,
     ParentElement, Styled, div, px,
 };
 use gpui_kit_assets::IconName;
 
 use super::RepoView;
 use super::common::{glyph, icon};
+use crate::branches::Section;
 use crate::data::Source;
+use crate::settings::{Settings, update};
 use crate::style::{self, Design};
+use crate::ui;
 use crate::worktree_panel::MainMode;
 
 /// The sidebar's width on a window with room to spare.
@@ -34,6 +43,19 @@ pub(super) fn width_for(viewport: f32) -> f32 {
     (viewport * SIDEBAR_SHARE).clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH)
 }
 
+/// The width the sidebar takes from the window while it is shown.
+///
+/// The collapsed rail is a fixed narrow strip; expanding asks [`width_for`]
+/// again, so the sidebar comes back at the width the window gives it rather
+/// than at one remembered from a different window size.
+pub(super) fn layout_width(viewport: f32, collapsed: bool) -> f32 {
+    if collapsed {
+        ui::RAIL_WIDTH
+    } else {
+        width_for(viewport)
+    }
+}
+
 impl RepoView {
     pub(super) fn sidebar(
         &self,
@@ -41,6 +63,10 @@ impl RepoView {
         design: &Design,
         width: f32,
     ) -> AnyElement {
+        if self.sidebar_collapsed(cx) {
+            return self.rail(cx, design);
+        }
+
         let mut sidebar = div()
             .flex()
             .flex_col()
@@ -54,6 +80,17 @@ impl RepoView {
             .bg(design.sidebar)
             .border_r_1()
             .border_color(design.border);
+        // The header is where the rail's expand button turns back into the
+        // full sidebar; the sections below it are what makes the width useful.
+        let collapse = ui::icon_button("sidebar-collapse", IconName::PanelLeftClose)
+            .size(ui::ButtonSize::Small)
+            .ghost()
+            .tooltip(t!("sidebar.collapse").to_string())
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)));
+        sidebar = sidebar.child(
+            ui::section_header("sidebar-header", t!("sidebar.title").to_string(), design)
+                .trailing(collapse),
+        );
         // The scope is a property of the history pane, but the sidebar is where
         // the refs and the way out of the filter both are.
         if let Some(name) = self.branches.scope_name() {
@@ -64,6 +101,113 @@ impl RepoView {
             .child(self.nav_section(cx, design))
             .child(self.ref_sections(design, &entity))
             .into_any_element()
+    }
+
+    /// Whether the sidebar is folded to its rail.
+    pub(crate) fn sidebar_collapsed(&self, cx: &App) -> bool {
+        Settings::get(cx).layout.sidebar_collapsed
+    }
+
+    /// Folds the sidebar into its rail, or gives it its width back.
+    pub(crate) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        let collapsed = !self.sidebar_collapsed(cx);
+        update(cx, |settings| {
+            settings.layout.sidebar_collapsed = collapsed;
+        });
+        cx.notify();
+    }
+
+    /// Opens the sidebar onto `section`: its rows unfold, its heading comes
+    /// into view, and the rail is replaced by the full sidebar.
+    fn open_sidebar_section(&mut self, section: Section, cx: &mut Context<Self>) {
+        self.branches.reveal_section(section);
+        if self.sidebar_collapsed(cx) {
+            update(cx, |settings| {
+                settings.layout.sidebar_collapsed = false;
+            });
+        }
+        cx.notify();
+    }
+
+    /// The collapsed sidebar: one icon per entry the expanded sidebar lists.
+    fn rail(&self, cx: &mut Context<Self>, design: &Design) -> AnyElement {
+        let (staged, unstaged) = self
+            .source()
+            .map_or((0, 0), |source| source.sidebar().working_tree);
+        let expand = ui::icon_button("sidebar-expand", IconName::PanelLeftOpen)
+            .size(ui::ButtonSize::Small)
+            .ghost()
+            .tooltip(t!("sidebar.expand").to_string())
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)));
+
+        let mut rail = ui::rail(design).child(expand);
+        let history = self.mode == MainMode::History;
+        rail = rail
+            .child(
+                ui::rail_item(
+                    "rail-working-tree",
+                    icon(IconName::FileText, 15.0, design.text),
+                    t!("sidebar.working_tree").to_string(),
+                    design,
+                )
+                .count(staged + unstaged)
+                .selected(self.mode == MainMode::Worktree)
+                .on_click(
+                    cx.listener(|this, _: &ClickEvent, window, cx| this.open_worktree(window, cx)),
+                ),
+            )
+            .child(
+                ui::rail_item(
+                    "rail-history",
+                    glyph(style::glyph::COMMIT, 15.0, design.text),
+                    t!("sidebar.history").to_string(),
+                    design,
+                )
+                .selected(history)
+                .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                    if this.mode != MainMode::History {
+                        this.close_worktree(window, cx);
+                    }
+                })),
+            )
+            .child(
+                ui::rail_item(
+                    "rail-reflog",
+                    icon(IconName::ClockArrowDown, 15.0, design.text),
+                    t!("sidebar.reflog").to_string(),
+                    design,
+                )
+                .selected(self.mode == MainMode::Reflog)
+                .on_click(
+                    cx.listener(|this, _: &ClickEvent, window, cx| this.open_reflog(window, cx)),
+                ),
+            );
+
+        let Some(source) = self.source() else {
+            return rail.into_any_element();
+        };
+        let data = source.sidebar();
+        let workdir = self
+            .session
+            .as_ref()
+            .and_then(|session| session.repo().workdir().map(std::path::Path::to_path_buf));
+        let extras = self.extras(workdir.as_deref());
+        for summary in self.branches.sections(&data, &extras, design) {
+            let section = summary.section;
+            rail = rail.child(
+                ui::rail_item(
+                    format!("rail-section-{}", section.id()),
+                    glyph(summary.icon, 15.0, design.text),
+                    summary.title,
+                    design,
+                )
+                .count(summary.count)
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.open_sidebar_section(section, cx)
+                })),
+            );
+        }
+        rail.into_any_element()
     }
 
     /// Says which ref the history is limited to and offers the way back to
@@ -248,12 +392,7 @@ impl RepoView {
             .session
             .as_ref()
             .and_then(|session| session.repo().workdir().map(std::path::Path::to_path_buf));
-        let extras = crate::branches::SidebarExtras {
-            submodules: self.extra_lists.submodules.as_slice(),
-            worktrees: self.extra_lists.worktrees.as_slice(),
-            current_worktree: workdir.as_deref(),
-            revision: self.extra_lists.generation,
-        };
+        let extras = self.extras(workdir.as_deref());
         self.branches.render(
             data,
             revision,
@@ -266,6 +405,20 @@ impl RepoView {
             &colors,
             entity,
         )
+    }
+
+    /// The submodule and worktree sections' data, borrowed from the view's own
+    /// cache; neither list is part of a snapshot.
+    fn extras<'a>(
+        &'a self,
+        workdir: Option<&'a std::path::Path>,
+    ) -> crate::branches::SidebarExtras<'a> {
+        crate::branches::SidebarExtras {
+            submodules: self.extra_lists.submodules.as_slice(),
+            worktrees: self.extra_lists.worktrees.as_slice(),
+            current_worktree: workdir,
+            revision: self.extra_lists.generation,
+        }
     }
 }
 
@@ -320,5 +473,79 @@ mod tests {
         // The commit list also keeps its fixed columns next to a readable
         // description at the minimum, which the commit list's own test covers.
         assert!(sidebar <= SIDEBAR_WIDTH);
+    }
+
+    #[test]
+    fn the_rail_hands_the_sidebar_width_to_the_content() {
+        for width in 640..=2_000 {
+            let width = width as f32;
+            let rail = layout_width(width, true);
+            assert_eq!(rail, crate::ui::RAIL_WIDTH);
+            assert!(
+                layout_width(width, false) - rail >= 100.0,
+                "collapsing at {width} px must free a useful amount of width"
+            );
+            assert!(
+                width - rail >= width - width_for(width),
+                "the content never loses width when the sidebar folds"
+            );
+        }
+    }
+
+    #[test]
+    fn expanding_brings_the_sidebar_back_at_the_width_the_window_gives_it() {
+        for width in 640..=2_000 {
+            let width = width as f32;
+            let before = layout_width(width, false);
+            let collapsed = layout_width(width, true);
+            let after = layout_width(width, false);
+            assert!(
+                collapsed < before,
+                "the rail is narrower than the sidebar at {width} px"
+            );
+            assert_eq!(
+                after, before,
+                "expanding must restore the width the sidebar had, not a remembered pixel count"
+            );
+        }
+    }
+
+    /// The action folds the sidebar, and the fold goes through the layout
+    /// preference, which is what makes it survive a restart.
+    #[gpui::test]
+    fn toggling_the_sidebar_folds_it_and_saves_the_preference(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            gpui_component::init(cx);
+            cx.set_global(Settings::default());
+            crate::actions::bind(cx);
+        });
+        let window = cx
+            .add_window(|window, cx| RepoView::new(crate::repo_view::Launch::fake(40), window, cx));
+        let view = window.root(cx).expect("the window's root view");
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+
+        assert!(!view.read_with(&cx, |view, cx| view.sidebar_collapsed(cx)));
+
+        cx.dispatch_action(crate::actions::ToggleSidebar);
+        assert!(
+            view.read_with(&cx, |view, cx| view.sidebar_collapsed(cx)),
+            "the action folds the sidebar"
+        );
+        assert!(
+            cx.update(|_, cx| Settings::get(cx).layout.sidebar_collapsed),
+            "the fold must be written to the layout preference"
+        );
+        // The rail draws in place of the section list without panicking.
+        cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+
+        cx.dispatch_action(crate::actions::ToggleSidebar);
+        assert!(
+            !view.read_with(&cx, |view, cx| view.sidebar_collapsed(cx)),
+            "the same action expands the sidebar again"
+        );
+        assert!(!cx.update(|_, cx| Settings::get(cx).layout.sidebar_collapsed));
     }
 }

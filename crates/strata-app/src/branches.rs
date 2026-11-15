@@ -22,8 +22,9 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, Div, ElementId, Entity,
     FocusHandle, Focusable as _, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement,
-    Pixels, Size, Stateful, StatefulInteractiveElement as _, Styled, UniformListScrollHandle,
-    Window, actions, anchored, deferred, div, hsla, point, px, uniform_list,
+    Pixels, ScrollStrategy, Size, Stateful, StatefulInteractiveElement as _, Styled,
+    UniformListScrollHandle, Window, actions, anchored, deferred, div, hsla, point, px,
+    uniform_list,
 };
 use gpui_component::{
     Icon,
@@ -83,7 +84,7 @@ pub(crate) struct Colors {
 
 /// One collapsible section of the sidebar.
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-enum Section {
+pub(crate) enum Section {
     Local,
     Remote,
     Tags,
@@ -93,7 +94,7 @@ enum Section {
 }
 
 impl Section {
-    const ALL: [Section; 6] = [
+    pub(crate) const ALL: [Section; 6] = [
         Section::Local,
         Section::Remote,
         Section::Tags,
@@ -102,7 +103,7 @@ impl Section {
         Section::Worktrees,
     ];
 
-    fn index(self) -> usize {
+    pub(crate) fn index(self) -> usize {
         match self {
             Section::Local => 0,
             Section::Remote => 1,
@@ -113,7 +114,20 @@ impl Section {
         }
     }
 
-    fn title(self) -> String {
+    /// Stable id for the section's elements when it is drawn outside the list,
+    /// in the collapsed rail.
+    pub(crate) fn id(self) -> &'static str {
+        match self {
+            Section::Local => "local",
+            Section::Remote => "remote",
+            Section::Tags => "tags",
+            Section::Stashes => "stashes",
+            Section::Submodules => "submodules",
+            Section::Worktrees => "worktrees",
+        }
+    }
+
+    pub(crate) fn title(self) -> String {
         match self {
             Section::Local => t!("branch.section.branches").to_string(),
             Section::Remote => t!("branch.section.remotes").to_string(),
@@ -124,7 +138,7 @@ impl Section {
         }
     }
 
-    fn icon(self) -> &'static [u8] {
+    pub(crate) fn icon(self) -> &'static [u8] {
         match self {
             Section::Local => style::glyph::BRANCH,
             Section::Remote => style::glyph::CLOUD,
@@ -132,6 +146,18 @@ impl Section {
             Section::Stashes => style::glyph::ARCHIVE,
             Section::Submodules => style::glyph::SUBMODULE,
             Section::Worktrees => style::glyph::WORKTREE,
+        }
+    }
+
+    /// How many entries the section lists.
+    fn count(self, data: &SidebarData, extras: &SidebarExtras<'_>) -> usize {
+        match self {
+            Section::Local => data.local.len(),
+            Section::Remote => data.remote.len(),
+            Section::Tags => data.tags.len(),
+            Section::Stashes => data.stashes.len(),
+            Section::Submodules => extras.submodules.len(),
+            Section::Worktrees => extras.worktrees.len(),
         }
     }
 
@@ -186,6 +212,15 @@ pub(crate) struct SidebarExtras<'a> {
     /// Generation of the last submodule/worktree answer; part of the list's
     /// cache key, because a new answer changes the rows without a new snapshot.
     pub(crate) revision: u64,
+}
+
+/// One section of the sidebar as the collapsed rail lists it.
+pub(crate) struct SectionSummary {
+    pub(crate) section: Section,
+    pub(crate) title: String,
+    pub(crate) count: usize,
+    /// The section's own glyph, so the rail reads like the expanded headings.
+    pub(crate) icon: &'static [u8],
 }
 
 /// Where a new branch should start. The label is user-facing, e.g. `from main`
@@ -461,6 +496,9 @@ pub(crate) struct Branches {
     force_retry: Option<Retry>,
     /// The section list's scroll position, shared by the list and its scrollbar.
     scroll: UniformListScrollHandle,
+    /// A section the collapsed rail asked for: the next drawn list scrolls
+    /// its heading into view.
+    pending_scroll: RefCell<Option<Section>>,
     cache: RefCell<ItemCache>,
     /// Bumped by every fold, so the cached list cannot outlive a toggle.
     local_revision: u64,
@@ -728,6 +766,7 @@ impl Branches {
         let head = data.head_branch.clone();
         let items = self.items(data, revision, upstreams, remotes, extras, &colors.design);
         self.restore_scroll(&items);
+        self.scroll_to_requested_section(&items);
 
         let reveal = self.reveal.clone();
         let selected_extra = self.selected_extra.clone();
@@ -852,6 +891,9 @@ impl Branches {
         extras: &SidebarExtras<'_>,
         design: &Design,
     ) -> Vec<SidebarItem> {
+        // Counted before the lists are destructured: the heading's number and
+        // the rail's are the same number.
+        let counts = Section::ALL.map(|section| section.count(&data, extras));
         let SidebarData {
             local,
             remote,
@@ -874,14 +916,7 @@ impl Branches {
             if section.hidden(design) || !section.present(extras) {
                 continue;
             }
-            let count = match section {
-                Section::Local => local.len(),
-                Section::Remote => remote.len(),
-                Section::Tags => tags.len(),
-                Section::Stashes => stashes.len(),
-                Section::Submodules => extras.submodules.len(),
-                Section::Worktrees => extras.worktrees.len(),
-            };
+            let count = counts[section.index()];
             let open = !self.collapsed[section.index()];
             items.push(SidebarItem::SectionHeader {
                 section,
@@ -1013,6 +1048,54 @@ impl Branches {
             }
         }
         items
+    }
+
+    /// The sections the collapsed rail lists, in the sidebar's own order.
+    ///
+    /// The rail shows what the expanded sidebar shows: a section the history
+    /// settings hide, or one the repository has nothing for, keeps its icon out
+    /// of the rail too.
+    pub(crate) fn sections(
+        &self,
+        data: &SidebarData,
+        extras: &SidebarExtras<'_>,
+        design: &Design,
+    ) -> Vec<SectionSummary> {
+        Section::ALL
+            .iter()
+            .filter(|section| !section.hidden(design) && section.present(extras))
+            .map(|section| SectionSummary {
+                section: *section,
+                title: section.title(),
+                count: section.count(data, extras),
+                icon: section.icon(),
+            })
+            .collect()
+    }
+
+    /// Unfolds `section` and scrolls its heading into view.
+    ///
+    /// While the view is collapsed the list is not drawn, so the scroll waits
+    /// for the first frame that draws it again; by then the unfolded section is
+    /// in the list the heading is found in.
+    pub(crate) fn reveal_section(&mut self, section: Section) {
+        if self.collapsed[section.index()] {
+            self.collapsed[section.index()] = false;
+            self.local_revision += 1;
+        }
+        *self.pending_scroll.borrow_mut() = Some(section);
+    }
+
+    /// Brings the heading the rail asked for into view, then forgets it.
+    fn scroll_to_requested_section(&self, items: &[SidebarItem]) {
+        let Some(section) = self.pending_scroll.borrow_mut().take() else {
+            return;
+        };
+        if let Some(index) = items.iter().position(|item| {
+            matches!(item, SidebarItem::SectionHeader { section: found, .. } if *found == section)
+        }) {
+            self.scroll.scroll_to_item(index, ScrollStrategy::Top);
+        }
     }
 
     /// Puts the row that was at the top of the viewport back where it was when

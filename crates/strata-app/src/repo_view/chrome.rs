@@ -22,7 +22,7 @@ use crate::actions::{
     self, CloseCompare, ExtendSelectionNext, ExtendSelectionPrevious, NavigateBack, OpenInEditor,
     OpenTerminalHere, SelectFirst, SelectLast, SelectNext, SelectPageDown, SelectPageUp,
     SelectPrevious, StashChanges, SwitchBranch, ToggleDetailsMaximized, ToggleFrameStats,
-    ToggleWholeFile, UndoLastAction,
+    ToggleSidebar, ToggleWholeFile, UndoLastAction,
 };
 use crate::branches::CreateBranchFromHead;
 use crate::commands::RunCustomCommand;
@@ -89,6 +89,7 @@ impl Render for RepoView {
             .on_action(cx.listener(|this, _: &SelectFirst, _, cx| this.jump(0, cx)))
             .on_action(cx.listener(|this, _: &SelectLast, _, cx| this.select_last(cx)))
             .on_action(cx.listener(|this, _: &ToggleFrameStats, _, cx| this.toggle_frame_stats(cx)))
+            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
             .on_action(cx.listener(|this, _: &ToggleDetailsMaximized, _, cx| {
                 this.toggle_details_maximized(cx)
             }))
@@ -182,7 +183,7 @@ impl Render for RepoView {
             let sidebar_width = if merge_full_window {
                 0.0
             } else {
-                super::sidebar::width_for(viewport_width)
+                super::sidebar::layout_width(viewport_width, self.sidebar_collapsed(cx))
             };
             let content_width = (viewport_width - sidebar_width).max(0.0);
             let sidebar = self.sidebar(cx, &design, sidebar_width);
