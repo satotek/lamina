@@ -65,6 +65,8 @@
               clippy
               rustc
               rustfmt
+              # libghostty-vt 1.0.1 requires Zig 0.17 to build from source.
+              zig_0_17
             ];
             RUST_BACKTRACE = "1";
             # Since Xcode 26 the Metal compiler is a separate download, and
@@ -95,6 +97,8 @@
               rustc
               rustfmt
               xvfb
+              # libghostty-vt 1.0.1 requires Zig 0.17 to build from source.
+              zig_0_17
             ];
 
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath runtimeLibs;
