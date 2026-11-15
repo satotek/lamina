@@ -1479,7 +1479,17 @@ mod tests {
                 .iter()
                 .map(|e| e.path.clone())
                 .collect::<Vec<_>>(),
-            vec![worktree_canon.clone(), main_canon.clone()]
+            // The recent list stores paths without Windows' `\\?\` prefix.
+            [&worktree_canon, &main_canon]
+                .into_iter()
+                .map(|path| {
+                    PathBuf::from(
+                        path.to_string_lossy()
+                            .trim_start_matches(r"\\?\")
+                            .to_owned(),
+                    )
+                })
+                .collect::<Vec<_>>()
         );
 
         // Navigate back via RepoView's NavigateBack action handler.
