@@ -18,7 +18,7 @@
 //! input actions with their OS selectors, so a focused text field keeps its
 //! native editing menu entries.
 
-use gpui::{App, Menu, MenuItem, OsAction, ParentElement as _, Window, actions};
+use gpui::{App, KeyBinding, Menu, MenuItem, OsAction, ParentElement as _, Window, actions};
 use gpui_component::WindowExt as _;
 use gpui_component::dialog::DialogFooter;
 use gpui_component::input::{Copy, Cut, Paste, SelectAll};
@@ -32,6 +32,26 @@ actions!(
         /// Shows the dialog that names the application and its version. It is
         /// reachable from the application menu only.
         AboutStrata,
+    ]
+);
+
+// The standard macOS window commands. They live outside the `strata`
+// namespace on purpose: a keymap reload keeps every binding whose action is
+// not the app's own, so these keys survive a rebinding without the registry
+// having to list commands the user should never rebind.
+actions!(
+    macos_window,
+    [
+        /// Hides the application.
+        HideApp,
+        /// Hides every other application.
+        HideOtherApps,
+        /// Shows every hidden application again.
+        ShowAllApps,
+        /// Minimizes the focused window into the Dock.
+        MinimizeWindow,
+        /// Toggles the focused window between its size and the screen.
+        ZoomWindow,
     ]
 );
 
@@ -133,6 +153,7 @@ pub static PLACEMENTS: &[Placement] = &[
     optional("ReopenClosedTab", MenuKind::File, 2),
     item("CloseTab", MenuKind::File, 2),
     item("UndoLastAction", MenuKind::Edit, 0),
+    item("RedoLastAction", MenuKind::Edit, 0),
     item("ToggleSidebar", MenuKind::View, 0),
     // Built only with the `terminal` feature; the item goes away with it.
     optional("ToggleTerminal", MenuKind::View, 1),
@@ -152,15 +173,36 @@ pub static PLACEMENTS: &[Placement] = &[
     item("ApplyPatch", MenuKind::Repository, 2),
     item("OpenGitConfig", MenuKind::Repository, 3),
     item("NavigateBack", MenuKind::Navigate, 0),
-    item("FocusSearch", MenuKind::Navigate, 1),
-    item("TogglePalette", MenuKind::Navigate, 2),
+    item("NavigateForward", MenuKind::Navigate, 0),
+    item("GoToParent", MenuKind::Navigate, 1),
+    item("GoToSecondParent", MenuKind::Navigate, 1),
+    item("GoToChild", MenuKind::Navigate, 1),
+    item("GoToHead", MenuKind::Navigate, 1),
+    item("FocusSearch", MenuKind::Navigate, 2),
+    item("TogglePalette", MenuKind::Navigate, 3),
     item("NextTab", MenuKind::Window, 0),
     item("PreviousTab", MenuKind::Window, 0),
     item("ShowKeyboardShortcuts", MenuKind::Help, 0),
 ];
 
-/// Registers the application menu's own action. Call once at startup.
+/// Registers the application menu's own actions. Call once at startup.
 pub fn bind(cx: &mut App) {
+    if cfg!(target_os = "macos") {
+        cx.bind_keys([
+            KeyBinding::new("cmd-h", HideApp, None),
+            KeyBinding::new("cmd-alt-h", HideOtherApps, None),
+            KeyBinding::new("cmd-m", MinimizeWindow, None),
+        ]);
+    }
+    cx.on_action(|_: &HideApp, cx: &mut App| cx.hide());
+    cx.on_action(|_: &HideOtherApps, cx: &mut App| cx.hide_other_apps());
+    cx.on_action(|_: &ShowAllApps, cx: &mut App| cx.unhide_other_apps());
+    cx.on_action(|_: &MinimizeWindow, cx: &mut App| {
+        with_active_window(cx, |window| window.minimize_window());
+    });
+    cx.on_action(|_: &ZoomWindow, cx: &mut App| {
+        with_active_window(cx, |window| window.zoom_window());
+    });
     cx.on_action(|_: &AboutStrata, cx: &mut App| {
         let Some(handle) = cx.active_window() else {
             return;
@@ -170,6 +212,17 @@ pub fn bind(cx: &mut App) {
         cx.defer(move |cx| {
             let _ = handle.update(cx, |_, window, cx| about(window, cx));
         });
+    });
+}
+
+/// Runs `f` on the focused window. Deferred because a menu item dispatches
+/// while the window is already borrowed.
+fn with_active_window(cx: &mut App, f: impl FnOnce(&mut Window) + 'static) {
+    let Some(handle) = cx.active_window() else {
+        return;
+    };
+    cx.defer(move |cx| {
+        let _ = handle.update(cx, |_, window, _| f(window));
     });
 }
 
@@ -190,6 +243,7 @@ pub fn menus() -> Vec<Menu> {
 fn items(kind: MenuKind) -> Vec<MenuItem> {
     let mut items = Vec::new();
     let mut section = None;
+    let platform = cfg!(target_os = "macos");
     for placement in PLACEMENTS.iter().filter(|item| item.menu == kind) {
         let Some(spec) = keymap::resolve(placement.action) else {
             debug_assert!(placement.optional, "{} is missing", placement.action);
@@ -200,6 +254,30 @@ fn items(kind: MenuKind) -> Vec<MenuItem> {
         }
         section = Some(placement.section);
         items.push(action_item(spec));
+    }
+    if platform && kind == MenuKind::Strata {
+        // macOS puts Hide between Settings and Quit; Quit is the last section.
+        let quit = items
+            .iter()
+            .rposition(|item| matches!(item, MenuItem::Separator));
+        let hide = [
+            MenuItem::action(t!("menu.strata.hide").to_string(), HideApp),
+            MenuItem::action(t!("menu.strata.hide_others").to_string(), HideOtherApps),
+            MenuItem::action(t!("menu.strata.show_all").to_string(), ShowAllApps),
+            MenuItem::separator(),
+        ];
+        let at = quit.map_or(items.len(), |index| index + 1);
+        items.splice(at..at, hide);
+    }
+    if platform && kind == MenuKind::Window {
+        let mut window = vec![
+            MenuItem::action(t!("menu.window.minimize").to_string(), MinimizeWindow),
+            MenuItem::action(t!("menu.window.zoom").to_string(), ZoomWindow),
+        ];
+        if !items.is_empty() {
+            window.push(MenuItem::separator());
+        }
+        items.splice(0..0, window);
     }
     // Editing a text field is the component library's job and its own actions
     // already exist; the OS selectors keep the native menu behaviour.
@@ -331,8 +409,18 @@ mod tests {
                 );
             }
         }
-        for key in ["cut", "copy", "paste", "select_all"] {
-            let key = format!("menu.edit.{key}");
+        for key in [
+            "edit.cut",
+            "edit.copy",
+            "edit.paste",
+            "edit.select_all",
+            "strata.hide",
+            "strata.hide_others",
+            "strata.show_all",
+            "window.minimize",
+            "window.zoom",
+        ] {
+            let key = format!("menu.{key}");
             for locale in ["en", "ja"] {
                 assert!(
                     i18n::lookup(locale, &key).is_some(),

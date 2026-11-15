@@ -385,7 +385,7 @@ pub static ACTIONS: &[ActionSpec] = &[
     ),
     action!(
         "strata::NavigateBack",
-        "Back to parent repository",
+        "Back",
         Actions,
         Some(REPO_VIEW),
         NavigateBack,
