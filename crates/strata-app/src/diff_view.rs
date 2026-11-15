@@ -485,7 +485,8 @@ impl DiffStyle {
             font_size: settings
                 .appearance
                 .code_font_size
-                .clamp(CODE_FONT_MIN, CODE_FONT_MAX),
+                .clamp(CODE_FONT_MIN, CODE_FONT_MAX)
+                * settings.appearance.zoom(),
             // The settings page offers 1–8 columns. A hand-edited file may ask
             // for more, and there is no reason to refuse it, so only zero (which
             // has no tab stop) is ruled out here.

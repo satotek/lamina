@@ -64,7 +64,18 @@ pub struct Appearance {
     pub code_font: Option<String>,
     pub code_font_size: f32,
     pub tab_width: u8,
+    /// The whole-window zoom in percent; see [`ZOOM_STEPS`].
+    pub zoom_percent: u16,
 }
+
+/// The zoom steps the settings window offers, in percent.
+///
+/// They are fixed rather than free: every window is laid out from a handful of
+/// type sizes, and a step keeps the same proportions in all of them while the
+/// lists still fit their rows.
+pub const ZOOM_STEPS: [u16; 8] = [80, 90, 100, 110, 125, 150, 175, 200];
+/// The zoom a settings file without the key opens at.
+pub const DEFAULT_ZOOM: u16 = 100;
 
 impl Default for Appearance {
     fn default() -> Self {
@@ -78,8 +89,27 @@ impl Default for Appearance {
             code_font: None,
             code_font_size: 12.5,
             tab_width: 4,
+            zoom_percent: DEFAULT_ZOOM,
         }
     }
+}
+
+impl Appearance {
+    /// The factor every window is drawn at: 1.0 at 100%.
+    pub fn zoom(&self) -> f32 {
+        f32::from(normalize_zoom(self.zoom_percent)) / 100.0
+    }
+}
+
+/// The offered step nearest to `percent`.
+///
+/// A hand-edited file can name any number; snapping keeps every window on one
+/// of the sizes the settings window can show.
+pub fn normalize_zoom(percent: u16) -> u16 {
+    ZOOM_STEPS
+        .into_iter()
+        .min_by_key(|step| step.abs_diff(percent))
+        .unwrap_or(DEFAULT_ZOOM)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -530,6 +560,9 @@ pub fn apply_theme(window: Option<&mut Window>, cx: &mut App) {
     // Every theme change resets gpui-component's palette, so the tokens are
     // re-pointed at the design's colours right after it.
     crate::component_theme::sync(cx);
+    // A theme reload also resets the base font size the component library
+    // scales from; the saved zoom is written back on top of it.
+    crate::zoom::apply(cx);
 }
 
 /// Changes the settings and notifies `observe_global::<Settings>` observers at

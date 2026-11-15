@@ -47,10 +47,11 @@ pub enum Group {
     Search,
     Picker,
     Palette,
+    Zoom,
 }
 
 /// Every group, in registration order.
-pub const GROUP_ORDER: [Group; 11] = [
+pub const GROUP_ORDER: [Group; 12] = [
     Group::Actions,
     Group::Settings,
     Group::GitConfig,
@@ -62,6 +63,7 @@ pub const GROUP_ORDER: [Group; 11] = [
     Group::Search,
     Group::Picker,
     Group::Palette,
+    Group::Zoom,
 ];
 
 /// One default binding of an action.
@@ -190,6 +192,7 @@ use crate::worktree_panel::{
     SelectNextFile, SelectPreviousFile, ShowHistory, StageSelected, ToggleSelected,
     UnstageSelected,
 };
+use crate::zoom::{ResetZoom, ZoomIn, ZoomOut};
 
 /// The worktree panel's context constants live with its actions; naming them
 /// here keeps every context string visible in one table.
@@ -1066,6 +1069,39 @@ pub static ACTIONS: &[ActionSpec] = &[
         Some(PALETTE_FIELD),
         PaletteDismiss,
         [binding("escape", Some(PALETTE_FIELD))]
+    ),
+    // --- the whole-window zoom -------------------------------------------
+    // Its own group rather than more `Actions` rows: window-wide commands
+    // belong together, and the shortcut sheet later lists actions by group.
+    action!(
+        "strata::ZoomIn",
+        "Zoom in",
+        Zoom,
+        None,
+        ZoomIn,
+        [binding("secondary-=", None), binding("secondary-+", None)],
+        38,
+        false
+    ),
+    action!(
+        "strata::ZoomOut",
+        "Zoom out",
+        Zoom,
+        None,
+        ZoomOut,
+        [binding("secondary--", None)],
+        39,
+        false
+    ),
+    action!(
+        "strata::ResetZoom",
+        "Reset zoom",
+        Zoom,
+        None,
+        ResetZoom,
+        [binding("secondary-0", None)],
+        40,
+        false
     ),
 ];
 
@@ -1982,6 +2018,11 @@ mod tests {
             ("up", "PalettePrevious", "Palette > Input"),
             ("down", "PaletteNext", "Palette > Input"),
             ("escape", "PaletteDismiss", "Palette > Input"),
+            // The zoom.
+            ("secondary-=", "ZoomIn", ""),
+            ("secondary-+", "ZoomIn", ""),
+            ("secondary--", "ZoomOut", ""),
+            ("secondary-0", "ResetZoom", ""),
         ];
 
         // The groups are stored in one array; comparing the full dump fails
@@ -2059,7 +2100,7 @@ mod tests {
             }
         }
         // Every built-in palette entry has a registry row.
-        let expected_count = if cfg!(feature = "terminal") { 38 } else { 37 };
+        let expected_count = if cfg!(feature = "terminal") { 41 } else { 40 };
         assert_eq!(orders.len(), expected_count);
     }
 

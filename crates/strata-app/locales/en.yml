@@ -1402,3 +1402,11 @@ terminal.exited_unknown: "Exited"
 terminal.start_failed: "Could not start shell: %{error}"
 terminal.invalid_shell: "Invalid shell command in settings: %{error}"
 
+
+# The whole-window zoom, its settings row and its palette commands.
+action.zoom_in: "Zoom in"
+action.zoom_out: "Zoom out"
+action.reset_zoom: "Reset zoom"
+settings.zoom.card: "Zoom"
+settings.appearance.zoom: "UI zoom"
+settings.appearance.zoom_description: "Scales the text, spacing and controls of every window. 100% is the normal size."

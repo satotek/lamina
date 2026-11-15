@@ -209,11 +209,15 @@ impl Design {
             show_commit_signatures: settings.history.show_commit_signatures,
             show_changed_file_count: settings.history.show_changed_file_count,
             summary_hint: settings.behaviour.summary_length_hint,
-            ui: settings.appearance.ui_font_size,
+            // The zoom multiplies the resolved sizes rather than the stored
+            // preferences: the settings page keeps showing the size the user
+            // chose, and every pane still draws one consistent scale.
+            ui: settings.appearance.ui_font_size * settings.appearance.zoom(),
             code: settings
                 .appearance
                 .code_font_size
-                .clamp(CODE_FONT_MIN, CODE_FONT_MAX),
+                .clamp(CODE_FONT_MIN, CODE_FONT_MAX)
+                * settings.appearance.zoom(),
             mono: settings
                 .appearance
                 .code_font

@@ -1390,3 +1390,11 @@ terminal.exited_unknown: "終了"
 terminal.start_failed: "シェルを起動できませんでした: %{error}"
 terminal.invalid_shell: "設定のシェルコマンドが無効です: %{error}"
 
+
+# ウインドウ全体のズーム、その設定行とパレットのコマンド。
+action.zoom_in: "拡大"
+action.zoom_out: "縮小"
+action.reset_zoom: "ズームをリセット"
+settings.zoom.card: "ズーム"
+settings.appearance.zoom: "UI のズーム"
+settings.appearance.zoom_description: "すべてのウインドウの文字・間隔・操作部品の大きさを変えます。100% が標準です。"

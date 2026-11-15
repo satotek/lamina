@@ -205,6 +205,15 @@ fn appearance(control: f32, design: &Design) -> SettingPage {
             .description(t!("settings.fonts.tab_width_description").to_string()),
         ]),
     )
+    .groups(
+        card(t!("settings.zoom.card").to_string()).item(
+            SettingItem::new(
+                t!("settings.appearance.zoom").to_string(),
+                zoom_field(control),
+            )
+            .description(t!("settings.appearance.zoom_description").to_string()),
+        ),
+    )
 }
 
 fn diff(control: f32, design: &Design) -> SettingPage {
@@ -1149,6 +1158,9 @@ fn heading(section: Section, description: impl Into<String>, design: &Design) ->
                                     settings::apply_theme(None, cx);
                                     crate::i18n::apply(cx);
                                 }
+                                // The zoom is written onto the component theme,
+                                // not only stored, so the reset has to apply it.
+                                crate::zoom::apply(cx);
                                 cx.refresh_windows();
                             }),
                         ),
@@ -1507,6 +1519,31 @@ fn language_field(control: f32) -> SettingField<SharedString> {
                 change::language(settings, crate::i18n::Language::from_id(&value));
             });
             crate::i18n::apply(cx);
+        },
+    )
+    .w(px(control))
+}
+
+/// The zoom dropdown. A step applies to every window at once, the way the
+/// keyboard and the menu apply it.
+fn zoom_field(control: f32) -> SettingField<SharedString> {
+    let labels: Vec<(SharedString, SharedString)> = crate::settings::ZOOM_STEPS
+        .iter()
+        .map(|percent| {
+            (
+                SharedString::from(percent.to_string()),
+                SharedString::from(format!("{percent}%")),
+            )
+        })
+        .collect();
+    SettingField::dropdown(
+        labels,
+        |cx| SharedString::from(Settings::get(cx).appearance.zoom_percent.to_string()),
+        |value, cx| {
+            let percent = value
+                .parse::<u16>()
+                .unwrap_or(crate::settings::DEFAULT_ZOOM);
+            crate::zoom::set(cx, percent);
         },
     )
     .w(px(control))

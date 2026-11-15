@@ -62,6 +62,7 @@ mod tools;
 mod ui;
 mod workspace;
 mod worktree_panel;
+mod zoom;
 
 use gpui::{
     App, AppContext as _, Bounds, WindowBounds, WindowDecorations, WindowOptions, px, size,
@@ -137,6 +138,7 @@ fn main() {
         search::bind(cx);
         picker::bind(cx);
         palette::bind(cx);
+        zoom::bind(cx);
         #[cfg(feature = "terminal")]
         terminal_panel::bind(cx);
 
