@@ -89,18 +89,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Two macOS builds instead of one universal binary: lipo only merges
-        # the executables, the bundle and the disk image still have to be
-        # produced separately, and per-arch downloads are less than half the
-        # size for everyone. ubuntu-22.04 is the oldest runner still hosted,
-        # which keeps the glibc floor at 2.35 for the Linux archive.
+        # macOS ships for Apple silicon only; Intel Macs are not a target.
+        # ubuntu-22.04 is the oldest runner still hosted, which keeps the
+        # glibc floor at 2.35 for the Linux archive.
         include:
           - name: macos-arm64
             os: macos-15
             target: aarch64-apple-darwin
-          - name: macos-x64
-            os: macos-15
-            target: x86_64-apple-darwin
           - name: windows-x64
             os: windows-latest
             target: x86_64-pc-windows-msvc

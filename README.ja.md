@@ -65,7 +65,7 @@ Strata は個人開発のオープンソースプロジェクトとして公開�
 - 任意: `gh`（GitHub CLI）、`git-lfs`、`ghq`
 
 ### macOS
-GitHub Releases から `.app` バンドル（macOS 14.0 以降対応）をダウンロードして展開し、`Strata.app` を `/Applications` に移動します。
+GitHub Releases から `.dmg`（Apple silicon 専用、macOS 14.0 以降）をダウンロードして開き、`Strata.app` を `/Applications` にドラッグします。Intel Mac には対応していません。
 
 配布ビルドはアドホック署名のみで**公証（notarization）を受けていません**。初回起動時は `Strata.app` を右クリックして**「開く」**を選ぶか、次のコマンドで quarantine 属性を解除してください。
 

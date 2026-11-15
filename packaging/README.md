@@ -39,13 +39,11 @@ several minutes of Zig work.
 
 1. `version` fails unless the tag equals the `[workspace.package] version` in
    `Cargo.toml` (so `v0.1.0` needs `version = "0.1.0"`).
-2. `build` compiles with `--release --locked` on four runners, packages the
+2. `build` compiles with `--release --locked` on three runners, packages the
    result with the scripts below, and uploads each archive as a workflow
    artifact:
    - `Strata-<version>-macos-arm64.dmg` on `macos-15`
      (`aarch64-apple-darwin`)
-   - `Strata-<version>-macos-x64.dmg` on `macos-15`
-     (`x86_64-apple-darwin`, cross-compiled)
    - `Strata-<version>-windows-x64.zip` on `windows-latest`
      (`x86_64-pc-windows-msvc`)
    - `strata-<version>-linux-x86_64.tar.gz` on `ubuntu-22.04`
@@ -57,9 +55,8 @@ several minutes of Zig work.
 
 Every artifact carries both licences and `THIRD-PARTY-NOTICES.md`, which
 `third-party/generate.sh` produces from `cargo-about` plus the pinned Zig
-dependency list. Two macOS builds rather than one universal binary: `lipo`
-would only merge the executables, the bundle and the `.dmg` still have to be
-built per arch, and separate downloads are smaller.
+dependency list. macOS releases target Apple silicon only; Intel Macs are not
+supported.
 
 ## macOS
 

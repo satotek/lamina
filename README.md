@@ -65,7 +65,7 @@ Prebuilt binaries are published on GitHub Releases.
 - Optional: `gh` (GitHub CLI), `git-lfs`, and `ghq`.
 
 ### macOS
-Download and extract the `.app` bundle (requires macOS 14.0 or later) and move `Strata.app` to `/Applications`.
+Download the `.dmg` (Apple silicon, macOS 14.0 or later), open it, and drag `Strata.app` to `/Applications`. Intel Macs are not supported.
 
 Release builds are ad-hoc signed and **not notarized**. On first launch, right-click `Strata.app` and choose **Open**, or clear the quarantine attribute:
 
