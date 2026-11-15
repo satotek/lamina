@@ -5,17 +5,18 @@
 //! settings, so it runs anywhere the app runs.
 
 use gpui::{
-    AnyElement, Context, FocusHandle, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement, Render, StatefulInteractiveElement as _, Styled, Window, div, px,
+    AnyElement, Context, FocusHandle, FontWeight, InteractiveElement as _, IntoElement, Keystroke,
+    OperatingSystem, ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled,
+    Window, div, px,
 };
 use gpui_component::{ActiveTheme as _, Theme, ThemeMode};
 use strata_core::{ChangeKind, RefKind};
 
 use super::{
     BadgeTone, BannerKind, ButtonKind, ButtonSize, Confirm, RowState, banner, button, change_badge,
-    content_button, count_pill, empty_state, icon_button, icon_toggle, kbd, list_row, message,
-    rail, rail_item, ref_badge, section_header, status_badge, swatch_label, swatch_strip, tab,
-    tab_strip,
+    content_button, count_pill, empty_state, icon_button, icon_toggle, kbd, keycaps, list_row,
+    message, rail, rail_item, ref_badge, section_header, shortcut_caps, status_badge, swatch_label,
+    swatch_strip, tab, tab_strip,
 };
 use crate::settings::Settings;
 use crate::style::{self, Design};
@@ -224,6 +225,34 @@ impl Render for Gallery {
                         .child(status_badge("locked", BadgeTone::Warning, &design))
                         .child(status_badge("missing", BadgeTone::Danger, &design))
                         .child(status_badge("not initialised", BadgeTone::Neutral, &design)),
+                ),
+        ));
+
+        column = column.child(section(
+            "Key caps",
+            &design,
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_3()
+                        .child(keycap_row("cmd-shift-p", OperatingSystem::Mac, &design))
+                        .child(keycap_row(
+                            "ctrl-shift-p",
+                            OperatingSystem::Windows,
+                            &design,
+                        ))
+                        .child(keycap_row("escape", OperatingSystem::Mac, &design)),
+                )
+                .child(
+                    div()
+                        .text_size(px(design.small()))
+                        .text_color(design.muted)
+                        .child("One cap per key, the symbols on macOS and the words elsewhere."),
                 ),
         ));
 
@@ -533,6 +562,19 @@ fn section(title: &str, design: &Design, body: impl IntoElement) -> AnyElement {
         )
         .child(body)
         .into_any_element()
+}
+
+/// One shortcut drawn as its individual caps.
+fn keycap_row(key: &str, os: OperatingSystem, design: &Design) -> AnyElement {
+    let keystroke = Keystroke::parse_with_os(key, os)
+        .unwrap_or_else(|error| panic!("`{key}` is not a keystroke: {error}"));
+    keycaps(
+        shortcut_caps(&keystroke, os)
+            .into_iter()
+            .map(SharedString::from)
+            .collect(),
+        design,
+    )
 }
 
 /// The three sizes of one button kind, plus the disabled state.

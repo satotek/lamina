@@ -7,7 +7,8 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Div, ElementId, FontWeight, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, RenderOnce, SharedString, Stateful, Styled as _, Window, div, px,
+    OperatingSystem, ParentElement as _, RenderOnce, SharedString, Stateful, Styled as _, Window,
+    div, px,
 };
 use gpui_component::Selectable;
 use gpui_component::tooltip::Tooltip;
@@ -382,4 +383,111 @@ pub fn kbd(label: impl Into<SharedString>, design: &Design) -> AnyElement {
         .text_size(px(11.0))
         .child(label.into())
         .into_any_element()
+}
+
+/// One shortcut as a row of caps: modifiers first, the key last.
+///
+/// A cap per key is what makes a shortcut readable at a glance, and it is the
+/// only way the macOS symbols (`⌘`, `⌥`, `⇧`, `⌃`) stay distinguishable; on the
+/// other platforms the modifiers are words.
+pub fn keycaps(labels: Vec<SharedString>, design: &Design) -> AnyElement {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(3.0))
+        .children(labels.into_iter().map(|label| kbd(label, design)))
+        .into_any_element()
+}
+
+/// The caps of one keystroke, in reading order.
+pub fn shortcut_caps(keystroke: &gpui::Keystroke, os: OperatingSystem) -> Vec<String> {
+    let modifiers = keystroke.modifiers;
+    let mut caps = Vec::with_capacity(5);
+    if modifiers.function {
+        caps.push("fn".to_owned());
+    }
+    if modifiers.control {
+        caps.push(symbol_or_word("⌃", "Ctrl", os));
+    }
+    if modifiers.alt {
+        caps.push(symbol_or_word("⌥", "Alt", os));
+    }
+    if modifiers.shift {
+        caps.push(symbol_or_word("⇧", "Shift", os));
+    }
+    if modifiers.platform {
+        caps.push(symbol_or_word("⌘", "Super", os));
+    }
+    caps.push(key_cap(&keystroke.key, os));
+    caps
+}
+
+fn symbol_or_word(symbol: &str, word: &str, os: OperatingSystem) -> String {
+    if os == OperatingSystem::Mac {
+        symbol.to_owned()
+    } else {
+        word.to_owned()
+    }
+}
+
+/// What one key is called on a cap: symbols for the named keys on macOS, the
+/// familiar short names everywhere.
+fn key_cap(key: &str, os: OperatingSystem) -> String {
+    let mac = os == OperatingSystem::Mac;
+    match key {
+        "escape" => if mac { "⎋" } else { "Esc" }.to_owned(),
+        "tab" => if mac { "⇥" } else { "Tab" }.to_owned(),
+        "enter" => if mac { "↩" } else { "Enter" }.to_owned(),
+        "backspace" => if mac { "⌫" } else { "Backspace" }.to_owned(),
+        "delete" => if mac { "⌦" } else { "Delete" }.to_owned(),
+        "up" => if mac { "↑" } else { "Up" }.to_owned(),
+        "down" => if mac { "↓" } else { "Down" }.to_owned(),
+        "left" => if mac { "←" } else { "Left" }.to_owned(),
+        "right" => if mac { "→" } else { "Right" }.to_owned(),
+        "space" => "Space".to_owned(),
+        "pageup" => "PgUp".to_owned(),
+        "pagedown" => "PgDn".to_owned(),
+        "home" => if mac { "↖" } else { "Home" }.to_owned(),
+        "end" => if mac { "↘" } else { "End" }.to_owned(),
+        key if key.len() == 1 => key.to_ascii_uppercase(),
+        key if key.len() > 1
+            && key.starts_with('f')
+            && key[1..].chars().all(|c| c.is_ascii_digit()) =>
+        {
+            key.to_ascii_uppercase()
+        }
+        other => other.to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{Keystroke, OperatingSystem};
+
+    fn caps(key: &str, os: OperatingSystem) -> Vec<String> {
+        let keystroke = Keystroke::parse_with_os(key, os).expect("a keystroke");
+        shortcut_caps(&keystroke, os)
+    }
+
+    #[test]
+    fn a_shortcut_is_split_into_one_cap_per_key() {
+        // Apple's modifier order in menus is Control, Option, Shift, Command,
+        // so the symbols follow it rather than the order the keys were typed.
+        assert_eq!(
+            caps("secondary-shift-p", OperatingSystem::Mac),
+            ["⇧", "⌘", "P"]
+        );
+        assert_eq!(
+            caps("secondary-shift-p", OperatingSystem::Linux),
+            ["Ctrl", "Shift", "P"]
+        );
+        assert_eq!(caps("secondary-f", OperatingSystem::Mac), ["⌘", "F"]);
+        assert_eq!(caps("escape", OperatingSystem::Mac), ["⎋"]);
+        assert_eq!(caps("escape", OperatingSystem::Windows), ["Esc"]);
+        assert_eq!(caps("alt-1", OperatingSystem::Linux), ["Alt", "1"]);
+        assert_eq!(caps("f12", OperatingSystem::Linux), ["F12"]);
+        assert_eq!(caps("ctrl-`", OperatingSystem::Linux), ["Ctrl", "`"]);
+    }
 }

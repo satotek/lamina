@@ -48,10 +48,11 @@ pub enum Group {
     Picker,
     Palette,
     Zoom,
+    Shortcuts,
 }
 
 /// Every group, in registration order.
-pub const GROUP_ORDER: [Group; 12] = [
+pub const GROUP_ORDER: [Group; 13] = [
     Group::Actions,
     Group::Settings,
     Group::GitConfig,
@@ -64,6 +65,7 @@ pub const GROUP_ORDER: [Group; 12] = [
     Group::Picker,
     Group::Palette,
     Group::Zoom,
+    Group::Shortcuts,
 ];
 
 /// One default binding of an action.
@@ -187,6 +189,7 @@ use crate::pull_requests::{CheckoutPullRequest, RefreshPullRequests};
 use crate::remote::{FetchRemotes, PullBranch, PushBranch};
 use crate::search::{FocusSearch, SearchDismiss, SearchNext, SearchPrevious, SearchSubmit};
 use crate::settings_view::CloseSettings;
+use crate::shortcuts::{DismissShortcuts, ShowKeyboardShortcuts};
 use crate::worktree_panel::{
     CommitMessage, DiscardSelected, ExtendNextFile, ExtendPreviousFile, SelectAllFiles,
     SelectNextFile, SelectPreviousFile, ShowHistory, StageSelected, ToggleSelected,
@@ -208,6 +211,7 @@ const PICKER_PAGE_LIST: &str = "PickerPage && !Input";
 const PICKER_DIALOG: &str = "PickerDialog";
 const PICKER_DIALOG_LIST: &str = "PickerDialog && !Input";
 const PALETTE_FIELD: &str = "Palette > Input";
+const SHORTCUTS_FIELD: &str = "ShortcutsDialog > Input";
 
 /// Every bindable action, in registration order.
 ///
@@ -1103,6 +1107,28 @@ pub static ACTIONS: &[ActionSpec] = &[
         40,
         false
     ),
+    // --- the keyboard shortcut sheet -------------------------------------
+    // Its own group rather than more `Actions` rows: the sheet lists actions
+    // under their group, and the window-wide command belongs with the other
+    // commands of its own.
+    action!(
+        "strata::ShowKeyboardShortcuts",
+        "Keyboard shortcuts",
+        Shortcuts,
+        None,
+        ShowKeyboardShortcuts,
+        [binding("secondary-/", None)],
+        41,
+        false
+    ),
+    action!(
+        "strata::DismissShortcuts",
+        "Close keyboard shortcuts",
+        Shortcuts,
+        Some(SHORTCUTS_FIELD),
+        DismissShortcuts,
+        [binding("escape", Some(SHORTCUTS_FIELD))]
+    ),
 ];
 
 /// Looks up an action by its full name or its short one, ignoring case.
@@ -1390,6 +1416,50 @@ pub fn user_keys(state: &KeymapState, spec: &ActionSpec, os: OperatingSystem) ->
         })
         .map(|entry| display_key(&entry.key, os))
         .collect()
+}
+
+/// The keystrokes that run `spec` right now: the defaults the user has not
+/// removed, then the user's own, each key once.
+///
+/// The shortcut sheet draws one cap per keystroke, so a key a user added on
+/// top of a default must not read as two shortcuts.
+pub fn effective_keystrokes(
+    state: &KeymapState,
+    spec: &'static ActionSpec,
+    os: OperatingSystem,
+) -> Vec<Keystroke> {
+    let unbound = |binding: &DefaultBinding| {
+        state.entries.iter().any(|entry| {
+            entry.action.is_none()
+                && Keystroke::parse_with_os(&entry.key, os).ok()
+                    == Keystroke::parse_with_os(binding.key, os).ok()
+                && contexts_overlap(entry.context.as_deref(), binding.context)
+        })
+    };
+    let mut keys: Vec<Keystroke> = Vec::new();
+    let mut add = |key: &str| {
+        if let Ok(keystroke) = Keystroke::parse_with_os(key, os)
+            && !keys.contains(&keystroke)
+        {
+            keys.push(keystroke);
+        }
+    };
+    for binding in spec.defaults.iter().filter(|binding| applies(binding, os)) {
+        if !unbound(binding) {
+            add(binding.key);
+        }
+    }
+    for entry in &state.entries {
+        if entry
+            .action
+            .as_deref()
+            .and_then(resolve)
+            .is_some_and(|found| found.name == spec.name)
+        {
+            add(&entry.key);
+        }
+    }
+    keys
 }
 
 fn display_key(key: &str, os: OperatingSystem) -> String {
@@ -2018,11 +2088,13 @@ mod tests {
             ("up", "PalettePrevious", "Palette > Input"),
             ("down", "PaletteNext", "Palette > Input"),
             ("escape", "PaletteDismiss", "Palette > Input"),
-            // The zoom.
+            // The zoom and the shortcut sheet.
             ("secondary-=", "ZoomIn", ""),
             ("secondary-+", "ZoomIn", ""),
             ("secondary--", "ZoomOut", ""),
             ("secondary-0", "ResetZoom", ""),
+            ("secondary-/", "ShowKeyboardShortcuts", ""),
+            ("escape", "DismissShortcuts", "ShortcutsDialog > Input"),
         ];
 
         // The groups are stored in one array; comparing the full dump fails
@@ -2100,7 +2172,7 @@ mod tests {
             }
         }
         // Every built-in palette entry has a registry row.
-        let expected_count = if cfg!(feature = "terminal") { 41 } else { 40 };
+        let expected_count = if cfg!(feature = "terminal") { 42 } else { 41 };
         assert_eq!(orders.len(), expected_count);
     }
 

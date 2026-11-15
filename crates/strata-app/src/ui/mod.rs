@@ -37,7 +37,8 @@ pub use askpass::askpass_prompt;
 pub use badge::{
     BadgeTone, REF_BADGE_GAP, REF_BADGE_MAX_LABEL_WIDTH, RefOverflowChip, avatar, change_badge,
     changed_file_count_badge, check_dot, count_pill, estimate_ref_badge_width,
-    estimate_ref_overflow_width, kbd, ref_badge, ref_chip, ref_overflow_chip, status_badge,
+    estimate_ref_overflow_width, kbd, keycaps, ref_badge, ref_chip, ref_overflow_chip,
+    shortcut_caps, status_badge,
 };
 pub use banner::{BannerKind, banner};
 pub use button::{

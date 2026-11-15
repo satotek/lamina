@@ -53,6 +53,7 @@ mod scrollbar;
 mod search;
 mod settings;
 mod settings_view;
+mod shortcuts;
 mod stash;
 mod style;
 mod tabs;
@@ -139,6 +140,7 @@ fn main() {
         picker::bind(cx);
         palette::bind(cx);
         zoom::bind(cx);
+        shortcuts::bind(cx);
         #[cfg(feature = "terminal")]
         terminal_panel::bind(cx);
 
