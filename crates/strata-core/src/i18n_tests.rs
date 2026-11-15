@@ -289,7 +289,12 @@ fn a_path_that_is_not_utf8_is_listed_without_panicking() {
     root.write("keep.txt", "keep\n");
     root.commit_as(AUTHOR, EMAIL, "base");
     let name = std::ffi::OsStr::from_bytes(b"broken\xFFname.txt");
-    root.write_bytes(std::path::Path::new(name), b"bytes\n");
+    // APFS (macOS) refuses names that are not valid UTF-8 with EILSEQ, so such
+    // a path can only reach Strata from a filesystem that stores raw bytes.
+    if let Err(err) = std::fs::write(root.path().join(name), b"bytes\n") {
+        eprintln!("skipping: this filesystem refuses non-UTF-8 names ({err})");
+        return;
+    }
 
     let status = root.open().status().expect("status must not panic");
     assert!(
