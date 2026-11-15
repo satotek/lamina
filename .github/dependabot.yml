@@ -5,9 +5,20 @@ updates:
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    # Routine bumps arrive as one reviewable PR per week; security advisories
+    # still open separately.
+    groups:
+      rust-dependencies:
+        patterns: ["*"]
+        update-types: [minor, patch]
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
+    # The workflows pin actions to exact versions so a release build is
+    # reproducible; these PRs are how the pins move.
+    groups:
+      github-actions:
+        patterns: ["*"]

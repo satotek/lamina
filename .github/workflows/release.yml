@@ -1,0 +1,224 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  # Manual runs build the same artifacts but publish nothing; the archives are
+  # left in the run for inspection.
+  workflow_dispatch:
+
+concurrency:
+  # A half-uploaded release is worse than a duplicate run, so never cancel one.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  # crates/strata-term/build.rs refuses any other Zig version.
+  ZIG_VERSION: "0.17.1"
+  LINUX_PACKAGES: >-
+    build-essential
+    clang
+    cmake
+    curl
+    elfutils
+    gcc
+    g++
+    git
+    jq
+    libasound2-dev
+    libfontconfig-dev
+    libfreetype-dev
+    libgit2-dev
+    libglib2.0-dev
+    libsqlite3-dev
+    libssl-dev
+    libstdc++-14-dev
+    libva-dev
+    libvulkan-dev
+    libwayland-dev
+    libx11-xcb-dev
+    libxcb1-dev
+    libxkbcommon-dev
+    libxkbcommon-x11-dev
+    libzstd-dev
+    lld
+    llvm
+    make
+    musl-dev
+    musl-tools
+    pkg-config
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: check tag against Cargo.toml
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      # The tag is the only thing that names a release, and the packaging
+      # scripts read the version from the manifest, so a mismatch would publish
+      # artifacts whose file names disagree with the tag.
+      - name: Read the workspace version and compare it with the tag
+        id: read
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["workspace"]["package"]["version"])')
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match [workspace.package] version ${version}" >&2
+            exit 1
+          fi
+          echo "building Strata ${version}"
+
+  build:
+    name: build (${{ matrix.name }})
+    needs: version
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # Two macOS builds instead of one universal binary: lipo only merges
+        # the executables, the bundle and the disk image still have to be
+        # produced separately, and per-arch downloads are less than half the
+        # size for everyone. ubuntu-22.04 is the oldest runner still hosted,
+        # which keeps the glibc floor at 2.35 for the Linux archive.
+        include:
+          - name: macos-arm64
+            os: macos-15
+            target: aarch64-apple-darwin
+          - name: macos-x64
+            os: macos-15
+            target: x86_64-apple-darwin
+          - name: windows-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - name: linux-x86_64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          # LINUX_PACKAGES is one package per line; xargs turns it into
+          # arguments, which avoids relying on unquoted word splitting.
+          sudo apt-get update
+          printf '%s\n' "$LINUX_PACKAGES" | xargs sudo apt-get install -y
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Add the target triple
+        run: rustup target add ${{ matrix.target }}
+
+      # libghostty-vt is compiled from source by crates/strata-term/build.rs,
+      # which checks the toolchain version before downloading anything.
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Cache libghostty-vt
+        uses: actions/cache@v6.1.0
+        with:
+          path: target/ghostty-vt-cache
+          key: ghostty-vt-${{ env.ZIG_VERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('crates/strata-term/build.rs') }}
+
+      - uses: Swatinem/rust-cache@v2.9.3
+
+      # The notices are generated here rather than checked in so they always
+      # describe the lockfile that produced the binaries.
+      - name: Install cargo-about
+        uses: taiki-e/install-action@v2.90.5
+        with:
+          tool: cargo-about
+
+      - name: Generate third-party notices
+        shell: bash
+        run: packaging/third-party/generate.sh dist/THIRD-PARTY-NOTICES.md
+
+      - name: Build, bundle and create the disk image
+        if: runner.os == 'macOS'
+        run: |
+          packaging/macos/bundle.sh --target ${{ matrix.target }}
+          packaging/macos/dmg.sh --target ${{ matrix.target }}
+          hdiutil verify dist/*.dmg
+
+      - name: Build and zip the executable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: packaging/windows/package.ps1 -Target '${{ matrix.target }}'
+
+      - name: Build and create the tarball
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          packaging/linux/package.sh --target ${{ matrix.target }}
+          tmp=$(mktemp -d)
+          tar -xzf dist/strata-*-linux-*.tar.gz -C "$tmp"
+          # The archive unpacks into strata-<version>-linux-<arch>/.
+          package=$(find "$tmp" -mindepth 1 -maxdepth 1 -type d -name 'strata-*')
+          PREFIX="$tmp/prefix" "$package/install.sh"
+          test -x "$tmp/prefix/bin/strata"
+          test -f "$tmp/prefix/share/applications/strata.desktop"
+          test -f "$tmp/prefix/share/icons/hicolor/512x512/apps/strata.png"
+          test -f "$tmp/prefix/share/doc/strata/THIRD-PARTY-NOTICES.md"
+
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: dist-${{ matrix.name }}
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: create draft release
+    needs: [version, build]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Only this job writes to the repository; every build job above is read-only.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Write SHA256SUMS.txt
+        run: |
+          cd dist
+          sha256sum -- * >SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      # --draft keeps the release invisible until a human reviews the artifacts
+      # and the generated notes. Re-running the workflow for a tag that already
+      # has a release replaces its assets instead of failing.
+      - name: Create or refresh the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" --draft \
+              --title "Strata ${VERSION}" --generate-notes dist/*
+          fi

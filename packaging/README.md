@@ -5,53 +5,128 @@ output lands in `dist/`, which is git-ignored.
 
 | Path | What it does |
 | --- | --- |
-| `macos/bundle.sh` | Builds `dist/Strata.app` with `Info.plist` and the `.icns`, ad-hoc signed. |
+| `lib/common.sh` | Version, target-directory and arch helpers the scripts share. |
+| `macos/bundle.sh` | Builds `dist/Strata.app` with `Info.plist`, the `.icns`, the licences and the notices, ad-hoc signed. |
+| `macos/dmg.sh` | Wraps that app in `dist/Strata-<version>-macos-<arch>.dmg`. |
+| `linux/package.sh` | Builds `dist/strata-<version>-linux-<arch>.tar.gz`. |
 | `linux/strata.desktop` | Desktop entry for menus and file managers. |
-| `linux/install.sh` | Builds and installs the binary, icons and desktop entry into a prefix. |
-| `windows/package.ps1` | Builds and zips `strata.exe` with `README.txt`. |
+| `linux/install.sh` | Installs the binary, icons and desktop entry into a prefix; works from an unpacked archive or a checkout. |
+| `windows/package.ps1` | Builds and zips `strata.exe`, the README, the licences and the notices. |
+| `third-party/generate.sh` | Writes the third-party notices that every artifact carries. |
+| `third-party/libghostty-vt.md` | The part of those notices that cargo-about cannot see: the Zig side of the terminal backend. |
 
 The app icon lives with the other resources, not here:
 `crates/strata-app/resources/icon/`. `generate.sh` there renders every platform
 file from the SVGs with `resvg`, and all of its outputs are checked in, so no
-build step needs an image tool.
+build step needs an image tool. How to regenerate them is the last section.
+
+## CI and releases
+
+`.github/workflows/ci.yml` runs rustfmt, then clippy and the test suite on
+Ubuntu, macOS and Windows, plus one job that runs clippy with
+`--no-default-features` to prove the app still builds without the terminal
+feature and therefore without Zig.
+
+Zig 0.17.1 is required by `crates/strata-term/build.rs`, which downloads
+libghostty-vt 1.0.1 and its dependency tarballs (verifying their SHA-256 sums)
+and compiles the static library. The compiled archive and the tarballs are
+cached under `<target dir>/ghostty-vt-cache`, and CI caches that directory
+separately from `Swatinem/rust-cache` so a dependency bump does not throw away
+several minutes of Zig work.
+
+`.github/workflows/release.yml` runs on a `v*` tag and on manual dispatch:
+
+1. `version` fails unless the tag equals the `[workspace.package] version` in
+   `Cargo.toml` (so `v0.1.0` needs `version = "0.1.0"`).
+2. `build` compiles with `--release --locked` on four runners, packages the
+   result with the scripts below, and uploads each archive as a workflow
+   artifact:
+   - `Strata-<version>-macos-arm64.dmg` on `macos-15`
+     (`aarch64-apple-darwin`)
+   - `Strata-<version>-macos-x64.dmg` on `macos-15`
+     (`x86_64-apple-darwin`, cross-compiled)
+   - `Strata-<version>-windows-x64.zip` on `windows-latest`
+     (`x86_64-pc-windows-msvc`)
+   - `strata-<version>-linux-x86_64.tar.gz` on `ubuntu-22.04`
+     (`x86_64-unknown-linux-gnu`, the oldest hosted runner, so the archive
+     needs no newer glibc than 2.35)
+3. `publish` (tags only) downloads the archives, writes `SHA256SUMS.txt`, and
+   creates a **draft** GitHub release with generated notes. A manual dispatch
+   stops after step 2 and leaves the archives in the workflow run.
+
+Every artifact carries both licences and `THIRD-PARTY-NOTICES.md`, which
+`third-party/generate.sh` produces from `cargo-about` plus the pinned Zig
+dependency list. Two macOS builds rather than one universal binary: `lipo`
+would only merge the executables, the bundle and the `.dmg` still have to be
+built per arch, and separate downloads are smaller.
 
 ## macOS
 
 ```sh
 direnv allow
 direnv exec . packaging/macos/bundle.sh
+direnv exec . packaging/macos/dmg.sh
 open dist/Strata.app
 ```
 
-`bundle.sh` runs `cargo build --release -p strata-app`, copies the binary to
-`Contents/MacOS/strata` and `Strata.icns` to `Contents/Resources/`, writes
-`Contents/Info.plist`, and signs the bundle ad hoc (`codesign -s -`). The
-signature is enough for local use; Gatekeeper still treats the app as unsigned
-for anything downloaded, and there is no notarization. The version comes from
-the workspace `Cargo.toml`; the bundle id is `dev.strata.Strata`.
+`bundle.sh` runs `cargo build --release --locked -p strata-app`, copies the
+binary to `Contents/MacOS/strata` and `Strata.icns`, `LICENSE-MIT`,
+`LICENSE-APACHE` and `THIRD-PARTY-NOTICES.md` to `Contents/Resources/`, writes
+`Contents/Info.plist`, and signs the bundle ad hoc (`codesign -s -`). It needs
+`dist/THIRD-PARTY-NOTICES.md`, so run `third-party/generate.sh` first, or point
+`NOTICES` at another file.
+
+The signature is enough for local use; Gatekeeper still treats the app as
+unsigned for anything downloaded, and there is no notarization. The version
+comes from the workspace `Cargo.toml`; the bundle id is `dev.strata.Strata`.
+
+Pass `--target <triple>` to build for the other architecture, and `--no-build`
+to bundle a binary that already exists. Both scripts resolve the binary through
+`CARGO_TARGET_DIR` and the target triple, because the Nix dev shell points
+cargo at a shared target directory instead of `./target`.
+
+`dmg.sh` copies the app into a staging folder with an `/Applications` symlink
+and the three licence files, then runs `hdiutil create` (`UDZO`), so the
+resulting image can be dragged straight into Applications. It refuses to run
+before `bundle.sh`.
 
 The bundle carries no dylibs: the release binary links only system frameworks,
-so the `.app` is the whole product. `LSMinimumSystemVersion` is 11.0.
+so the `.app` is the whole product. `LSMinimumSystemVersion` is 14.0.
 
-The script resolves the binary through `CARGO_TARGET_DIR` because the Nix dev
-shell points cargo at a shared target directory instead of `./target`.
-
-`CFBundleIconFile` names `Strata.icns`, which `generate.sh` builds with
+`CFBundleIconFile` names `Strata.icns`, which the icon `generate.sh` builds with
 `iconutil` from an `.iconset`. `iconutil` is macOS-only, so regenerating that
 one file has to happen on a Mac; the other sizes still regenerate anywhere.
 
 ## Linux
 
 ```sh
+direnv exec . packaging/linux/package.sh
 direnv exec . packaging/linux/install.sh            # /usr/local
 PREFIX=$HOME/.local direnv exec . packaging/linux/install.sh
 ```
 
-The install drops the binary in `bin/`, `strata.desktop` in
-`share/applications/`, and the 16–512px PNGs in the matching
-`share/icons/hicolor/<size>x<size>/apps/strata.png` paths. It is a convenience
-for a development machine built in the Nix dev shell, not a distribution
-package: a distro build needs its own dependency and library-path handling.
+`package.sh` builds the release binary and writes
+`dist/strata-<version>-linux-<arch>.tar.gz`. The archive unpacks into one
+directory holding `strata`, `strata.desktop`, `icons/<size>.png` (16–512),
+`install.sh`, `LICENSE-MIT`, `LICENSE-APACHE` and `THIRD-PARTY-NOTICES.md`, so
+it installs on a machine with no toolchain:
+
+```sh
+tar -xzf strata-0.1.0-linux-x86_64.tar.gz
+PREFIX=$HOME/.local strata-0.1.0-linux-x86_64/install.sh
+```
+
+`install.sh` detects that layout. Run from a checkout instead, it builds the
+release binary first and installs from the repository. Either way it drops the
+binary in `bin/`, `strata.desktop` in `share/applications/`, the icons in
+`share/icons/hicolor/<size>x<size>/apps/strata.png` and the licences in
+`share/doc/strata/`. It is a convenience for a development machine or the
+release archive, not a distribution package: a distro build needs its own
+dependency and library-path handling.
+
+`package.sh` takes `--target <triple>` and `--no-build` like the macOS scripts,
+and `NOTICES=<path>` to point at a notices file other than
+`dist/THIRD-PARTY-NOTICES.md`.
 
 The desktop entry uses `Icon=strata` and `StartupWMClass=strata`, and the app
 sets `WindowOptions::app_id` to `strata` so X11/Wayland group the window with
@@ -68,13 +143,48 @@ is behind `cfg(target_os = "linux")`.
 powershell -ExecutionPolicy Bypass -File packaging\windows\package.ps1
 ```
 
-Builds with `cargo build --release -p strata-app` and writes
-`dist\strata-<version>-windows-x86_64.zip` containing `strata.exe` and
-`README.txt`. `build.rs` embeds `resources/icon/strata.ico` in the executable,
-which is what Explorer, the taskbar and every window show, so the zip needs no
-icon files. The script assumes the default `target\release` layout and is meant
-to run on Windows; GPUI compiles its shaders with `fxc.exe` from the Windows
-SDK, so there is no cross-build.
+Builds with `cargo build --release --locked -p strata-app` and writes
+`dist\Strata-<version>-windows-x64.zip` containing `strata.exe`, `README.txt`,
+both licences and `THIRD-PARTY-NOTICES.md`. `-Target <triple>` and `-NoBuild`
+mirror the shell scripts, and the script resolves the binary through
+`CARGO_TARGET_DIR`. `build.rs` embeds `resources/icon/strata.ico` in the
+executable, which is what Explorer, the taskbar and every window show, so the
+zip needs no icon files. Build on Windows: GPUI compiles its shaders with
+`fxc.exe` from the Windows SDK, so there is no cross-build.
+
+## Third-party notices
+
+```sh
+nix shell nixpkgs#cargo-about --command \
+    direnv exec . packaging/third-party/generate.sh dist/THIRD-PARTY-NOTICES.md
+```
+
+The script renders `about.hbs` through `cargo-about` (configuration in
+`about.toml`, which accepts only the licences actually present in the
+lockfile), appends `third-party/libghostty-vt.md`, and writes the result. It
+needs `cargo-about` on PATH; the Nix package and `cargo install cargo-about`
+both work, and CI installs it with `taiki-e/install-action`.
+
+The appended section matters because `cargo-about` only walks Cargo's graph:
+libghostty-vt, its Zig packages (Highway, Wuffs, Aro, `translate_c`, uucode) and
+its vendored simdutf are compiled by `build.rs` with Zig and never appear as
+crates. The table there is the upstream `deps/libghostty-vt-third-party.json`
+of the pinned release, so bumping libghostty-vt means updating that table too.
+
+## Cutting a release
+
+1. Bump `[workspace.package] version` in `Cargo.toml` and commit it.
+2. Tag the commit and push the tag:
+
+   ```sh
+   git tag v0.1.0
+   git push origin v0.1.0
+   ```
+
+3. Wait for the Release workflow. It fails immediately if the tag and the
+   manifest version disagree.
+4. Review the draft release on GitHub: check the four archives,
+   `SHA256SUMS.txt` and the generated notes, then publish it.
 
 ## Regenerating the icons
 

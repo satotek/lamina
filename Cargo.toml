@@ -6,6 +6,9 @@ members = ["crates/strata-core", "crates/strata-app", "crates/strata-term"]
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
+description = "Lightweight cross-platform git client"
+repository = "https://github.com/satotek/strata"
+homepage = "https://github.com/satotek/strata"
 
 [workspace.dependencies]
 strata-core = { path = "crates/strata-core" }

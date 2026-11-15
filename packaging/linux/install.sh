@@ -1,32 +1,66 @@
 #!/bin/sh
-# Installs a Linux build into a prefix: the binary, the hicolor icons and the
-# desktop entry.
+# Installs a Linux build into a prefix: the binary, the hicolor icons, the
+# desktop entry and (when they ship next to this script) the licences.
+#
+# From the release archive, which needs no toolchain:
+#
+#     ./install.sh
+#     PREFIX=$HOME/.local ./install.sh
+#
+# From a checkout, which builds the release binary first:
 #
 #     direnv exec . packaging/linux/install.sh
 #     PREFIX=$HOME/.local direnv exec . packaging/linux/install.sh
 #
-# This packages a build made in the Nix dev shell, which links the shell's
-# native libraries; a distribution package is a separate job.
+# This installs an archive or a build made in the Nix dev shell, which links the
+# shell's native libraries; a distribution package is a separate job.
 set -eu
 
-root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+here=$(CDPATH='' cd -- "$(dirname "$0")" && pwd)
 prefix=${PREFIX:-/usr/local}
-# The dev shell points cargo at a shared target directory, so resolve the
-# binary the same way the other packaging scripts do.
-target_dir=${CARGO_TARGET_DIR:-$root/target}
-icons="$root/crates/strata-app/resources/icon"
 
-cargo build --release -p strata-app
+command -v install >/dev/null 2>&1 || {
+    echo "install.sh: the 'install' utility is missing (coreutils)" >&2
+    exit 1
+}
 
-install -Dm755 "$target_dir/release/strata" "$prefix/bin/strata"
-install -Dm644 "$root/packaging/linux/strata.desktop" \
-    "$prefix/share/applications/strata.desktop"
+if [ -x "$here/strata" ] && [ -d "$here/icons" ]; then
+    # Release archive: the binary, desktop entry and icons sit next to this
+    # script, so nothing has to be built.
+    bin=$here/strata
+    desktop=$here/strata.desktop
+    icons=$here/icons
+    docs=$here
+else
+    root=$(CDPATH='' cd -- "$here/../.." && pwd)
+    . "$root/packaging/lib/common.sh"
+    command -v cargo >/dev/null 2>&1 || {
+        echo "install.sh: cargo not found; run through the dev shell: direnv exec . $0" >&2
+        exit 1
+    }
+    (cd "$root" && cargo build --release --locked -p strata-app)
+    bin=$(strata_release_dir "$root" "")/strata
+    desktop=$root/packaging/linux/strata.desktop
+    icons=$root/crates/strata-app/resources/icon/hicolor
+    docs=$root
+fi
+
+install -Dm755 "$bin" "$prefix/bin/strata"
+install -Dm644 "$desktop" "$prefix/share/applications/strata.desktop"
 
 # The window icon is the 128px file embedded in the binary; the desktop entry
 # needs the whole hicolor ladder for panels, task switchers and file managers.
 for size in 16 32 48 64 128 256 512; do
-    install -Dm644 "$icons/hicolor/$size.png" \
+    install -Dm644 "$icons/$size.png" \
         "$prefix/share/icons/hicolor/${size}x${size}/apps/strata.png"
+done
+
+# Licences and third-party notices are required next to a distributed binary;
+# a fresh checkout has them at the root as well.
+for doc in LICENSE-MIT LICENSE-APACHE THIRD-PARTY-NOTICES.md; do
+    if [ -f "$docs/$doc" ]; then
+        install -Dm644 "$docs/$doc" "$prefix/share/doc/strata/$doc"
+    fi
 done
 
 # Both caches are optional; a distribution's packages usually update them.

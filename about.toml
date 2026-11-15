@@ -1,0 +1,17 @@
+# Only the licences the lockfile actually needs. cargo-about fails the build when
+# a dependency adds one that is not listed here, which is the point: a new
+# licence has to be reviewed rather than shipped silently.
+# about.hbs filters out the workspace crates, covered by LICENSE-MIT and
+# LICENSE-APACHE, so they never appear as third-party components.
+accepted = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "CC0-1.0",
+    "Unicode-3.0",
+    "0BSD",
+    "MPL-2.0",
+]

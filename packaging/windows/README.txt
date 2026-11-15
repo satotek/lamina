@@ -12,3 +12,13 @@ Strata runs the git command line for every write and reads repositories
 directly, so Git for Windows has to be installed and on PATH.
 
 Settings live in %APPDATA%\Strata.
+
+This build is not code signed, so Windows SmartScreen may ask for confirmation
+the first time it runs.
+
+Licences
+--------
+
+Strata is licensed under MIT OR Apache-2.0; see LICENSE-MIT and LICENSE-APACHE.
+THIRD-PARTY-NOTICES.md lists every bundled third-party component and its
+licence terms.

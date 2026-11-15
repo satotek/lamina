@@ -4,6 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
 
 concurrency:
   # PRs share a ref across pushes, so a new push cancels the previous run.
@@ -13,6 +14,42 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
+  # crates/strata-term/build.rs refuses any other Zig version.
+  ZIG_VERSION: "0.17.1"
+  # Mirrors the apt list in zed-industries/zed `script/linux`, which is the
+  # authoritative set of native dependencies for GPUI on Debian-likes.
+  LINUX_PACKAGES: >-
+    build-essential
+    clang
+    cmake
+    curl
+    elfutils
+    gcc
+    g++
+    git
+    jq
+    libasound2-dev
+    libfontconfig-dev
+    libfreetype-dev
+    libgit2-dev
+    libglib2.0-dev
+    libsqlite3-dev
+    libssl-dev
+    libstdc++-14-dev
+    libva-dev
+    libvulkan-dev
+    libwayland-dev
+    libx11-xcb-dev
+    libxcb1-dev
+    libxkbcommon-dev
+    libxkbcommon-x11-dev
+    libzstd-dev
+    lld
+    llvm
+    make
+    musl-dev
+    musl-tools
+    pkg-config
 
 permissions:
   contents: read
@@ -23,7 +60,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
       # rust-toolchain.toml pins the channel and components; this makes rustup
       # materialise the toolchain before the first cargo invocation.
       - run: rustup show
@@ -32,57 +69,42 @@ jobs:
   test:
     name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
-      # Mirrors the apt list in zed-industries/zed `script/linux`, which is the
-      # authoritative set of native dependencies for GPUI on Debian-likes.
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
         run: |
+          # LINUX_PACKAGES is one package per line; xargs turns it into
+          # arguments, which avoids relying on unquoted word splitting.
           sudo apt-get update
-          sudo apt-get install -y \
-            build-essential \
-            clang \
-            cmake \
-            curl \
-            elfutils \
-            gcc \
-            g++ \
-            git \
-            jq \
-            libasound2-dev \
-            libfontconfig-dev \
-            libfreetype-dev \
-            libgit2-dev \
-            libglib2.0-dev \
-            libsqlite3-dev \
-            libssl-dev \
-            libstdc++-14-dev \
-            libva-dev \
-            libvulkan-dev \
-            libwayland-dev \
-            libx11-xcb-dev \
-            libxcb1-dev \
-            libxkbcommon-dev \
-            libxkbcommon-x11-dev \
-            libzstd-dev \
-            lld \
-            llvm \
-            make \
-            musl-dev \
-            musl-tools \
-            pkg-config
+          printf '%s\n' "$LINUX_PACKAGES" | xargs sudo apt-get install -y
 
       - name: Install Rust toolchain
         run: rustup show
 
-      - uses: Swatinem/rust-cache@v2
+      # libghostty-vt is built from source by crates/strata-term/build.rs, which
+      # checks the toolchain version before downloading anything.
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      # build.rs keeps the compiled archive and the pinned tarballs under
+      # <target>/ghostty-vt-cache. The crate itself rarely changes, so this
+      # cache outlives the rust-cache entry that a lockfile change discards.
+      - name: Cache libghostty-vt
+        uses: actions/cache@v6.1.0
+        with:
+          path: target/ghostty-vt-cache
+          key: ghostty-vt-${{ env.ZIG_VERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('crates/strata-term/build.rs') }}
+
+      - uses: Swatinem/rust-cache@v2.9.3
 
       # Tests shell out to `git` to build fixtures; runners have no global
       # identity, and commits without one fail.
@@ -96,3 +118,28 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+  no-terminal:
+    name: clippy (no terminal feature)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install Linux dependencies
+        run: |
+          # LINUX_PACKAGES is one package per line; xargs turns it into
+          # arguments, which avoids relying on unquoted word splitting.
+          sudo apt-get update
+          printf '%s\n' "$LINUX_PACKAGES" | xargs sudo apt-get install -y
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - uses: Swatinem/rust-cache@v2.9.3
+
+      # No Zig step here on purpose: the point of this job is that the app
+      # still builds when the terminal feature, and with it libghostty-vt, is
+      # turned off.
+      - name: Clippy without the terminal feature
+        run: cargo clippy -p strata-app --no-default-features --all-targets -- -D warnings

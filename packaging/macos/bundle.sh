@@ -1,50 +1,111 @@
 #!/bin/sh
 # Builds dist/Strata.app: the release binary, a bundle Info.plist and the
 # checked-in Strata.icns, then signs it ad hoc so it launches on this Mac.
-# Nothing here notarises or installs the app; copy it to /Applications if you
-# want it in the Dock permanently.
+# Nothing here notarises the app; the release workflow uses the same script and
+# dmg.sh to turn the result into a disk image.
 #
 # Run it from the dev shell so cargo and the release target directory match a
 # normal build:
 #
 #     direnv exec . packaging/macos/bundle.sh
+#     packaging/macos/bundle.sh --target x86_64-apple-darwin
 set -eu
 
-root=$(CDPATH= cd -- "$(dirname "$0")/../.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
+. "$root/packaging/lib/common.sh"
+
+usage() {
+    cat <<'EOF'
+Builds dist/Strata.app: the release binary, a bundle Info.plist and the
+checked-in Strata.icns, then signs it ad hoc so it launches on this Mac.
+Nothing here notarises the app; dmg.sh turns the result into the disk image
+the release publishes.
+
+    direnv exec . packaging/macos/bundle.sh
+    packaging/macos/bundle.sh --target x86_64-apple-darwin
+
+Options:
+    --target <triple>  build and bundle that target instead of the host
+    --no-build         bundle a release binary that already exists
+
+Environment:
+    NOTICES  notices file to embed (default: dist/THIRD-PARTY-NOTICES.md)
+EOF
+}
+
+target=
+build=1
+while [ $# -gt 0 ]; do
+    case $1 in
+    --target)
+        target=${2:?--target needs a triple}
+        shift 2
+        ;;
+    --no-build) build=0; shift ;;
+    -h | --help)
+        usage
+        exit 0
+        ;;
+    *)
+        echo "bundle.sh: unknown argument: $1" >&2
+        exit 2
+        ;;
+    esac
+done
+
 cd "$root"
 
 app="$root/dist/Strata.app"
 icon=crates/strata-app/resources/icon/Strata.icns
-# The dev shell points cargo at one target directory shared by every worktree,
-# so the binary is not necessarily under ./target. `cargo run` would find it,
-# but this script copies the file and so has to resolve the path itself.
-target_dir=${CARGO_TARGET_DIR:-$root/target}
+notices=${NOTICES:-$root/dist/THIRD-PARTY-NOTICES.md}
+# Resolve the binary through CARGO_TARGET_DIR and the optional --target, because
+# the dev shell points cargo at one target directory shared by every worktree
+# and cross builds add a triple directory.
+release=$(strata_release_dir "$root" "$target")
+version=$(strata_version "$root")
 
-command -v cargo >/dev/null 2>&1 || {
-    echo "bundle.sh: cargo not found; run through the dev shell: direnv exec . $0" >&2
+if [ -z "$version" ]; then
+    echo "bundle.sh: could not read [workspace.package] version from Cargo.toml" >&2
     exit 1
-}
+fi
+if [ ! -f "$notices" ]; then
+    echo "bundle.sh: $notices is missing; run packaging/third-party/generate.sh first" >&2
+    exit 1
+fi
+
+if [ "$build" = 1 ]; then
+    command -v cargo >/dev/null 2>&1 || {
+        echo "bundle.sh: cargo not found; run through the dev shell: direnv exec . $0" >&2
+        exit 1
+    }
+    set -- --release --locked -p strata-app
+    if [ -n "$target" ]; then
+        set -- "$@" --target "$target"
+    fi
+    cargo build "$@"
+fi
+
 command -v codesign >/dev/null 2>&1 || {
     echo "bundle.sh: codesign not found; install the Xcode command line tools" >&2
     exit 1
 }
 
-cargo build --release -p strata-app
-
-version=$(cargo metadata --no-deps --format-version 1 --quiet | python3 -c '
-import json, sys
-packages = json.load(sys.stdin)["packages"]
-print(next(package["version"] for package in packages if package["name"] == "strata-app"))
-')
+if [ ! -f "$release/strata" ]; then
+    echo "bundle.sh: no binary at $release/strata; build it or drop --no-build" >&2
+    exit 1
+fi
 
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp "$target_dir/release/strata" "$app/Contents/MacOS/strata"
+cp "$release/strata" "$app/Contents/MacOS/strata"
 cp "$icon" "$app/Contents/Resources/Strata.icns"
+# Licences travel inside the bundle; dmg.sh also copies them to the image root.
+cp LICENSE-MIT LICENSE-APACHE "$app/Contents/Resources/"
+cp "$notices" "$app/Contents/Resources/THIRD-PARTY-NOTICES.md"
 
 # 14.0 matches the deployment target the Rust toolchain compiles for
 # (`LC_BUILD_VERSION minos`); GPUI's Metal renderer needs a current SDK too.
-cat > "$app/Contents/Info.plist" <<PLIST
+cat >"$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
