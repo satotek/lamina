@@ -166,8 +166,9 @@ macro_rules! action {
 use crate::actions::ToggleTerminal;
 use crate::actions::{
     CloneRepository, CloseCompare, CloseTab, ExtendSelectionNext, ExtendSelectionPrevious,
-    NavigateBack, NewRepository, NewTab, NextTab, OpenGitConfig, OpenInEditor, OpenRepository,
-    OpenSettings, OpenTerminalHere, PreviousTab, Quit, REPO_VIEW, REPO_VIEW_LIST, RedoLastAction,
+    GoToChild, GoToHead, GoToParent, GoToSecondParent, NavigateBack, NavigateForward,
+    NewRepository, NewTab, NextTab, OpenGitConfig, OpenInEditor, OpenRepository, OpenSettings,
+    OpenTerminalHere, PreviousTab, Quit, REPO_VIEW, REPO_VIEW_LIST, RedoLastAction,
     ReopenClosedTab, SelectFirst, SelectLast, SelectNext, SelectPageDown, SelectPageUp,
     SelectPrevious, SelectTab1, SelectTab2, SelectTab3, SelectTab4, SelectTab5, SelectTab6,
     SelectTab7, SelectTab8, SelectTab9, StashChanges, SwitchBranch, ToggleDetailsMaximized,
@@ -369,7 +370,7 @@ pub static ACTIONS: &[ActionSpec] = &[
         Some(REPO_VIEW_LIST),
         RedoLastAction,
         [binding("secondary-shift-z", Some(REPO_VIEW_LIST))],
-        38,
+        44,
         true
     ),
     action!(
@@ -383,6 +384,59 @@ pub static ACTIONS: &[ActionSpec] = &[
             mac_binding("secondary-[", Some(REPO_VIEW))
         ],
         16,
+        true
+    ),
+    action!(
+        "strata::NavigateForward",
+        "Go forward",
+        Actions,
+        Some(REPO_VIEW),
+        NavigateForward,
+        [
+            binding("alt-right", Some(REPO_VIEW)),
+            mac_binding("secondary-]", Some(REPO_VIEW))
+        ],
+        45,
+        true
+    ),
+    action!(
+        "strata::GoToParent",
+        "Go to parent commit",
+        Actions,
+        Some(REPO_VIEW_LIST),
+        GoToParent,
+        [binding("secondary-down", Some(REPO_VIEW_LIST))],
+        46,
+        true
+    ),
+    action!(
+        "strata::GoToSecondParent",
+        "Go to second parent",
+        Actions,
+        Some(REPO_VIEW_LIST),
+        GoToSecondParent,
+        [binding("secondary-shift-down", Some(REPO_VIEW_LIST))],
+        47,
+        true
+    ),
+    action!(
+        "strata::GoToChild",
+        "Go to child commit",
+        Actions,
+        Some(REPO_VIEW_LIST),
+        GoToChild,
+        [binding("secondary-up", Some(REPO_VIEW_LIST))],
+        48,
+        true
+    ),
+    action!(
+        "strata::GoToHead",
+        "Go to HEAD",
+        Actions,
+        Some(REPO_VIEW_LIST),
+        GoToHead,
+        [binding("secondary-shift-h", Some(REPO_VIEW_LIST))],
+        49,
         true
     ),
     action!(
@@ -2024,6 +2078,17 @@ mod tests {
             ("alt-left", "NavigateBack", "RepoView"),
             #[cfg(target_os = "macos")]
             ("secondary-[", "NavigateBack", "RepoView"),
+            ("alt-right", "NavigateForward", "RepoView"),
+            #[cfg(target_os = "macos")]
+            ("secondary-]", "NavigateForward", "RepoView"),
+            ("secondary-down", "GoToParent", "RepoView && !Input"),
+            (
+                "secondary-shift-down",
+                "GoToSecondParent",
+                "RepoView && !Input",
+            ),
+            ("secondary-up", "GoToChild", "RepoView && !Input"),
+            ("secondary-shift-h", "GoToHead", "RepoView && !Input"),
             ("secondary-t", "NewTab", "Workspace"),
             ("secondary-w", "CloseTab", "Workspace"),
             ("secondary-shift-t", "ReopenClosedTab", "Workspace"),
@@ -2195,7 +2260,7 @@ mod tests {
             }
         }
         // Every built-in palette entry has a registry row.
-        let expected_count = if cfg!(feature = "terminal") { 43 } else { 42 };
+        let expected_count = if cfg!(feature = "terminal") { 48 } else { 47 };
         assert_eq!(orders.len(), expected_count);
     }
 

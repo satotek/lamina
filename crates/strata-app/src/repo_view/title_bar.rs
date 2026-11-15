@@ -70,18 +70,20 @@ impl RepoView {
         let branch_pr = branch_prs.get(&branch).cloned();
         let branch_pr_note = branch_prs.note().map(str::to_owned);
         let back_button = self.parent_name.as_deref().map(|parent| {
-            let tooltip = t!(
-                "title_bar.back_tooltip",
-                parent = parent,
-                key = back_key_label()
-            )
-            .to_string();
+            // No shortcut in the tooltip: Back walks the commit history first
+            // and only then falls back to the parent repository.
+            let tooltip = t!("title_bar.back", parent = parent).to_string();
+            let entity = self.entity.clone();
             crate::ui::content_button("back-to-parent")
                 .kind(crate::ui::ButtonKind::Ghost)
                 .size(crate::ui::ButtonSize::Small)
                 .tooltip(tooltip)
-                .on_click(|_, window, cx| {
-                    window.dispatch_action(Box::new(actions::NavigateBack), cx);
+                // This button means the parent repository, not the commit
+                // history the Back action walks first.
+                .on_click(move |_, window, cx| {
+                    if let Some(entity) = entity.upgrade() {
+                        entity.update(cx, |this, cx| this.navigate_back_to_parent(window, cx));
+                    }
                 })
                 .child(
                     div()
@@ -317,6 +319,9 @@ impl RepoView {
                             }),
                     )
                     .child(div().w(px(1.0)).h(px(18.0)).mx_1().bg(design.border))
+                    .when(fit.nav_history, |row| {
+                        row.child(control(self.nav_buttons(design, window)))
+                    })
                     .when_some(back_button, |row, button| row.child(control(button)))
                     .child(control(repository))
                     .when_some(branch_chip, |row, chip| row.child(control(chip))),
@@ -355,6 +360,10 @@ const TOOL_BUTTON_WIDTH: f32 = 32.0;
 
 /// The undo and redo pair, with the same 2 px gap the network actions use.
 const UNDO_REDO_WIDTH: f32 = 2.0 * TOOL_BUTTON_WIDTH + ACTION_GAP;
+
+/// The back and forward pair beside the repository and branch chips.
+const NAV_HISTORY_BUTTON: f32 = 24.0;
+const NAV_HISTORY_WIDTH: f32 = 2.0 * NAV_HISTORY_BUTTON + ACTION_GAP;
 
 /// The width of the title bar's actions: the undo/redo pair, the remote row,
 /// the stash action (52 px with its label, 32 as an icon), the separator, the
@@ -399,7 +408,7 @@ const MAX_SEARCH_WIDTH: f32 = 420.0;
 /// The search field keeps the `Ctrl F` hint only while there is room for both
 /// the hint and a readable amount of query text beside it.
 const KEY_HINT_BELOW: f32 = 1500.0;
-const KEY_HINT_MIN_SEARCH_WIDTH: f32 = 240.0;
+const KEY_HINT_MIN_SEARCH_WIDTH: f32 = 220.0;
 
 /// The narrowest the back button gets: its arrow alone, with the parent name
 /// left to the tooltip.
@@ -413,13 +422,13 @@ const MIN_BRANCH_WIDTH: f32 = 60.0;
 ///
 /// The actions on the right always stay in the window, down to the 720 px
 /// minimum size. Everything between them and the app mark gives way in one
-/// order as the window narrows: the undo/redo pair, the search hint, the
-/// wordmark, the upstream tracking label, the remote buttons' labels, the
-/// repository and branch caps, the back button's label, and finally the branch
-/// chip. The search field is the last thing to go: it is the only part with no
-/// icon-only form, so it is narrowed to [`MIN_SEARCH_WIDTH`] before it
-/// disappears. The name caps are what the row reserves; a longer name
-/// truncates inside its cap.
+/// order as the window narrows: the upstream tracking label, the back/forward
+/// pair, the undo/redo pair, the search hint, the wordmark, the remote buttons'
+/// labels, the repository and branch caps, the back button's label, and finally
+/// the branch chip. The search field is the last thing to go: it is the only
+/// part with no icon-only form, so it is narrowed to [`MIN_SEARCH_WIDTH`]
+/// before it disappears. The name caps are what the row reserves; a longer
+/// name truncates inside its cap.
 #[derive(Clone, Copy, Debug)]
 struct TitleBarFit {
     /// The search column. It is dropped only when even the barest name row
@@ -437,9 +446,12 @@ struct TitleBarFit {
     stash_label: bool,
     /// Fetch, Pull and Push as icons only, with the labels in their tooltips.
     remote_compact: bool,
-    /// The undo/redo pair before the remote actions. It gives way at the
-    /// narrowest widths, where the shortcuts still run both actions.
+    /// The undo/redo pair before the remote actions. It gives way with the
+    /// history pair on the narrowest windows; the shortcuts still run both
+    /// actions.
     undo_redo: bool,
+    /// The back/forward pair beside the name chips.
+    nav_history: bool,
     /// Whether the "Back to <parent>" label is shown beside its arrow icon.
     back_label: bool,
     back_width: f32,
@@ -461,6 +473,7 @@ impl TitleBarFit {
             stash_label: width >= 1300.0,
             remote_compact: width < REMOTE_ICONS_BELOW,
             undo_redo: true,
+            nav_history: true,
             back_label,
             back_width,
             repository_width,
@@ -554,6 +567,10 @@ impl TitleBarFit {
             + 9.0
             + 59.0
             + self.repository_width;
+        if self.nav_history {
+            // Its own row gap and the extra gap the row gains for the pair.
+            width += NAV_HISTORY_WIDTH + 16.0;
+        }
         if self.back_label || self.back_width > 0.0 {
             // The row gap and the small ghost button's horizontal padding.
             width += 8.0 + 16.0 + self.back_width;
@@ -572,14 +589,17 @@ impl TitleBarFit {
     /// Gives up one detail, the least costly first, to make room for the
     /// search field. Returns false once nothing else may give way.
     fn shed(&mut self) -> bool {
-        if self.undo_redo {
-            // The pair is the newest detail and the one with a complete
-            // alternative: both actions keep their shortcuts, so it gives way
-            // before the remote labels and the chips that identify the
-            // repository.
-            self.undo_redo = false;
-        } else if self.track {
+        if self.track {
+            // The upstream tracking label is the least load-bearing detail: the
+            // branch chip still names the branch, and the sidebar holds the
+            // full upstream state.
             self.track = false;
+        } else if self.nav_history {
+            // The history pair is the newest detail; its actions keep their
+            // shortcuts, so it goes before the pair that has none.
+            self.nav_history = false;
+        } else if self.undo_redo {
+            self.undo_redo = false;
         } else if self.wordmark {
             self.wordmark = false;
         } else if !self.remote_compact {
@@ -727,6 +747,45 @@ impl RepoView {
             .into_any_element()
     }
 
+    /// The commit-history Back and Forward pair beside the name chips.
+    ///
+    /// Back falls back to the parent repository, so it is enabled when either
+    /// stack can move; Forward only walks this view's own jumps.
+    fn nav_buttons(&self, design: &Design, window: &Window) -> AnyElement {
+        let can_back = self.can_navigate_back();
+        let can_forward = self.can_navigate_forward();
+        div()
+            .flex()
+            .items_center()
+            .gap(px(ACTION_GAP))
+            .flex_none()
+            .child(
+                crate::ui::icon_button("navigate-back", IconName::ArrowLeft)
+                    .ghost()
+                    .w(px(NAV_HISTORY_BUTTON))
+                    .h(px(NAV_HISTORY_BUTTON))
+                    .text_color(design.muted)
+                    .tooltip(self.back_tooltip(window))
+                    .disabled(!can_back)
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(Box::new(actions::NavigateBack), cx);
+                    }),
+            )
+            .child(
+                crate::ui::icon_button("navigate-forward", IconName::ArrowRight)
+                    .ghost()
+                    .w(px(NAV_HISTORY_BUTTON))
+                    .h(px(NAV_HISTORY_BUTTON))
+                    .text_color(design.muted)
+                    .tooltip(self.forward_tooltip(window))
+                    .disabled(!can_forward)
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(Box::new(actions::NavigateForward), cx);
+                    }),
+            )
+            .into_any_element()
+    }
+
     /// The title bar's Undo and Redo pair, left of the remote actions.
     ///
     /// The tooltips name the entry each button would move to, so the pair says
@@ -828,16 +887,6 @@ fn search_key_label() -> &'static str {
 #[cfg(target_os = "macos")]
 fn search_key_label() -> &'static str {
     "⌘F"
-}
-
-#[cfg(not(target_os = "macos"))]
-fn back_key_label() -> &'static str {
-    "Alt+Left"
-}
-
-#[cfg(target_os = "macos")]
-fn back_key_label() -> &'static str {
-    "⌘["
 }
 
 #[cfg(test)]
@@ -1004,8 +1053,8 @@ mod tests {
         assert_eq!(fit.repository_width, 220.0);
         assert_eq!(fit.branch_width, 240.0);
         assert!(
-            fit.search_width > 280.0,
-            "a 1600 px window has a wide search field beside the undo pair"
+            fit.search_width > 220.0,
+            "a 1600 px window keeps a usable search field beside both new pairs"
         );
     }
 
@@ -1013,8 +1062,15 @@ mod tests {
     fn back_button_shows_its_label_at_normal_widths_and_keeps_search_usable() {
         let default_fit = TitleBarFit::new(1360.0, true);
         assert!(default_fit.back_label);
-        assert!(default_fit.branch && default_fit.track);
-        assert!(default_fit.search && default_fit.search_width >= MIN_SEARCH_WIDTH);
+        assert!(default_fit.branch);
+        assert!(
+            default_fit.search && default_fit.search_width >= MIN_SEARCH_WIDTH,
+            "the back button's label still leaves the search usable"
+        );
+        // Next to the back button the upstream label is what pays for the two
+        // new pairs; without it, a window of the same size keeps tracking.
+        assert!(!default_fit.track);
+        assert!(TitleBarFit::new(1360.0, false).track);
 
         let narrow_fit = TitleBarFit::new(style::MIN_WINDOW_SIZE.0, true);
         assert!(

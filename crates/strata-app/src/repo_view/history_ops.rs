@@ -681,6 +681,7 @@ pub(crate) fn commit_menu(
     let (Some(commit), Some(state)) = (target.id, state) else {
         return menu;
     };
+    menu = RepoView::graph_submenu(menu, entity.clone(), commit, state.head, window, cx);
     let short = target.short;
     let summary = target.summary;
     let tags = target.tags;

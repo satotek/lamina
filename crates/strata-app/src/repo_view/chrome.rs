@@ -15,14 +15,16 @@ use gpui::{
 use gpui::{Axis, Bounds, Pixels, relative};
 use gpui_component::ActiveTheme as _;
 
+use super::navigation;
 use super::{PAGE, RepoView};
 #[cfg(feature = "terminal")]
 use crate::actions::ToggleTerminal;
 use crate::actions::{
-    self, CloseCompare, ExtendSelectionNext, ExtendSelectionPrevious, NavigateBack, OpenInEditor,
-    OpenTerminalHere, RedoLastAction, SelectFirst, SelectLast, SelectNext, SelectPageDown,
-    SelectPageUp, SelectPrevious, StashChanges, SwitchBranch, ToggleDetailsMaximized,
-    ToggleFrameStats, ToggleSidebar, ToggleWholeFile, UndoLastAction,
+    self, CloseCompare, ExtendSelectionNext, ExtendSelectionPrevious, GoToChild, GoToHead,
+    GoToParent, GoToSecondParent, NavigateBack, NavigateForward, OpenInEditor, OpenTerminalHere,
+    RedoLastAction, SelectFirst, SelectLast, SelectNext, SelectPageDown, SelectPageUp,
+    SelectPrevious, StashChanges, SwitchBranch, ToggleDetailsMaximized, ToggleFrameStats,
+    ToggleSidebar, ToggleWholeFile, UndoLastAction,
 };
 use crate::branches::CreateBranchFromHead;
 use crate::commands::RunCustomCommand;
@@ -152,11 +154,25 @@ impl Render for RepoView {
                     this.toggle_terminal(window, cx)
                 }));
         }
-        if self.parent_name.is_some() {
-            root = root.on_action(cx.listener(|this, _: &NavigateBack, window, cx| {
-                this.navigate_back_to_parent(window, cx);
+        root = root
+            .on_action(cx.listener(|this, _: &NavigateBack, window, cx| {
+                this.navigate_back(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NavigateForward, window, cx| {
+                this.navigate_forward(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &GoToParent, window, cx| {
+                this.graph_move(navigation::GraphMove::Parent, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &GoToSecondParent, window, cx| {
+                this.graph_move(navigation::GraphMove::SecondParent, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &GoToChild, window, cx| {
+                this.graph_move(navigation::GraphMove::Child, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &GoToHead, window, cx| {
+                this.graph_move(navigation::GraphMove::Head, window, cx);
             }));
-        }
         if let Some(font) = &design.ui_font {
             root = root.font_family(font.clone());
         }

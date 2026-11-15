@@ -95,9 +95,20 @@ actions!(
         /// Opens the branch switcher under the title bar's branch chip.
         /// Handled on `RepoView` by `branch_switcher.rs`.
         SwitchBranch,
-        /// Returns to the parent repository this one was opened from. Handled
-        /// on `RepoView` when a parent exists on the navigation stack.
+        /// Returns to the previous commit jump, or the parent repository this
+        /// one was opened from. Handled on `RepoView` by `navigation.rs`.
         NavigateBack,
+        /// Returns to the commit jump Back left. Handled on `RepoView` by
+        /// `navigation.rs`.
+        NavigateForward,
+        /// Selects the selected commit's first parent in the history list.
+        GoToParent,
+        /// Selects the second parent of a merge.
+        GoToSecondParent,
+        /// Selects the first child of the selected commit in display order.
+        GoToChild,
+        /// Selects the commit HEAD points at.
+        GoToHead,
         /// Closes the compare view. Handled on `RepoView` by
         /// `repo_view::compare`; a no-op while no comparison is open.
         CloseCompare,

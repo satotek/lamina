@@ -21,6 +21,7 @@ mod edit_dialog;
 mod editor;
 mod history_ops;
 mod in_progress;
+mod navigation;
 mod rebase_dialog;
 pub(crate) mod rebase_onto;
 mod rebase_plan;
@@ -389,6 +390,8 @@ pub struct RepoView {
     in_progress: InProgress,
     /// The reflog rows and the undo this view is waiting for.
     reflog: reflog::ReflogState,
+    /// The commit jumps Back and Forward walk through.
+    navigation: navigation::NavigationHistory,
     /// The history loader suggested writing a commit-graph and the user has
     /// not answered yet.
     commit_graph_offer: bool,
@@ -610,6 +613,7 @@ impl RepoView {
             compare: None,
             in_progress: InProgress::default(),
             reflog: reflog::ReflogState::default(),
+            navigation: navigation::NavigationHistory::default(),
             commit_graph_offer: false,
             commit_graph_writing: false,
             commit_graph_dismissed: false,
