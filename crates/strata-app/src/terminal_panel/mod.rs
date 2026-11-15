@@ -239,7 +239,7 @@ impl TerminalPanel {
         panel
     }
 
-    #[cfg(all(test, not(windows)))]
+    #[cfg(test)]
     pub(crate) fn snapshot(&self) -> &TerminalSnapshot {
         &self.snapshot
     }
