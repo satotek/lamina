@@ -134,6 +134,9 @@ impl Fixture {
         self.commit_all(&source, "source");
         let source_head = self.head(&source);
         let source_url = source.to_str().expect("source path is UTF-8").to_owned();
+        // `.gitmodules` is a config file too, so the appended entry has to use
+        // the forward-slash form a backslash would otherwise corrupt.
+        let config_url = source_url.replace('\\', "/");
 
         let superproject = self.init_repo("super");
         self.write(&superproject, "base.txt", "base\n");
@@ -149,7 +152,7 @@ impl Fixture {
         let modules = superproject.join(".gitmodules");
         let mut text = fs::read_to_string(&modules).expect("read .gitmodules");
         text.push_str(&format!(
-            "\n[submodule \"uninitialised\"]\n\tpath = uninitialised\n\turl = {source_url}\n"
+            "\n[submodule \"uninitialised\"]\n\tpath = uninitialised\n\turl = {config_url}\n"
         ));
         fs::write(&modules, text).expect("append .gitmodules entry");
         self.git(&superproject, &["add", ".gitmodules"]);

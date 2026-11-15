@@ -404,7 +404,7 @@ mod tests {
 
     use super::*;
     use crate::repo::GitConfig;
-    use crate::test_support::TestRepo;
+    use crate::test_support::{TestRepo, config_path};
 
     fn write(path: &Path, contents: &str) {
         if let Some(parent) = path.parent() {
@@ -533,7 +533,7 @@ mod tests {
         let include = home.path().join("work.gitconfig");
         write(
             &global,
-            &format!("[include]\n\tpath = {}\n", include.display()),
+            &format!("[include]\n\tpath = {}\n", config_path(&include)),
         );
         write(&include, "[user]\n\tname = Included\n");
         let git = isolated(&repo, home.path());

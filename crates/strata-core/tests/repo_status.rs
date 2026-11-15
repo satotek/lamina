@@ -1233,7 +1233,7 @@ fn incremental_mixed_burst_and_special_characters() {
     fs::remove_file(repo.path().join("deleted.txt")).expect("remove deleted.txt");
     repo.write("staged.txt", "v3\n");
     fs::remove_file(repo.path().join("temp.txt")).expect("remove temp.txt");
-    repo.write("weird*[1].txt", "glob-like\n");
+    repo.write("weird[1].txt", "glob-like\n");
     repo.write("newdir/one.txt", "one\n");
     repo.write("newdir/sub/two.txt", "two\n");
     repo.write("debug.log", "ignored\n");
@@ -1243,7 +1243,7 @@ fn incremental_mixed_burst_and_special_characters() {
         repo.path().join("deleted.txt"),
         repo.path().join("staged.txt"),
         repo.path().join("temp.txt"),
-        repo.path().join("weird*[1].txt"),
+        repo.path().join("weird[1].txt"),
         repo.path().join("newdir"),
         repo.path().join("newdir/one.txt"),
         repo.path().join("newdir/sub/two.txt"),

@@ -1180,7 +1180,7 @@ mod tests {
     use std::fs;
 
     use super::*;
-    use crate::test_support::TestRepo;
+    use crate::test_support::{TestRepo, config_path};
 
     fn sources(global: &Path) -> ConfigSources {
         ConfigSources {
@@ -1258,9 +1258,9 @@ mod tests {
                 "[user]\n\tname = Global\n\
                  [includeIf \"gitdir:{}/\"]\n\tpath = {}\n\
                  [includeIf \"gitdir:/definitely/not/this/repository/\"]\n\tpath = {}\n",
-                git_dir.display(),
-                matched.display(),
-                unmatched.display()
+                config_path(&git_dir),
+                config_path(&matched),
+                config_path(&unmatched)
             ),
         );
 
@@ -1320,8 +1320,8 @@ mod tests {
                 "[includeIf \"onbranch:{}/\"]\n\tpath = {}\n\
                  [includeIf \"onbranch:not-this-branch/\"]\n\tpath = {}\n",
                 branch.trim(),
-                matched.display(),
-                matched.display()
+                config_path(&matched),
+                config_path(&matched)
             ),
         );
 
@@ -1357,8 +1357,8 @@ mod tests {
                 "[remote \"origin\"]\n\turl = https://example.com/team/project.git\n\
                  [includeIf \"hasconfig:remote.*.url:https://example.com/**\"]\n\tpath = {}\n\
                  [includeIf \"hasconfig:remote.*.url:https://other.invalid/**\"]\n\tpath = {}\n",
-                matched.display(),
-                matched.display()
+                config_path(&matched),
+                config_path(&matched)
             ),
         );
 
@@ -1382,11 +1382,11 @@ mod tests {
         let inner = root.path().join("inner.gitconfig");
         write(
             &global,
-            &format!("[include]\n\tpath = {}\n", outer.display()),
+            &format!("[include]\n\tpath = {}\n", config_path(&outer)),
         );
         write(
             &outer,
-            &format!("[include]\n\tpath = {}\n", inner.display()),
+            &format!("[include]\n\tpath = {}\n", config_path(&inner)),
         );
         write(&inner, "[user]\n\temail = inner@example.invalid\n");
 
@@ -1596,8 +1596,8 @@ mod tests {
             &global,
             &format!(
                 "[includeIf \"gitdir:{}/\"]\n\tpath = {}\n",
-                repo.path().join(".git").display(),
-                work.display()
+                config_path(&repo.path().join(".git")),
+                config_path(&work)
             ),
         );
 

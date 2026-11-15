@@ -196,6 +196,15 @@ impl TestRepo {
     }
 }
 
+/// A path written the way it belongs in a git config value.
+///
+/// Backslash is an escape character in that format, so a native Windows path
+/// written raw makes the whole file unreadable. Git stores such paths with
+/// forward slashes itself, which every platform accepts.
+pub(crate) fn config_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 /// A source repository whose HEAD renames a file after a merge, and a clone of
 /// it made with `args`.
 ///

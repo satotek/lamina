@@ -683,9 +683,13 @@ mod tests {
 
     #[test]
     fn rescan_flag_and_rules_files_force_rescan() {
+        // `Root::new` makes the root absolute, and an event path only matches
+        // in that form; `/worktree` alone becomes `C:\worktree` on Windows.
+        let worktree = std::path::absolute("/worktree").expect("absolute worktree");
+        let git_dir = worktree.join(".git");
         let watch = Watch {
-            workdir: Some(Root::new(Path::new("/worktree"))),
-            git_dir: Root::new(Path::new("/worktree/.git")),
+            workdir: Some(Root::new(&worktree)),
+            git_dir: Root::new(&git_dir),
             debounce: Duration::from_millis(10),
             filter: None,
         };
@@ -697,13 +701,13 @@ mod tests {
         assert!(!changes.is_idle());
 
         let gitignore = notify::Event::new(EventKind::Modify(notify::event::ModifyKind::Any))
-            .add_path(PathBuf::from("/worktree/.gitignore"));
+            .add_path(worktree.join(".gitignore"));
         let changes = watch.changes(&[Ok(gitignore)]);
         assert!(changes.worktree);
         assert!(changes.rescan);
 
         let info_exclude = notify::Event::new(EventKind::Modify(notify::event::ModifyKind::Any))
-            .add_path(PathBuf::from("/worktree/.git/info/exclude"));
+            .add_path(git_dir.join("info").join("exclude"));
         let changes = watch.changes(&[Ok(info_exclude)]);
         assert!(changes.worktree);
         assert!(changes.rescan);
