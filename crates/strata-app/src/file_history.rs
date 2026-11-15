@@ -611,7 +611,7 @@ impl RepoView {
             .flex()
             .items_center()
             .gap_3()
-            .h(px(40.0))
+            .h(colors.design.px(40.0))
             .flex_none()
             .px_3p5()
             .bg(colors.background)
@@ -621,7 +621,7 @@ impl RepoView {
             .child(
                 div()
                     .flex_none()
-                    .text_size(px(12.0))
+                    .text_size(colors.design.px(12.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(t!("file_history.title").to_string()),
             )
@@ -631,7 +631,7 @@ impl RepoView {
                     .min_w_0()
                     .truncate()
                     .font_family(colors.mono.clone())
-                    .text_size(px(11.5))
+                    .text_size(colors.design.px(11.5))
                     .text_color(colors.accent)
                     .child(history.path.clone()),
             )
@@ -639,7 +639,7 @@ impl RepoView {
             .child(
                 div()
                     .flex_none()
-                    .text_size(px(11.0))
+                    .text_size(colors.design.px(11.0))
                     .text_color(colors.muted_foreground)
                     .child(count),
             );
@@ -683,14 +683,14 @@ impl RepoView {
                 .items_center()
                 .justify_center()
                 .gap_2()
-                .w(px(LIST_WIDTH))
+                .w(colors.design.px(LIST_WIDTH))
                 .flex_none()
                 .border_r_1()
                 .border_color(colors.border)
                 .child(Spinner::new().color(colors.muted_foreground))
                 .child(
                     div()
-                        .text_size(px(11.0))
+                        .text_size(colors.design.px(11.0))
                         .text_color(colors.muted_foreground)
                         .child(t!("file_history.walking").to_string()),
                 )
@@ -733,7 +733,7 @@ impl RepoView {
                     // when a rename makes the row older than the requested
                     // path. Every row keeps the taller height so the list stays
                     // uniform.
-                    .h(px(38.0))
+                    .h(list_colors.design.px(38.0))
                     .gap_3()
                     .mx(px(0.0))
                     .w_full()
@@ -751,14 +751,14 @@ impl RepoView {
                                 div()
                                     .min_w_0()
                                     .truncate()
-                                    .text_size(px(10.0))
+                                    .text_size(list_colors.design.px(10.0))
                                     .text_color(list_colors.muted_foreground)
                                     .child(rename)
                             })),
                     )
                     .child(
                         div()
-                            .w(px(92.0))
+                            .w(list_colors.design.px(92.0))
                             .flex_none()
                             .truncate()
                             .text_color(list_colors.muted_foreground)
@@ -766,7 +766,7 @@ impl RepoView {
                     )
                     .child(
                         div()
-                            .w(px(96.0))
+                            .w(list_colors.design.px(96.0))
                             .flex_none()
                             .truncate()
                             .text_color(list_colors.muted_foreground)
@@ -774,7 +774,7 @@ impl RepoView {
                     )
                     .child(
                         div()
-                            .w(px(58.0))
+                            .w(list_colors.design.px(58.0))
                             .flex_none()
                             .font_family(list_colors.mono.clone())
                             .text_color(list_colors.muted_foreground)
@@ -794,7 +794,7 @@ impl RepoView {
         })
         .track_scroll(&history.scroll)
         .with_scrollbar(&history.scroll)
-        .w(px(LIST_WIDTH))
+        .w(colors.design.px(LIST_WIDTH))
         .flex_none()
         .border_r_1()
         .border_color(colors.border)
@@ -818,13 +818,13 @@ impl RepoView {
             .items_center()
             .justify_between()
             .gap_3()
-            .h(px(36.0))
+            .h(colors.design.px(36.0))
             .flex_none()
             .px_3p5()
             .bg(colors.title_bar)
             .border_b_1()
             .border_color(colors.border)
-            .text_size(px(11.0))
+            .text_size(colors.design.px(11.0))
             .child(
                 div()
                     .truncate()
@@ -977,7 +977,7 @@ fn loading_row(colors: &Colors) -> AnyElement {
         &colors.design,
     )
     .gap_2()
-    .h(px(38.0))
+    .h(colors.design.px(38.0))
     .mx(px(0.0))
     .w_full()
     .px_3()
@@ -991,7 +991,7 @@ fn loading_row(colors: &Colors) -> AnyElement {
 fn list_message(text: impl Into<gpui::SharedString>, color: Hsla, colors: &Colors) -> AnyElement {
     div()
         .flex()
-        .w(px(LIST_WIDTH))
+        .w(colors.design.px(LIST_WIDTH))
         .flex_none()
         .border_r_1()
         .border_color(colors.border)

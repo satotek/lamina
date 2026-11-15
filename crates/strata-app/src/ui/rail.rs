@@ -10,7 +10,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, ClickEvent, Div, ElementId, InteractiveElement as _, IntoElement,
     ParentElement as _, RenderOnce, SharedString, Stateful, StatefulInteractiveElement as _,
-    Styled, Window, div, px,
+    Styled, Window, div,
 };
 use gpui_component::tooltip::Tooltip;
 
@@ -28,12 +28,12 @@ pub fn rail(design: &Design) -> Div {
         .flex()
         .flex_col()
         .items_center()
-        .gap(px(2.0))
-        .w(px(RAIL_WIDTH))
+        .gap(design.px(2.0))
+        .w(design.px(RAIL_WIDTH))
         .h_full()
         .flex_none()
         .py_3()
-        .px(px(4.0))
+        .px(design.px(4.0))
         .overflow_hidden()
         .bg(design.sidebar)
         .border_r_1()
@@ -103,11 +103,11 @@ impl RenderOnce for RailItem {
             .flex_col()
             .items_center()
             .justify_center()
-            .gap(px(2.0))
+            .gap(design.px(2.0))
             .w_full()
-            .h(px(RAIL_ITEM_HEIGHT))
+            .h(design.px(RAIL_ITEM_HEIGHT))
             .flex_none()
-            .rounded(px(8.0))
+            .rounded(design.px(8.0))
             .cursor_pointer()
             .text_color(design.text)
             .when(self.selected, |item| item.bg(design.selected))
@@ -117,7 +117,7 @@ impl RenderOnce for RailItem {
         if let Some(count) = self.count {
             item = item.child(
                 div()
-                    .text_size(px(10.0))
+                    .text_size(design.px(10.0))
                     .text_color(design.muted)
                     .child(count.to_string()),
             );

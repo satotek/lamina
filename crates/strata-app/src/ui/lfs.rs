@@ -64,7 +64,7 @@ impl RenderOnce for LfsCard {
             .gap_2()
             .m_3()
             .p_3()
-            .rounded(px(6.0))
+            .rounded(design.px(6.0))
             .border_1()
             .border_color(design.border)
             .bg(design.field)
@@ -104,7 +104,7 @@ fn side_row(label: &str, side: &LfsDiffSide, design: &Design) -> AnyElement {
         .text_size(px(design.small()))
         .child(
             div()
-                .w(px(28.0))
+                .w(design.px(28.0))
                 .flex_none()
                 .text_color(design.muted)
                 .child(SharedString::from(label.to_owned())),

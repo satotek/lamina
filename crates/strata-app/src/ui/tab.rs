@@ -40,11 +40,11 @@ impl Render for DraggedTab {
         div()
             .px_3()
             .py_1()
-            .rounded(px(6.0))
+            .rounded(design.px(6.0))
             .bg(design.panel)
             .border_1()
             .border_color(design.accent)
-            .text_size(px(design.small() + 0.5))
+            .text_size(px(design.small() + design.scale(0.5)))
             .font_weight(FontWeight::MEDIUM)
             .text_color(design.text)
             .shadow_md()
@@ -61,7 +61,7 @@ pub fn tab_strip(id: impl Into<ElementId>, design: &Design) -> Stateful<Div> {
         .flex()
         .flex_none()
         .items_end()
-        .h(px(TAB_STRIP_HEIGHT))
+        .h(design.px(TAB_STRIP_HEIGHT))
         .w_full()
         .overflow_x_scroll()
         .px_2()
@@ -88,6 +88,13 @@ struct TabColors {
     muted: Hsla,
     accent: Hsla,
     font_size: f32,
+    zoom: f32,
+}
+
+impl TabColors {
+    fn px(self, value: f32) -> gpui::Pixels {
+        px(value * self.zoom)
+    }
 }
 
 impl From<&Design> for TabColors {
@@ -99,7 +106,8 @@ impl From<&Design> for TabColors {
             text: design.text,
             muted: design.muted,
             accent: design.accent,
-            font_size: design.small() + 0.5,
+            font_size: design.small() + design.scale(0.5),
+            zoom: design.zoom,
         }
     }
 }
@@ -214,10 +222,10 @@ impl RenderOnce for UiTab {
             .flex()
             .flex_none()
             .items_center()
-            .gap(px(6.0))
-            .h(px(TAB_STRIP_HEIGHT))
-            .min_w(px(96.0))
-            .max_w(px(220.0))
+            .gap(colors.px(6.0))
+            .h(colors.px(TAB_STRIP_HEIGHT))
+            .min_w(colors.px(96.0))
+            .max_w(colors.px(220.0))
             .px_3()
             .border_t(px(2.0))
             .border_color(Hsla::transparent_black())
@@ -240,8 +248,8 @@ impl RenderOnce for UiTab {
                 div()
                     .absolute()
                     .left_0()
-                    .top(px(8.0))
-                    .bottom(px(8.0))
+                    .top(colors.px(8.0))
+                    .bottom(colors.px(8.0))
                     .w(px(1.0))
                     .bg(colors.border),
             );
@@ -322,8 +330,8 @@ impl RenderOnce for UiTab {
                 div()
                     .id(("ui-tab-busy", index))
                     .flex_none()
-                    .w(px(6.0))
-                    .h(px(6.0))
+                    .w(colors.px(6.0))
+                    .h(colors.px(6.0))
                     .rounded_full()
                     .bg(colors.accent),
             );
@@ -336,10 +344,10 @@ impl RenderOnce for UiTab {
                 .flex_none()
                 .items_center()
                 .justify_center()
-                .w(px(18.0))
-                .h(px(18.0))
-                .rounded(px(4.0))
-                .text_size(px(colors.font_size + 1.0))
+                .w(colors.px(18.0))
+                .h(colors.px(18.0))
+                .rounded(colors.px(4.0))
+                .text_size(px(colors.font_size + colors.zoom))
                 .text_color(colors.muted)
                 .when(!self.active, |close| {
                     close
@@ -367,8 +375,8 @@ fn tab_tip(name: SharedString, hint: Option<SharedString>, colors: TabColors) ->
     div()
         .flex()
         .flex_col()
-        .gap(px(2.0))
-        .max_w(px(360.0))
+        .gap(colors.px(2.0))
+        .max_w(colors.px(360.0))
         .child(
             div()
                 .truncate()
@@ -381,7 +389,7 @@ fn tab_tip(name: SharedString, hint: Option<SharedString>, colors: TabColors) ->
             tip.child(
                 div()
                     .truncate()
-                    .text_size(px(colors.font_size - 0.5))
+                    .text_size(px(colors.font_size - 0.5 * colors.zoom))
                     .text_color(colors.muted)
                     .child(hint),
             )

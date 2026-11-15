@@ -155,14 +155,14 @@ impl WorktreePanel {
         let mut header = div()
             .flex()
             .items_center()
-            .gap(px(10.0))
-            .h(px(40.0))
+            .gap(colors.design.px(10.0))
+            .h(colors.design.px(40.0))
             .flex_none()
             .px_3p5()
             .bg(colors.background)
             .border_b_1()
             .border_color(colors.border)
-            .text_size(px(12.0));
+            .text_size(colors.design.px(12.0));
         if let Some(kind) = kind {
             header = header.child(crate::ui::change_badge(kind, &colors.design));
         }
@@ -180,7 +180,7 @@ impl WorktreePanel {
                                 .ml_2()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(px(11.5))
+                                .text_size(colors.design.px(11.5))
                                 .text_color(colors.muted_foreground)
                                 .child(dir.to_owned()),
                         )
@@ -189,7 +189,7 @@ impl WorktreePanel {
             .child(
                 div()
                     .flex_none()
-                    .text_size(px(11.0))
+                    .text_size(colors.design.px(11.0))
                     .text_color(colors.muted_foreground)
                     .child(side.map(Side::label).unwrap_or_default()),
             );
@@ -373,7 +373,7 @@ impl WorktreePanel {
         if count == 0 {
             return div()
                 .flex_none()
-                .text_size(px(11.0))
+                .text_size(colors.design.px(11.0))
                 .text_color(colors.muted_foreground)
                 .child(t!("worktree.pick_hint").to_string())
                 .into_any_element();
@@ -569,7 +569,7 @@ fn hunk_header_row(
         .bg(colors.design.panel)
         .border_t_1()
         .border_color(colors.border)
-        .text_size(px(11.0))
+        .text_size(colors.design.px(11.0))
         .text_color(diff_colors.muted)
         .child(
             div()

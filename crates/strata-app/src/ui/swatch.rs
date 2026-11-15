@@ -4,7 +4,7 @@
 //! opening or switching to it first.
 
 use gpui::{
-    AnyElement, Hsla, IntoElement as _, ParentElement as _, SharedString, Styled as _, div, px,
+    AnyElement, Hsla, IntoElement as _, ParentElement as _, SharedString, Styled as _, div,
 };
 
 use crate::style::Design;
@@ -17,16 +17,18 @@ const SWATCH_GAP: f32 = 2.0;
 /// against a light surface.
 pub fn swatch_strip(colors: impl IntoIterator<Item = Hsla>, design: &Design) -> AnyElement {
     let border = design.border;
+    let size = design.px(SWATCH_SIZE);
+    let radius = design.px(SWATCH_RADIUS);
     div()
         .flex()
         .flex_none()
         .items_center()
-        .gap(px(SWATCH_GAP))
-        .children(colors.into_iter().map(|color| {
+        .gap(design.px(SWATCH_GAP))
+        .children(colors.into_iter().map(move |color| {
             div()
-                .w(px(SWATCH_SIZE))
-                .h(px(SWATCH_SIZE))
-                .rounded(px(SWATCH_RADIUS))
+                .w(size)
+                .h(size)
+                .rounded(radius)
                 .border_1()
                 .border_color(border)
                 .bg(color)

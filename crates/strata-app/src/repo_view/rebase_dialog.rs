@@ -67,6 +67,7 @@ pub(super) fn open(
     let footer = dialog.clone();
     let confirm = dialog;
     window.open_dialog(cx, move |card, _, cx| {
+        let zoom = Settings::get(cx).appearance.zoom();
         let content = content.clone();
         let footer = footer.clone();
         let confirm = confirm.clone();
@@ -78,7 +79,7 @@ pub(super) fn open(
             ok = ok.tooltip(reason);
         }
         card.title(t!("rebase_edit.title").to_string())
-            .w(px(700.0))
+            .w(px(700.0 * zoom))
             .content(move |body, _, _| body.child(content.clone()))
             .footer(
                 DialogFooter::new()
@@ -118,7 +119,7 @@ impl Render for DraggedRow {
         div()
             .px_2()
             .py_1()
-            .rounded(px(6.0))
+            .rounded(design.px(6.0))
             .border_1()
             .border_color(design.accent)
             .bg(design.panel)
@@ -262,13 +263,14 @@ impl RebaseDialog {
         let content = prompt.clone();
         let footer = prompt.clone();
         let confirm = prompt;
+        let zoom = Settings::get(cx).appearance.zoom();
         window.open_dialog(cx, move |card, _, cx| {
             let content = content.clone();
             let footer = footer.clone();
             let confirm = confirm.clone();
             let empty = confirm.read(cx).is_empty(cx);
             card.title(t!("edit_dialog.title").to_string())
-                .w(px(520.0))
+                .w(px(520.0 * zoom))
                 .content(move |body, _, _| body.child(content.clone()))
                 .footer(
                     DialogFooter::new()
@@ -358,7 +360,7 @@ impl RebaseDialog {
         // An orphan has nothing above to be nested under, so it is not indented.
         let combined = matches!(row.action, ActionKind::Squash | ActionKind::Fixup) && !orphan;
         let selector = ActionKind::ALL.into_iter().fold(
-            div().flex().flex_none().items_center().gap(px(2.0)),
+            div().flex().flex_none().items_center().gap(design.px(2.0)),
             |selector, action| {
                 let chosen = row.action == action;
                 let kind = match (chosen, action) {
@@ -402,11 +404,11 @@ impl RebaseDialog {
         .on_drop(cx.listener(move |this, dragged: &DraggedRow, _, cx| {
             this.move_row(dragged.index, index, cx);
         }))
-        .when(combined, |row| row.pl(px(24.0)))
+        .when(combined, |row| row.pl(design.px(24.0)))
         .child(
             div()
                 .flex_none()
-                .w(px(14.0))
+                .w(design.px(14.0))
                 .text_color(design.muted)
                 .child("⠿"),
         )
@@ -414,7 +416,7 @@ impl RebaseDialog {
         .child(
             div()
                 .flex_none()
-                .w(px(58.0))
+                .w(design.px(58.0))
                 .font_family(design.mono.clone())
                 .text_size(px(design.code))
                 .text_color(design.muted)
@@ -464,10 +466,10 @@ impl Render for RebaseDialog {
             .on_key_down(cx.listener(|this, event, window, cx| {
                 this.handle_key(event, window, cx);
             }))
-            .max_h(px(LIST_MAX_HEIGHT))
+            .max_h(design.px(LIST_MAX_HEIGHT))
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
-            .rounded(px(6.0))
+            .rounded(design.px(6.0))
             .border_1()
             .border_color(design.border)
             .bg(design.background)
@@ -495,15 +497,18 @@ impl Render for RebaseDialog {
                         ),
                         &design,
                     )
-                    .rounded(px(6.0)),
+                    .rounded(design.px(6.0)),
                 )
             })
             .when_some(self.error.clone(), |body, error| {
-                body.child(ui::banner(ui::BannerKind::Danger, error, &design).rounded(px(6.0)))
+                body.child(
+                    ui::banner(ui::BannerKind::Danger, error, &design).rounded(design.px(6.0)),
+                )
             })
             .when_some(problem.filter(PlanProblem::is_error), |body, problem| {
                 body.child(
-                    ui::banner(ui::BannerKind::Danger, problem.reason(), &design).rounded(px(6.0)),
+                    ui::banner(ui::BannerKind::Danger, problem.reason(), &design)
+                        .rounded(design.px(6.0)),
                 )
             })
             .child(
@@ -586,7 +591,7 @@ impl Render for RewordPrompt {
             )
             .child(
                 Textarea::new(&self.message)
-                    .h(px(220.0))
+                    .h(design.px(220.0))
                     .w_full()
                     .text_size(px(design.code)),
             )

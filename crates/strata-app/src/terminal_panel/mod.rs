@@ -109,6 +109,7 @@ pub struct TerminalPanel {
     font_family: SharedString,
     font_size: Pixels,
     cell_size: Size<Pixels>,
+    zoom: f32,
     cols: u16,
     rows: u16,
     last_bounds: Option<Bounds<Pixels>>,
@@ -218,6 +219,7 @@ impl TerminalPanel {
             font_family,
             font_size,
             cell_size,
+            zoom: design.zoom,
             cols: DEFAULT_COLS,
             rows: DEFAULT_ROWS,
             last_bounds: None,
@@ -289,6 +291,14 @@ impl TerminalPanel {
 
         let new_font = design.mono.clone();
         let new_size = px(design.code);
+        let new_zoom = design.zoom;
+        if self.zoom != new_zoom {
+            self.zoom = new_zoom;
+            if let Some(bounds) = self.last_bounds {
+                self.resize_for_bounds(bounds);
+            }
+            changed = true;
+        }
         if let Some(window) = window
             && (self.font_family != new_font || self.font_size != new_size)
         {
@@ -481,7 +491,7 @@ impl TerminalPanel {
 
     fn resize_for_bounds(&mut self, bounds: Bounds<Pixels>) {
         self.last_bounds = Some(bounds);
-        let (new_cols, new_rows) = grid_dimensions_for_bounds(bounds, self.cell_size);
+        let (new_cols, new_rows) = grid_dimensions_for_bounds(bounds, self.cell_size, self.zoom);
         if new_cols != self.cols || new_rows != self.rows {
             self.cols = new_cols;
             self.rows = new_rows;
@@ -610,6 +620,7 @@ impl TerminalPanel {
             self.cell_size,
             self.snapshot.cols,
             self.snapshot.rows,
+            self.zoom,
         ))
     }
 
@@ -790,7 +801,7 @@ impl TerminalPanel {
             .flex_1()
             .child(
                 Icon::new(IconName::SquareTerminal)
-                    .size(px(14.0))
+                    .size(design.px(14.0))
                     .text_color(if self.bell_active {
                         design.accent_text
                     } else {
@@ -840,7 +851,7 @@ impl TerminalPanel {
             .items_center()
             .justify_between()
             .gap_2()
-            .h(px(30.0))
+            .h(design.px(30.0))
             .flex_none()
             .px_3()
             .bg(header_bg)
@@ -947,6 +958,7 @@ impl EntityInputHandler for TerminalPanel {
             element_bounds,
             self.cell_size,
             self.snapshot.cursor,
+            self.zoom,
         ))
     }
 
@@ -970,6 +982,7 @@ impl Render for TerminalPanel {
                 session.set_theme(expected_theme);
             }
         }
+        self.zoom = design.zoom;
         if self.font_family != design.mono || self.font_size != px(design.code) {
             self.font_family = design.mono.clone();
             self.font_size = px(design.code);
@@ -991,6 +1004,7 @@ impl Render for TerminalPanel {
             font_family: self.font_family.clone(),
             font_size: self.font_size,
             cell_size: self.cell_size,
+            zoom: design.zoom,
             focused,
             marked_text: self.marked_text.clone(),
             focus_handle: self.focus_handle.clone(),

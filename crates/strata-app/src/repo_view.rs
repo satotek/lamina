@@ -1064,11 +1064,12 @@ impl RepoView {
         total: f32,
         cx: &mut Context<Self>,
     ) {
+        let zoom = crate::settings::Settings::get(cx).appearance.zoom();
         let clamped = crate::ui::clamp_fraction(
             fraction,
             total,
-            Self::MAIN_MIN_HEIGHT,
-            Self::TERMINAL_MIN_HEIGHT,
+            Self::MAIN_MIN_HEIGHT * zoom,
+            Self::TERMINAL_MIN_HEIGHT * zoom,
         );
         if (self.terminal_top_fraction - clamped).abs() < f32::EPSILON {
             return;

@@ -62,28 +62,32 @@ pub(super) const COMMIT_HEADER_HEIGHT: f32 = 28.0;
 /// than squeezing the summary to nothing or letting the row run past the edge.
 /// The decision is made once per frame for the whole list, so rows do not
 /// change shape from one row to the next.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct CommitColumns {
     author: bool,
     date: bool,
+    zoom: f32,
 }
 
 impl CommitColumns {
     /// The widest column set that leaves the summary its minimum, given the
     /// widest graph column in the list.
-    pub(super) fn for_width(width: f32, graph_width: f32) -> Self {
+    pub(super) fn for_width(width: f32, graph_width: f32, zoom: f32) -> Self {
         [
             Self {
                 author: true,
                 date: true,
+                zoom,
             },
             Self {
                 author: true,
                 date: false,
+                zoom,
             },
             Self {
                 author: false,
                 date: false,
+                zoom,
             },
         ]
         .into_iter()
@@ -91,7 +95,20 @@ impl CommitColumns {
         .unwrap_or(Self {
             author: false,
             date: false,
+            zoom,
         })
+    }
+
+    fn author_width(self) -> f32 {
+        AUTHOR_WIDTH * self.zoom
+    }
+
+    fn date_width(self) -> f32 {
+        DATE_WIDTH * self.zoom
+    }
+
+    fn commit_width(self) -> f32 {
+        COMMIT_WIDTH * self.zoom
     }
 
     /// The cells a row has: the graph, the summary, the optional columns and
@@ -102,12 +119,16 @@ impl CommitColumns {
 
     /// What the row reserves before the summary gets a share.
     fn fixed_width(self, graph_width: f32) -> f32 {
-        ROW_PADDING
+        ROW_PADDING * self.zoom
             + graph_width
-            + COMMIT_WIDTH
-            + if self.author { AUTHOR_WIDTH } else { 0.0 }
-            + if self.date { DATE_WIDTH } else { 0.0 }
-            + CELL_GAP * (self.cells() - 1.0)
+            + self.commit_width()
+            + if self.author {
+                self.author_width()
+            } else {
+                0.0
+            }
+            + if self.date { self.date_width() } else { 0.0 }
+            + (CELL_GAP * self.zoom) * (self.cells() - 1.0)
     }
 
     fn description_width(self, width: f32, graph_width: f32) -> f32 {
@@ -115,7 +136,7 @@ impl CommitColumns {
     }
 
     fn fits(self, width: f32, graph_width: f32) -> bool {
-        self.fixed_width(graph_width) + DESCRIPTION_MIN_WIDTH <= width
+        self.fixed_width(graph_width) + DESCRIPTION_MIN_WIDTH * self.zoom <= width
     }
 }
 
@@ -164,7 +185,11 @@ impl RepoView {
 
         // The decision uses the widest graph in the list, not the row's own:
         // columns that came and went between rows would read as noise.
-        let columns = CommitColumns::for_width(width, graph_canvas::indent(widest));
+        let columns = CommitColumns::for_width(
+            width,
+            graph_canvas::indent_at(widest, design.zoom),
+            design.zoom,
+        );
         let now = style::now_epoch();
         let selection = self.selection.clone();
         let revealed = self.revealed_commit();
@@ -313,13 +338,13 @@ impl RepoView {
                         let selected = selection.contains(index);
                         let row_ui_state = row_state(selected, revealed);
                         let row_graph_width = if filtered {
-                            graph_canvas::search_indent()
+                            graph_canvas::search_indent_at(row_design.zoom)
                         } else {
-                            graph_canvas::indent(row.graph.width)
+                            graph_canvas::indent_at(row.graph.width, row_design.zoom)
                         };
                         let desc_width = columns.description_width(width, row_graph_width);
                         let chip_desc_width = if show_changed_counts {
-                            (desc_width - CHANGED_COUNT_RESERVE).max(0.0)
+                            (desc_width - row_design.scale(CHANGED_COUNT_RESERVE)).max(0.0)
                         } else {
                             desc_width
                         };
@@ -448,10 +473,10 @@ impl RepoView {
                 div()
                     .flex()
                     .items_center()
-                    .h(px(20.0))
+                    .h(design.px(20.0))
                     .flex_none()
                     .px_3()
-                    .text_size(px(10.0))
+                    .text_size(design.px(10.0))
                     .text_color(design.muted)
                     .child(t!("history.loading", count = len).to_string()),
             );
@@ -491,7 +516,7 @@ impl RepoView {
             .flex()
             .items_center()
             .gap_2()
-            .h(px(30.0))
+            .h(design.px(30.0))
             .flex_none()
             .px_3()
             .bg(design.background)
@@ -501,7 +526,7 @@ impl RepoView {
             .child(
                 div()
                     .flex_none()
-                    .text_size(px(10.5))
+                    .text_size(design.px(10.5))
                     .text_color(design.muted)
                     .child(t!("history.filters").to_string()),
             )
@@ -529,7 +554,13 @@ impl RepoView {
                 self.search.fields(),
                 entity.clone(),
             ))
-            .child(div().w(px(1.0)).h(px(14.0)).mx_0p5().bg(design.border))
+            .child(
+                div()
+                    .w(px(1.0))
+                    .h(design.px(14.0))
+                    .mx_0p5()
+                    .bg(design.border),
+            )
             .child(search_mode_chip(
                 "content",
                 IconName::FileSearch,
@@ -552,12 +583,12 @@ impl RepoView {
         {
             bar = bar.child(
                 div()
-                    .w(px(180.0))
-                    .h(px(22.0))
+                    .w(design.px(180.0))
+                    .h(design.px(22.0))
                     .px_2()
                     .flex()
                     .items_center()
-                    .rounded(px(5.0))
+                    .rounded(design.px(5.0))
                     .bg(design.field)
                     .child(
                         Input::new(path_input)
@@ -577,9 +608,9 @@ impl RepoView {
         bar.child(
             div()
                 .flex_none()
-                .max_w(px(340.0))
+                .max_w(design.px(340.0))
                 .truncate()
-                .text_size(px(10.5))
+                .text_size(design.px(10.5))
                 .text_color(if self.search.error().is_some() {
                     design.remove_text
                 } else {
@@ -600,10 +631,10 @@ fn commit_header(design: &Design, columns: CommitColumns) -> AnyElement {
         .flex()
         .items_center()
         .gap_3()
-        .h(px(COMMIT_HEADER_HEIGHT))
+        .h(design.px(COMMIT_HEADER_HEIGHT))
         .flex_none()
-        .pl(px(20.0))
-        .pr(px(13.0))
+        .pl(design.px(20.0))
+        .pr(design.px(13.0))
         .border_b_1()
         .border_color(design.border)
         .text_size(px(design.tiny()))
@@ -618,7 +649,7 @@ fn commit_header(design: &Design, columns: CommitColumns) -> AnyElement {
         .when(columns.author, |header| {
             header.child(
                 div()
-                    .w(px(AUTHOR_WIDTH))
+                    .w(px(columns.author_width()))
                     .flex_none()
                     .child(t!("history.column.author").to_string()),
             )
@@ -626,14 +657,14 @@ fn commit_header(design: &Design, columns: CommitColumns) -> AnyElement {
         .when(columns.date, |header| {
             header.child(
                 div()
-                    .w(px(DATE_WIDTH))
+                    .w(px(columns.date_width()))
                     .flex_none()
                     .child(t!("history.column.date").to_string()),
             )
         })
         .child(
             div()
-                .w(px(COMMIT_WIDTH))
+                .w(px(columns.commit_width()))
                 .flex_none()
                 .child(t!("history.column.commit").to_string()),
         )
@@ -665,7 +696,7 @@ fn commit_description_cell(
         .min_w_0()
         .flex()
         .items_center()
-        .gap(px(6.0))
+        .gap(design.px(6.0))
         .overflow_hidden()
         .when_some(
             ref_chips_strip(row_index, &data.badges, description_width, design, entity),
@@ -726,7 +757,7 @@ fn commit_row(
     let fade = crate::ui::row_surface(state, design);
     crate::ui::list_row(("commit-row", row_index), state, design)
         .gap_3()
-        .h(px(graph_canvas::ROW_HEIGHT))
+        .h(design.px(graph_canvas::ROW_HEIGHT))
         .w_full()
         .mx(px(0.0))
         .px_3()
@@ -737,6 +768,7 @@ fn commit_row(
             design.lane,
             fade,
             design.muted,
+            design.zoom,
         ))
         .child(commit_description_cell(
             row_index,
@@ -751,13 +783,17 @@ fn commit_row(
         .when(columns.author, |row| {
             row.child(
                 div()
-                    .w(px(AUTHOR_WIDTH))
+                    .w(px(columns.author_width()))
                     .flex_none()
                     .flex()
                     .items_center()
-                    .gap(px(7.0))
+                    .gap(design.px(7.0))
                     .overflow_hidden()
-                    .child(crate::ui::avatar(initials.clone(), avatar_color, 18.0))
+                    .child(crate::ui::avatar(
+                        initials.clone(),
+                        avatar_color,
+                        design.scale(18.0),
+                    ))
                     .child(
                         div()
                             .min_w_0()
@@ -771,7 +807,7 @@ fn commit_row(
         .when(columns.date, |row| {
             row.child(
                 div()
-                    .w(px(DATE_WIDTH))
+                    .w(px(columns.date_width()))
                     .flex_none()
                     .truncate()
                     .text_size(px(design.tiny()))
@@ -781,7 +817,7 @@ fn commit_row(
         })
         .child(
             div()
-                .w(px(COMMIT_WIDTH))
+                .w(px(columns.commit_width()))
                 .flex_none()
                 .font_family(design.mono.clone())
                 .text_size(px(design.code))
@@ -811,7 +847,7 @@ fn uncommitted_row(
     };
     crate::ui::list_row("uncommitted-row", state, design)
         .gap_3()
-        .h(px(graph_canvas::ROW_HEIGHT))
+        .h(design.px(graph_canvas::ROW_HEIGHT))
         .w_full()
         .mx(px(0.0))
         .px_3()
@@ -819,6 +855,7 @@ fn uncommitted_row(
             graph,
             design.lane,
             fade,
+            design.zoom,
         ))
         .child(
             div()
@@ -826,7 +863,7 @@ fn uncommitted_row(
                 .min_w_0()
                 .flex()
                 .items_center()
-                .gap(px(6.0))
+                .gap(design.px(6.0))
                 .overflow_hidden()
                 .child(crate::ui::status_badge(
                     t!("history.uncommitted.badge_worktree").to_string(),
@@ -851,14 +888,14 @@ fn uncommitted_row(
                 }),
         )
         .when(columns.author, |row| {
-            row.child(div().w(px(AUTHOR_WIDTH)).flex_none())
+            row.child(div().w(px(columns.author_width())).flex_none())
         })
         .when(columns.date, |row| {
-            row.child(div().w(px(DATE_WIDTH)).flex_none())
+            row.child(div().w(px(columns.date_width())).flex_none())
         })
         .child(
             div()
-                .w(px(COMMIT_WIDTH))
+                .w(px(columns.commit_width()))
                 .flex_none()
                 .font_family(design.mono.clone())
                 .text_size(px(design.code))
@@ -887,11 +924,15 @@ fn filtered_commit_row(
     let initials = style::initials(&data.author);
     crate::ui::list_row(("commit-row", row_index), state, design)
         .gap_3()
-        .h(px(graph_canvas::ROW_HEIGHT))
+        .h(design.px(graph_canvas::ROW_HEIGHT))
         .w_full()
         .mx(px(0.0))
         .px_3()
-        .child(div().w(px(graph_canvas::search_indent())).flex_none())
+        .child(
+            div()
+                .w(px(graph_canvas::search_indent_at(design.zoom)))
+                .flex_none(),
+        )
         .child(commit_description_cell(
             row_index,
             "filtered-commit-sig",
@@ -905,13 +946,17 @@ fn filtered_commit_row(
         .when(columns.author, |row| {
             row.child(
                 div()
-                    .w(px(AUTHOR_WIDTH))
+                    .w(px(columns.author_width()))
                     .flex_none()
                     .flex()
                     .items_center()
-                    .gap(px(7.0))
+                    .gap(design.px(7.0))
                     .overflow_hidden()
-                    .child(crate::ui::avatar(initials.clone(), avatar_color, 18.0))
+                    .child(crate::ui::avatar(
+                        initials.clone(),
+                        avatar_color,
+                        design.scale(18.0),
+                    ))
                     .child(
                         div()
                             .min_w_0()
@@ -925,7 +970,7 @@ fn filtered_commit_row(
         .when(columns.date, |row| {
             row.child(
                 div()
-                    .w(px(DATE_WIDTH))
+                    .w(px(columns.date_width()))
                     .flex_none()
                     .truncate()
                     .text_size(px(design.tiny()))
@@ -935,7 +980,7 @@ fn filtered_commit_row(
         })
         .child(
             div()
-                .w(px(COMMIT_WIDTH))
+                .w(px(columns.commit_width()))
                 .flex_none()
                 .font_family(design.mono.clone())
                 .text_size(px(design.code))
@@ -1013,19 +1058,19 @@ fn ref_display_priority<'a>(badge: &'a Badge<'_>) -> (u8, u8, &'a str) {
     (head_rank, kind_rank, badge.label.as_ref())
 }
 
-fn ref_chip_width_budget(description_width: f32) -> f32 {
-    (description_width - DESCRIPTION_SUBJECT_RESERVE).max(0.0)
+fn ref_chip_width_budget(description_width: f32, zoom: f32) -> f32 {
+    (description_width - DESCRIPTION_SUBJECT_RESERVE * zoom).max(0.0)
 }
 
 /// Orders commit refs by relevance (HEAD/current branch, local branches, tags,
 /// remote branches) and fits at most [`MAX_VISIBLE_REF_CHIPS`] within the
 /// description column's width budget, leaving the rest for a `+N` chip.
-fn plan_ref_chips<'a>(badges: &[Badge<'a>], description_width: f32) -> RefChipPlan<'a> {
+fn plan_ref_chips<'a>(badges: &[Badge<'a>], description_width: f32, zoom: f32) -> RefChipPlan<'a> {
     let mut all = badges.to_vec();
     all.sort_by(|a, b| ref_display_priority(a).cmp(&ref_display_priority(b)));
 
-    let max_label_width = crate::ui::REF_BADGE_MAX_LABEL_WIDTH
-        .min((description_width - 80.0).max(MIN_SINGLE_CHIP_LABEL_WIDTH));
+    let max_label_width = (crate::ui::REF_BADGE_MAX_LABEL_WIDTH * zoom)
+        .min((description_width - 80.0 * zoom).max(MIN_SINGLE_CHIP_LABEL_WIDTH * zoom));
 
     if all.is_empty() {
         return RefChipPlan {
@@ -1048,13 +1093,15 @@ fn plan_ref_chips<'a>(badges: &[Badge<'a>], description_width: f32) -> RefChipPl
         };
     }
 
-    let budget = ref_chip_width_budget(description_width);
+    let budget = ref_chip_width_budget(description_width, zoom);
     let widths: Vec<f32> = all
         .iter()
-        .map(|badge| crate::ui::estimate_ref_badge_width(badge.label.as_ref(), max_label_width))
+        .map(|badge| {
+            crate::ui::estimate_ref_badge_width(badge.label.as_ref(), max_label_width, zoom)
+        })
         .collect();
 
-    let gap = crate::ui::REF_BADGE_GAP;
+    let gap = crate::ui::REF_BADGE_GAP * zoom;
     if all.len() <= MAX_VISIBLE_REF_CHIPS {
         let total_width = widths.iter().sum::<f32>() + gap * (all.len() - 1) as f32;
         if total_width <= budget {
@@ -1073,7 +1120,7 @@ fn plan_ref_chips<'a>(badges: &[Badge<'a>], description_width: f32) -> RefChipPl
         let hidden_count = all.len() - candidate;
         let chips_width = widths[..candidate].iter().sum::<f32>();
         let gaps_width = gap * candidate as f32;
-        let overflow_width = crate::ui::estimate_ref_overflow_width(hidden_count);
+        let overflow_width = crate::ui::estimate_ref_overflow_width(hidden_count, zoom);
         if chips_width + gaps_width + overflow_width <= budget {
             shown = candidate;
             break;
@@ -1137,7 +1184,7 @@ fn branch_drop_chip(
         .flex()
         .items_center()
         .rounded_full()
-        .p(px(2.0))
+        .p(design.px(2.0))
         .child(chip);
     crate::branches::branch_drop_target_with(
         wrapper,
@@ -1159,11 +1206,11 @@ fn ref_chips_strip(
         return None;
     }
 
-    let plan = plan_ref_chips(badges, description_width);
+    let plan = plan_ref_chips(badges, description_width, design.zoom);
     let mut strip = div()
         .flex()
         .items_center()
-        .gap(px(crate::ui::REF_BADGE_GAP))
+        .gap(design.px(crate::ui::REF_BADGE_GAP))
         .flex_none()
         .overflow_hidden();
 
@@ -1221,15 +1268,15 @@ fn ref_overflow_popover(
 ) -> AnyElement {
     Popover::new(("commit-ref-overflow", row_index))
         .anchor(Anchor::TopLeft)
-        .offset(px(4.0))
+        .offset(design.px(4.0))
         .trigger(trigger)
         .content(move |_, _window, cx| {
             let popover = cx.entity();
             let total = refs.len();
             let mut list = v_flex()
                 .id(("commit-ref-overflow-list", row_index))
-                .gap(px(2.0))
-                .max_h(px(260.0))
+                .gap(design.px(2.0))
+                .max_h(design.px(260.0))
                 .overflow_y_scroll();
 
             for (item_index, item) in refs.iter().enumerate() {
@@ -1257,11 +1304,13 @@ fn ref_overflow_popover(
                         crate::ui::RowState::NORMAL.head(item.head),
                         &design,
                     )
-                    .h(px(26.0))
+                    .h(design.px(26.0))
                     .mx(px(0.0))
                     .w_full()
                     .cursor_pointer()
-                    .child(style::glyph_icon(glyph_data, 12.0, icon_color).flex_none())
+                    .child(
+                        style::glyph_icon(glyph_data, design.scale(12.0), icon_color).flex_none(),
+                    )
                     .child(div().flex_1().min_w_0().truncate().child(full_label))
                     .when(item.head, |row| {
                         row.child(crate::ui::status_badge(
@@ -1283,9 +1332,9 @@ fn ref_overflow_popover(
             }
 
             v_flex()
-                .min_w(px(210.0))
-                .max_w(px(340.0))
-                .gap(px(4.0))
+                .min_w(design.px(210.0))
+                .max_w(design.px(340.0))
+                .gap(design.px(4.0))
                 .child(
                     div()
                         .px_2()
@@ -1368,16 +1417,16 @@ mod tests {
     fn the_date_goes_before_the_author() {
         let graph = graph_canvas::indent(1);
 
-        let wide = CommitColumns::for_width(900.0, graph);
+        let wide = CommitColumns::for_width(900.0, graph, 1.0);
         assert!(wide.author && wide.date, "a wide list keeps both columns");
 
-        let narrow = CommitColumns::for_width(500.0, graph);
+        let narrow = CommitColumns::for_width(500.0, graph, 1.0);
         assert!(
             narrow.author && !narrow.date,
             "a narrow list drops the date first"
         );
 
-        let narrowest = CommitColumns::for_width(300.0, graph);
+        let narrowest = CommitColumns::for_width(300.0, graph, 1.0);
         assert!(
             !narrowest.author && !narrowest.date,
             "the narrowest list keeps only the summary and the id"
@@ -1392,7 +1441,7 @@ mod tests {
         for width in (400..=1600).map(|width| width as f32) {
             for lanes in [1, 4, graph_canvas::MAX_LANES] {
                 let graph = graph_canvas::indent(lanes);
-                let columns = CommitColumns::for_width(width, graph);
+                let columns = CommitColumns::for_width(width, graph, 1.0);
                 assert!(
                     columns.fits(width, graph),
                     "{} px with a {lanes} lane graph leaves the summary {} px",
@@ -1402,10 +1451,12 @@ mod tests {
                 let full = CommitColumns {
                     author: true,
                     date: true,
+                    zoom: 1.0,
                 };
                 let no_date = CommitColumns {
                     author: true,
                     date: false,
+                    zoom: 1.0,
                 };
                 if !columns.author {
                     assert!(
@@ -1428,7 +1479,7 @@ mod tests {
         let width = crate::style::MIN_WINDOW_SIZE.0
             - crate::repo_view::sidebar::width_for(crate::style::MIN_WINDOW_SIZE.0);
         let graph = graph_canvas::indent(6);
-        let columns = CommitColumns::for_width(width, graph);
+        let columns = CommitColumns::for_width(width, graph, 1.0);
         assert!(columns.author, "a 720 px window still names the author");
         assert!(!columns.date, "the date is the first column to give way");
         assert!(columns.fits(width, graph));
@@ -1444,7 +1495,7 @@ mod tests {
             test_badge("zeta", RefKind::LocalBranch, true),
         ];
 
-        let plan = plan_ref_chips(&badges, 600.0);
+        let plan = plan_ref_chips(&badges, 600.0, 1.0);
         let all_labels: Vec<&str> = plan.all.iter().map(|b| b.label.as_ref()).collect();
         assert_eq!(
             all_labels,
@@ -1478,17 +1529,17 @@ mod tests {
         ];
 
         // Wide description shows 2 chips + `+1`.
-        let wide = plan_ref_chips(&badges, 560.0);
+        let wide = plan_ref_chips(&badges, 560.0, 1.0);
         assert_eq!(wide.visible.len(), 2);
         assert_eq!(wide.hidden.len(), 1);
 
         // Medium description only has room for 1 max-width chip + `+2`.
-        let medium = plan_ref_chips(&badges, 305.0);
+        let medium = plan_ref_chips(&badges, 305.0, 1.0);
         assert_eq!(medium.visible.len(), 1);
         assert_eq!(medium.hidden.len(), 2);
 
         // Very narrow description leaves only the `+3` chip so the summary stays visible.
-        let narrow = plan_ref_chips(&badges, 140.0);
+        let narrow = plan_ref_chips(&badges, 140.0, 1.0);
         assert_eq!(narrow.visible.len(), 0);
         assert_eq!(narrow.hidden.len(), 3);
     }
@@ -1501,9 +1552,35 @@ mod tests {
             false,
         )];
 
-        let plan = plan_ref_chips(&badges, 160.0);
+        let plan = plan_ref_chips(&badges, 160.0, 1.0);
         assert_eq!(plan.visible.len(), 1);
         assert!(plan.hidden.is_empty());
         assert!(plan.max_label_width <= crate::ui::REF_BADGE_MAX_LABEL_WIDTH);
+    }
+
+    #[test]
+    fn commit_columns_and_ref_chips_scale_proportionally_with_zoom() {
+        let graph_1x = graph_canvas::indent_at(3, 1.0);
+        let graph_15x = graph_canvas::indent_at(3, 1.5);
+        assert!((graph_15x - graph_1x * 1.5).abs() < 0.01);
+
+        let cols_1x = CommitColumns::for_width(500.0, graph_1x, 1.0);
+        let cols_15x = CommitColumns::for_width(500.0 * 1.5, graph_15x, 1.5);
+        assert_eq!(cols_1x.author, cols_15x.author);
+        assert_eq!(cols_1x.date, cols_15x.date);
+        assert!(
+            (cols_15x.fixed_width(graph_15x) - cols_1x.fixed_width(graph_1x) * 1.5).abs() < 0.01
+        );
+
+        let badges = vec![
+            test_badge("feature/alpha-branch", RefKind::LocalBranch, true),
+            test_badge("feature/beta-branch", RefKind::LocalBranch, false),
+            test_badge("origin/main", RefKind::RemoteBranch, false),
+        ];
+        let plan_1x = plan_ref_chips(&badges, 305.0, 1.0);
+        let plan_15x = plan_ref_chips(&badges, 305.0 * 1.5, 1.5);
+        assert_eq!(plan_1x.visible.len(), plan_15x.visible.len());
+        assert_eq!(plan_1x.hidden.len(), plan_15x.hidden.len());
+        assert!((plan_15x.max_label_width - plan_1x.max_label_width * 1.5).abs() < 0.01);
     }
 }

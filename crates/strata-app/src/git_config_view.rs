@@ -366,8 +366,9 @@ impl GitConfigView {
             let state_for_cancel = state.clone();
             let state_for_enter = state.clone();
             let title = state.read(cx).title();
+            let zoom = Settings::get(cx).appearance.zoom();
             card.title(title)
-                .w(px(760.0))
+                .w(px(760.0 * zoom))
                 .content(move |body, _, _| body.child(content.clone()))
                 .footer(
                     DialogFooter::new()
@@ -433,7 +434,7 @@ impl GitConfigView {
 
     fn title_bar(&self, design: &Design) -> impl IntoElement {
         TitleBar::new()
-            .h(px(crate::style::TITLE_BAR_HEIGHT))
+            .h(design.px(crate::style::TITLE_BAR_HEIGHT))
             .bg(design.chrome)
             .border_color(design.border)
             .child(
@@ -446,11 +447,14 @@ impl GitConfigView {
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(7.0))
-                            .child(style::app_mark(style::BRAND_MARK))
-                            .child(style::wordmark(style::BRAND_WORDMARK, design.text)),
+                            .gap(design.px(7.0))
+                            .child(style::app_mark(design.scale(style::BRAND_MARK)))
+                            .child(style::wordmark(
+                                design.scale(style::BRAND_WORDMARK),
+                                design.text,
+                            )),
                     )
-                    .child(div().w(px(1.0)).h(px(18.0)).mx_1().bg(design.border))
+                    .child(div().w(px(1.0)).h(design.px(18.0)).mx_1().bg(design.border))
                     .child(
                         div()
                             .font_weight(FontWeight::SEMIBOLD)
@@ -584,21 +588,21 @@ impl GitConfigView {
             RowState::NORMAL.selected(selected),
             design,
         )
-        .h(px(30.0))
+        .h(design.px(30.0))
         .cursor_pointer()
         .on_click(cx.listener(move |this, _, _, cx| this.toggle(&key, cx)))
         .child(
             div()
                 .flex_none()
-                .w(px(14.0))
-                .text_size(px(10.0))
+                .w(design.px(14.0))
+                .text_size(design.px(10.0))
                 .text_color(design.muted)
                 .child(if expanded { "▾" } else { "▸" }),
         )
         .child(
             div()
                 .flex_none()
-                .w(px(280.0))
+                .w(design.px(280.0))
                 .min_w_0()
                 .truncate()
                 .font_family(design.mono.clone())
@@ -646,7 +650,7 @@ impl GitConfigView {
         design: &Design,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let mut details = v_flex().pl(px(34.0)).pr_3().pb_2().gap_1();
+        let mut details = v_flex().pl(design.px(34.0)).pr_3().pb_2().gap_1();
         if let Some(well_known) = entry.well_known {
             details = details.child(
                 div()
@@ -664,7 +668,7 @@ impl GitConfigView {
         let edit_key = key.clone();
         let mut actions = h_flex()
             .gap_2()
-            .pl(px(150.0))
+            .pl(design.px(150.0))
             .child(
                 ui::button(
                     format!("config-edit-{}", entry.key),
@@ -803,14 +807,16 @@ fn identity_row(
     design: &Design,
 ) -> impl IntoElement {
     let id = format!("identity-{label}");
-    let mut row = list_row(id, RowState::NORMAL, design).h(px(26.0)).child(
-        div()
-            .flex_none()
-            .w(px(96.0))
-            .text_size(px(design.tiny()))
-            .text_color(design.muted)
-            .child(label),
-    );
+    let mut row = list_row(id, RowState::NORMAL, design)
+        .h(design.px(26.0))
+        .child(
+            div()
+                .flex_none()
+                .w(design.px(96.0))
+                .text_size(px(design.tiny()))
+                .text_color(design.muted)
+                .child(label),
+        );
     match value {
         Some(value) => {
             row = row
@@ -826,7 +832,7 @@ fn identity_row(
                 .child(
                     div()
                         .flex_none()
-                        .max_w(px(300.0))
+                        .max_w(design.px(300.0))
                         .truncate()
                         .text_size(px(design.tiny()))
                         .text_color(design.muted)
@@ -860,7 +866,7 @@ fn value_detail(
         .child(
             div()
                 .flex_none()
-                .w(px(150.0))
+                .w(design.px(150.0))
                 .text_size(px(design.tiny()))
                 .text_color(design.muted)
                 .child(label.to_owned()),
@@ -878,7 +884,7 @@ fn value_detail(
             div()
                 .flex_none()
                 .min_w_0()
-                .max_w(px(240.0))
+                .max_w(design.px(240.0))
                 .truncate()
                 .text_size(px(design.tiny()))
                 .text_color(design.muted)
@@ -911,12 +917,12 @@ fn include_row(index: usize, include: &ConfigInclude, design: &Design) -> impl I
         t!("git_config.not_matched").to_string()
     };
     let mut row = list_row(("config-include", index), RowState::NORMAL, design)
-        .h(px(30.0))
+        .h(design.px(30.0))
         .child(crate::ui::status_badge(status, tone, design))
         .child(
             div()
                 .flex_none()
-                .w(px(330.0))
+                .w(design.px(330.0))
                 .min_w_0()
                 .truncate()
                 .font_family(design.mono.clone())
@@ -1125,7 +1131,7 @@ impl Render for GitConfigView {
                     .items_center()
                     .justify_between()
                     .gap_3()
-                    .h(px(36.0))
+                    .h(design.px(36.0))
                     .px_3()
                     .border_t_1()
                     .border_color(design.border)
@@ -1684,7 +1690,7 @@ impl ConfigEditor {
             .child(
                 div()
                     .w_full()
-                    .rounded(px(4.0))
+                    .rounded(design.px(4.0))
                     .bg(design.field)
                     .p_2()
                     .font_family(design.mono.clone())
@@ -1706,9 +1712,9 @@ impl ConfigEditor {
         let mut diff = v_flex()
             .id("config-preview-diff")
             .w_full()
-            .max_h(px(340.0))
+            .max_h(design.px(340.0))
             .overflow_y_scroll()
-            .rounded(px(4.0))
+            .rounded(design.px(4.0))
             .border_1()
             .border_color(design.border)
             .bg(design.background)

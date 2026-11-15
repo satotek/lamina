@@ -125,9 +125,13 @@ impl RepoView {
                     .flex()
                     .items_center()
                     .gap_2()
-                    .text_size(px(12.0))
+                    .text_size(design.px(12.0))
                     .text_color(design.muted)
-                    .child(crate::ui::avatar(initials.clone(), avatar_color, 18.0))
+                    .child(crate::ui::avatar(
+                        initials.clone(),
+                        avatar_color,
+                        design.scale(18.0),
+                    ))
                     .child(
                         div()
                             .flex_1()
@@ -140,7 +144,7 @@ impl RepoView {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(6.0))
+                    .gap(design.px(6.0))
                     // The details column can be as narrow as its split's
                     // minimum; the id and the parent list truncate there
                     // instead of running into the diff.
@@ -156,15 +160,15 @@ impl RepoView {
                             .flex_none()
                             .items_center()
                             .justify_center()
-                            .w(px(22.0))
-                            .h(px(22.0))
-                            .rounded(px(5.0))
+                            .w(design.px(22.0))
+                            .h(design.px(22.0))
+                            .rounded(design.px(5.0))
                             .cursor_pointer()
                             .hover(|style| style.bg(design.field))
                             .on_click(move |_, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(copy_id.clone()));
                             })
-                            .child(icon(IconName::Copy, 13.0, design.muted)),
+                            .child(icon(IconName::Copy, design.scale(13.0), design.muted)),
                     )
                     .when(!parents.is_empty(), |row| {
                         let entity = self.entity();
@@ -218,7 +222,7 @@ impl RepoView {
         if self.fake.is_some() {
             block = block.child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(design.px(11.0))
                     .text_color(design.muted)
                     .child(t!("history.synthetic_diff").to_string()),
             );
@@ -234,7 +238,7 @@ impl RepoView {
                             div()
                                 .flex_1()
                                 .min_w_0()
-                                .text_size(px(11.0))
+                                .text_size(design.px(11.0))
                                 .text_color(design.muted)
                                 .child(t!("history.shallow_note").to_string()),
                         )
@@ -314,13 +318,13 @@ impl RepoView {
                 div()
                     .min_w_0()
                     .truncate()
-                    .text_size(px(12.0))
+                    .text_size(design.px(12.0))
                     .text_color(design.muted)
                     .child(summary.authors.join(", ")),
             )
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(design.px(11.0))
                     .text_color(design.muted)
                     .child(range),
             );
@@ -332,11 +336,13 @@ impl RepoView {
                 block = block.child(range_note(
                     t!("details.not_one_line").to_string(),
                     design.muted,
+                    design,
                 ));
             } else if let Some(skipped) = self.selection_diff.skipped() {
                 block = block.child(range_note(
                     t!("details.range_skipped", count = skipped).to_string(),
                     design.muted,
+                    design,
                 ));
             }
             if self.selection_diff.offers_mode_toggle() {
@@ -360,13 +366,13 @@ impl RepoView {
             );
         }
         if let Some(error) = self.selection_diff.error() {
-            block = block.child(range_note(error.to_owned(), design.remove_text));
+            block = block.child(range_note(error.to_owned(), design.remove_text, design));
         }
 
         block
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(design.px(11.0))
                     .text_color(design.muted)
                     .child(t!("history.cherry_pick_hint").to_string()),
             )
@@ -421,7 +427,7 @@ impl RepoView {
             .px_3p5()
             .pt_2()
             .pb_1()
-            .text_size(px(11.0));
+            .text_size(design.px(11.0));
         if files == 0 {
             return row
                 .child(
@@ -649,14 +655,18 @@ impl RepoView {
                             crate::ui::RowState::NORMAL,
                             &list_design,
                         )
-                        .pl(px(8.0 + *depth as f32 * 12.0))
+                        .pl(list_design.px(8.0 + *depth as f32 * 12.0))
                         .cursor_pointer()
                         .on_click(move |_event, _window, cx| {
                             let dir = dir.clone();
                             entity.update(cx, |this, cx| this.toggle_file_tree_dir(dir, cx));
                         })
-                        .child(icon(chevron, 12.0, list_design.muted))
-                        .child(icon(IconName::Folder, 14.0, list_design.muted))
+                        .child(icon(chevron, list_design.scale(12.0), list_design.muted))
+                        .child(icon(
+                            IconName::Folder,
+                            list_design.scale(14.0),
+                            list_design.muted,
+                        ))
                         .child(div().flex_1().min_w_0().truncate().child(name.clone()))
                         .into_any_element()
                     }
@@ -678,7 +688,7 @@ impl RepoView {
                             crate::ui::RowState::NORMAL.selected(is_selected),
                             &list_design,
                         )
-                        .pl(px(8.0 + *depth as f32 * 12.0))
+                        .pl(list_design.px(8.0 + *depth as f32 * 12.0))
                         .child(crate::ui::change_badge(kind, &list_design))
                         .child(div().flex_1().min_w_0().truncate().child(name.clone()))
                         .when(lfs.contains_key(path), |row| {
@@ -687,10 +697,10 @@ impl RepoView {
                         .when_some(dir, |row, dir| {
                             row.child(
                                 div()
-                                    .max_w(px(110.0))
+                                    .max_w(list_design.px(110.0))
                                     .flex_none()
                                     .truncate()
-                                    .text_size(px(11.0))
+                                    .text_size(list_design.px(11.0))
                                     .text_color(list_design.muted)
                                     .child(dir.to_owned()),
                             )
@@ -792,10 +802,14 @@ impl RepoView {
 }
 
 /// One explanation line inside the multi-selection summary.
-fn range_note(text: impl Into<gpui::SharedString>, color: gpui::Hsla) -> AnyElement {
+fn range_note(
+    text: impl Into<gpui::SharedString>,
+    color: gpui::Hsla,
+    design: &Design,
+) -> AnyElement {
     div()
         .min_w_0()
-        .text_size(px(11.0))
+        .text_size(design.px(11.0))
         .text_color(color)
         .child(text.into())
         .into_any_element()
@@ -837,12 +851,12 @@ pub(super) fn file_stat_label(file: &FileStat, design: &Design) -> AnyElement {
     if file.binary {
         return div()
             .flex_none()
-            .text_size(px(10.5))
+            .text_size(design.px(10.5))
             .text_color(design.muted)
             .child(t!("history.binary").to_string())
             .into_any_element();
     }
-    let mut label = div().flex().flex_none().gap_1().text_size(px(10.5));
+    let mut label = div().flex().flex_none().gap_1().text_size(design.px(10.5));
     if let Some((added, removed)) = line_counts(file) {
         if added > 0 {
             label = label.child(div().text_color(design.add_text).child(format!("+{added}")));

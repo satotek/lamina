@@ -95,12 +95,13 @@ impl RepoView {
         let content = dialog.clone();
         let footer = dialog.clone();
         let confirm = dialog;
+        let zoom = crate::settings::Settings::get(cx).appearance.zoom();
         window.open_dialog(cx, move |card, _, _| {
             let content = content.clone();
             let footer = footer.clone();
             let confirm = confirm.clone();
             card.title(stash_title())
-                .w(px(520.0))
+                .w(px(520.0 * zoom))
                 .content(move |body, _, _| body.child(content.clone()))
                 .footer(
                     DialogFooter::new()
@@ -307,13 +308,13 @@ pub(crate) fn sidebar_row(
         crate::ui::RowState::NORMAL.revealed(revealed),
         &colors.design,
     )
-    .h(px(28.0))
+    .h(colors.design.px(28.0))
     .w_full()
     .min_w_0()
     .overflow_hidden()
     .mx(px(0.0))
-    .pr(px(18.0))
-    .rounded(px(7.0))
+    .pr(colors.design.px(18.0))
+    .rounded(colors.design.px(7.0))
     .text_size(px(colors.design.small()))
     .text_color(colors.sidebar_foreground)
     .child(div().flex_1().min_w_0().truncate().child(label))
@@ -487,6 +488,7 @@ impl StashDialog {
 
 impl Render for StashDialog {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let design = style::Design::new(cx.theme(), crate::settings::Settings::get(cx));
         let muted = cx.theme().muted_foreground;
         let include_untracked = self.include_untracked;
         let toggle = cx.listener(|this, checked: &bool, _window, cx| {
@@ -538,10 +540,15 @@ impl Render for StashDialog {
             .flex_col()
             .gap_2()
             .w_full()
-            .child(div().text_size(px(11.0)).text_color(muted).child(format!(
-                "{summary} The staged and unstaged parts of each ticked file are \
-                     stashed, and the rest of the working tree stays as it is."
-            )))
+            .child(
+                div()
+                    .text_size(design.px(11.0))
+                    .text_color(muted)
+                    .child(format!(
+                        "{summary} The staged and unstaged parts of each ticked file are \
+                         stashed, and the rest of the working tree stays as it is."
+                    )),
+            )
             .child(Input::new(&self.input))
             .child(
                 div()
@@ -549,7 +556,7 @@ impl Render for StashDialog {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .max_h(px(CHECKLIST_HEIGHT))
+                    .max_h(design.px(CHECKLIST_HEIGHT))
                     .overflow_y_scroll()
                     .children(rows),
             )

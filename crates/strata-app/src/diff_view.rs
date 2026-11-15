@@ -461,6 +461,7 @@ pub struct RowOptions {
 pub struct DiffStyle {
     mono: SharedString,
     font_size: f32,
+    zoom: f32,
     tab_width: usize,
     split: bool,
     wrap: bool,
@@ -471,6 +472,7 @@ pub struct DiffStyle {
 impl DiffStyle {
     pub fn from_settings(cx: &App, fallback: &SharedString) -> Self {
         let settings = Settings::get(cx);
+        let zoom = settings.appearance.zoom();
         let chosen = settings
             .appearance
             .code_font
@@ -486,7 +488,8 @@ impl DiffStyle {
                 .appearance
                 .code_font_size
                 .clamp(CODE_FONT_MIN, CODE_FONT_MAX)
-                * settings.appearance.zoom(),
+                * zoom,
+            zoom,
             // The settings page offers 1–8 columns. A hand-edited file may ask
             // for more, and there is no reason to refuse it, so only zero (which
             // has no tab stop) is ruled out here.
@@ -508,11 +511,21 @@ impl DiffStyle {
         self
     }
 
-    /// Row height for this font size. A list is only uniform if every row
-    /// agrees, so panes with their own hunk headers (the staging pane) ask for
-    /// this instead of using [`ROW_HEIGHT`] directly.
+    /// Scales a 100%-zoom pixel measurement by the active window zoom.
+    pub fn scale(&self, value: f32) -> f32 {
+        value * self.zoom
+    }
+
+    /// A 100%-zoom measurement converted into zoomed GPUI pixels.
+    pub fn px(&self, value: f32) -> gpui::Pixels {
+        px(self.scale(value))
+    }
+
+    /// Row height for this font size and zoom. A list is only uniform if every
+    /// row agrees, so panes with their own hunk headers (the staging pane) ask
+    /// for this instead of using [`ROW_HEIGHT`] directly.
     pub fn row_height(&self) -> f32 {
-        (self.font_size + 7.5).max(ROW_HEIGHT)
+        (self.font_size + self.scale(7.5)).max(self.scale(ROW_HEIGHT))
     }
 
     /// The code font, for a pane that draws rows of its own (the conflict view).
@@ -530,13 +543,14 @@ impl DiffStyle {
         self.syntax
     }
 
-    /// What changes how a wrapped line breaks: the font, its size, the tab
-    /// width and whether whitespace markers take a tab's place. A list that
-    /// cached wrapped heights has to measure again when any of them moves.
+    /// What changes how a wrapped line breaks: the font, its size, the zoom,
+    /// the tab width and whether whitespace markers take a tab's place. A list
+    /// that cached wrapped heights has to measure again when any of them moves.
     fn fingerprint(&self) -> u64 {
         let mut hash = FNV_OFFSET;
         hash_bytes(&mut hash, self.mono.as_bytes());
         hash_bytes(&mut hash, &self.font_size.to_bits().to_le_bytes());
+        hash_bytes(&mut hash, &self.zoom.to_bits().to_le_bytes());
         hash_bytes(&mut hash, &(self.tab_width as u64).to_le_bytes());
         hash_bytes(&mut hash, &[u8::from(self.show_whitespace)]);
         hash
@@ -796,6 +810,9 @@ struct WrappedList {
     state: ListState,
     /// The item count the state was built for; a layout change makes it stale.
     items: usize,
+    /// Unwrapped row height the state was built for; a zoom/font change makes
+    /// unmeasured rows stale.
+    row_height: f32,
     /// Fingerprints of the rows and of the style the cached heights belong to.
     content: u64,
     style: u64,
@@ -808,6 +825,7 @@ impl WrappedList {
         Self {
             state,
             items,
+            row_height,
             content,
             style,
         }
@@ -820,10 +838,11 @@ impl WrappedList {
     /// or another tab width therefore invalidate every cached height, while
     /// the scroll position the user had stays put.
     fn sync(&mut self, items: usize, content: u64, style: u64, row_height: f32) {
-        if self.items != items {
+        if self.items != items || (self.row_height - row_height).abs() > f32::EPSILON {
             let top = self.state.logical_scroll_top();
             self.state.reset_with_uniform_height(items, px(row_height));
             self.items = items;
+            self.row_height = row_height;
             self.state.scroll_to(ListOffset {
                 item_ix: top.item_ix.min(items),
                 offset_in_item: top.offset_in_item,
@@ -979,7 +998,7 @@ fn unified_row(
             // Context revealed out of a gap has no card, but it sits among the
             // cards and must keep their gutter alignment.
             if role.is_some() || (options.inset && matches!(row, Row::Context(_))) {
-                outer = outer.pl(px(CARD_INSET)).pr(px(CARD_INSET));
+                outer = outer.pl(style.px(CARD_INSET)).pr(style.px(CARD_INSET));
             }
             outer = if wrap {
                 outer.items_start()
@@ -1029,17 +1048,17 @@ fn unified_row(
                 .child(
                     body.child(
                         div()
-                            .w(px(PICK_WIDTH))
+                            .w(style.px(PICK_WIDTH))
                             .flex_none()
-                            .text_size(px(10.0))
+                            .text_size(style.px(10.0))
                             .text_color(colors.selection)
                             .child(if picked { "✓" } else { "" }),
                     )
-                    .child(gutter(line.old_lineno, colors))
-                    .child(gutter(line.new_lineno, colors))
+                    .child(gutter(line.old_lineno, colors, style))
+                    .child(gutter(line.new_lineno, colors, style))
                     .child(
                         div()
-                            .w(px(MARKER_WIDTH))
+                            .w(style.px(MARKER_WIDTH))
                             .flex_none()
                             .text_color(colors.gutter)
                             .child(marker(line.kind)),
@@ -1118,8 +1137,8 @@ fn split_row_scoped(
                 .font_family(style.mono.clone())
                 .text_size(px(style.font_size))
                 .text_color(colors.text)
-                .pl(px(CARD_INSET))
-                .pr(px(CARD_INSET));
+                .pl(style.px(CARD_INSET))
+                .pr(style.px(CARD_INSET));
             outer = if wrap {
                 outer.items_start()
             } else {
@@ -1224,10 +1243,10 @@ fn side_cell(
         cell = cell.bg(background);
     }
 
-    cell.child(gutter(number, colors))
+    cell.child(gutter(number, colors, style))
         .child(
             div()
-                .w(px(MARKER_WIDTH))
+                .w(style.px(MARKER_WIDTH))
                 .flex_none()
                 .text_color(colors.gutter)
                 .child(marker),
@@ -1358,7 +1377,7 @@ fn hidden_bar_shell(label: String, colors: &DiffColors, style: &DiffStyle) -> Di
         .flex()
         .items_center()
         .justify_center()
-        .gap(px(8.0))
+        .gap(style.px(8.0))
         .h(px(style.row_height()))
         .w_full()
         .bg(colors.header)
@@ -1366,7 +1385,9 @@ fn hidden_bar_shell(label: String, colors: &DiffColors, style: &DiffStyle) -> Di
         .border_b_1()
         .border_color(colors.border)
         .font_family(style.mono.clone())
-        .text_size(px((style.font_size - 1.0).max(9.0)))
+        .text_size(px(
+            (style.font_size - style.scale(1.0)).max(style.scale(9.0))
+        ))
         .text_color(colors.muted)
         .child(label)
 }
@@ -1377,16 +1398,17 @@ fn hunk_header(
     style: &DiffStyle,
 ) -> AnyElement {
     let text = format!("@@ -{old_start},{old_len} +{new_start},{new_len} @@");
-    let band = style.row_height() - CARD_GAP;
+    let card_gap = style.scale(CARD_GAP);
+    let band = style.row_height() - card_gap;
 
     div()
         .flex()
         .flex_col()
         .h(px(style.row_height()))
         .w_full()
-        .pl(px(CARD_INSET))
-        .pr(px(CARD_INSET))
-        .pt(px(CARD_GAP))
+        .pl(style.px(CARD_INSET))
+        .pr(style.px(CARD_INSET))
+        .pt(px(card_gap))
         .child(
             div()
                 .flex()
@@ -1400,8 +1422,10 @@ fn hunk_header(
                 .border_color(colors.border)
                 .rounded_t_sm()
                 .font_family(style.mono.clone())
-                .text_size(px((style.font_size - 1.0).max(9.0)))
-                .line_height(px((band - 1.0).max(8.0)))
+                .text_size(px(
+                    (style.font_size - style.scale(1.0)).max(style.scale(9.0))
+                ))
+                .line_height(px((band - style.scale(1.0)).max(style.scale(8.0))))
                 .text_color(colors.muted)
                 .child(div().pl_2().child(text))
                 // Reserved for per-hunk actions.
@@ -1619,11 +1643,11 @@ fn split_markers(text: &str, markers: bool) -> Vec<(&str, bool)> {
     runs
 }
 
-fn gutter(number: Option<u32>, colors: &DiffColors) -> Div {
+fn gutter(number: Option<u32>, colors: &DiffColors, style: &DiffStyle) -> Div {
     let mut gutter = div()
         .flex()
         .justify_end()
-        .w(px(GUTTER_WIDTH))
+        .w(style.px(GUTTER_WIDTH))
         .flex_none()
         .pr_2()
         .text_color(colors.gutter);
@@ -2013,6 +2037,7 @@ mod tests {
         let style = DiffStyle {
             mono: SharedString::default(),
             font_size: 12.5,
+            zoom: 1.0,
             tab_width: 4,
             split: false,
             wrap: true,
@@ -2085,6 +2110,7 @@ mod tests {
         let style = DiffStyle {
             mono: SharedString::default(),
             font_size: 12.5,
+            zoom: 1.0,
             tab_width: 4,
             split: false,
             wrap: false,
@@ -2209,6 +2235,7 @@ mod tests {
         let style = DiffStyle {
             mono: SharedString::default(),
             font_size: 22.0,
+            zoom: 1.0,
             tab_width: 4,
             split: false,
             wrap: false,
@@ -2220,6 +2247,33 @@ mod tests {
             style.clone().one_line_per_row().row_height(),
             style.row_height()
         );
+    }
+
+    #[test]
+    fn diff_style_scales_metrics_proportionally_with_zoom() {
+        let base = DiffStyle {
+            mono: SharedString::default(),
+            font_size: 12.0,
+            zoom: 1.0,
+            tab_width: 4,
+            split: false,
+            wrap: false,
+            syntax: true,
+            show_whitespace: false,
+        };
+        let zoomed = DiffStyle {
+            mono: SharedString::default(),
+            font_size: 18.0,
+            zoom: 1.5,
+            tab_width: 4,
+            split: false,
+            wrap: false,
+            syntax: true,
+            show_whitespace: false,
+        };
+        assert_eq!(base.row_height(), ROW_HEIGHT);
+        assert_eq!(zoomed.row_height(), ROW_HEIGHT * 1.5);
+        assert_eq!(zoomed.scale(GUTTER_WIDTH), GUTTER_WIDTH * 1.5);
     }
 
     #[test]

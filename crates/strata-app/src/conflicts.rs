@@ -1629,7 +1629,7 @@ fn conflict_row(
         crate::ui::RowState::NORMAL.selected(is_selected),
         &colors.design,
     )
-    .h(px(ROW_HEIGHT))
+    .h(colors.design.px(ROW_HEIGHT))
     .cursor_pointer()
     .on_click(move |_, window, cx| {
         let path = click_path.clone();
@@ -1645,10 +1645,10 @@ fn conflict_row(
     .when_some(dir, |row, dir| {
         row.child(
             div()
-                .max_w(px(120.0))
+                .max_w(colors.design.px(120.0))
                 .flex_none()
                 .truncate()
-                .text_size(px(11.0))
+                .text_size(colors.design.px(11.0))
                 .text_color(colors.muted_foreground)
                 .child(dir.to_owned()),
         )
@@ -1656,7 +1656,7 @@ fn conflict_row(
     .child(
         div()
             .flex_none()
-            .text_size(px(9.5))
+            .text_size(colors.design.px(9.5))
             .text_color(colors.muted_foreground)
             .child(kind_label(kind)),
     )
@@ -1706,7 +1706,7 @@ impl Conflicts {
         )
         .track_scroll(&self.list_scroll)
         .with_scrollbar(&self.list_scroll)
-        .h(px(ROW_HEIGHT * visible as f32))
+        .h(colors.design.px(ROW_HEIGHT * visible as f32))
         .flex_none();
 
         div()
@@ -1725,7 +1725,7 @@ impl Conflicts {
                     .pb_1p5()
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .text_size(colors.design.px(11.0))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .text_color(colors.danger)
                             .child(t!("conflict.header", count = conflicts.len()).to_string()),
@@ -1828,10 +1828,10 @@ impl Conflicts {
                 div()
                     .flex_none()
                     .px_3()
-                    .h(px(22.0))
+                    .h(colors.design.px(22.0))
                     .flex()
                     .items_center()
-                    .text_size(px(10.0))
+                    .text_size(colors.design.px(10.0))
                     .text_color(colors.success)
                     .child(notice.clone()),
             );
@@ -1866,17 +1866,17 @@ impl Conflicts {
             .flex()
             .items_center()
             .gap_2()
-            .h(px(40.0))
+            .h(colors.design.px(40.0))
             .flex_none()
             .px_3p5()
             .bg(colors.background)
             .border_b_1()
             .border_color(colors.border)
-            .text_size(px(12.0))
+            .text_size(colors.design.px(12.0))
             .child(
                 gpui_component::Icon::from(IconName::TriangleAlert)
-                    .w(px(14.0))
-                    .h(px(14.0))
+                    .w(colors.design.px(14.0))
+                    .h(colors.design.px(14.0))
                     .text_color(colors.warning),
             )
             .child(
@@ -1892,7 +1892,7 @@ impl Conflicts {
                             div()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(px(11.5))
+                                .text_size(colors.design.px(11.5))
                                 .text_color(colors.muted_foreground)
                                 .child(dir.to_owned()),
                         )
@@ -1901,7 +1901,7 @@ impl Conflicts {
                         line.child(
                             div()
                                 .flex_none()
-                                .text_size(px(10.0))
+                                .text_size(colors.design.px(10.0))
                                 .text_color(colors.warning)
                                 .child(kind_label(loaded.data.kind)),
                         )
@@ -1915,7 +1915,7 @@ impl Conflicts {
                 .child(
                     div()
                         .flex_none()
-                        .text_size(px(11.0))
+                        .text_size(colors.design.px(11.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(if editor.model.all_resolved() {
                             colors.success
@@ -1962,7 +1962,7 @@ impl Conflicts {
             ));
         }
 
-        row = row.child(div().flex_none().w(px(4.0)));
+        row = row.child(div().flex_none().w(colors.design.px(4.0)));
 
         if editor.is_some() {
             let base_label = if self.show_base {
@@ -2168,7 +2168,7 @@ fn whole_file_body(
                 .flex_none()
                 .px_3()
                 .pb_2()
-                .text_size(px(10.0))
+                .text_size(colors.design.px(10.0))
                 .text_color(colors.muted_foreground)
                 .child(sizes_line(data)),
         )
@@ -2453,7 +2453,7 @@ fn side_panes(
         .flex_1()
         .min_w_0()
         .items_center()
-        .h(px(28.0))
+        .h(design.px(28.0))
         .border_l_1()
         .border_color(design.border)
         .child(pane_header(
@@ -2546,7 +2546,7 @@ fn side_header(
         .flex()
         .flex_1()
         .min_w_0()
-        .h(px(28.0))
+        .h(design.px(28.0))
         .child(header)
         .into_any_element()
 }
@@ -2565,7 +2565,7 @@ fn pane_header(
         .h_full()
         .px_2()
         .bg(design.field)
-        .text_size(px(9.5))
+        .text_size(design.px(9.5))
         .text_color(design.muted);
     if let Some(checkbox) = checkbox {
         header = header.child(checkbox);
@@ -2587,7 +2587,7 @@ fn tick_box(
 ) -> AnyElement {
     let mut gutter = div()
         .flex_none()
-        .w(px(22.0))
+        .w(design.px(22.0))
         .h_full()
         .flex()
         .items_center()
@@ -2729,9 +2729,9 @@ fn side_cell(
             cell.child(
                 div()
                     .flex_none()
-                    .w(px(38.0))
+                    .w(style.px(38.0))
                     .pr_1()
-                    .text_size(px(style.font_size() - 2.0))
+                    .text_size(px(style.font_size() - style.scale(2.0)))
                     .text_color(diff.gutter)
                     .text_right()
                     .child(number.to_string()),
@@ -2749,7 +2749,7 @@ fn side_cell(
             div()
                 .flex_1()
                 .min_w_0()
-                .text_size(px(style.font_size() - 2.0))
+                .text_size(px(style.font_size() - style.scale(2.0)))
                 .text_color(diff.gutter)
                 .child(""),
         ),
@@ -2765,7 +2765,7 @@ fn side_cell(
                     .bottom_0()
                     .flex()
                     .items_center()
-                    .rounded(px(3.0))
+                    .rounded(design.px(3.0))
                     .bg(design.background)
                     .child(actions),
             )
@@ -2794,13 +2794,23 @@ fn result_pane(editor: &MergeEditor, colors: &Colors, style: &DiffStyle, busy: b
     };
     let mut legend = div().flex().items_center().gap_1();
     for (side, label) in [(Side::A, "A"), (Side::B, "B")] {
-        legend = legend.child(div().size(px(7.0)).rounded_full().bg(colors.side(side)));
-        legend = legend.child(div().text_size(px(9.0)).child(label));
+        legend = legend.child(
+            div()
+                .size(colors.design.px(7.0))
+                .rounded_full()
+                .bg(colors.side(side)),
+        );
+        legend = legend.child(div().text_size(colors.design.px(9.0)).child(label));
     }
-    legend = legend.child(div().size(px(7.0)).rounded_full().bg(colors.warning));
     legend = legend.child(
         div()
-            .text_size(px(9.0))
+            .size(colors.design.px(7.0))
+            .rounded_full()
+            .bg(colors.warning),
+    );
+    legend = legend.child(
+        div()
+            .text_size(colors.design.px(9.0))
             .child(t!("conflict.unresolved").to_string()),
     );
     // The faint fill on a change git merged by itself needs a name of its own;
@@ -2812,17 +2822,17 @@ fn result_pane(editor: &MergeEditor, colors: &Colors, style: &DiffStyle, busy: b
             .items_center()
             .gap_1()
             .px_1()
-            .rounded(px(3.0))
+            .rounded(colors.design.px(3.0))
             .bg(colors.side_a_soft.opacity(0.45))
             .child(
                 div()
-                    .size(px(7.0))
+                    .size(colors.design.px(7.0))
                     .rounded_full()
                     .bg(colors.side_a.opacity(0.5)),
             )
             .child(
                 div()
-                    .text_size(px(9.0))
+                    .text_size(colors.design.px(9.0))
                     .child(t!("conflict.auto_merged_legend").to_string()),
             )
             .tooltip(move |window, cx| {
@@ -2841,11 +2851,11 @@ fn result_pane(editor: &MergeEditor, colors: &Colors, style: &DiffStyle, busy: b
                 .flex()
                 .items_center()
                 .gap_2()
-                .h(px(22.0))
+                .h(colors.design.px(22.0))
                 .flex_none()
                 .px_2()
                 .bg(colors.muted.opacity(0.4))
-                .text_size(px(9.5))
+                .text_size(colors.design.px(9.5))
                 .text_color(colors.muted_foreground)
                 .child(t!("conflict.result").to_string())
                 .child(div().flex_1().min_w_0().truncate().child(status))

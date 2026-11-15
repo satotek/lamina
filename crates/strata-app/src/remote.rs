@@ -347,6 +347,13 @@ pub(crate) struct Colors {
     pub(crate) border: Hsla,
     pub(crate) accent: Hsla,
     pub(crate) accent_foreground: Hsla,
+    pub(crate) zoom: f32,
+}
+
+impl Colors {
+    fn px(&self, value: f32) -> gpui::Pixels {
+        px(value * self.zoom)
+    }
 }
 
 impl Remote {
@@ -458,7 +465,7 @@ impl Remote {
             .items_center()
             .gap_2()
             .flex_none()
-            .max_w(px(560.0))
+            .max_w(colors.px(560.0))
             .child(
                 div()
                     .flex_none()
@@ -473,8 +480,8 @@ impl Remote {
                 .child(
                     div()
                         .flex_none()
-                        .w(px(PROGRESS_WIDTH))
-                        .h(px(4.0))
+                        .w(colors.px(PROGRESS_WIDTH))
+                        .h(colors.px(4.0))
                         .rounded_full()
                         .bg(colors.border)
                         .child(
@@ -574,9 +581,9 @@ impl RepoView {
                 .flex_col()
                 .items_center()
                 .justify_center()
-                .gap(px(2.0))
-                .text_size(px(10.0))
-                .child(Icon::new(icon_name).with_size(px(16.0)));
+                .gap(colors.px(2.0))
+                .text_size(colors.px(10.0))
+                .child(Icon::new(icon_name).with_size(colors.px(16.0)));
             if !compact {
                 content = content.child(label.clone());
             }
@@ -587,27 +594,27 @@ impl RepoView {
                 content = content.child(
                     div()
                         .absolute()
-                        .top(px(top))
-                        .right(px(right))
-                        .min_w(px(14.0))
-                        .h(px(14.0))
-                        .px(px(3.0))
+                        .top(colors.px(top))
+                        .right(colors.px(right))
+                        .min_w(colors.px(14.0))
+                        .h(colors.px(14.0))
+                        .px(colors.px(3.0))
                         .rounded_full()
                         .bg(colors.accent)
                         .text_color(colors.accent_foreground)
-                        .text_size(px(9.0))
+                        .text_size(colors.px(9.0))
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(count.to_string()),
                 );
             }
             crate::ui::content_button(id)
                 .ghost()
-                .w(px(if compact {
+                .w(colors.px(if compact {
                     ICON_BUTTON_WIDTH
                 } else {
                     LABELLED_BUTTON_WIDTH
                 }))
-                .h(px(40.0))
+                .h(colors.px(40.0))
                 .p_0()
                 .text_color(if enabled {
                     colors.foreground
@@ -669,7 +676,7 @@ impl RepoView {
         div()
             .flex()
             .items_center()
-            .gap(px(2.0))
+            .gap(colors.px(2.0))
             .flex_none()
             .child(fetch)
             .child(pull)

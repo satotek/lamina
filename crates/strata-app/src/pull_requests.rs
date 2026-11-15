@@ -441,7 +441,7 @@ pub(crate) fn badge(
         .flex()
         .flex_none()
         .items_center()
-        .gap(px(3.0));
+        .gap(design.px(3.0));
     if let Some(dot) = ui::check_dot(pull_request.checks.state, design) {
         cell = cell.child(dot);
     }
@@ -622,10 +622,11 @@ impl RepoView {
         let repo = self.entity.clone();
         let dialog = cx.new(|cx| CheckoutDialog::new(items, repo, window, cx));
         let focus = dialog.read(cx).focus.clone();
-        window.open_dialog(cx, move |card, _, _| {
+        window.open_dialog(cx, move |card, _, cx| {
             let content = dialog.clone();
+            let zoom = Settings::get(cx).appearance.zoom();
             card.title(t!("pr.checkout_title").to_string())
-                .w(px(DIALOG_WIDTH))
+                .w(px(DIALOG_WIDTH * zoom))
                 .close_button(false)
                 .on_ok(|_, _, _| false)
                 .content(move |body, _, _| body.child(content.clone()))
@@ -822,7 +823,7 @@ impl CheckoutDialog {
         .child(
             div()
                 .flex_none()
-                .max_w(px(140.0))
+                .max_w(design.px(140.0))
                 .truncate()
                 .text_size(px(design.tiny()))
                 .text_color(design.muted)
@@ -844,7 +845,7 @@ impl Render for CheckoutDialog {
             .flex()
             .flex_col()
             .w_full()
-            .max_h(px(LIST_MAX_HEIGHT))
+            .max_h(design.px(LIST_MAX_HEIGHT))
             .overflow_y_scroll();
         if filtered.is_empty() {
             list = list.child(ui::empty_state(t!("pr.no_match").to_string(), &design));

@@ -1000,7 +1000,7 @@ impl Workspace {
             OpenTarget::Current => t!("picker.open_repository").to_string(),
             OpenTarget::NewTab => t!("picker.open_new_tab").to_string(),
         };
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, _, cx| {
             let content_picker = picker.clone();
             let footer_picker = picker.clone();
             let clone_footer_picker = picker.clone();
@@ -1055,9 +1055,10 @@ impl Workspace {
                         .size(crate::ui::ButtonSize::Medium)
                         .on_click(|_, window, cx| window.close_dialog(cx)),
                 );
+            let zoom = Settings::get(cx).appearance.zoom();
             dialog
                 .title(title.clone())
-                .w(px(720.0))
+                .w(px(720.0 * zoom))
                 .content(move |content, _, _| content.child(content_picker.clone()))
                 .footer(footer)
                 .on_ok(move |_, window, cx| {

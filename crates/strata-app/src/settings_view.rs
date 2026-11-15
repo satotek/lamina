@@ -130,7 +130,7 @@ impl SettingsView {
     /// wordmark, a divider, then the name of the window.
     fn title_bar(&self, design: &Design) -> impl IntoElement {
         TitleBar::new()
-            .h(px(crate::style::TITLE_BAR_HEIGHT))
+            .h(design.px(crate::style::TITLE_BAR_HEIGHT))
             .bg(design.chrome)
             .border_color(design.border)
             .child(
@@ -143,11 +143,14 @@ impl SettingsView {
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(7.0))
-                            .child(style::app_mark(style::BRAND_MARK))
-                            .child(style::wordmark(style::BRAND_WORDMARK, design.text)),
+                            .gap(design.px(7.0))
+                            .child(style::app_mark(design.scale(style::BRAND_MARK)))
+                            .child(style::wordmark(
+                                design.scale(style::BRAND_WORDMARK),
+                                design.text,
+                            )),
                     )
-                    .child(div().w(px(1.0)).h(px(18.0)).mx_1().bg(design.border))
+                    .child(div().w(px(1.0)).h(design.px(18.0)).mx_1().bg(design.border))
                     .child(
                         div()
                             .font_weight(FontWeight::SEMIBOLD)
@@ -168,7 +171,7 @@ impl SettingsView {
             .items_center()
             .justify_between()
             .gap_3()
-            .h(px(40.0))
+            .h(design.px(40.0))
             .px_3()
             .border_t_1()
             .border_color(design.border)
@@ -223,8 +226,8 @@ impl Render for SettingsView {
             .child(
                 div().flex_1().min_h_0().child(
                     SettingsPages::new("settings")
-                        .sidebar_width(px(SIDEBAR_WIDTH))
-                        .sidebar_size_range(px(SIDEBAR_MIN)..px(SIDEBAR_MAX))
+                        .sidebar_width(design.px(SIDEBAR_WIDTH))
+                        .sidebar_size_range(design.px(SIDEBAR_MIN)..design.px(SIDEBAR_MAX))
                         .sidebar_style(&sidebar_style)
                         // Each group is a bordered card on the page surface,
                         // with its heading and description above it.

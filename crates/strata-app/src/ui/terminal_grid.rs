@@ -26,6 +26,11 @@ pub const GRID_PADDING_X: f32 = 8.0;
 /// Vertical padding inside the terminal canvas before row 0.
 pub const GRID_PADDING_Y: f32 = 6.0;
 
+/// Returns the scaled `(x, y)` canvas padding inside [`TerminalGrid`].
+pub fn grid_padding(zoom: f32) -> (f32, f32) {
+    (GRID_PADDING_X * zoom, GRID_PADDING_Y * zoom)
+}
+
 #[derive(Default)]
 struct ScrollbarState {
     viewport_bounds: Bounds<Pixels>,
@@ -124,6 +129,7 @@ pub struct TerminalGridProps<V: EntityInputHandler + 'static> {
     pub font_family: SharedString,
     pub font_size: Pixels,
     pub cell_size: Size<Pixels>,
+    pub zoom: f32,
     pub focused: bool,
     pub marked_text: Option<String>,
     pub focus_handle: FocusHandle,
@@ -210,10 +216,8 @@ impl<V: EntityInputHandler + 'static> Element for TerminalGrid<V> {
             cx,
         );
 
-        let origin = point(
-            bounds.origin.x + px(GRID_PADDING_X),
-            bounds.origin.y + px(GRID_PADDING_Y),
-        );
+        let (pad_x, pad_y) = grid_padding(self.props.zoom);
+        let origin = point(bounds.origin.x + px(pad_x), bounds.origin.y + px(pad_y));
         let default_bg = rgb_to_hsla(snapshot.default_bg);
         window.paint_quad(fill(bounds, default_bg));
 
@@ -463,25 +467,26 @@ impl<V: EntityInputHandler + 'static> Element for TerminalGrid<V> {
             } else {
                 cw
             };
+            let cursor_bar = px(2.0 * self.props.zoom);
             match shape {
                 CursorShape::Block => {}
                 CursorShape::Bar => {
                     window.paint_quad(fill(
-                        Bounds::new(point(cx_pos, cy_pos), size(px(2.0), ch)),
+                        Bounds::new(point(cx_pos, cy_pos), size(cursor_bar, ch)),
                         color,
                     ));
                 }
                 CursorShape::Underline => {
                     window.paint_quad(fill(
                         Bounds::new(
-                            point(cx_pos, cy_pos + ch - px(2.0)),
-                            size(cursor_w, px(2.0)),
+                            point(cx_pos, cy_pos + ch - cursor_bar),
+                            size(cursor_w, cursor_bar),
                         ),
                         color,
                     ));
                 }
                 CursorShape::BlockHollow => {
-                    let t = px(1.5);
+                    let t = px(1.5 * self.props.zoom);
                     window.paint_quad(fill(
                         Bounds::new(point(cx_pos, cy_pos), size(cursor_w, t)),
                         color,
@@ -524,7 +529,7 @@ impl<V: EntityInputHandler + 'static> Element for TerminalGrid<V> {
                 color: self.props.ime_fg,
                 background_color: None,
                 underline: Some(GpuiUnderlineStyle {
-                    thickness: px(1.5),
+                    thickness: px(1.5 * self.props.zoom),
                     color: Some(self.props.ime_fg),
                     wavy: false,
                 }),
@@ -536,7 +541,10 @@ impl<V: EntityInputHandler + 'static> Element for TerminalGrid<V> {
                 &[run],
                 None,
             );
-            let bg_bounds = Bounds::new(ime_pos, size(shaped.width() + px(4.0), ch));
+            let bg_bounds = Bounds::new(
+                ime_pos,
+                size(shaped.width() + px(4.0 * self.props.zoom), ch),
+            );
             window.paint_quad(fill(bg_bounds, self.props.ime_bg));
             let _ = shaped.paint(ime_pos, ch, TextAlign::Left, None, window, cx);
         }
@@ -591,11 +599,16 @@ pub fn measure_cell_size(
 }
 
 /// Computes `(cols, rows)` that fit inside `bounds` for cells of `cell_size`.
-pub fn grid_dimensions_for_bounds(bounds: Bounds<Pixels>, cell_size: Size<Pixels>) -> (u16, u16) {
+pub fn grid_dimensions_for_bounds(
+    bounds: Bounds<Pixels>,
+    cell_size: Size<Pixels>,
+    zoom: f32,
+) -> (u16, u16) {
+    let (pad_x, pad_y) = grid_padding(zoom);
     let cw = f32::from(cell_size.width).max(1.0);
     let ch = f32::from(cell_size.height).max(1.0);
-    let avail_w = (f32::from(bounds.size.width) - GRID_PADDING_X * 2.0).max(cw);
-    let avail_h = (f32::from(bounds.size.height) - GRID_PADDING_Y * 2.0).max(ch);
+    let avail_w = (f32::from(bounds.size.width) - pad_x * 2.0).max(cw);
+    let avail_h = (f32::from(bounds.size.height) - pad_y * 2.0).max(ch);
     let cols = (avail_w / cw).floor().clamp(2.0, 500.0) as u16;
     let rows = (avail_h / ch).floor().clamp(2.0, 300.0) as u16;
     (cols, rows)
@@ -608,11 +621,13 @@ pub fn pixel_to_viewport_cell(
     cell_size: Size<Pixels>,
     cols: u16,
     rows: u16,
+    zoom: f32,
 ) -> (u16, u16) {
+    let (pad_x, pad_y) = grid_padding(zoom);
     let cw = f32::from(cell_size.width).max(1.0);
     let ch = f32::from(cell_size.height).max(1.0);
-    let rel_x = (f32::from(position.x - bounds.origin.x) - GRID_PADDING_X).max(0.0);
-    let rel_y = (f32::from(position.y - bounds.origin.y) - GRID_PADDING_Y).max(0.0);
+    let rel_x = (f32::from(position.x - bounds.origin.x) - pad_x).max(0.0);
+    let rel_y = (f32::from(position.y - bounds.origin.y) - pad_y).max(0.0);
     let col = (rel_x / cw)
         .floor()
         .clamp(0.0, f32::from(cols.saturating_sub(1))) as u16;
@@ -627,7 +642,9 @@ pub fn ime_cursor_bounds(
     element_bounds: Bounds<Pixels>,
     cell_size: Size<Pixels>,
     cursor: strata_term::CursorSnapshot,
+    zoom: f32,
 ) -> Bounds<Pixels> {
+    let (pad_x, pad_y) = grid_padding(zoom);
     let col = if cursor.in_viewport {
         f32::from(cursor.col)
     } else {
@@ -638,8 +655,8 @@ pub fn ime_cursor_bounds(
     } else {
         0.0
     };
-    let x = element_bounds.origin.x + px(GRID_PADDING_X) + cell_size.width * col;
-    let y = element_bounds.origin.y + px(GRID_PADDING_Y) + cell_size.height * row;
+    let x = element_bounds.origin.x + px(pad_x) + cell_size.width * col;
+    let y = element_bounds.origin.y + px(pad_y) + cell_size.height * row;
     Bounds::new(point(x, y), cell_size)
 }
 
@@ -803,16 +820,16 @@ mod tests {
         let cell = size(px(8.0), px(16.0));
         let bounds = Bounds::new(point(px(10.0), px(20.0)), size(px(816.0), px(396.0)));
         // Available: (816 - 16) / 8 = 100 cols, (396 - 12) / 16 = 24 rows.
-        assert_eq!(grid_dimensions_for_bounds(bounds, cell), (100, 24));
+        assert_eq!(grid_dimensions_for_bounds(bounds, cell, 1.0), (100, 24));
 
         // Origin inside padding maps to (0, 0).
         assert_eq!(
-            pixel_to_viewport_cell(point(px(18.0), px(26.0)), bounds, cell, 100, 24),
+            pixel_to_viewport_cell(point(px(18.0), px(26.0)), bounds, cell, 100, 24, 1.0),
             (0, 0)
         );
         // Outside top-left clamps to (0, 0).
         assert_eq!(
-            pixel_to_viewport_cell(point(px(0.0), px(0.0)), bounds, cell, 100, 24),
+            pixel_to_viewport_cell(point(px(0.0), px(0.0)), bounds, cell, 100, 24, 1.0),
             (0, 0)
         );
         // Inside cell (5, 3).
@@ -825,14 +842,35 @@ mod tests {
                 bounds,
                 cell,
                 100,
-                24
+                24,
+                1.0,
             ),
             (5, 3)
         );
         // Beyond bottom-right clamps to (99, 23).
         assert_eq!(
-            pixel_to_viewport_cell(point(px(5000.0), px(5000.0)), bounds, cell, 100, 24),
+            pixel_to_viewport_cell(point(px(5000.0), px(5000.0)), bounds, cell, 100, 24, 1.0),
             (99, 23)
+        );
+
+        // At 150% zoom, padding scales from (8, 6) to (12, 9) and cells scale by 1.5.
+        assert_eq!(grid_padding(1.5), (12.0, 9.0));
+        let zoomed_cell = size(px(12.0), px(24.0));
+        let zoomed_bounds = Bounds::new(point(px(0.0), px(0.0)), size(px(1224.0), px(594.0)));
+        assert_eq!(
+            grid_dimensions_for_bounds(zoomed_bounds, zoomed_cell, 1.5),
+            (100, 24)
+        );
+        assert_eq!(
+            pixel_to_viewport_cell(
+                point(px(12.0 + 2.0 * 12.0 + 1.0), px(9.0 + 3.0 * 24.0 + 1.0)),
+                zoomed_bounds,
+                zoomed_cell,
+                100,
+                24,
+                1.5,
+            ),
+            (2, 3)
         );
     }
 

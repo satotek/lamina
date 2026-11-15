@@ -84,7 +84,7 @@ fn icon(section: Section) -> IconName {
 /// sized from it because the page list and its cards are only as wide as the
 /// window leaves them.
 pub(super) fn pages(viewport_width: f32, design: &Design) -> Vec<SettingPage> {
-    let control = control_width(viewport_width);
+    let control = control_width(viewport_width, design);
     Section::ALL
         .into_iter()
         .map(|section| page(section, control, design))
@@ -97,10 +97,13 @@ pub(super) fn pages(viewport_width: f32, design: &Design) -> Vec<SettingPage> {
 /// The sidebar keeps the width it was dragged to inside the settings component,
 /// so the widest it can become is what the calculation may assume; beside a
 /// narrower sidebar the control just ends further inside the card.
-fn control_width(viewport_width: f32) -> f32 {
-    let row = viewport_width - SIDEBAR_MAX - 2.0 * PAGE_GUTTER - 2.0 * CARD_PADDING;
-    let room = row * (1.0 - LABEL_FRACTION) - ROW_GAP;
-    room.clamp(0.0, CONTROL_MAX)
+fn control_width(viewport_width: f32, design: &Design) -> f32 {
+    let row = viewport_width
+        - design.scale(SIDEBAR_MAX)
+        - 2.0 * design.scale(PAGE_GUTTER)
+        - 2.0 * design.scale(CARD_PADDING);
+    let room = row * (1.0 - LABEL_FRACTION) - design.scale(ROW_GAP);
+    room.clamp(0.0, design.scale(CONTROL_MAX))
 }
 
 fn page(section: Section, control: f32, design: &Design) -> SettingPage {
@@ -123,7 +126,7 @@ fn appearance(control: f32, design: &Design) -> SettingPage {
         design,
     )
     .groups(
-        card(t!("settings.theme.card").to_string()).items([
+        card(t!("settings.theme.card").to_string(), design).items([
             SettingItem::new(t!("settings.theme.mode").to_string(), theme_field(control))
                 .description(t!("settings.theme.description").to_string()),
             SettingItem::new(
@@ -140,7 +143,7 @@ fn appearance(control: f32, design: &Design) -> SettingPage {
         ]),
     )
     .groups(
-        card(t!("settings.appearance.language").to_string()).item(
+        card(t!("settings.appearance.language").to_string(), design).item(
             SettingItem::new(
                 t!("settings.appearance.language").to_string(),
                 language_field(control),
@@ -149,7 +152,7 @@ fn appearance(control: f32, design: &Design) -> SettingPage {
         ),
     )
     .groups(
-        card(t!("settings.fonts.card").to_string()).items([
+        card(t!("settings.fonts.card").to_string(), design).items([
             SettingItem::new(
                 t!("settings.fonts.interface").to_string(),
                 text_field(
@@ -206,7 +209,7 @@ fn appearance(control: f32, design: &Design) -> SettingPage {
         ]),
     )
     .groups(
-        card(t!("settings.zoom.card").to_string()).item(
+        card(t!("settings.zoom.card").to_string(), design).item(
             SettingItem::new(
                 t!("settings.appearance.zoom").to_string(),
                 zoom_field(control),
@@ -223,7 +226,7 @@ fn diff(control: f32, design: &Design) -> SettingPage {
         design,
     )
     .groups(
-        card(t!("settings.diff.layout.card").to_string()).items([
+        card(t!("settings.diff.layout.card").to_string(), design).items([
             SettingItem::new(
                 t!("settings.diff.layout.card").to_string(),
                 choice(
@@ -254,7 +257,7 @@ fn diff(control: f32, design: &Design) -> SettingPage {
         ]),
     )
     .groups(
-        card(t!("settings.diff.text.card").to_string()).items([
+        card(t!("settings.diff.text.card").to_string(), design).items([
             SettingItem::new(
                 t!("settings.diff.syntax").to_string(),
                 toggle(
@@ -274,7 +277,7 @@ fn diff(control: f32, design: &Design) -> SettingPage {
         ]),
     )
     .groups(
-        card(t!("settings.diff.comparison.card").to_string())
+        card(t!("settings.diff.comparison.card").to_string(), design)
             .description(t!("settings.diff.comparison_description").to_string())
             .items([
                 SettingItem::new(
@@ -307,7 +310,7 @@ fn history(control: f32, design: &Design) -> SettingPage {
         design,
     )
     .groups(
-        card(t!("settings.history.refs").to_string()).items([
+        card(t!("settings.history.refs").to_string(), design).items([
             SettingItem::new(
                 t!("settings.history.remote_branches").to_string(),
                 toggle(
@@ -332,7 +335,7 @@ fn history(control: f32, design: &Design) -> SettingPage {
         ]),
     )
     .groups(
-        card(t!("settings.history.dates").to_string()).item(
+        card(t!("settings.history.dates").to_string(), design).item(
             SettingItem::new(
                 t!("settings.history.date_format").to_string(),
                 choice(
@@ -358,7 +361,7 @@ fn history(control: f32, design: &Design) -> SettingPage {
         ),
     )
     .groups(
-        card(t!("settings.history.signatures").to_string()).item(
+        card(t!("settings.history.signatures").to_string(), design).item(
             SettingItem::new(
                 t!("settings.history.commit_signatures").to_string(),
                 toggle(
@@ -370,7 +373,7 @@ fn history(control: f32, design: &Design) -> SettingPage {
         ),
     )
     .groups(
-        card(t!("settings.history.rows").to_string()).items([
+        card(t!("settings.history.rows").to_string(), design).items([
             SettingItem::new(
                 t!("settings.history.uncommitted_changes").to_string(),
                 toggle(
@@ -398,7 +401,7 @@ fn behaviour(control: f32, design: &Design) -> SettingPage {
         design,
     )
     .groups(
-        card(t!("settings.behaviour.fetching").to_string()).items([
+        card(t!("settings.behaviour.fetching").to_string(), design).items([
             SettingItem::new(
                 t!("settings.behaviour.auto_fetch").to_string(),
                 choice(
@@ -444,7 +447,7 @@ fn behaviour(control: f32, design: &Design) -> SettingPage {
         ]),
     )
     .groups(
-        card(t!("settings.behaviour.safety").to_string()).items([
+        card(t!("settings.behaviour.safety").to_string(), design).items([
             SettingItem::new(
                 t!("settings.behaviour.confirm_destructive").to_string(),
                 toggle(
@@ -483,7 +486,7 @@ fn tools(control: f32, design: &Design) -> SettingPage {
         design,
     )
     .groups(
-        card(t!("settings.tools.git").to_string()).item(
+        card(t!("settings.tools.git").to_string(), design).item(
             SettingItem::new(
                 t!("settings.tools.git_executable").to_string(),
                 git_field(control),
@@ -492,7 +495,7 @@ fn tools(control: f32, design: &Design) -> SettingPage {
         ),
     )
     .groups(
-        card("ghq").items([
+        card("ghq", design).items([
             SettingItem::new(
                 t!("settings.tools.use_ghq").to_string(),
                 tool_toggle(|settings| settings.tools.ghq.enabled, change::ghq_enabled),
@@ -523,7 +526,7 @@ fn tools(control: f32, design: &Design) -> SettingPage {
         ]),
     )
     .groups(
-        card(t!("settings.tools.github_cli").to_string()).items([
+        card(t!("settings.tools.github_cli").to_string(), design).items([
             SettingItem::new(
                 t!("settings.tools.use_gh").to_string(),
                 tool_toggle(|settings| settings.tools.gh.enabled, change::gh_enabled),
@@ -536,39 +539,41 @@ fn tools(control: f32, design: &Design) -> SettingPage {
         ]),
     )
     .groups(
-        card(t!("settings.tools.repository").to_string()).item(SettingItem::render(|_, _, cx| {
-            let design = Design::new(cx.theme(), Settings::get(cx));
-            let available = crate::git_config_view::has_repository(cx);
-            v_flex()
-                .gap_1()
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .items_center()
-                        .child(
-                            crate::ui::button(
-                                "open-git-config",
-                                t!("settings.tools.show_git_config").to_string(),
-                            )
-                            .size(crate::ui::ButtonSize::Small)
-                            .disabled(!available)
-                            .on_click(|_, window, cx| {
-                                window.dispatch_action(Box::new(OpenGitConfig), cx);
-                            }),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(design.tiny()))
-                                .text_color(design.muted)
-                                .child(if available {
-                                    t!("settings.tools.show_git_config_available").to_string()
-                                } else {
-                                    t!("settings.tools.show_git_config_unavailable").to_string()
+        card(t!("settings.tools.repository").to_string(), design).item(SettingItem::render(
+            |_, _, cx| {
+                let design = Design::new(cx.theme(), Settings::get(cx));
+                let available = crate::git_config_view::has_repository(cx);
+                v_flex()
+                    .gap_1()
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                crate::ui::button(
+                                    "open-git-config",
+                                    t!("settings.tools.show_git_config").to_string(),
+                                )
+                                .size(crate::ui::ButtonSize::Small)
+                                .disabled(!available)
+                                .on_click(|_, window, cx| {
+                                    window.dispatch_action(Box::new(OpenGitConfig), cx);
                                 }),
-                        ),
-                )
-                .into_any_element()
-        })),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(design.tiny()))
+                                    .text_color(design.muted)
+                                    .child(if available {
+                                        t!("settings.tools.show_git_config_available").to_string()
+                                    } else {
+                                        t!("settings.tools.show_git_config_unavailable").to_string()
+                                    }),
+                            ),
+                    )
+                    .into_any_element()
+            },
+        )),
     )
     .groups({
         #[cfg_attr(not(feature = "terminal"), allow(unused_mut))]
@@ -610,7 +615,7 @@ fn tools(control: f32, design: &Design) -> SettingPage {
             )
             .description(t!("settings.tools.embedded_shell_description").to_string()),
         );
-        card(t!("settings.tools.editor_terminal").to_string()).items(items)
+        card(t!("settings.tools.editor_terminal").to_string(), design).items(items)
     })
 }
 
@@ -621,7 +626,7 @@ fn privacy(_control: f32, design: &Design) -> SettingPage {
         design,
     )
     .groups(
-        card(t!("settings.privacy.network").to_string()).item(
+        card(t!("settings.privacy.network").to_string(), design).item(
             SettingItem::new(
                 t!("settings.privacy.avatars").to_string(),
                 toggle(
@@ -641,7 +646,7 @@ fn keyboard(design: &Design) -> SettingPage {
         design,
     )
     .groups(
-        card(t!("settings.keyboard.bindings").to_string())
+        card(t!("settings.keyboard.bindings").to_string(), design)
             .item(SettingItem::render(keyboard_table)),
     )
 }
@@ -653,7 +658,7 @@ fn commands_page(design: &Design) -> SettingPage {
         t!("settings.commands.description").to_string(),
         design,
     )
-    .groups(card(file).item(SettingItem::render(|_, _, cx| {
+    .groups(card(file, design).item(SettingItem::render(|_, _, cx| {
         let design = Design::new(cx.theme(), Settings::get(cx));
         let state = crate::commands::CommandState::get(cx);
         let path = state.path.as_ref().map_or_else(
@@ -712,65 +717,70 @@ fn commands_page(design: &Design) -> SettingPage {
             .into_any_element()
     })))
     .groups(
-        card(t!("settings.commands.loaded").to_string()).item(SettingItem::render(|_, _, cx| {
-            let design = Design::new(cx.theme(), Settings::get(cx));
-            let state = crate::commands::CommandState::get(cx);
-            let rows = crate::commands::rows(state);
-            if rows.is_empty() {
-                return crate::ui::empty_state(t!("settings.commands.empty").to_string(), &design)
-                    .into_any_element();
-            }
-            v_flex()
-                .w_full()
-                .children(rows.into_iter().enumerate().map(|(index, row)| {
-                    crate::ui::list_row(
-                        ("custom-command", index),
-                        crate::ui::RowState::NORMAL,
+        card(t!("settings.commands.loaded").to_string(), design).item(SettingItem::render(
+            |_, _, cx| {
+                let design = Design::new(cx.theme(), Settings::get(cx));
+                let state = crate::commands::CommandState::get(cx);
+                let rows = crate::commands::rows(state);
+                if rows.is_empty() {
+                    return crate::ui::empty_state(
+                        t!("settings.commands.empty").to_string(),
                         &design,
                     )
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(180.0))
-                            .truncate()
-                            .child(row.title.to_owned()),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(px(74.0))
-                            .text_size(px(design.tiny()))
-                            .text_color(design.muted)
-                            .child(row.context.to_owned()),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .font_family(design.mono.clone())
-                            .text_size(px(design.tiny()))
-                            .text_color(design.muted)
-                            .child(row.line),
-                    )
-                    .child(
-                        div()
-                            .flex_none()
-                            .text_size(px(design.tiny()))
-                            .text_color(design.muted)
-                            .child(if row.confirm {
-                                t!("settings.commands.asks").to_string()
-                            } else {
-                                String::new()
-                            }),
-                    )
-                    .when_some(row.key.map(str::to_owned), |this, key| {
-                        this.child(crate::ui::kbd(key, &design))
-                    })
+                    .into_any_element();
+                }
+                v_flex()
+                    .w_full()
+                    .children(rows.into_iter().enumerate().map(|(index, row)| {
+                        crate::ui::list_row(
+                            ("custom-command", index),
+                            crate::ui::RowState::NORMAL,
+                            &design,
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(design.px(180.0))
+                                .truncate()
+                                .child(row.title.to_owned()),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(design.px(74.0))
+                                .text_size(px(design.tiny()))
+                                .text_color(design.muted)
+                                .child(row.context.to_owned()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .font_family(design.mono.clone())
+                                .text_size(px(design.tiny()))
+                                .text_color(design.muted)
+                                .child(row.line),
+                        )
+                        .child(
+                            div()
+                                .flex_none()
+                                .text_size(px(design.tiny()))
+                                .text_color(design.muted)
+                                .child(if row.confirm {
+                                    t!("settings.commands.asks").to_string()
+                                } else {
+                                    String::new()
+                                }),
+                        )
+                        .when_some(row.key.map(str::to_owned), |this, key| {
+                            this.child(crate::ui::kbd(key, &design))
+                        })
+                        .into_any_element()
+                    }))
                     .into_any_element()
-                }))
-                .into_any_element()
-        })),
+            },
+        )),
     )
 }
 
@@ -899,22 +909,22 @@ fn table_header(design: &Design) -> AnyElement {
         .child(
             div()
                 .flex_none()
-                .w(px(130.0))
+                .w(design.px(130.0))
                 .child(t!("settings.keyboard.column_keys").to_string()),
         )
         .child(
             div()
                 .flex_none()
-                .w(px(100.0))
+                .w(design.px(100.0))
                 .child(t!("settings.keyboard.column_context").to_string()),
         )
         .child(
             div()
                 .flex_none()
-                .w(px(84.0))
+                .w(design.px(84.0))
                 .child(t!("settings.keyboard.column_source").to_string()),
         )
-        .child(div().flex_none().w(px(84.0)).child(""))
+        .child(div().flex_none().w(design.px(84.0)).child(""))
         .into_any_element()
 }
 
@@ -930,12 +940,12 @@ fn action_row(row: crate::keymap::ActionRow, design: &Design) -> AnyElement {
     )
     .gap_2()
     // Three lines: the title, the action name and the conflict warning.
-    .when(conflict.is_some(), |row| row.h(px(46.0)))
+    .when(conflict.is_some(), |row| row.h(design.px(46.0)))
     .child(
         v_flex()
             .flex_1()
             .min_w_0()
-            .gap(px(1.0))
+            .gap(design.px(1.0))
             .child(div().truncate().child(title))
             .child(
                 div()
@@ -958,8 +968,8 @@ fn action_row(row: crate::keymap::ActionRow, design: &Design) -> AnyElement {
     .child(
         v_flex()
             .flex_none()
-            .w(px(130.0))
-            .gap(px(2.0))
+            .w(design.px(130.0))
+            .gap(design.px(2.0))
             .child(crate::ui::kbd(row.effective, design))
             .when(changed && !row.unbound, |this| {
                 this.child(
@@ -976,7 +986,7 @@ fn action_row(row: crate::keymap::ActionRow, design: &Design) -> AnyElement {
     .child(
         div()
             .flex_none()
-            .w(px(100.0))
+            .w(design.px(100.0))
             .truncate()
             .text_size(px(design.tiny()))
             .text_color(design.muted)
@@ -985,8 +995,8 @@ fn action_row(row: crate::keymap::ActionRow, design: &Design) -> AnyElement {
     .child(
         v_flex()
             .flex_none()
-            .w(px(84.0))
-            .gap(px(2.0))
+            .w(design.px(84.0))
+            .gap(design.px(2.0))
             .text_size(px(design.tiny()))
             .text_color(if changed {
                 design.accent_text
@@ -1013,7 +1023,7 @@ fn action_row(row: crate::keymap::ActionRow, design: &Design) -> AnyElement {
     .child(
         h_flex()
             .flex_none()
-            .w(px(84.0))
+            .w(design.px(84.0))
             .gap_1()
             .child(
                 crate::ui::button(
@@ -1054,6 +1064,7 @@ struct Card {
     title: String,
     description: Option<String>,
     group: SettingGroup,
+    card_margin_bottom: gpui::Pixels,
 }
 
 impl Card {
@@ -1079,7 +1090,11 @@ impl IntoIterator for Card {
     type IntoIter = std::array::IntoIter<SettingGroup, 2>;
 
     fn into_iter(self) -> Self::IntoIter {
-        [card_label(self.title, self.description), self.group].into_iter()
+        [
+            card_label(self.title, self.description, self.card_margin_bottom),
+            self.group,
+        ]
+        .into_iter()
     }
 }
 
@@ -1090,11 +1105,12 @@ impl IntoIterator for Card {
 /// space above it. The label then sits the same [`CARD_LABEL_GAP`] over its
 /// surface, and two cards keep the same 32 px between them, as when the label
 /// was the group's title.
-fn card(title: impl Into<String>) -> Card {
+fn card(title: impl Into<String>, design: &Design) -> Card {
     Card {
         title: title.into(),
         description: None,
-        group: SettingGroup::new().mt(px(-CARD_LABEL_GAP)),
+        group: SettingGroup::new().mt(design.px(-CARD_LABEL_GAP)),
+        card_margin_bottom: design.px(-PAGE_GUTTER),
     }
 }
 
@@ -1102,10 +1118,14 @@ fn card(title: impl Into<String>) -> Card {
 ///
 /// It draws the same element a group title does: muted text on a 1.25 line
 /// height, with the description as small muted text under it.
-fn card_label(title: String, description: Option<String>) -> SettingGroup {
+fn card_label(
+    title: String,
+    description: Option<String>,
+    margin_bottom: gpui::Pixels,
+) -> SettingGroup {
     SettingGroup::new()
         .variant(GroupBoxVariant::Normal)
-        .mb(px(-PAGE_GUTTER))
+        .mb(margin_bottom)
         .item(SettingItem::render(move |_, _, cx| {
             div()
                 .text_color(cx.theme().muted_foreground)
@@ -1136,9 +1156,9 @@ fn heading(section: Section, description: impl Into<String>, design: &Design) ->
         .variant(GroupBoxVariant::Normal)
         .item(SettingItem::render(move |_, _, _cx| {
             v_flex()
-                .gap(px(8.0))
-                .pt(px(8.0))
-                .px(px(CARD_PADDING))
+                .gap(design.px(8.0))
+                .pt(design.px(8.0))
+                .px(design.px(CARD_PADDING))
                 .child(
                     h_flex()
                         .items_center()
@@ -1146,7 +1166,7 @@ fn heading(section: Section, description: impl Into<String>, design: &Design) ->
                         .gap_3()
                         .child(
                             div()
-                                .text_size(px(design.ui + 5.0))
+                                .text_size(px(design.ui + design.scale(5.0)))
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .text_color(design.text)
                                 .child(section.title()),
@@ -1219,12 +1239,12 @@ fn heading_no_reset(
         .variant(GroupBoxVariant::Normal)
         .item(SettingItem::render(move |_, _, _cx| {
             v_flex()
-                .gap(px(8.0))
-                .pt(px(8.0))
-                .px(px(CARD_PADDING))
+                .gap(design.px(8.0))
+                .pt(design.px(8.0))
+                .px(design.px(CARD_PADDING))
                 .child(
                     div()
-                        .text_size(px(design.ui + 5.0))
+                        .text_size(px(design.ui + design.scale(5.0)))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(design.text)
                         .child(section.title()),
@@ -1500,7 +1520,7 @@ fn theme_error_banner(error: &theme::ThemeLoadError, design: &Design) -> AnyElem
     };
     let mut banner = crate::ui::banner(crate::ui::BannerKind::Warning, lead, design)
         .wrap()
-        .rounded(px(6.0));
+        .rounded(design.px(6.0));
     if let Some(detail) = detail {
         banner = banner.detail(detail.to_owned());
     }
@@ -1742,8 +1762,13 @@ fn git_field(control: f32) -> SettingField<SharedString> {
                 ),
         );
         if let Some(error) = error {
-            let danger = crate::style::Design::new(cx.theme(), Settings::get(cx)).remove_text;
-            field = field.child(div().text_size(px(11.0)).text_color(danger).child(error));
+            let design = crate::style::Design::new(cx.theme(), Settings::get(cx));
+            field = field.child(
+                div()
+                    .text_size(design.px(11.0))
+                    .text_color(design.remove_text)
+                    .child(error),
+            );
         }
         field.into_any_element()
     })
@@ -1873,7 +1898,7 @@ fn gh_status(
 
 fn status_text(text: String, ok: bool, design: &Design) -> AnyElement {
     div()
-        .max_w(px(420.0))
+        .max_w(design.px(420.0))
         .text_size(px(design.tiny()))
         .text_color(if ok { design.muted } else { design.remove_text })
         .child(text)
@@ -1941,24 +1966,37 @@ mod tests {
         CARD_PADDING, CONTROL_MAX, LABEL_FRACTION, PAGE_GUTTER, ROW_GAP, SIDEBAR_MAX,
         control_width, git_executable_error,
     };
+    use crate::settings::Settings;
+    use crate::style::Design;
+    use gpui_component::Theme;
 
     #[test]
     fn a_control_always_fits_beside_its_label() {
+        let base = Design::default();
+        let mut settings = Settings::default();
+        settings.appearance.zoom_percent = 150;
+        let zoomed = Design::new(&Theme::default(), &settings);
+
         // The row is what the window leaves after the sidebar at its widest and
         // the gutters on both sides of the card, and the label may take 60% of
         // it: anything wider than the rest, less the row's gap, spills past the
         // card's right padding.
-        for viewport in [640.0, 900.0, 1200.0, 2400.0] {
-            let row = viewport - SIDEBAR_MAX - 2.0 * PAGE_GUTTER - 2.0 * CARD_PADDING;
-            let control = control_width(viewport);
-            assert!(control > 0.0, "{viewport}");
-            assert!(
-                control + ROW_GAP <= row * (1.0 - LABEL_FRACTION) + 0.01,
-                "{viewport}: {control} does not fit in {row}"
-            );
-            assert!(control <= CONTROL_MAX, "{viewport}");
+        for design in [&base, &zoomed] {
+            for viewport in [640.0, 900.0, 1200.0, 2400.0] {
+                let row = viewport
+                    - design.scale(SIDEBAR_MAX)
+                    - 2.0 * design.scale(PAGE_GUTTER)
+                    - 2.0 * design.scale(CARD_PADDING);
+                let control = control_width(viewport, design);
+                assert!(control > 0.0, "{viewport}");
+                assert!(
+                    control + design.scale(ROW_GAP) <= row * (1.0 - LABEL_FRACTION) + 0.01,
+                    "{viewport}: {control} does not fit in {row}"
+                );
+                assert!(control <= design.scale(CONTROL_MAX), "{viewport}");
+            }
+            assert_eq!(control_width(2400.0, design), design.scale(CONTROL_MAX));
         }
-        assert_eq!(control_width(2400.0), CONTROL_MAX);
     }
 
     #[test]

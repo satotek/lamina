@@ -687,13 +687,13 @@ impl Picker {
             column = column
                 .child(
                     div()
-                        .text_size(px(22.0))
+                        .text_size(design.px(22.0))
                         .font_weight(FontWeight::BOLD)
                         .child(t!("app.name").to_string()),
                 )
                 .child(
                     div()
-                        .text_size(px(12.0))
+                        .text_size(design.px(12.0))
                         .text_color(design.muted)
                         .child(t!("picker.tagline").to_string()),
                 )
@@ -736,12 +736,12 @@ impl Picker {
                 )
                 .count(self.recents.len())
                 .px(px(0.0))
-                .h(px(20.0)),
+                .h(design.px(20.0)),
             ),
         );
 
         if let Some(error) = &self.error {
-            column = column.child(div().max_w(px(520.0)).child(ui::banner(
+            column = column.child(div().max_w(design.px(520.0)).child(ui::banner(
                 ui::BannerKind::Danger,
                 error.clone(),
                 design,
@@ -752,7 +752,7 @@ impl Picker {
             column = column.child(
                 div()
                     .pt_2()
-                    .text_size(px(11.5))
+                    .text_size(design.px(11.5))
                     .text_color(design.muted)
                     .child(if self.recents.is_empty() {
                         t!("picker.empty.recent").to_string()
@@ -787,7 +787,7 @@ impl Picker {
             })
             .track_scroll(&self.scroll)
             .with_scrollbar(&self.scroll)
-            .h(px(height))
+            .h(design.px(height))
             .w_full();
             column = column.child(list);
         }
@@ -798,30 +798,33 @@ impl Picker {
                     ui::section_header("picker-ghq", t!("picker.section.ghq").to_string(), design)
                         .count(ghq_paths.len())
                         .px(px(0.0))
-                        .h(px(20.0)),
+                        .h(design.px(20.0)),
                 ),
             );
             if ghq_loading && ghq_paths.is_empty() {
                 column = column.child(
                     div()
-                        .text_size(px(11.5))
+                        .text_size(design.px(11.5))
                         .text_color(design.muted)
                         .child(t!("picker.loading_ghq").to_string()),
                 );
             } else if let Some(error) = ghq_error {
-                column = column.child(div().max_w(px(520.0)).child(ui::banner(
+                column = column.child(div().max_w(design.px(520.0)).child(ui::banner(
                     ui::BannerKind::Danger,
                     t!("picker.ghq_failed", error = error).to_string(),
                     design,
                 )));
             } else if ghq_count == 0 {
-                column = column.child(div().text_size(px(11.5)).text_color(design.muted).child(
-                    if ghq_paths.is_empty() {
-                        t!("picker.empty.ghq").to_string()
-                    } else {
-                        t!("picker.empty.ghq_filter").to_string()
-                    },
-                ));
+                column = column.child(
+                    div()
+                        .text_size(design.px(11.5))
+                        .text_color(design.muted)
+                        .child(if ghq_paths.is_empty() {
+                            t!("picker.empty.ghq").to_string()
+                        } else {
+                            t!("picker.empty.ghq_filter").to_string()
+                        }),
+                );
             } else {
                 let entity = self.entity.clone();
                 let row_design = design.clone();
@@ -848,7 +851,7 @@ impl Picker {
                 })
                 .track_scroll(&self.ghq_scroll)
                 .with_scrollbar(&self.ghq_scroll)
-                .h(px(GHQ_LIST_HEIGHT))
+                .h(design.px(GHQ_LIST_HEIGHT))
                 .w_full();
                 column = column.child(list);
             }
@@ -858,7 +861,7 @@ impl Picker {
             column = column.child(
                 div()
                     .pt_1()
-                    .text_size(px(10.5))
+                    .text_size(design.px(10.5))
                     .text_color(design.muted)
                     .child(t!(
                         "picker.hint",
@@ -870,7 +873,7 @@ impl Picker {
         }
 
         div()
-            .w(px(560.0))
+            .w(design.px(560.0))
             .flex()
             .flex_col()
             .child(column)
@@ -978,14 +981,14 @@ fn recent_row(
                 .child(
                     div()
                         .truncate()
-                        .text_size(px(12.0))
+                        .text_size(design.px(12.0))
                         .text_color(design.text)
                         .child(name),
                 )
                 .child(
                     div()
                         .truncate()
-                        .text_size(px(10.5))
+                        .text_size(design.px(10.5))
                         .text_color(design.muted)
                         .child(path),
                 ),
@@ -993,7 +996,7 @@ fn recent_row(
         .child(
             div()
                 .flex_none()
-                .text_size(px(10.5))
+                .text_size(design.px(10.5))
                 .text_color(design.muted)
                 .child(opened),
         );
@@ -1005,7 +1008,7 @@ fn recent_row(
         .px_1()
         .rounded_sm()
         .cursor_pointer()
-        .text_size(px(12.0))
+        .text_size(design.px(12.0))
         .text_color(design.muted)
         // Hidden until the row is hovered, so the list reads as names rather
         // than names with buttons. It stays clickable once shown.
@@ -1021,7 +1024,7 @@ fn recent_row(
         .flex()
         .items_center()
         .gap_2()
-        .h(px(ROW_HEIGHT))
+        .h(design.px(ROW_HEIGHT))
         .w_full()
         .px_2()
         .rounded_sm()
@@ -1127,14 +1130,14 @@ fn ghq_row(
                 .child(
                     div()
                         .truncate()
-                        .text_size(px(12.0))
+                        .text_size(design.px(12.0))
                         .text_color(design.text)
                         .child(name),
                 )
                 .child(
                     div()
                         .truncate()
-                        .text_size(px(10.5))
+                        .text_size(design.px(10.5))
                         .text_color(design.muted)
                         .child(path_label),
                 ),
@@ -1145,7 +1148,7 @@ fn ghq_row(
         .flex()
         .items_center()
         .gap_2()
-        .h(px(ROW_HEIGHT))
+        .h(design.px(ROW_HEIGHT))
         .w_full()
         .px_2()
         .rounded_sm()
@@ -1227,7 +1230,7 @@ impl Render for Picker {
                     // The same 44 px chrome strip as the main window, so the
                     // welcome screen is the same app with no repository open.
                     TitleBar::new()
-                        .h(px(crate::style::TITLE_BAR_HEIGHT))
+                        .h(design.px(crate::style::TITLE_BAR_HEIGHT))
                         .bg(design.chrome)
                         .border_color(design.border)
                         .child(
@@ -1240,17 +1243,19 @@ impl Render for Picker {
                                     div()
                                         .flex()
                                         .items_center()
-                                        .gap(px(7.0))
-                                        .child(crate::style::app_mark(crate::style::BRAND_MARK))
+                                        .gap(design.px(7.0))
+                                        .child(crate::style::app_mark(
+                                            design.scale(crate::style::BRAND_MARK),
+                                        ))
                                         .child(crate::style::wordmark(
-                                            crate::style::BRAND_WORDMARK,
+                                            design.scale(crate::style::BRAND_WORDMARK),
                                             design.text,
                                         )),
                                 )
-                                .child(div().w(px(1.0)).h(px(18.0)).mx_1().bg(design.border))
+                                .child(div().w(px(1.0)).h(design.px(18.0)).mx_1().bg(design.border))
                                 .child(
                                     div()
-                                        .text_size(px(11.0))
+                                        .text_size(design.px(11.0))
                                         .text_color(design.muted)
                                         .child(t!("picker.welcome").to_string()),
                                 ),
@@ -1286,7 +1291,7 @@ impl Render for Picker {
                     .child(
                         div()
                             .pb_1()
-                            .text_size(px(11.0))
+                            .text_size(design.px(11.0))
                             .text_color(design.muted)
                             .child(subtitle),
                     )

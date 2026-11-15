@@ -96,6 +96,8 @@ impl RepoView {
 
         let fraction = commit_list_fraction(cx);
         let measured = self.splits.history.get();
+        let list_min_height = design.scale(LIST_MIN_HEIGHT);
+        let details_min_height = design.scale(DETAILS_MIN_HEIGHT);
         let mut list_pane = div()
             .relative()
             .flex()
@@ -109,8 +111,8 @@ impl RepoView {
             Some(area) => list_pane.h(px(ui::split_pixels(
                 fraction,
                 area.size(),
-                LIST_MIN_HEIGHT,
-                DETAILS_MIN_HEIGHT,
+                list_min_height,
+                details_min_height,
             ))),
             // The first frame has no measurement yet; the basis is the same
             // fraction of the same area, so the pane does not jump.
@@ -258,7 +260,7 @@ impl RepoView {
             .flex()
             .items_center()
             .gap_2()
-            .h(px(STRIP_HEIGHT))
+            .h(design.px(STRIP_HEIGHT))
             .flex_none()
             .px_3()
             .bg(design.panel)
@@ -281,7 +283,13 @@ impl RepoView {
 
     /// Stores a new commit list share, clamped so neither side collapses.
     fn set_commit_list_fraction(&mut self, fraction: f32, total: f32, cx: &mut Context<Self>) {
-        let fraction = ui::clamp_fraction(fraction, total, LIST_MIN_HEIGHT, DETAILS_MIN_HEIGHT);
+        let zoom = Settings::get(cx).appearance.zoom();
+        let fraction = ui::clamp_fraction(
+            fraction,
+            total,
+            LIST_MIN_HEIGHT * zoom,
+            DETAILS_MIN_HEIGHT * zoom,
+        );
         if commit_list_fraction(cx) == fraction {
             return;
         }
@@ -303,7 +311,13 @@ impl RepoView {
 
     /// Stores a new file column share, clamped so the diff keeps its width.
     pub(super) fn set_files_fraction(&mut self, fraction: f32, total: f32, cx: &mut Context<Self>) {
-        let fraction = ui::clamp_fraction(fraction, total, FILES_MIN_WIDTH, DIFF_MIN_WIDTH);
+        let zoom = Settings::get(cx).appearance.zoom();
+        let fraction = ui::clamp_fraction(
+            fraction,
+            total,
+            FILES_MIN_WIDTH * zoom,
+            DIFF_MIN_WIDTH * zoom,
+        );
         if files_fraction(cx) == fraction {
             return;
         }
@@ -326,11 +340,12 @@ impl RepoView {
     /// The file column's width in pixels, once the details area is measured.
     pub(super) fn details_column_width(&self, cx: &App) -> Option<f32> {
         let area = self.splits.details.get()?;
+        let zoom = Settings::get(cx).appearance.zoom();
         Some(ui::split_pixels(
             files_fraction(cx),
             area.size(),
-            FILES_MIN_WIDTH,
-            DIFF_MIN_WIDTH,
+            FILES_MIN_WIDTH * zoom,
+            DIFF_MIN_WIDTH * zoom,
         ))
     }
 }

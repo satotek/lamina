@@ -31,7 +31,7 @@ impl RepoView {
     /// [`TitleBarFit`].
     pub(super) fn header(&self, design: &Design, window: &Window) -> AnyElement {
         let has_back = self.parent_name.is_some();
-        let fit = TitleBarFit::new(window.viewport_size().width.as_f32(), has_back);
+        let fit = TitleBarFit::new(window.viewport_size().width.as_f32(), has_back, design.zoom);
         let source = self.source();
         let head = source.as_ref().and_then(Source::head);
         let repo = match &self.fake {
@@ -89,11 +89,11 @@ impl RepoView {
                     div()
                         .flex()
                         .items_center()
-                        .gap(px(4.0))
+                        .gap(design.px(4.0))
                         .max_w(px(fit.back_width))
                         .text_size(px(design.small()))
                         .text_color(design.muted)
-                        .child(icon(IconName::ArrowLeft, 13.0, design.muted))
+                        .child(icon(IconName::ArrowLeft, design.scale(13.0), design.muted))
                         .when(fit.back_label, |btn| {
                             btn.child(
                                 div()
@@ -108,16 +108,16 @@ impl RepoView {
             .id("repository-button")
             .flex()
             .items_center()
-            .gap(px(6.0))
-            .h(px(30.0))
+            .gap(design.px(6.0))
+            .h(design.px(30.0))
             .px_2p5()
-            .rounded(px(7.0))
+            .rounded(design.px(7.0))
             .cursor_pointer()
             .hover(|style| style.bg(design.field))
             .on_click(|_, window, cx| {
                 window.dispatch_action(Box::new(actions::OpenRepository), cx);
             })
-            .child(icon(IconName::Folder, 15.0, design.text))
+            .child(icon(IconName::Folder, design.scale(15.0), design.text))
             .child(
                 div()
                     .max_w(px(fit.repository_width))
@@ -125,15 +125,19 @@ impl RepoView {
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(repo),
             )
-            .child(icon(IconName::ChevronDown, 12.0, design.muted));
+            .child(icon(
+                IconName::ChevronDown,
+                design.scale(12.0),
+                design.muted,
+            ));
 
         let branch_chip = fit.branch.then(|| {
             let mut chip = crate::ui::content_button("branch-chip")
                 .ghost()
                 .cursor_pointer()
-                .h(px(28.0))
+                .h(design.px(28.0))
                 .px_2p5()
-                .rounded(px(7.0))
+                .rounded(design.px(7.0))
                 .border_1()
                 .border_color(design.border)
                 .bg(design.background)
@@ -141,18 +145,22 @@ impl RepoView {
                     div()
                         .flex()
                         .items_center()
-                        .gap(px(6.0))
+                        .gap(design.px(6.0))
                         .text_size(px(design.ui))
-                        .child(glyph(style::glyph::BRANCH, 14.0, design.text))
+                        .child(glyph(style::glyph::BRANCH, design.scale(14.0), design.text))
                         .child(div().max_w(px(fit.branch_width)).truncate().child(branch))
                         .when(fit.track && track_gone, |content| {
-                            content.child(icon(IconName::Unlink, 12.0, design.tag_text))
+                            content.child(icon(
+                                IconName::Unlink,
+                                design.scale(12.0),
+                                design.tag_text,
+                            ))
                         })
                         .when(fit.track && !track.is_empty(), |content| {
                             content.child(
                                 div()
                                     .flex_none()
-                                    .text_size(px(11.0))
+                                    .text_size(design.px(11.0))
                                     .text_color(design.muted)
                                     .child(track),
                             )
@@ -164,7 +172,11 @@ impl RepoView {
                                 design,
                             ))
                         })
-                        .child(icon(IconName::ChevronDown, 12.0, design.muted)),
+                        .child(icon(
+                            IconName::ChevronDown,
+                            design.scale(12.0),
+                            design.muted,
+                        )),
                 );
             if let Some(note) = track_note {
                 chip = chip.tooltip(note.to_owned());
@@ -194,23 +206,23 @@ impl RepoView {
                 .into_any_element(),
         };
         let mode = self.search.mode();
-        let show_mode_toggles = fit.search_width >= 260.0 && self.session.is_some();
+        let show_mode_toggles = fit.search_width >= design.scale(260.0) && self.session.is_some();
         let search = div()
             .id("commit-search-field")
             .occlude()
             .flex()
             .items_center()
-            .gap(px(6.0))
+            .gap(design.px(6.0))
             .w(px(fit.search_width))
-            .min_w(px(MIN_SEARCH_WIDTH))
+            .min_w(design.px(MIN_SEARCH_WIDTH))
             .max_w_full()
-            .h(px(28.0))
+            .h(design.px(28.0))
             .px_2p5()
-            .rounded(px(7.0))
+            .rounded(design.px(7.0))
             .bg(design.field)
             .text_color(design.muted)
             .cursor_text()
-            .child(icon(IconName::Search, 14.0, design.muted))
+            .child(icon(IconName::Search, design.scale(14.0), design.muted))
             .child(search_field)
             .when(show_mode_toggles, |search| {
                 let entity = self.entity.clone();
@@ -240,7 +252,7 @@ impl RepoView {
         let separator = div()
             .flex_none()
             .w(px(1.0))
-            .h(px(22.0))
+            .h(design.px(22.0))
             .mx_1p5()
             .bg(design.border);
 
@@ -250,7 +262,7 @@ impl RepoView {
         let nav = div()
             .flex()
             .items_center()
-            .gap(px(2.0))
+            .gap(design.px(ACTION_GAP))
             .flex_none()
             .occlude()
             .when_some(undo_redo, |nav, buttons| nav.child(buttons))
@@ -262,6 +274,7 @@ impl RepoView {
                     border: design.border,
                     accent: design.accent,
                     accent_foreground: design.on_accent,
+                    zoom: design.zoom,
                 },
                 fit.remote_compact,
             ))
@@ -271,8 +284,8 @@ impl RepoView {
             .child(
                 crate::ui::icon_button("open-settings", IconName::Settings)
                     .ghost()
-                    .w(px(32.0))
-                    .h(px(32.0))
+                    .w(design.px(TOOL_BUTTON_WIDTH))
+                    .h(design.px(TOOL_BUTTON_WIDTH))
                     .text_color(design.muted)
                     .tooltip(t!("title_bar.settings_tooltip").to_string())
                     .on_click(|_, window, cx| {
@@ -295,7 +308,7 @@ impl RepoView {
         });
 
         TitleBar::new()
-            .h(px(style::TITLE_BAR_HEIGHT))
+            .h(design.px(style::TITLE_BAR_HEIGHT))
             .bg(design.chrome)
             .border_color(design.border)
             .child(
@@ -312,13 +325,16 @@ impl RepoView {
                         div()
                             .flex()
                             .items_center()
-                            .gap(px(7.0))
-                            .child(style::app_mark(style::BRAND_MARK))
+                            .gap(design.px(7.0))
+                            .child(style::app_mark(design.scale(style::BRAND_MARK)))
                             .when(fit.wordmark, |mark| {
-                                mark.child(style::wordmark(style::BRAND_WORDMARK, design.text))
+                                mark.child(style::wordmark(
+                                    design.scale(style::BRAND_WORDMARK),
+                                    design.text,
+                                ))
                             }),
                     )
-                    .child(div().w(px(1.0)).h(px(18.0)).mx_1().bg(design.border))
+                    .child(div().w(px(1.0)).h(design.px(18.0)).mx_1().bg(design.border))
                     .when(fit.nav_history, |row| {
                         row.child(control(self.nav_buttons(design, window)))
                     })
@@ -458,20 +474,22 @@ struct TitleBarFit {
     repository_width: f32,
     branch_width: f32,
     search_width: f32,
+    zoom: f32,
 }
 
 impl TitleBarFit {
-    fn new(width: f32, has_back: bool) -> Self {
+    fn new(width: f32, has_back: bool, zoom: f32) -> Self {
+        let effective = width / zoom;
         let (repository_width, branch_width, branch, track, wordmark, back_label, back_width) =
-            Self::tier(width, has_back);
+            Self::tier(effective, has_back);
         let mut fit = Self {
             search: false,
             wordmark,
             key_hint: false,
             branch,
             track,
-            stash_label: width >= 1300.0,
-            remote_compact: width < REMOTE_ICONS_BELOW,
+            stash_label: effective >= 1300.0,
+            remote_compact: effective < REMOTE_ICONS_BELOW,
             undo_redo: true,
             nav_history: true,
             back_label,
@@ -479,19 +497,25 @@ impl TitleBarFit {
             repository_width,
             branch_width,
             search_width: 0.0,
+            zoom: 1.0,
         };
         // The search field is the last part to go. Everything cheaper gives
         // way first, so a window with a back button keeps a field it can
         // actually type into instead of losing it whole.
-        while fit.available(width) < MIN_SEARCH_WIDTH && fit.shed() {}
-        let available = fit.available(width);
+        while fit.available(effective) < MIN_SEARCH_WIDTH && fit.shed() {}
+        let available = fit.available(effective);
         fit.search = available >= MIN_SEARCH_WIDTH;
         fit.search_width = if fit.search {
             available.min(MAX_SEARCH_WIDTH)
         } else {
             0.0
         };
-        fit.key_hint = width >= KEY_HINT_BELOW && fit.search_width >= KEY_HINT_MIN_SEARCH_WIDTH;
+        fit.key_hint = effective >= KEY_HINT_BELOW && fit.search_width >= KEY_HINT_MIN_SEARCH_WIDTH;
+        fit.zoom = zoom;
+        fit.back_width *= zoom;
+        fit.repository_width *= zoom;
+        fit.branch_width *= zoom;
+        fit.search_width *= zoom;
         fit
     }
 
@@ -539,13 +563,13 @@ impl TitleBarFit {
             remote,
             if self.stash_label { 64.0 } else { 32.0 },
             self.undo_redo,
-        )
+        ) * self.zoom
     }
 
     /// What is left for the search field once the name row and the actions
     /// have taken their share of `width`.
     fn available(&self, width: f32) -> f32 {
-        width - TITLE_BAR_CHROME - self.actions_width() - self.reserved_names()
+        width - TITLE_BAR_CHROME * self.zoom - self.actions_width() - self.reserved_names()
     }
 
     /// The widest the name chips get: the app mark and optional wordmark, the
@@ -557,7 +581,7 @@ impl TitleBarFit {
     fn reserved_names(&self) -> f32 {
         // App mark, the wordmark and its gap, three 8 px row gaps, the divider
         // with its margins, and the repository chip's own padding and icons.
-        let mut width = style::BRAND_MARK
+        let mut width = (style::BRAND_MARK
             + if self.wordmark {
                 style::wordmark_width(style::BRAND_WORDMARK) + 7.0
             } else {
@@ -565,22 +589,23 @@ impl TitleBarFit {
             }
             + 24.0
             + 9.0
-            + 59.0
+            + 59.0)
+            * self.zoom
             + self.repository_width;
         if self.nav_history {
             // Its own row gap and the extra gap the row gains for the pair.
-            width += NAV_HISTORY_WIDTH + 16.0;
+            width += (NAV_HISTORY_WIDTH + 16.0) * self.zoom;
         }
         if self.back_label || self.back_width > 0.0 {
             // The row gap and the small ghost button's horizontal padding.
-            width += 8.0 + 16.0 + self.back_width;
+            width += (8.0 + 16.0) * self.zoom + self.back_width;
         }
         if self.branch {
             // The row gap, the branch chip's padding, glyph and chevron, then
             // the upstream label and its gap.
-            width += 8.0 + 58.0 + self.branch_width;
+            width += (8.0 + 58.0) * self.zoom + self.branch_width;
             if self.track {
-                width += 76.0;
+                width += 76.0 * self.zoom;
             }
         }
         width
@@ -713,8 +738,8 @@ impl RepoView {
         let entity = self.entity.clone();
         crate::ui::icon_toggle("open-terminal", IconName::SquareTerminal, open)
             .ghost()
-            .w(px(32.0))
-            .h(px(32.0))
+            .w(design.px(TOOL_BUTTON_WIDTH))
+            .h(design.px(TOOL_BUTTON_WIDTH))
             .text_color(if open { design.text } else { design.muted })
             .tooltip(self.terminal_toggle_tooltip(window))
             .disabled(!enabled)
@@ -734,8 +759,8 @@ impl RepoView {
         let entity = self.entity.clone();
         crate::ui::icon_button("open-terminal", IconName::SquareTerminal)
             .ghost()
-            .w(px(32.0))
-            .h(px(32.0))
+            .w(design.px(TOOL_BUTTON_WIDTH))
+            .h(design.px(TOOL_BUTTON_WIDTH))
             .text_color(design.muted)
             .tooltip(t!("action.open_terminal_here").to_string())
             .disabled(!enabled)
@@ -757,13 +782,13 @@ impl RepoView {
         div()
             .flex()
             .items_center()
-            .gap(px(ACTION_GAP))
+            .gap(design.px(ACTION_GAP))
             .flex_none()
             .child(
                 crate::ui::icon_button("navigate-back", IconName::ArrowLeft)
                     .ghost()
-                    .w(px(NAV_HISTORY_BUTTON))
-                    .h(px(NAV_HISTORY_BUTTON))
+                    .w(design.px(NAV_HISTORY_BUTTON))
+                    .h(design.px(NAV_HISTORY_BUTTON))
                     .text_color(design.muted)
                     .tooltip(self.back_tooltip(window))
                     .disabled(!can_back)
@@ -774,8 +799,8 @@ impl RepoView {
             .child(
                 crate::ui::icon_button("navigate-forward", IconName::ArrowRight)
                     .ghost()
-                    .w(px(NAV_HISTORY_BUTTON))
-                    .h(px(NAV_HISTORY_BUTTON))
+                    .w(design.px(NAV_HISTORY_BUTTON))
+                    .h(design.px(NAV_HISTORY_BUTTON))
                     .text_color(design.muted)
                     .tooltip(self.forward_tooltip(window))
                     .disabled(!can_forward)
@@ -796,13 +821,13 @@ impl RepoView {
         div()
             .flex()
             .items_center()
-            .gap(px(ACTION_GAP))
+            .gap(design.px(ACTION_GAP))
             .flex_none()
             .child(
                 crate::ui::icon_button("undo-last-action", IconName::Undo)
                     .ghost()
-                    .w(px(TOOL_BUTTON_WIDTH))
-                    .h(px(TOOL_BUTTON_WIDTH))
+                    .w(design.px(TOOL_BUTTON_WIDTH))
+                    .h(design.px(TOOL_BUTTON_WIDTH))
                     .text_color(design.muted)
                     .tooltip(undo_tooltip)
                     .disabled(!undo_enabled)
@@ -813,8 +838,8 @@ impl RepoView {
             .child(
                 crate::ui::icon_button("redo-last-action", IconName::Redo)
                     .ghost()
-                    .w(px(TOOL_BUTTON_WIDTH))
-                    .h(px(TOOL_BUTTON_WIDTH))
+                    .w(design.px(TOOL_BUTTON_WIDTH))
+                    .h(design.px(TOOL_BUTTON_WIDTH))
                     .text_color(design.muted)
                     .tooltip(redo_tooltip)
                     .disabled(!redo_enabled)
@@ -832,8 +857,8 @@ impl RepoView {
 fn stash_button(design: &Design, label: bool) -> AnyElement {
     crate::ui::content_button("stash-button")
         .ghost()
-        .w(px(if label { 64.0 } else { 32.0 }))
-        .h(px(40.0))
+        .w(design.px(if label { 64.0 } else { 32.0 }))
+        .h(design.px(40.0))
         .tooltip(t!("action.stash_changes").to_string())
         .on_click(|_, window, cx| {
             window.dispatch_action(Box::new(actions::StashChanges), cx);
@@ -845,9 +870,13 @@ fn stash_button(design: &Design, label: bool) -> AnyElement {
                 .flex()
                 .flex_col()
                 .items_center()
-                .gap(px(2.0))
-                .text_size(px(10.0))
-                .child(glyph(style::glyph::ARCHIVE, 16.0, design.text))
+                .gap(design.px(2.0))
+                .text_size(design.px(10.0))
+                .child(glyph(
+                    style::glyph::ARCHIVE,
+                    design.scale(16.0),
+                    design.text,
+                ))
                 .when(label, |content| {
                     content.child(t!("title_bar.stash").to_string())
                 }),
@@ -894,7 +923,7 @@ mod tests {
     use super::*;
 
     fn used(fit: &TitleBarFit) -> f32 {
-        fit.reserved_names() + fit.actions_width() + TITLE_BAR_CHROME + fit.search_width
+        fit.reserved_names() + fit.actions_width() + TITLE_BAR_CHROME * fit.zoom + fit.search_width
     }
 
     /// Every width from the app's minimum to a maximised window, at 1 px
@@ -907,7 +936,7 @@ mod tests {
     fn the_actions_stay_inside_the_window_at_every_width() {
         for width in widths() {
             for has_back in [false, true] {
-                let fit = TitleBarFit::new(width, has_back);
+                let fit = TitleBarFit::new(width, has_back, 1.0);
                 let label = if has_back {
                     "with back button"
                 } else {
@@ -936,7 +965,7 @@ mod tests {
         // reserve so much that the search was dropped whole, leaving a gap
         // even though a narrower field still fits.
         for width in 760..=850 {
-            let fit = TitleBarFit::new(width as f32, true);
+            let fit = TitleBarFit::new(width as f32, true, 1.0);
             assert!(
                 fit.search && fit.search_width >= MIN_SEARCH_WIDTH,
                 "the search field vanishes at {width} px with a back button"
@@ -953,7 +982,7 @@ mod tests {
         // and without the back button.
         for width in widths() {
             for has_back in [false, true] {
-                let fit = TitleBarFit::new(width, has_back);
+                let fit = TitleBarFit::new(width, has_back, 1.0);
                 assert!(
                     (MIN_REPOSITORY_WIDTH..=220.0).contains(&fit.repository_width),
                     "repository cap {} at {width} px",
@@ -974,41 +1003,41 @@ mod tests {
     #[test]
     fn details_come_back_as_the_window_grows() {
         assert!(
-            !TitleBarFit::new(800.0, false).branch,
+            !TitleBarFit::new(800.0, false, 1.0).branch,
             "no branch chip at 800 px"
         );
         assert!(
-            TitleBarFit::new(1000.0, false).branch,
+            TitleBarFit::new(1000.0, false, 1.0).branch,
             "the branch chip is back at 1000 px"
         );
         assert!(
-            !TitleBarFit::new(1000.0, false).stash_label,
+            !TitleBarFit::new(1000.0, false, 1.0).stash_label,
             "the stash action is still an icon at 1000 px"
         );
-        assert!(TitleBarFit::new(1300.0, false).stash_label);
-        assert!(!TitleBarFit::new(1300.0, false).wordmark);
-        assert!(TitleBarFit::new(1500.0, false).wordmark);
+        assert!(TitleBarFit::new(1300.0, false, 1.0).stash_label);
+        assert!(!TitleBarFit::new(1300.0, false, 1.0).wordmark);
+        assert!(TitleBarFit::new(1500.0, false, 1.0).wordmark);
     }
 
     #[test]
     fn the_undo_pair_shows_once_the_bar_has_room_for_it() {
         assert!(
-            TitleBarFit::new(1360.0, false).undo_redo,
+            TitleBarFit::new(1360.0, false, 1.0).undo_redo,
             "a default-sized window shows undo and redo beside the remote actions"
         );
         assert!(
-            TitleBarFit::new(1360.0, true).undo_redo,
+            TitleBarFit::new(1360.0, true, 1.0).undo_redo,
             "the pair survives the back button at a default size"
         );
         assert!(
-            !TitleBarFit::new(style::MIN_WINDOW_SIZE.0, true).undo_redo,
+            !TitleBarFit::new(style::MIN_WINDOW_SIZE.0, true, 1.0).undo_redo,
             "at the app minimum the search field comes before the pair"
         );
     }
 
     #[test]
     fn a_narrow_window_hides_details_instead_of_overflowing() {
-        let fit = TitleBarFit::new(800.0, false);
+        let fit = TitleBarFit::new(800.0, false, 1.0);
         assert!(!fit.wordmark, "the wordmark goes before the name chips");
         assert!(!fit.branch, "the branch chip goes at the narrowest widths");
         assert!(!fit.stash_label, "the stash action keeps its icon only");
@@ -1018,19 +1047,19 @@ mod tests {
 
     #[test]
     fn the_remote_buttons_drop_their_labels_in_the_narrowest_tier() {
-        assert!(!TitleBarFit::new(REMOTE_ICONS_BELOW, false).remote_compact);
-        assert!(TitleBarFit::new(REMOTE_ICONS_BELOW - 1.0, false).remote_compact);
-        assert!(TitleBarFit::new(REMOTE_ICONS_BELOW - 1.0, true).remote_compact);
+        assert!(!TitleBarFit::new(REMOTE_ICONS_BELOW, false, 1.0).remote_compact);
+        assert!(TitleBarFit::new(REMOTE_ICONS_BELOW - 1.0, false, 1.0).remote_compact);
+        assert!(TitleBarFit::new(REMOTE_ICONS_BELOW - 1.0, true, 1.0).remote_compact);
 
         // Next to the back button's label the actions are the cheapest thing
         // to shrink, so the icons come one tier earlier than the window does.
-        let at_tier = TitleBarFit::new(REMOTE_ICONS_BELOW, true);
+        let at_tier = TitleBarFit::new(REMOTE_ICONS_BELOW, true, 1.0);
         assert!(at_tier.remote_compact);
         assert!(at_tier.search && at_tier.search_width >= MIN_SEARCH_WIDTH);
 
         // The width the icons free is what keeps a usable search field next to
         // the back button at the app's minimum window size.
-        let fit = TitleBarFit::new(style::MIN_WINDOW_SIZE.0, true);
+        let fit = TitleBarFit::new(style::MIN_WINDOW_SIZE.0, true, 1.0);
         assert!(fit.remote_compact);
         assert!(fit.search && fit.search_width >= MIN_SEARCH_WIDTH);
         assert!(used(&fit) <= style::MIN_WINDOW_SIZE.0);
@@ -1038,14 +1067,14 @@ mod tests {
 
     #[test]
     fn a_window_below_the_minimum_keeps_the_actions_and_drops_the_search() {
-        let fit = TitleBarFit::new(640.0, false);
+        let fit = TitleBarFit::new(640.0, false, 1.0);
         assert!(!fit.search, "nothing is left for the field at 640 px");
         assert!(used(&fit) <= 640.0, "the actions stay on screen");
     }
 
     #[test]
     fn a_wide_window_shows_the_full_bar() {
-        let fit = TitleBarFit::new(1600.0, false);
+        let fit = TitleBarFit::new(1600.0, false, 1.0);
         assert!(fit.wordmark);
         assert!(fit.branch && fit.track);
         assert!(fit.stash_label);
@@ -1060,7 +1089,7 @@ mod tests {
 
     #[test]
     fn back_button_shows_its_label_at_normal_widths_and_keeps_search_usable() {
-        let default_fit = TitleBarFit::new(1360.0, true);
+        let default_fit = TitleBarFit::new(1360.0, true, 1.0);
         assert!(default_fit.back_label);
         assert!(default_fit.branch);
         assert!(
@@ -1070,9 +1099,9 @@ mod tests {
         // Next to the back button the upstream label is what pays for the two
         // new pairs; without it, a window of the same size keeps tracking.
         assert!(!default_fit.track);
-        assert!(TitleBarFit::new(1360.0, false).track);
+        assert!(TitleBarFit::new(1360.0, false, 1.0).track);
 
-        let narrow_fit = TitleBarFit::new(style::MIN_WINDOW_SIZE.0, true);
+        let narrow_fit = TitleBarFit::new(style::MIN_WINDOW_SIZE.0, true, 1.0);
         assert!(
             !narrow_fit.back_label,
             "the label drops to icon-only at the app minimum"
@@ -1086,5 +1115,42 @@ mod tests {
             "the compact remote row leaves the search its usable width"
         );
         assert!(used(&narrow_fit) <= style::MIN_WINDOW_SIZE.0);
+    }
+
+    #[test]
+    fn title_bar_fit_scales_proportionally_and_stays_inside_window_at_zoom_150() {
+        let fit_1x = TitleBarFit::new(1360.0, true, 1.0);
+        let fit_15x = TitleBarFit::new(1360.0 * 1.5, true, 1.5);
+        assert_eq!(fit_1x.wordmark, fit_15x.wordmark);
+        assert_eq!(fit_1x.branch, fit_15x.branch);
+        assert_eq!(fit_1x.track, fit_15x.track);
+        assert_eq!(fit_1x.back_label, fit_15x.back_label);
+        assert!((fit_15x.repository_width - fit_1x.repository_width * 1.5).abs() < 0.01);
+        assert!((fit_15x.branch_width - fit_1x.branch_width * 1.5).abs() < 0.01);
+        assert!((fit_15x.back_width - fit_1x.back_width * 1.5).abs() < 0.01);
+        assert!((fit_15x.search_width - fit_1x.search_width * 1.5).abs() < 0.01);
+        assert!((used(&fit_15x) - used(&fit_1x) * 1.5).abs() < 0.01);
+
+        for width in widths().map(|w| w * 1.5) {
+            for has_back in [false, true] {
+                let fit = TitleBarFit::new(width, has_back, 1.5);
+                assert!(
+                    fit.search && fit.search_width >= MIN_SEARCH_WIDTH * 1.5,
+                    "zoom 1.5 lost usable search at {width} px (has_back={has_back})"
+                );
+                assert!(
+                    used(&fit) <= width + 0.01,
+                    "zoom 1.5 overflows {width} px (has_back={has_back}): used={}",
+                    used(&fit)
+                );
+            }
+        }
+
+        // Below the scaled minimum window width, optional pieces shed cleanly.
+        let squeezed = TitleBarFit::new(style::MIN_WINDOW_SIZE.0, true, 1.5);
+        assert!(!squeezed.search);
+        assert!(!squeezed.branch);
+        assert!(!squeezed.wordmark);
+        assert!(squeezed.remote_compact);
     }
 }

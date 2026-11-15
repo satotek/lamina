@@ -40,13 +40,13 @@ pub fn signature_badge(
             .flex_none()
             .items_center()
             .justify_center()
-            .h(px(16.0))
-            .px(px(4.0))
-            .rounded(px(4.0))
+            .h(design.px(16.0))
+            .px(design.px(4.0))
+            .rounded(design.px(4.0))
             .bg(background)
             .child(
                 Icon::new(icon_name)
-                    .with_size(px(11.0))
+                    .with_size(design.px(11.0))
                     .text_color(foreground),
             )
             .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
@@ -94,20 +94,20 @@ pub fn signature_details(
         .id("commit-signature-details-toggle")
         .flex()
         .items_center()
-        .gap(px(6.0))
+        .gap(design.px(6.0))
         .min_w_0()
-        .rounded(px(5.0))
-        .px(px(6.0))
-        .py(px(4.0))
+        .rounded(design.px(5.0))
+        .px(design.px(6.0))
+        .py(design.px(4.0))
         .bg(design.field)
         .child(
             div()
                 .flex()
                 .flex_none()
                 .items_center()
-                .gap(px(4.0))
-                .px(px(6.0))
-                .h(px(18.0))
+                .gap(design.px(4.0))
+                .px(design.px(6.0))
+                .h(design.px(18.0))
                 .rounded_full()
                 .bg(background)
                 .text_color(foreground)
@@ -115,7 +115,7 @@ pub fn signature_details(
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(
                     Icon::new(icon_name)
-                        .with_size(px(11.0))
+                        .with_size(design.px(11.0))
                         .text_color(foreground),
                 )
                 .child(format!("{status_label} ({format_label})")),
@@ -125,7 +125,7 @@ pub fn signature_details(
                 .flex_1()
                 .min_w_0()
                 .truncate()
-                .text_size(px(11.5))
+                .text_size(design.px(11.5))
                 .text_color(design.text)
                 .child(summary_line),
         );
@@ -141,20 +141,20 @@ pub fn signature_details(
             .hover(|style| style.bg(design.selected))
             .child(
                 Icon::new(chevron)
-                    .with_size(px(12.0))
+                    .with_size(design.px(12.0))
                     .text_color(design.muted),
             )
             .tooltip(move |window, cx| Tooltip::new(message.clone()).build(window, cx))
             .on_click(move |_event, window, cx| on_toggle(window, cx));
     }
 
-    let mut container = div().flex().flex_col().gap(px(4.0)).child(header);
+    let mut container = div().flex().flex_col().gap(design.px(4.0)).child(header);
 
     if let Some(hint) = missing_hint {
         container = container.child(
             div()
-                .px(px(6.0))
-                .text_size(px(11.0))
+                .px(design.px(6.0))
+                .text_size(design.px(11.0))
                 .text_color(design.muted)
                 .child(hint),
         );
@@ -166,9 +166,9 @@ pub fn signature_details(
     {
         container = container.child(
             div()
-                .px(px(8.0))
-                .py(px(6.0))
-                .rounded(px(5.0))
+                .px(design.px(8.0))
+                .py(design.px(6.0))
+                .rounded(design.px(5.0))
                 .bg(design.field)
                 .border_1()
                 .border_color(design.border)

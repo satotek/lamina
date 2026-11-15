@@ -24,7 +24,7 @@ pub fn message(text: impl Into<SharedString>, color: Hsla, design: &Design) -> D
         .items_center()
         .justify_center()
         .p_4()
-        .text_size(px(12.0))
+        .text_size(design.px(12.0))
         .text_color(color)
         .bg(design.background)
         .child(text.into())
@@ -131,10 +131,10 @@ impl RenderOnce for SectionHeader {
             .id(self.id)
             .flex()
             .items_center()
-            .gap(px(6.0))
-            .h(px(26.0))
+            .gap(self.design.px(6.0))
+            .h(self.design.px(26.0))
             .px_2()
-            .rounded(px(7.0))
+            .rounded(self.design.px(7.0))
             .text_size(px(self.design.tiny()))
             .font_weight(FontWeight::SEMIBOLD)
             .text_color(color)
@@ -149,7 +149,7 @@ impl RenderOnce for SectionHeader {
                 } else {
                     IconName::ChevronRight
                 })
-                .with_size(px(12.0))
+                .with_size(self.design.px(12.0))
                 .text_color(color),
             );
         }
@@ -164,7 +164,7 @@ impl RenderOnce for SectionHeader {
                 div()
                     .flex_none()
                     .font_weight(FontWeight::NORMAL)
-                    .text_size(px(10.0))
+                    .text_size(self.design.px(10.0))
                     .child(count.to_string()),
             );
         }

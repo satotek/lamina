@@ -209,7 +209,11 @@ impl Render for RepoView {
             let sidebar_width = if merge_full_window {
                 0.0
             } else {
-                super::sidebar::layout_width(viewport_width, self.sidebar_collapsed(cx))
+                super::sidebar::layout_width_for_zoom(
+                    viewport_width,
+                    self.sidebar_collapsed(cx),
+                    design.zoom,
+                )
             };
             let content_width = (viewport_width - sidebar_width).max(0.0);
             let sidebar = self.sidebar(cx, &design, sidebar_width);
@@ -284,8 +288,8 @@ impl Render for RepoView {
                     Some(area) => top_pane.h(px(crate::ui::split_pixels(
                         top_fraction,
                         area.size(),
-                        Self::MAIN_MIN_HEIGHT,
-                        Self::TERMINAL_MIN_HEIGHT,
+                        design.scale(Self::MAIN_MIN_HEIGHT),
+                        design.scale(Self::TERMINAL_MIN_HEIGHT),
                     ))),
                     None => top_pane.flex_basis(relative(top_fraction)),
                 };
@@ -363,8 +367,8 @@ impl RepoView {
 
         let mut panel = div()
             .absolute()
-            .bottom(px(10.0))
-            .right(px(12.0))
+            .bottom(design.px(10.0))
+            .right(design.px(12.0))
             .flex()
             .flex_col()
             .gap_1()
@@ -373,7 +377,7 @@ impl RepoView {
             .bg(design.panel)
             .border_1()
             .border_color(design.border)
-            .text_size(px(11.0))
+            .text_size(design.px(11.0))
             .text_color(design.text)
             .child(
                 div().font_weight(FontWeight::SEMIBOLD).child(
@@ -438,26 +442,26 @@ impl RepoView {
             .p_8()
             .child(
                 div()
-                    .text_size(px(18.0))
+                    .text_size(design.px(18.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(design.remove_text)
                     .child(t!("chrome.could_not_open").to_string()),
             )
             .child(
                 div()
-                    .text_size(px(12.0))
+                    .text_size(design.px(12.0))
                     .text_color(design.muted)
                     .child(path.to_owned()),
             )
             .child(
                 div()
-                    .max_w(px(760.0))
-                    .text_size(px(12.0))
+                    .max_w(design.px(760.0))
+                    .text_size(design.px(12.0))
                     .child(error.to_owned()),
             )
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(design.px(11.0))
                     .text_color(design.muted)
                     .child(t!("chrome.usage").to_string()),
             )

@@ -802,7 +802,7 @@ impl RepoView {
             .flex()
             .items_center()
             .gap_2()
-            .h(px(40.0))
+            .h(design.px(40.0))
             .flex_none()
             .px_3p5()
             .bg(design.background)
@@ -812,7 +812,7 @@ impl RepoView {
             .child(
                 div()
                     .flex_none()
-                    .text_size(px(12.0))
+                    .text_size(design.px(12.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(t!("blame.title").to_string()),
             )
@@ -822,7 +822,7 @@ impl RepoView {
                     .min_w_0()
                     .truncate()
                     .font_family(design.mono.clone())
-                    .text_size(px(11.5))
+                    .text_size(design.px(11.5))
                     .text_color(design.accent)
                     .child(path),
             )
@@ -863,7 +863,7 @@ impl RepoView {
                         .absolute()
                         .bottom_0()
                         .left_0()
-                        .h(px(2.0))
+                        .h(design.px(2.0))
                         .w(gpui::relative(f32::from(pct) / 100.0))
                         .bg(design.accent),
                 )
@@ -912,6 +912,13 @@ impl RepoView {
         let design = design.clone();
         let target_path = self.blame.path().map(str::to_owned);
         let row_height = style.row_height();
+        let bar_width = design.px(BAR_WIDTH);
+        let annotation_width = design.px(ANNOTATION_WIDTH);
+        let line_number_width = design.px(LINE_NUMBER_WIDTH);
+        let gutter_radius = design.px(4.0);
+        let short_w = design.px(52.0);
+        let author_w = design.px(88.0);
+        let date_w = design.px(72.0);
         uniform_list("blame-lines", count, move |range, _window, cx| {
             let view = entity.read(cx);
             range
@@ -922,12 +929,12 @@ impl RepoView {
                     let bar = match row.age {
                         Some(age) => div()
                             .flex_none()
-                            .w(px(BAR_WIDTH))
+                            .w(bar_width)
                             .h(px(row_height))
                             .bg(design.accent.opacity(bar_opacity(age))),
                         None => div()
                             .flex_none()
-                            .w(px(BAR_WIDTH))
+                            .w(bar_width)
                             .h(px(row_height))
                             .bg(design.border.opacity(0.25)),
                     };
@@ -953,7 +960,7 @@ impl RepoView {
                                 .items_center()
                                 .gap_2()
                                 .flex_none()
-                                .w(px(ANNOTATION_WIDTH))
+                                .w(annotation_width)
                                 // The wrapper that carries the menu now sits
                                 // between this row and the mono line, so the
                                 // row states its own family.
@@ -964,7 +971,7 @@ impl RepoView {
                                 .h(px(row_height))
                                 .px_1()
                                 .pr_2()
-                                .rounded(px(4.0))
+                                .rounded(gutter_radius)
                                 .overflow_hidden()
                                 .cursor_pointer()
                                 .hover(move |s| s.bg(hover))
@@ -979,7 +986,7 @@ impl RepoView {
                                 .child(
                                     div()
                                         .flex_none()
-                                        .w(px(52.0))
+                                        .w(short_w)
                                         .truncate()
                                         .font_family(design.mono.clone())
                                         .text_color(design.accent)
@@ -988,7 +995,7 @@ impl RepoView {
                                 .child(
                                     div()
                                         .flex_none()
-                                        .w(px(88.0))
+                                        .w(author_w)
                                         .truncate()
                                         .text_color(design.text)
                                         .child(author),
@@ -996,7 +1003,7 @@ impl RepoView {
                                 .child(
                                     div()
                                         .flex_none()
-                                        .w(px(72.0))
+                                        .w(date_w)
                                         .truncate()
                                         .text_color(design.muted)
                                         .child(date),
@@ -1072,7 +1079,7 @@ impl RepoView {
                         }
                         _ => div()
                             .flex_none()
-                            .w(px(ANNOTATION_WIDTH))
+                            .w(annotation_width)
                             .h_full()
                             .into_any_element(),
                     };
@@ -1090,7 +1097,7 @@ impl RepoView {
                                 .flex()
                                 .justify_end()
                                 .flex_none()
-                                .w(px(LINE_NUMBER_WIDTH))
+                                .w(line_number_width)
                                 .pr_2()
                                 .text_color(colors.muted)
                                 .child(row.line.to_string()),

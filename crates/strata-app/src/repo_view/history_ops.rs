@@ -1736,12 +1736,13 @@ impl RepoView {
         let content = dialog.clone();
         let footer = dialog.clone();
         let confirm = dialog;
-        window.open_dialog(cx, move |card, _, _| {
+        window.open_dialog(cx, move |card, _, cx| {
+            let zoom = Settings::get(cx).appearance.zoom();
             let content = content.clone();
             let footer = footer.clone();
             let confirm = confirm.clone();
             card.title(t!("history_ops.tag.dialog").to_string())
-                .w(px(440.0))
+                .w(px(440.0 * zoom))
                 .content(move |body, _, _| body.child(content.clone()))
                 .footer(
                     DialogFooter::new()

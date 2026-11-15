@@ -70,8 +70,9 @@ pub(crate) fn open_clone(
         let confirm = confirm.clone();
         let close = close.clone();
         let running = close.read(cx).is_running();
+        let zoom = Settings::get(cx).appearance.zoom();
         card.title(t!("clone.title").to_string())
-            .w(px(640.0))
+            .w(px(640.0 * zoom))
             .content(move |body, _, _| body.child(content.clone()))
             .footer(
                 DialogFooter::new()
@@ -123,8 +124,9 @@ pub(crate) fn open_init(
         let confirm = confirm.clone();
         let guard = confirm.clone();
         let busy = confirm.read(cx).busy;
+        let zoom = Settings::get(cx).appearance.zoom();
         card.title(t!("init.title").to_string())
-            .w(px(560.0))
+            .w(px(560.0 * zoom))
             .content(move |body, _, _| body.child(content.clone()))
             .footer(
                 DialogFooter::new()

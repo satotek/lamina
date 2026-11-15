@@ -379,14 +379,15 @@ fn open(window: &mut Window, cx: &mut App) {
     }
     let palette = cx.new(|cx| Palette::new(window, cx));
     let focus = palette.read(cx).focus.clone();
-    window.open_dialog(cx, move |dialog, _, _| {
+    window.open_dialog(cx, move |dialog, _, cx| {
         let content = palette.clone();
+        let zoom = Settings::get(cx).appearance.zoom();
         dialog
             // A palette is a keyboard surface: it has to be there the moment
             // the shortcut is pressed, and gone the moment Enter is.
             .entrance(DialogEntrance::None)
             .centered()
-            .w(px(WIDTH))
+            .w(px(WIDTH * zoom))
             .close_button(false)
             // The field owns Enter: its `PressEnter` runs the command and
             // closes the card itself. Letting the dialog confirm as well would

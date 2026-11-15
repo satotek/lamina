@@ -116,6 +116,8 @@ pub struct Design {
     pub ui: f32,
     /// Monospace size, from `appearance.code_font_size`.
     pub code: f32,
+    /// Whole-window zoom factor, from `appearance.zoom_percent`.
+    pub zoom: f32,
     pub mono: SharedString,
     pub lane: [Hsla; LANES],
     avatar: [Hsla; AVATARS],
@@ -145,6 +147,7 @@ impl Design {
         fallback_ui: SharedString,
         fallback_mono: SharedString,
     ) -> Self {
+        let zoom = settings.appearance.zoom();
         Self {
             background: palette.background,
             chrome: palette.chrome,
@@ -212,12 +215,13 @@ impl Design {
             // The zoom multiplies the resolved sizes rather than the stored
             // preferences: the settings page keeps showing the size the user
             // chose, and every pane still draws one consistent scale.
-            ui: settings.appearance.ui_font_size * settings.appearance.zoom(),
+            ui: settings.appearance.ui_font_size * zoom,
             code: settings
                 .appearance
                 .code_font_size
                 .clamp(CODE_FONT_MIN, CODE_FONT_MAX)
-                * settings.appearance.zoom(),
+                * zoom,
+            zoom,
             mono: settings
                 .appearance
                 .code_font
@@ -228,14 +232,24 @@ impl Design {
         }
     }
 
+    /// Scales a 100%-zoom pixel measurement by the active window zoom.
+    pub fn scale(&self, value: f32) -> f32 {
+        value * self.zoom
+    }
+
+    /// A 100%-zoom measurement converted into zoomed GPUI pixels.
+    pub fn px(&self, value: f32) -> gpui::Pixels {
+        px(self.scale(value))
+    }
+
     /// Secondary text, a little under the UI size.
     pub fn small(&self) -> f32 {
-        (self.ui - 1.5).max(9.0)
+        (self.ui - self.scale(1.5)).max(self.scale(9.0))
     }
 
     /// Captions, badges and status details.
     pub fn tiny(&self) -> f32 {
-        (self.ui - 2.5).max(8.0)
+        (self.ui - self.scale(2.5)).max(self.scale(8.0))
     }
 
     /// The colour of one syntax class.
@@ -957,5 +971,28 @@ mod tests {
             dark_design().primary_button().background,
             "each theme has its own accent"
         );
+    }
+
+    #[test]
+    fn zoom_scales_design_typography_and_px_helpers() {
+        let base = Design::default();
+        assert_eq!(base.zoom, 1.0);
+        assert_eq!(base.ui, 13.0);
+        assert_eq!(base.code, 12.5);
+        assert_eq!(base.small(), 11.5);
+        assert_eq!(base.tiny(), 10.5);
+        assert_eq!(base.scale(28.0), 28.0);
+        assert_eq!(base.px(28.0), px(28.0));
+
+        let mut settings = Settings::default();
+        settings.appearance.zoom_percent = 150;
+        let zoomed = Design::new(&Theme::default(), &settings);
+        assert_eq!(zoomed.zoom, 1.5);
+        assert_eq!(zoomed.ui, 19.5);
+        assert_eq!(zoomed.code, 18.75);
+        assert_eq!(zoomed.small(), 17.25);
+        assert_eq!(zoomed.tiny(), 15.75);
+        assert_eq!(zoomed.scale(28.0), 42.0);
+        assert_eq!(zoomed.px(28.0), px(42.0));
     }
 }

@@ -27,17 +27,17 @@ pub const REF_BADGE_MAX_LABEL_WIDTH: f32 = 130.0;
 const REF_OVERFLOW_PADDING_X: f32 = 6.0;
 
 /// Approximate width of a [`ref_badge`] / [`ref_chip`] rendered with `label`,
-/// matching the badge's padding, icon, gap, and clamped label width.
-pub fn estimate_ref_badge_width(label: &str, max_label_width: f32) -> f32 {
-    let chrome = REF_BADGE_PADDING_X * 2.0 + REF_BADGE_GLYPH + REF_BADGE_GAP;
-    let label_width = estimate_label_width(label).min(max_label_width.max(0.0));
+/// matching the badge's padding, icon, gap, and clamped label width at `zoom`.
+pub fn estimate_ref_badge_width(label: &str, max_label_width: f32, zoom: f32) -> f32 {
+    let chrome = (REF_BADGE_PADDING_X * 2.0 + REF_BADGE_GLYPH + REF_BADGE_GAP) * zoom;
+    let label_width = (estimate_label_width(label) * zoom).min(max_label_width.max(0.0));
     chrome + label_width
 }
 
-/// Approximate width of the `+N` overflow chip for `hidden_count` refs.
-pub fn estimate_ref_overflow_width(hidden_count: usize) -> f32 {
+/// Approximate width of the `+N` overflow chip for `hidden_count` refs at `zoom`.
+pub fn estimate_ref_overflow_width(hidden_count: usize, zoom: f32) -> f32 {
     let label = format!("+{hidden_count}");
-    REF_OVERFLOW_PADDING_X * 2.0 + estimate_label_width(&label) + 2.0
+    (REF_OVERFLOW_PADDING_X * 2.0 + estimate_label_width(&label) + 2.0) * zoom
 }
 
 fn estimate_label_width(label: &str) -> f32 {
@@ -68,11 +68,11 @@ pub fn change_badge(kind: ChangeKind, design: &Design) -> AnyElement {
         .flex_none()
         .items_center()
         .justify_center()
-        .w(px(18.0))
-        .h(px(18.0))
-        .rounded(px(4.0))
+        .w(design.px(18.0))
+        .h(design.px(18.0))
+        .rounded(design.px(4.0))
         .bg(background)
-        .text_size(px(10.0))
+        .text_size(design.px(10.0))
         .font_weight(FontWeight::BOLD)
         .text_color(foreground)
         .child(style::kind_marker(kind))
@@ -100,20 +100,24 @@ fn ref_badge_body(
     div()
         .flex()
         .items_center()
-        .gap(px(REF_BADGE_GAP))
+        .gap(design.px(REF_BADGE_GAP))
         .flex_none()
-        .h(px(REF_BADGE_HEIGHT))
-        .px(px(REF_BADGE_PADDING_X))
+        .h(design.px(REF_BADGE_HEIGHT))
+        .px(design.px(REF_BADGE_PADDING_X))
         .rounded_full()
         .bg(background)
-        .text_size(px(REF_BADGE_FONT_SIZE))
+        .text_size(design.px(REF_BADGE_FONT_SIZE))
         .font_weight(if head || kind == RefKind::Tag {
             FontWeight::SEMIBOLD
         } else {
             FontWeight::MEDIUM
         })
         .text_color(foreground)
-        .child(style::glyph_icon(glyph_data, REF_BADGE_GLYPH, foreground))
+        .child(style::glyph_icon(
+            glyph_data,
+            design.scale(REF_BADGE_GLYPH),
+            foreground,
+        ))
         .child(div().max_w(px(max_label_width)).truncate().child(label))
 }
 
@@ -125,7 +129,14 @@ pub fn ref_badge(
     label: impl Into<SharedString>,
     design: &Design,
 ) -> AnyElement {
-    ref_badge_body(kind, head, label.into(), REF_BADGE_MAX_LABEL_WIDTH, design).into_any_element()
+    ref_badge_body(
+        kind,
+        head,
+        label.into(),
+        design.scale(REF_BADGE_MAX_LABEL_WIDTH),
+        design,
+    )
+    .into_any_element()
 }
 
 /// An identifiable, truncated ref chip so callers can attach tooltips or drop
@@ -142,7 +153,7 @@ pub fn ref_chip(
         kind,
         head,
         label.into(),
-        max_label_width.clamp(24.0, REF_BADGE_MAX_LABEL_WIDTH),
+        max_label_width.clamp(design.scale(24.0), design.scale(REF_BADGE_MAX_LABEL_WIDTH)),
         design,
     )
     .id(id)
@@ -220,15 +231,15 @@ impl RenderOnce for RefOverflowChip {
             .items_center()
             .justify_center()
             .flex_none()
-            .h(px(REF_BADGE_HEIGHT))
-            .px(px(REF_OVERFLOW_PADDING_X))
+            .h(design.px(REF_BADGE_HEIGHT))
+            .px(design.px(REF_OVERFLOW_PADDING_X))
             .rounded_full()
             .border_1()
             .border_color(design.border)
             .bg(bg)
             .hover(|style| style.bg(design.selected).text_color(design.text))
             .cursor_pointer()
-            .text_size(px(REF_BADGE_FONT_SIZE))
+            .text_size(design.px(REF_BADGE_FONT_SIZE))
             .font_weight(FontWeight::MEDIUM)
             .text_color(fg)
             .child(format!("+{}", self.count))
@@ -271,8 +282,8 @@ pub fn status_badge(
         .flex()
         .flex_none()
         .items_center()
-        .h(px(16.0))
-        .px(px(6.0))
+        .h(design.px(16.0))
+        .px(design.px(6.0))
         .rounded_full()
         .bg(background)
         .text_size(px(design.tiny()))
@@ -296,8 +307,8 @@ pub fn check_dot(state: ChecksState, design: &Design) -> Option<AnyElement> {
     Some(
         div()
             .flex_none()
-            .w(px(6.0))
-            .h(px(6.0))
+            .w(design.px(6.0))
+            .h(design.px(6.0))
             .rounded_full()
             .bg(color)
             .into_any_element(),
@@ -308,13 +319,13 @@ pub fn check_dot(state: ChecksState, design: &Design) -> Option<AnyElement> {
 pub fn count_pill(count: impl ToString, design: &Design) -> AnyElement {
     div()
         .flex_none()
-        .min_w(px(14.0))
-        .h(px(14.0))
-        .px(px(3.0))
+        .min_w(design.px(14.0))
+        .h(design.px(14.0))
+        .px(design.px(3.0))
         .rounded_full()
         .bg(design.accent)
         .text_color(design.on_accent)
-        .text_size(px(9.0))
+        .text_size(design.px(9.0))
         .font_weight(FontWeight::SEMIBOLD)
         .flex()
         .items_center()
@@ -340,9 +351,9 @@ pub fn changed_file_count_badge(
         .flex_none()
         .items_center()
         .justify_center()
-        .min_w(px(18.0))
-        .h(px(16.0))
-        .px(px(5.0))
+        .min_w(design.px(18.0))
+        .h(design.px(16.0))
+        .px(design.px(5.0))
         .rounded_full()
         .bg(design.field)
         .text_size(px(design.tiny()))
@@ -375,12 +386,12 @@ pub fn avatar(text: impl Into<SharedString>, color: Hsla, size: f32) -> AnyEleme
 pub fn kbd(label: impl Into<SharedString>, design: &Design) -> AnyElement {
     div()
         .flex_none()
-        .px(px(6.0))
-        .py(px(1.0))
-        .rounded(px(4.0))
+        .px(design.px(6.0))
+        .py(design.px(1.0))
+        .rounded(design.px(4.0))
         .border_1()
         .border_color(design.border)
-        .text_size(px(11.0))
+        .text_size(design.px(11.0))
         .child(label.into())
         .into_any_element()
 }
@@ -395,7 +406,7 @@ pub fn keycaps(labels: Vec<SharedString>, design: &Design) -> AnyElement {
         .flex()
         .flex_none()
         .items_center()
-        .gap(px(3.0))
+        .gap(design.px(3.0))
         .children(labels.into_iter().map(|label| kbd(label, design)))
         .into_any_element()
 }
@@ -489,5 +500,16 @@ mod tests {
         assert_eq!(caps("alt-1", OperatingSystem::Linux), ["Alt", "1"]);
         assert_eq!(caps("f12", OperatingSystem::Linux), ["F12"]);
         assert_eq!(caps("ctrl-`", OperatingSystem::Linux), ["Ctrl", "`"]);
+    }
+
+    #[test]
+    fn ref_badge_width_estimates_scale_with_zoom() {
+        let base_badge = estimate_ref_badge_width("main", REF_BADGE_MAX_LABEL_WIDTH, 1.0);
+        let zoomed_badge = estimate_ref_badge_width("main", REF_BADGE_MAX_LABEL_WIDTH * 1.5, 1.5);
+        assert!((zoomed_badge - base_badge * 1.5).abs() < 0.001);
+
+        let base_overflow = estimate_ref_overflow_width(3, 1.0);
+        let zoomed_overflow = estimate_ref_overflow_width(3, 1.5);
+        assert!((zoomed_overflow - base_overflow * 1.5).abs() < 0.001);
     }
 }

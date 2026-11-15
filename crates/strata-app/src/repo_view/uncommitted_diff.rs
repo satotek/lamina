@@ -212,6 +212,7 @@ pub(crate) struct UncommittedDiffState {
     sections: Vec<UncommittedSection>,
     generation: u64,
     options: DiffOptions,
+    zoom: f32,
     list: ListState,
     left_scroll: UniformListScrollHandle,
     cache: DiffCache,
@@ -227,6 +228,7 @@ impl Default for UncommittedDiffState {
             sections: Vec::new(),
             generation: 0,
             options: DiffOptions::default(),
+            zoom: 1.0,
             list: ListState::new(0, ListAlignment::Top, px(STACK_OVERDRAW)),
             left_scroll: UniformListScrollHandle::default(),
             cache: DiffCache::default(),
@@ -251,10 +253,13 @@ impl UncommittedDiffState {
         &mut self,
         snapshot: &RepoSnapshot,
         options: DiffOptions,
+        zoom: f32,
         session: Option<&Session>,
     ) {
         let new_sections = build_sections(snapshot);
-        let context_changed = self.generation != snapshot.generation || self.options != options;
+        let zoom_changed = (self.zoom - zoom).abs() > 1e-4;
+        let context_changed =
+            self.generation != snapshot.generation || self.options != options || zoom_changed;
         let sections_changed = self.sections != new_sections;
 
         let active_keys: HashSet<DiffKey> =
@@ -282,8 +287,10 @@ impl UncommittedDiffState {
         if sections_changed {
             let top = self.list.logical_scroll_top();
             self.sections = new_sections;
-            self.list
-                .reset_with_uniform_height(self.sections.len(), px(ESTIMATED_SECTION_HEIGHT));
+            self.list.reset_with_uniform_height(
+                self.sections.len(),
+                px(ESTIMATED_SECTION_HEIGHT * zoom),
+            );
             if !self.sections.is_empty() {
                 self.list.scroll_to(ListOffset {
                     item_ix: top.item_ix.min(self.sections.len()),
@@ -296,6 +303,7 @@ impl UncommittedDiffState {
 
         self.generation = snapshot.generation;
         self.options = options;
+        self.zoom = zoom;
         if context_changed || sections_changed {
             self.pending_indices.borrow_mut().clear();
         }
@@ -572,8 +580,9 @@ impl RepoView {
             return;
         }
         let options = super::history_diff_options(cx);
+        let zoom = crate::settings::Settings::get(cx).appearance.zoom();
         self.uncommitted_diff
-            .sync(&snapshot, options, Some(session));
+            .sync(&snapshot, options, zoom, Some(session));
     }
 
     pub(super) fn flush_uncommitted_diff_requests(&mut self, cx: &mut Context<Self>) {
@@ -668,7 +677,7 @@ impl RepoView {
                     .flex()
                     .flex_wrap()
                     .items_center()
-                    .gap(px(6.0))
+                    .gap(design.px(6.0))
                     .when(counts.conflicts > 0, |row| {
                         row.child(ui::status_badge(
                             t!("history.uncommitted.conflicts", count = counts.conflicts)
@@ -710,7 +719,7 @@ impl RepoView {
         let body = if left_rows.is_empty() {
             div()
                 .p_3()
-                .text_size(px(12.0))
+                .text_size(design.px(12.0))
                 .text_color(design.muted)
                 .child(t!("history.uncommitted.no_file_changes").to_string())
                 .into_any_element()
@@ -736,7 +745,7 @@ impl RepoView {
                                     &list_design,
                                 )
                                 .count(*count)
-                                .h(px(LEFT_ROW_HEIGHT))
+                                .h(list_design.px(LEFT_ROW_HEIGHT))
                                 .px_3()
                                 .rounded(px(0.0));
                                 if *side == SectionSide::Conflicted {
@@ -757,7 +766,7 @@ impl RepoView {
                                     ui::RowState::NORMAL,
                                     &list_design,
                                 )
-                                .h(px(LEFT_ROW_HEIGHT))
+                                .h(list_design.px(LEFT_ROW_HEIGHT))
                                 .cursor_pointer()
                                 .on_click(move |_, _, cx| {
                                     click_entity.update(cx, |this, cx| {
@@ -769,10 +778,10 @@ impl RepoView {
                                 .when_some(dir, |row, dir| {
                                     row.child(
                                         div()
-                                            .max_w(px(110.0))
+                                            .max_w(list_design.px(110.0))
                                             .flex_none()
                                             .truncate()
-                                            .text_size(px(11.0))
+                                            .text_size(list_design.px(11.0))
                                             .text_color(list_design.muted)
                                             .child(dir.to_owned()),
                                     )
@@ -903,14 +912,14 @@ impl RepoView {
         div()
             .flex()
             .items_center()
-            .gap(px(10.0))
-            .h(px(40.0))
+            .gap(design.px(10.0))
+            .h(design.px(40.0))
             .flex_none()
             .px_3p5()
             .bg(design.background)
             .border_b_1()
             .border_color(design.border)
-            .text_size(px(12.0))
+            .text_size(design.px(12.0))
             .child(
                 div()
                     .flex_1()
@@ -922,7 +931,7 @@ impl RepoView {
             .child(
                 div()
                     .flex_none()
-                    .text_size(px(11.0))
+                    .text_size(design.px(11.0))
                     .text_color(design.muted)
                     .child(right),
             )
@@ -963,15 +972,15 @@ fn render_section(
     let header = div()
         .flex()
         .items_center()
-        .gap(px(8.0))
-        .min_h(px(34.0))
+        .gap(design.px(8.0))
+        .min_h(design.px(34.0))
         .px_3()
         .py_1p5()
         .bg(design.panel)
         .border_t_1()
         .border_b_1()
         .border_color(design.border)
-        .text_size(px(12.0))
+        .text_size(design.px(12.0))
         .child(ui::change_badge(section.change_kind, design))
         .child(
             div()
@@ -992,7 +1001,7 @@ fn render_section(
                             .ml_2()
                             .min_w_0()
                             .truncate()
-                            .text_size(px(11.5))
+                            .text_size(design.px(11.5))
                             .text_color(design.muted)
                             .child(dir.to_owned()),
                     )
@@ -1015,7 +1024,7 @@ fn render_section(
         None => div()
             .px_3()
             .py_2()
-            .text_size(px(12.0))
+            .text_size(design.px(12.0))
             .text_color(design.muted)
             .child(t!("worktree.computing_diff").to_string())
             .into_any_element(),
@@ -1023,7 +1032,7 @@ fn render_section(
             Err(error) => div()
                 .px_3()
                 .py_2()
-                .text_size(px(12.0))
+                .text_size(design.px(12.0))
                 .text_color(design.remove_text)
                 .child(error.clone())
                 .into_any_element(),
@@ -1066,7 +1075,7 @@ fn render_section(
                         div()
                             .px_3()
                             .py_2()
-                            .text_size(px(12.0))
+                            .text_size(design.px(12.0))
                             .text_color(design.muted)
                             .child(t!("worktree.binary_file").to_string()),
                     );
@@ -1076,7 +1085,7 @@ fn render_section(
                             div()
                                 .px_3()
                                 .py_2()
-                                .text_size(px(12.0))
+                                .text_size(design.px(12.0))
                                 .text_color(design.muted)
                                 .child(t!("worktree.no_text_changes").to_string()),
                         );
@@ -1446,7 +1455,7 @@ mod tests {
         };
 
         let snap1 = snapshot_with_paths(&[], &["a.rs", "b.rs", "c.rs"], &[], 1);
-        state.sync(&snap1, opts_a, None);
+        state.sync(&snap1, opts_a, 1.0, None);
 
         for (i, path) in ["a.rs", "b.rs", "c.rs"].iter().enumerate() {
             let ticket = DiffTicket((i + 1) as u64);
@@ -1501,7 +1510,7 @@ mod tests {
 
         // Changing options or generation invalidates cached entries.
         let snap2 = snapshot_with_paths(&[], &["a.rs", "b.rs", "c.rs"], &[], 2);
-        state.sync(&snap2, opts_b, None);
+        state.sync(&snap2, opts_b, 1.0, None);
         assert!(
             state
                 .cache
@@ -1522,7 +1531,7 @@ mod tests {
         let mut state = UncommittedDiffState::default();
         let opts = DiffOptions::default();
         let snap = snapshot_with_paths(&[], &["big.txt"], &[], 1);
-        state.sync(&snap, opts, None);
+        state.sync(&snap, opts, 1.0, None);
 
         let key = DiffKey {
             side: SectionSide::Unstaged,

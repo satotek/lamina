@@ -97,7 +97,7 @@ fn row(title: &str, caps: &[Vec<String>], design: &Design) -> impl IntoElement {
             .flex()
             .flex_none()
             .items_center()
-            .gap(px(8.0))
+            .gap(design.px(8.0))
             .children(caps.iter().map(|shortcut| {
                 ui::keycaps(
                     shortcut
@@ -162,7 +162,7 @@ impl Render for Sheet {
                         .text_color(design.muted)
                         .child(group_title(group)),
                 )
-                .child(div().flex().flex_col().gap(px(1.0)).children(rows));
+                .child(div().flex().flex_col().gap(design.px(1.0)).children(rows));
         }
         if shown == 0 {
             list = list.child(ui::empty_state(
@@ -185,7 +185,7 @@ impl Render for Sheet {
             .child(
                 div()
                     .id("shortcuts-list")
-                    .max_h(px(LIST_HEIGHT))
+                    .max_h(design.px(LIST_HEIGHT))
                     .overflow_y_scroll()
                     .child(list),
             )
@@ -216,13 +216,14 @@ fn open(window: &mut Window, cx: &mut App) {
     }
     let sheet = cx.new(|cx| Sheet::new(window, cx));
     let focus = sheet.read(cx).focus.clone();
-    window.open_dialog(cx, move |dialog, _, _| {
+    window.open_dialog(cx, move |dialog, _, cx| {
         let content = sheet.clone();
+        let zoom = Settings::get(cx).appearance.zoom();
         dialog
             .title(t!("shortcuts.title").to_string())
             .entrance(DialogEntrance::None)
             .centered()
-            .w(px(WIDTH))
+            .w(px(WIDTH * zoom))
             .close_button(false)
             // The field owns Enter, and the sheet has nothing to confirm.
             .on_ok(|_, _, _| false)

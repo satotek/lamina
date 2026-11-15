@@ -177,14 +177,14 @@ impl RepoView {
         div()
             .flex()
             .items_center()
-            .gap(px(10.0))
-            .h(px(40.0))
+            .gap(design.px(10.0))
+            .h(design.px(40.0))
             .flex_none()
             .px_3p5()
             .bg(design.background)
             .border_b_1()
             .border_color(design.border)
-            .text_size(px(12.0))
+            .text_size(design.px(12.0))
             .child(match kind {
                 Some(kind) => crate::ui::change_badge(kind, design),
                 None => div().into_any_element(),
@@ -208,7 +208,7 @@ impl RepoView {
                                 .ml_2()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(px(11.5))
+                                .text_size(design.px(11.5))
                                 .text_color(design.muted)
                                 .child(dir.to_owned()),
                         )
@@ -225,7 +225,7 @@ impl RepoView {
             .child(
                 div()
                     .flex_none()
-                    .text_size(px(11.0))
+                    .text_size(design.px(11.0))
                     .text_color(design.muted)
                     .child(right),
             )

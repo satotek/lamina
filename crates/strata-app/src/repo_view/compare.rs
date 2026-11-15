@@ -864,7 +864,7 @@ impl RepoView {
             let mut block = div().flex().items_center().gap_1().min_w_0().child(
                 div()
                     .flex_none()
-                    .max_w(px(180.0))
+                    .max_w(design.px(180.0))
                     .truncate()
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(side.title()),
@@ -876,7 +876,7 @@ impl RepoView {
                     div()
                         .flex_none()
                         .font_family(design.mono.clone())
-                        .text_size(px(10.5))
+                        .text_size(design.px(10.5))
                         .text_color(design.muted)
                         .child(data::short_oid(oid)),
                 );
@@ -890,7 +890,7 @@ impl RepoView {
             .flex()
             .items_center()
             .gap_2()
-            .h(px(40.0))
+            .h(design.px(40.0))
             .flex_none()
             .px_3()
             .bg(design.chrome)
@@ -900,7 +900,7 @@ impl RepoView {
             .child(
                 div()
                     .flex_none()
-                    .text_size(px(12.0))
+                    .text_size(design.px(12.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(t!("compare.title").to_string()),
             )
@@ -928,7 +928,7 @@ impl RepoView {
             .flex_none()
             .items_center()
             .gap_2()
-            .text_size(px(11.0))
+            .text_size(design.px(11.0))
             .text_color(design.muted);
         if comparison.ahead > 0 {
             row = row.child(
@@ -963,7 +963,7 @@ impl RepoView {
                 .flex_1()
                 .items_center()
                 .justify_center()
-                .text_size(px(11.0))
+                .text_size(design.px(11.0))
                 .text_color(design.muted)
                 .child(t!("compare.comparing").to_string())
                 .into_any_element();
@@ -999,10 +999,10 @@ impl RepoView {
                     .when_some(dir, |row, dir| {
                         row.child(
                             div()
-                                .max_w(px(110.0))
+                                .max_w(list_design.px(110.0))
                                 .flex_none()
                                 .truncate()
-                                .text_size(px(11.0))
+                                .text_size(list_design.px(11.0))
                                 .text_color(list_design.muted)
                                 .child(dir.to_owned()),
                         )
@@ -1047,13 +1047,13 @@ impl RepoView {
             .items_center()
             .justify_between()
             .gap_3()
-            .h(px(36.0))
+            .h(design.px(36.0))
             .flex_none()
             .px_3p5()
             .bg(design.chrome)
             .border_b_1()
             .border_color(design.border)
-            .text_size(px(11.0))
+            .text_size(design.px(11.0))
             .child(
                 div()
                     .min_w_0()

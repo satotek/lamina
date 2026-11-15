@@ -685,20 +685,24 @@ impl RepoView {
         let mut trail = div()
             .flex()
             .items_center()
-            .gap(px(3.0))
+            .gap(design.px(3.0))
             .flex_1()
             .min_w_0()
             .overflow_hidden();
         for (index, crumb) in crumbs.into_iter().enumerate() {
             if index > 0 {
-                trail = trail.child(icon(IconName::ChevronRight, 10.0, design.muted));
+                trail = trail.child(icon(
+                    IconName::ChevronRight,
+                    design.scale(10.0),
+                    design.muted,
+                ));
             }
             let last = index + 1 == count;
             let mut label = div()
                 .id(("tree-crumb", index))
                 .flex_none()
                 .px_1()
-                .rounded(px(4.0))
+                .rounded(design.px(4.0))
                 .text_size(px(design.small()))
                 .text_color(if last { design.text } else { design.muted })
                 .child(crumb.label);
@@ -719,8 +723,8 @@ impl RepoView {
         div()
             .flex()
             .items_center()
-            .gap(px(8.0))
-            .h(px(40.0))
+            .gap(design.px(8.0))
+            .h(design.px(40.0))
             .flex_none()
             .px_2()
             .bg(design.background)
@@ -781,7 +785,11 @@ impl RepoView {
                         crate::ui::RowState::NORMAL,
                         &list_design,
                     )
-                    .child(icon(entry_icon(entry.kind), 14.0, list_design.muted))
+                    .child(icon(
+                        entry_icon(entry.kind),
+                        list_design.scale(14.0),
+                        list_design.muted,
+                    ))
                     .child(
                         div()
                             .flex_1()
@@ -796,7 +804,7 @@ impl RepoView {
                         row.child(
                             div()
                                 .flex_none()
-                                .text_size(px(10.5))
+                                .text_size(list_design.px(10.5))
                                 .text_color(list_design.muted)
                                 .child(detail),
                         )
@@ -833,6 +841,7 @@ impl RepoView {
                 // viewer and the diff pane never drift apart.
                 let style = DiffStyle::from_settings(cx, &design.mono);
                 let height = style.row_height();
+                let gutter_width = style.px(GUTTER_WIDTH);
                 uniform_list("tree-file", lines.len(), move |range, _window, _cx| {
                     range
                         .map(|index| {
@@ -865,7 +874,7 @@ impl RepoView {
                                 .child(
                                     div()
                                         .flex_none()
-                                        .w(px(GUTTER_WIDTH))
+                                        .w(gutter_width)
                                         .pr_2()
                                         .text_color(colors.gutter)
                                         .child((index + 1).to_string()),

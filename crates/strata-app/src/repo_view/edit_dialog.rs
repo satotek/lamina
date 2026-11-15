@@ -41,12 +41,13 @@ pub(super) fn open(
     let footer = dialog.clone();
     let confirm = dialog;
     window.open_dialog(cx, move |card, _, cx| {
+        let zoom = Settings::get(cx).appearance.zoom();
         let content = content.clone();
         let footer = footer.clone();
         let confirm = confirm.clone();
         let empty = confirm.read(cx).is_empty(cx);
         card.title(t!("edit_dialog.title"))
-            .w(px(520.0))
+            .w(px(520.0 * zoom))
             .content(move |body, _, _| body.child(content.clone()))
             .footer(
                 DialogFooter::new()
@@ -152,7 +153,7 @@ impl Render for RewordDialog {
             )
             .child(
                 Textarea::new(&self.message)
-                    .h(px(220.0))
+                    .h(design.px(220.0))
                     .w_full()
                     .text_size(px(design.code)),
             )

@@ -48,6 +48,11 @@ pub fn lane_offset(lane: u16) -> f32 {
     LANE_PADDING + f32::from(lane) * LANE_WIDTH
 }
 
+/// [`lane_offset`] scaled by `zoom`.
+pub fn lane_offset_at(lane: u16, zoom: f32) -> f32 {
+    lane_offset(lane) * zoom
+}
+
 /// Width of the graph part of a row that reserves `lanes` lanes.
 ///
 /// Zero lanes means an empty row: it gets the same indent as a single-lane row,
@@ -58,10 +63,21 @@ pub fn indent(lanes: u16) -> f32 {
     LANE_PADDING + (lanes - 1.0) * LANE_WIDTH + NODE_RADIUS + TEXT_GAP
 }
 
+/// [`indent`] scaled by `zoom`.
+pub fn indent_at(lanes: u16, zoom: f32) -> f32 {
+    indent(lanes) * zoom
+}
+
 /// Indent for a row without a graph, such as a search result, so its text does
 /// not jump to the left edge of the list.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn search_indent() -> f32 {
     indent(1)
+}
+
+/// [`search_indent`] scaled by `zoom`.
+pub fn search_indent_at(zoom: f32) -> f32 {
+    indent_at(1, zoom)
 }
 
 /// Where a clipped row's lanes stop and the fade begins.
@@ -69,11 +85,19 @@ fn clip_edge() -> f32 {
     lane_offset(MAX_LANES - 1) + NODE_RADIUS
 }
 
+fn clip_edge_at(zoom: f32) -> f32 {
+    clip_edge() * zoom
+}
+
 /// The marker that replaces a node beyond the cap, as an x offset, or `None`
 /// when the node is inside the row's visible lanes.
 pub fn node_marker(lane: u16, lanes: u16) -> Option<f32> {
     let visible = lanes.clamp(1, MAX_LANES);
     (lane >= visible).then_some(clip_edge())
+}
+
+fn node_marker_at(lane: u16, lanes: u16, zoom: f32) -> Option<f32> {
+    node_marker(lane, lanes).map(|x| x * zoom)
 }
 
 /// Lanes the row paints: its layout width, widened if a line reaches further.
@@ -111,11 +135,12 @@ pub fn graph_column(
     colors: [Hsla; LANES],
     fade: Hsla,
     muted: Hsla,
+    zoom: f32,
 ) -> impl IntoElement {
     // A row above MERGE_HEAD's node may not have that lane yet, and the dashed
     // run would fall outside the row's indent and never be painted.
     let lanes = row_lanes(row).max(merge_edge.map_or(0, |edge| edge.lane.saturating_add(1)));
-    let width = px(indent(lanes));
+    let width = px(indent_at(lanes, zoom));
     // The paint closure must own its data; only visible rows are copied.
     let row = OwnedRow {
         node_lane: row.node_lane,
@@ -131,7 +156,7 @@ pub fn graph_column(
     div().w(width).h_full().flex_none().child(
         canvas(
             move |bounds, _window, _cx| bounds,
-            move |bounds, _, window, _cx| paint_row(&row, &colors, fade, bounds, window),
+            move |bounds, _, window, _cx| paint_row(&row, &colors, fade, zoom, bounds, window),
         )
         .size_full(),
     )
@@ -186,14 +211,15 @@ pub fn uncommitted_graph_column(
     graph: UncommittedGraph,
     colors: [Hsla; LANES],
     fade: Hsla,
+    zoom: f32,
 ) -> impl IntoElement {
     let lanes = graph.lanes.max(1);
-    let width = px(indent(lanes));
+    let width = px(indent_at(lanes, zoom));
     div().w(width).h_full().flex_none().child(
         canvas(
             move |bounds, _window, _cx| bounds,
             move |bounds, _, window, _cx| {
-                paint_uncommitted_row(graph, &colors, fade, bounds, window)
+                paint_uncommitted_row(graph, &colors, fade, zoom, bounds, window)
             },
         )
         .size_full(),
@@ -260,7 +286,12 @@ fn slot(color: u16) -> usize {
 /// `visible` is the number of lanes the row actually paints. An edge that
 /// starts or ends inside the cap is kept whole: its far end runs under the
 /// fade rather than stopping at the clip.
+#[cfg_attr(not(test), allow(dead_code))]
 fn linework(row: &OwnedRow, visible: u16) -> Linework {
+    linework_at(row, visible, 1.0)
+}
+
+fn linework_at(row: &OwnedRow, visible: u16, zoom: f32) -> Linework {
     // Every pass and edge contributes at most one run, so the buffers never
     // grow while they are filled.
     let capacity = row.passes.len() + row.edges.len();
@@ -274,7 +305,7 @@ fn linework(row: &OwnedRow, visible: u16) -> Linework {
         straight.push((
             slot(pass.color),
             Straight {
-                x: lane_offset(pass.lane),
+                x: lane_offset_at(pass.lane, zoom),
                 from: 0.0,
                 to: 1.0,
             },
@@ -286,8 +317,8 @@ fn linework(row: &OwnedRow, visible: u16) -> Linework {
             continue;
         }
         let color = slot(segment.color);
-        let from_x = lane_offset(segment.from_lane);
-        let to_x = lane_offset(segment.to_lane);
+        let from_x = lane_offset_at(segment.from_lane, zoom);
+        let to_x = lane_offset_at(segment.to_lane, zoom);
         let (from_y, to_y, control_y) = match segment.half {
             Half::Top => (0.0, 0.5, 0.25),
             Half::Bottom => (0.5, 1.0, 0.75),
@@ -336,6 +367,7 @@ fn paint_row(
     row: &OwnedRow,
     colors: &[Hsla; LANES],
     fade: Hsla,
+    zoom: f32,
     bounds: Bounds<Pixels>,
     window: &mut Window,
 ) {
@@ -343,28 +375,31 @@ fn paint_row(
     let height = bounds.size.height;
     let middle = top + height / 2.0;
     let left = bounds.origin.x;
+    let stroke_width = STROKE_WIDTH * zoom;
+    let fade_width = FADE_WIDTH * zoom;
+    let marker_radius = MARKER_RADIUS * zoom;
 
     let clipped = row.lanes > MAX_LANES;
     let visible = row.lanes.min(MAX_LANES);
     // A clipped row paints inside the cap; its canvas is already only that
     // wide, so the mask also keeps lane changes from straddling the text.
     let clip = if clipped {
-        Bounds::new(bounds.origin, size(px(clip_edge()), height))
+        Bounds::new(bounds.origin, size(px(clip_edge_at(zoom)), height))
     } else {
         bounds
     };
 
-    let lines = linework(row, visible);
+    let lines = linework_at(row, visible, zoom);
 
     window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
         // A straight run has the shape its stroke would have tessellated into,
         // so a quad paints the same pixels without touching the tessellator.
         for (color, run) in &lines.straight {
-            let x = left + px(run.x) - px(STROKE_WIDTH / 2.0);
+            let x = left + px(run.x) - px(stroke_width / 2.0);
             window.paint_quad(fill(
                 Bounds::new(
                     point(x, top + height * run.from),
-                    size(px(STROKE_WIDTH), height * (run.to - run.from)),
+                    size(px(stroke_width), height * (run.to - run.from)),
                 ),
                 colors[*color],
             ));
@@ -375,7 +410,7 @@ fn paint_row(
         // rebuilding one per segment is what keeps its buffers from growing.
         let mut paths: [Option<PathBuilder>; LANES] = std::array::from_fn(|_| None);
         for (color, curve) in &lines.curves {
-            let path = paths[*color].get_or_insert_with(|| PathBuilder::stroke(px(STROKE_WIDTH)));
+            let path = paths[*color].get_or_insert_with(|| PathBuilder::stroke(px(stroke_width)));
             path.move_to(lane_point(left, top, height, curve.from));
             path.cubic_bezier_to(
                 lane_point(left, top, height, curve.to),
@@ -398,22 +433,30 @@ fn paint_row(
         {
             let end = if edge.to_node {
                 // Leave the node itself its solid outline.
-                middle - px(NODE_RADIUS + 1.0)
+                middle - px((NODE_RADIUS + 1.0) * zoom)
             } else {
                 top + height
             };
-            paint_dashed_vertical(left, top, end, edge.lane, colors[slot(edge.color)], window);
+            paint_dashed_vertical(
+                left,
+                top,
+                end,
+                edge.lane,
+                colors[slot(edge.color)],
+                zoom,
+                window,
+            );
         }
     });
 
     if clipped {
-        let edge = bounds.origin.x + px(clip_edge());
+        let edge = bounds.origin.x + px(clip_edge_at(zoom));
         // Fading only the last four pixels keeps the cap's final lane crisp
         // while dissolving clipped lane ends into the row's fill.
         window.paint_quad(fill(
             Bounds::new(
-                point(edge - px(FADE_WIDTH), top),
-                size(px(FADE_WIDTH), height),
+                point(edge - px(fade_width), top),
+                size(px(fade_width), height),
             ),
             linear_gradient(
                 90.0,
@@ -433,24 +476,25 @@ fn paint_row(
             middle,
             row.node_lane,
             colors[slot(row.node_color)],
+            zoom,
             window,
         );
-        Some(lane_offset(row.node_lane))
-    } else if let Some(x) = node_marker(row.node_lane, row.lanes) {
+        Some(lane_offset_at(row.node_lane, zoom))
+    } else if let Some(x) = node_marker_at(row.node_lane, row.lanes, zoom) {
         let color = colors[slot(row.node_color)];
-        let diameter = MARKER_RADIUS * 2.0;
+        let diameter = marker_radius * 2.0;
         window.paint_quad(
             fill(
                 Bounds::new(
                     point(
-                        bounds.origin.x + px(x) - px(MARKER_RADIUS),
-                        middle - px(MARKER_RADIUS),
+                        bounds.origin.x + px(x) - px(marker_radius),
+                        middle - px(marker_radius),
                     ),
                     size(px(diameter), px(diameter)),
                 ),
                 color,
             )
-            .corner_radii(px(MARKER_RADIUS)),
+            .corner_radii(px(marker_radius)),
         );
         Some(x)
     } else {
@@ -460,7 +504,7 @@ fn paint_row(
     if row.boundary
         && let Some(x) = node_x
     {
-        paint_boundary_stub(bounds, middle, x, row.muted, window);
+        paint_boundary_stub(bounds, middle, x, row.muted, zoom, window);
     }
 }
 
@@ -471,18 +515,19 @@ fn paint_boundary_stub(
     middle: Pixels,
     lane: f32,
     color: Hsla,
+    zoom: f32,
     window: &mut Window,
 ) {
-    const DASH: f32 = 1.5;
-    const GAP: f32 = 2.0;
-    let x = bounds.origin.x + px(lane) - px(DASH / 2.0);
-    let mut y = middle + px(NODE_RADIUS + 1.0);
+    let dash = 1.5 * zoom;
+    let gap = 2.0 * zoom;
+    let x = bounds.origin.x + px(lane) - px(dash / 2.0);
+    let mut y = middle + px((NODE_RADIUS + 1.0) * zoom);
     for _ in 0..3 {
         window.paint_quad(fill(
-            Bounds::new(point(x, y), size(px(DASH), px(DASH))),
+            Bounds::new(point(x, y), size(px(dash), px(dash))),
             color,
         ));
-        y += px(DASH + GAP);
+        y += px(dash + gap);
     }
 }
 
@@ -491,25 +536,33 @@ fn lane_point(left: Pixels, top: Pixels, height: Pixels, at: Pt) -> Point<Pixels
     point(left + px(at.x), top + height * at.y)
 }
 
-fn paint_node(bounds: Bounds<Pixels>, middle: Pixels, lane: u16, color: Hsla, window: &mut Window) {
-    let diameter = NODE_RADIUS * 2.0;
+fn paint_node(
+    bounds: Bounds<Pixels>,
+    middle: Pixels,
+    lane: u16,
+    color: Hsla,
+    zoom: f32,
+    window: &mut Window,
+) {
+    let node_radius = NODE_RADIUS * zoom;
+    let diameter = node_radius * 2.0;
     window.paint_quad(
         fill(
             Bounds::new(
                 point(
-                    lane_x(bounds, lane) - px(NODE_RADIUS),
-                    middle - px(NODE_RADIUS),
+                    lane_x(bounds, lane, zoom) - px(node_radius),
+                    middle - px(node_radius),
                 ),
                 size(px(diameter), px(diameter)),
             ),
             color,
         )
-        .corner_radii(px(NODE_RADIUS)),
+        .corner_radii(px(node_radius)),
     );
 }
 
-fn lane_x(bounds: Bounds<Pixels>, lane: u16) -> Pixels {
-    bounds.origin.x + px(lane_offset(lane))
+fn lane_x(bounds: Bounds<Pixels>, lane: u16, zoom: f32) -> Pixels {
+    bounds.origin.x + px(lane_offset_at(lane, zoom))
 }
 
 fn cubic_bezier_pt(curve: Curve, t: f32) -> Pt {
@@ -578,6 +631,7 @@ fn paint_uncommitted_row(
     graph: UncommittedGraph,
     colors: &[Hsla; LANES],
     fade: Hsla,
+    zoom: f32,
     bounds: Bounds<Pixels>,
     window: &mut Window,
 ) {
@@ -585,11 +639,15 @@ fn paint_uncommitted_row(
     let height = bounds.size.height;
     let middle = top + height / 2.0;
     let left = bounds.origin.x;
+    let stroke_width = STROKE_WIDTH * zoom;
+    let fade_width = FADE_WIDTH * zoom;
+    let node_radius = NODE_RADIUS * zoom;
+    let marker_radius = MARKER_RADIUS * zoom;
 
     let clipped = graph.lanes > MAX_LANES;
     let visible = graph.lanes.min(MAX_LANES);
     let clip = if clipped {
-        Bounds::new(bounds.origin, size(px(clip_edge()), height))
+        Bounds::new(bounds.origin, size(px(clip_edge_at(zoom)), height))
     } else {
         bounds
     };
@@ -597,8 +655,8 @@ fn paint_uncommitted_row(
     window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
         if let Some((merge_lane, merge_color)) = graph.merge_target {
             if merge_lane != graph.head_lane && graph.head_lane.min(merge_lane) < visible {
-                let head_x = lane_offset(graph.head_lane);
-                let merge_x = lane_offset(merge_lane);
+                let head_x = lane_offset_at(graph.head_lane, zoom);
+                let merge_x = lane_offset_at(merge_lane, zoom);
                 let curve = Curve {
                     from: Pt { x: head_x, y: 0.5 },
                     control_a: Pt { x: head_x, y: 0.75 },
@@ -608,7 +666,7 @@ fn paint_uncommitted_row(
                     },
                     to: Pt { x: merge_x, y: 1.0 },
                 };
-                let mut builder = PathBuilder::stroke(px(STROKE_WIDTH));
+                let mut builder = PathBuilder::stroke(px(stroke_width));
                 for polyline in dashed_curve_segments(curve) {
                     if let Some((first, rest)) = polyline.split_first() {
                         builder.move_to(lane_point(left, top, height, *first));
@@ -623,10 +681,11 @@ fn paint_uncommitted_row(
             } else if !graph.has_head_edge && merge_lane < visible {
                 paint_dashed_vertical(
                     left,
-                    middle + px(NODE_RADIUS + 1.0),
+                    middle + px((NODE_RADIUS + 1.0) * zoom),
                     top + height,
                     merge_lane,
                     colors[slot(merge_color)],
+                    zoom,
                     window,
                 );
             }
@@ -635,21 +694,22 @@ fn paint_uncommitted_row(
         if graph.has_head_edge && graph.head_lane < visible {
             paint_dashed_vertical(
                 left,
-                middle + px(NODE_RADIUS + 1.0),
+                middle + px((NODE_RADIUS + 1.0) * zoom),
                 top + height,
                 graph.head_lane,
                 colors[slot(graph.head_color)],
+                zoom,
                 window,
             );
         }
     });
 
     if clipped {
-        let edge = bounds.origin.x + px(clip_edge());
+        let edge = bounds.origin.x + px(clip_edge_at(zoom));
         window.paint_quad(fill(
             Bounds::new(
-                point(edge - px(FADE_WIDTH), top),
-                size(px(FADE_WIDTH), height),
+                point(edge - px(fade_width), top),
+                size(px(fade_width), height),
             ),
             linear_gradient(
                 90.0,
@@ -661,21 +721,21 @@ fn paint_uncommitted_row(
 
     let head_color = colors[slot(graph.head_color)];
     if graph.head_lane < visible {
-        let center_x = lane_offset(graph.head_lane);
-        let diameter = NODE_RADIUS * 2.0;
+        let center_x = lane_offset_at(graph.head_lane, zoom);
+        let diameter = node_radius * 2.0;
         // Hollow interior masks the top of any downward edge under the ring.
         window.paint_quad(
             fill(
                 Bounds::new(
-                    point(left + px(center_x - NODE_RADIUS), middle - px(NODE_RADIUS)),
+                    point(left + px(center_x - node_radius), middle - px(node_radius)),
                     size(px(diameter), px(diameter)),
                 ),
                 fade,
             )
-            .corner_radii(px(NODE_RADIUS)),
+            .corner_radii(px(node_radius)),
         );
-        let mut builder = PathBuilder::stroke(px(STROKE_WIDTH));
-        for arc in dashed_circle_arcs(center_x, 0.0, NODE_RADIUS - STROKE_WIDTH * 0.5) {
+        let mut builder = PathBuilder::stroke(px(stroke_width));
+        for arc in dashed_circle_arcs(center_x, 0.0, node_radius - stroke_width * 0.5) {
             if let Some((first, rest)) = arc.split_first() {
                 builder.move_to(point(left + px(first.0), middle + px(first.1)));
                 for pt in rest {
@@ -686,20 +746,20 @@ fn paint_uncommitted_row(
         if let Ok(path) = builder.build() {
             window.paint_path(path, head_color);
         }
-    } else if let Some(x) = node_marker(graph.head_lane, graph.lanes) {
-        let diameter = MARKER_RADIUS * 2.0;
+    } else if let Some(x) = node_marker_at(graph.head_lane, graph.lanes, zoom) {
+        let diameter = marker_radius * 2.0;
         window.paint_quad(
             fill(
                 Bounds::new(
-                    point(left + px(x - MARKER_RADIUS), middle - px(MARKER_RADIUS)),
+                    point(left + px(x - marker_radius), middle - px(marker_radius)),
                     size(px(diameter), px(diameter)),
                 ),
                 fade,
             )
-            .corner_radii(px(MARKER_RADIUS)),
+            .corner_radii(px(marker_radius)),
         );
-        let mut builder = PathBuilder::stroke(px(STROKE_WIDTH));
-        for arc in dashed_circle_arcs(x, 0.0, MARKER_RADIUS - STROKE_WIDTH * 0.5) {
+        let mut builder = PathBuilder::stroke(px(stroke_width));
+        for arc in dashed_circle_arcs(x, 0.0, marker_radius - stroke_width * 0.5) {
             if let Some((first, rest)) = arc.split_first() {
                 builder.move_to(point(left + px(first.0), middle + px(first.1)));
                 for pt in rest {
@@ -713,25 +773,31 @@ fn paint_uncommitted_row(
     }
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    reason = "paints one dashed lane segment with explicit bounds and zoom"
+)]
 fn paint_dashed_vertical(
     left: Pixels,
     from: Pixels,
     to: Pixels,
     lane: u16,
     color: Hsla,
+    zoom: f32,
     window: &mut Window,
 ) {
-    const DASH: f32 = 2.5;
-    const GAP: f32 = 2.0;
-    let x = left + px(lane_offset(lane)) - px(STROKE_WIDTH / 2.0);
+    let dash = 2.5 * zoom;
+    let gap = 2.0 * zoom;
+    let stroke_width = STROKE_WIDTH * zoom;
+    let x = left + px(lane_offset_at(lane, zoom)) - px(stroke_width / 2.0);
     let mut y = from;
     while y < to {
-        let dash_height = px(DASH).min(to - y);
+        let dash_height = px(dash).min(to - y);
         window.paint_quad(fill(
-            Bounds::new(point(x, y), size(px(STROKE_WIDTH), dash_height)),
+            Bounds::new(point(x, y), size(px(stroke_width), dash_height)),
             color,
         ));
-        y += px(DASH + GAP);
+        y += px(dash + gap);
     }
 }
 
@@ -1142,5 +1208,18 @@ mod tests {
             None,
             "a lane without a target row is not drawn either"
         );
+    }
+
+    #[test]
+    fn graph_geometry_scales_proportionally_with_zoom() {
+        assert_eq!(lane_offset_at(2, 1.0), lane_offset(2));
+        assert_eq!(lane_offset_at(2, 1.5), lane_offset(2) * 1.5);
+        assert_eq!(indent_at(4, 1.5), indent(4) * 1.5);
+        assert_eq!(search_indent_at(1.5), search_indent() * 1.5);
+        assert_eq!(node_marker_at(12, 13, 1.5), Some(clip_edge() * 1.5));
+
+        let passes = [PassThrough { lane: 1, color: 0 }];
+        let lines = linework_at(&owned(0, 2, &passes, &[]), 2, 1.5);
+        assert_eq!(lines.straight[0].1.x, lane_offset(1) * 1.5);
     }
 }

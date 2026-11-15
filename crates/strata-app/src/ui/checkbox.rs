@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, ElementId, Hsla, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
 };
 use gpui_component::checkbox::Checkbox;
 use gpui_component::tooltip::Tooltip;
@@ -46,8 +46,8 @@ pub fn gutter_checkbox(
         .flex()
         .items_center()
         .justify_center()
-        .size(px(18.0))
-        .rounded(px(4.0))
+        .size(design.px(18.0))
+        .rounded(design.px(4.0))
         .border_1()
         .border_color(if checked { color } else { design.muted })
         .bg(if checked {

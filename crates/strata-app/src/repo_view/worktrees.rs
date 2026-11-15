@@ -411,12 +411,13 @@ fn show_worktree_dialog(
     let content = dialog.clone();
     let footer = dialog.clone();
     let confirm = dialog;
-    window.open_dialog(cx, move |card, _, _| {
+    window.open_dialog(cx, move |card, _, cx| {
+        let zoom = Settings::get(cx).appearance.zoom();
         let content = content.clone();
         let footer = footer.clone();
         let confirm = confirm.clone();
         card.title(t!("worktree.add.title").to_string())
-            .w(px(520.0))
+            .w(px(520.0 * zoom))
             .content(move |body, _, _| body.child(content.clone()))
             .footer(
                 DialogFooter::new()
@@ -767,13 +768,13 @@ impl Render for AddWorktreeDialog {
             .w_full()
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(design.px(11.0))
                     .text_color(muted)
                     .child(t!("worktree.add.description").to_string()),
             )
             .child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(design.px(11.0))
                     .font_weight(FontWeight::MEDIUM)
                     .child(t!("worktree.add.directory").to_string()),
             )
@@ -789,19 +790,19 @@ impl Render for AddWorktreeDialog {
         if create_branch {
             form = form.child(Input::new(&self.new_branch)).child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(design.px(11.0))
                     .text_color(muted)
                     .child(t!("worktree.add.start_description", start = start_label).to_string()),
             );
             if self.allow_detached {
-                form = form.child(div().text_size(px(11.0)).text_color(muted).child(
+                form = form.child(div().text_size(design.px(11.0)).text_color(muted).child(
                     t!("worktree.add.detached_hint", short = self.default_name).to_string(),
                 ));
             }
         } else if self.branches.is_empty() {
             form = form.child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(design.px(11.0))
                     .text_color(muted)
                     .child(t!("worktree.add.all_checked_out").to_string()),
             );
@@ -830,7 +831,7 @@ impl Render for AddWorktreeDialog {
                     .flex()
                     .flex_col()
                     .gap_1()
-                    .max_h(px(200.0))
+                    .max_h(design.px(200.0))
                     .overflow_y_scroll()
                     .children(rows),
             );
@@ -839,7 +840,7 @@ impl Render for AddWorktreeDialog {
         if let Some(error) = &self.error {
             form = form.child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(design.px(11.0))
                     .text_color(design.remove_text)
                     .child(error.clone()),
             );

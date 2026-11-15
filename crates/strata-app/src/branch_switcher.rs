@@ -478,7 +478,7 @@ pub(crate) fn chip(view: &RepoView, chip: crate::ui::UiButton, design: &Design) 
 
     Popover::new("branch-switcher")
         .anchor(Anchor::TopLeft)
-        .offset(px(6.0))
+        .offset(design.px(6.0))
         .open(open)
         .on_open_change(move |open, window, cx| {
             let open = *open;
@@ -536,8 +536,8 @@ fn card(
         .id("branch-switcher-card")
         .flex()
         .flex_col()
-        .gap(px(2.0))
-        .w(px(WIDTH))
+        .gap(design.px(2.0))
+        .w(design.px(WIDTH))
         .key_context(SWITCHER)
         .on_action(move |_: &BranchSwitcherPrevious, _, cx| {
             step_up.update(cx, |view, cx| view.step_branch_switcher(-1, cx));
@@ -594,7 +594,7 @@ fn list(
         .id("branch-switcher-list")
         .flex()
         .flex_col()
-        .max_h(px(LIST_MAX_HEIGHT))
+        .max_h(design.px(LIST_MAX_HEIGHT))
         .overflow_y_scroll()
         .track_scroll(scroll);
 
@@ -608,16 +608,22 @@ fn list(
                         section.title(),
                         design,
                     )
-                    .h(px(24.0)),
+                    .h(design.px(24.0)),
                 );
             }
             Row::Divider => {
-                column = column.child(div().h(px(1.0)).mx_2p5().my(px(4.0)).bg(design.border));
+                column = column.child(
+                    div()
+                        .h(px(1.0))
+                        .mx_2p5()
+                        .my(design.px(4.0))
+                        .bg(design.border),
+                );
             }
             Row::Empty => {
                 column = column.child(
                     ui::empty_state(t!("switcher.no_match").to_string(), design)
-                        .h(px(52.0))
+                        .h(design.px(52.0))
                         .bg(design.panel),
                 );
             }
@@ -670,18 +676,18 @@ fn local_row(
         design,
     )
     .w_full()
-    .h(px(ROW_HEIGHT))
+    .h(design.px(ROW_HEIGHT))
     .cursor_pointer()
     .on_click(move |_, window, cx| {
         click_entity.update(cx, |view, cx| {
             view.activate_branch_switcher_row(Row::Local(index), window, cx)
         });
     })
-    .child(
-        div()
-            .flex_none()
-            .child(style::glyph_icon(style::glyph::BRANCH, 13.0, design.muted)),
-    )
+    .child(div().flex_none().child(style::glyph_icon(
+        style::glyph::BRANCH,
+        design.scale(13.0),
+        design.muted,
+    )))
     .child(
         div()
             .flex_1()
@@ -698,7 +704,7 @@ fn local_row(
             .items_center()
             .child(
                 gpui_component::Icon::new(gpui_kit_assets::IconName::Unlink)
-                    .with_size(px(12.0))
+                    .with_size(design.px(12.0))
                     .text_color(design.tag_text),
             );
         if let Some(note) = branch.upstream_note.clone() {
@@ -750,18 +756,18 @@ fn remote_row(
         design,
     )
     .w_full()
-    .h(px(ROW_HEIGHT))
+    .h(design.px(ROW_HEIGHT))
     .cursor_pointer()
     .on_click(move |_, window, cx| {
         click_entity.update(cx, |view, cx| {
             view.activate_branch_switcher_row(Row::Remote(index), window, cx)
         });
     })
-    .child(
-        div()
-            .flex_none()
-            .child(style::glyph_icon(style::glyph::CLOUD, 13.0, design.muted)),
-    )
+    .child(div().flex_none().child(style::glyph_icon(
+        style::glyph::CLOUD,
+        design.scale(13.0),
+        design.muted,
+    )))
     .child(
         div()
             .flex_1()
@@ -787,7 +793,7 @@ fn new_branch_row(highlight: bool, design: &Design, entity: &Entity<RepoView>) -
         design,
     )
     .w_full()
-    .h(px(ROW_HEIGHT))
+    .h(design.px(ROW_HEIGHT))
     .cursor_pointer()
     .on_click(move |_, window, cx| {
         click_entity.update(cx, |view, cx| {
@@ -797,7 +803,7 @@ fn new_branch_row(highlight: bool, design: &Design, entity: &Entity<RepoView>) -
     .child(
         div()
             .flex_none()
-            .w(px(14.0))
+            .w(design.px(14.0))
             .text_color(design.muted)
             .child("+"),
     )

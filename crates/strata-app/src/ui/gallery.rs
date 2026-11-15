@@ -62,7 +62,7 @@ impl Render for Gallery {
                             .gap_1()
                             .child(
                                 div()
-                                    .text_size(px(20.0))
+                                    .text_size(design.px(20.0))
                                     .font_weight(FontWeight::BOLD)
                                     .child("Strata UI parts"),
                             )
@@ -138,8 +138,8 @@ impl Render for Gallery {
                                     .flex()
                                     .flex_col()
                                     .items_center()
-                                    .gap(px(2.0))
-                                    .text_size(px(10.0))
+                                    .gap(design.px(2.0))
+                                    .text_size(design.px(10.0))
                                     .child("Icon over label"),
                             ),
                         ),
@@ -302,7 +302,7 @@ impl Render for Gallery {
                 RowState::NORMAL.selected(true).head(true),
             ),
         ];
-        let mut row_list = div().flex().flex_col().gap_1().w(px(420.0));
+        let mut row_list = div().flex().flex_col().gap_1().w(design.px(420.0));
         for (label, state) in rows {
             row_list = row_list.child(
                 list_row(format!("gallery-row-{label}"), state, &design)
@@ -325,7 +325,7 @@ impl Render for Gallery {
                 .flex()
                 .flex_col()
                 .gap_1()
-                .w(px(420.0))
+                .w(design.px(420.0))
                 .child(
                     section_header("gallery-header-plain", "UNSTAGED", &design)
                         .count(2)
@@ -339,7 +339,11 @@ impl Render for Gallery {
                     section_header("gallery-header-collapsible", "BRANCHES", &design)
                         .count(7)
                         .disclosure(true)
-                        .icon(style::glyph_icon(style::glyph::BRANCH, 14.0, design.muted))
+                        .icon(style::glyph_icon(
+                            style::glyph::BRANCH,
+                            design.scale(14.0),
+                            design.muted,
+                        ))
                         .on_click(|_, _| {}),
                 )
                 .child(
@@ -358,16 +362,16 @@ impl Render for Gallery {
                 .gap_1()
                 .child(
                     div()
-                        .h(px(80.0))
+                        .h(design.px(80.0))
                         .flex()
                         .child(empty_state("No commits yet", &design)),
                 )
-                .child(div().h(px(80.0)).flex().child(message(
+                .child(div().h(design.px(80.0)).flex().child(message(
                     "computing diff…",
                     design.muted,
                     &design,
                 )))
-                .child(div().h(px(80.0)).flex().child(message(
+                .child(div().h(design.px(80.0)).flex().child(message(
                     "git failed: fatal: bad object",
                     design.remove_text,
                     &design,
@@ -379,7 +383,7 @@ impl Render for Gallery {
             &design,
             tab_strip("gallery-tab-strip", &design)
                 .border_1()
-                .rounded(px(6.0))
+                .rounded(design.px(6.0))
                 .child(
                     tab("gallery-tab-0", 0, "strata", true, &design)
                         .tooltip("/work/strata")
@@ -414,7 +418,7 @@ impl Render for Gallery {
             .child(
                 rail_item(
                     "gallery-rail-working-tree",
-                    style::glyph_icon(style::glyph::COMMIT, 15.0, design.text),
+                    style::glyph_icon(style::glyph::COMMIT, design.scale(15.0), design.text),
                     "Working tree",
                     &design,
                 )
@@ -424,7 +428,7 @@ impl Render for Gallery {
             .child(
                 rail_item(
                     "gallery-rail-branches",
-                    style::glyph_icon(style::glyph::BRANCH, 15.0, design.accent_text),
+                    style::glyph_icon(style::glyph::BRANCH, design.scale(15.0), design.accent_text),
                     "Branches",
                     &design,
                 )
@@ -435,7 +439,7 @@ impl Render for Gallery {
             .child(
                 rail_item(
                     "gallery-rail-tags",
-                    style::glyph_icon(style::glyph::TAG, 15.0, design.text),
+                    style::glyph_icon(style::glyph::TAG, design.scale(15.0), design.text),
                     "Tags",
                     &design,
                 )
@@ -445,13 +449,13 @@ impl Render for Gallery {
             .child(
                 rail_item(
                     "gallery-rail-history",
-                    style::glyph_icon(style::glyph::COMMIT, 15.0, design.text),
+                    style::glyph_icon(style::glyph::COMMIT, design.scale(15.0), design.text),
                     "History",
                     &design,
                 )
                 .on_click(|_, _, _| {}),
             );
-        rail_demo = rail_demo.h(px(240.0));
+        rail_demo = rail_demo.h(design.px(240.0));
         column = column.child(section(
             "Collapsed rail",
             &design,
@@ -462,7 +466,7 @@ impl Render for Gallery {
                 .child(rail_demo)
                 .child(
                     div()
-                        .max_w(px(360.0))
+                        .max_w(design.px(360.0))
                         .text_size(px(design.small()))
                         .text_color(design.muted)
                         .child(
@@ -581,7 +585,7 @@ fn keycap_row(key: &str, os: OperatingSystem, design: &Design) -> AnyElement {
 fn kinds(title: &str, design: &Design, kind: ButtonKind) -> AnyElement {
     let mut row = div().flex().items_center().gap_2().child(
         div()
-            .w(px(70.0))
+            .w(design.px(70.0))
             .flex_none()
             .text_size(px(design.tiny()))
             .text_color(design.muted)

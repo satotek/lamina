@@ -859,7 +859,7 @@ impl Branches {
     ) -> AnyElement {
         let head = data.head_branch.clone();
         let items = self.items(data, revision, upstreams, remotes, extras, &colors.design);
-        self.restore_scroll(&items);
+        self.restore_scroll(&items, &colors.design);
         self.scroll_to_requested_section(&items);
 
         let reveal = self.reveal.clone();
@@ -1382,7 +1382,7 @@ impl Branches {
     /// a refresh inserts or removes entries above it. The row is remembered by
     /// its key, not its index, so adding a tag above the viewport does not
     /// scroll the list by a row.
-    fn restore_scroll(&self, items: &Rc<Vec<SidebarItem>>) {
+    fn restore_scroll(&self, items: &Rc<Vec<SidebarItem>>, design: &Design) {
         let mut anchor = self.anchor.borrow_mut();
         let Some(previous) = anchor.items.replace(items.clone()) else {
             return;
@@ -1393,7 +1393,7 @@ impl Branches {
         }
 
         let base = self.scroll.0.borrow().base_handle.clone();
-        let height = px(ITEM_HEIGHT);
+        let height = design.px(ITEM_HEIGHT);
         let scroll_top = -base.offset().y;
         if scroll_top <= Pixels::ZERO {
             return;
@@ -1445,11 +1445,11 @@ impl Branches {
             .id("branch-drop-menu")
             .flex()
             .flex_col()
-            .gap(px(1.0))
-            .min_w(px(220.0))
-            .max_w(px(340.0))
-            .p(px(4.0))
-            .rounded(px(8.0))
+            .gap(design.px(1.0))
+            .min_w(design.px(220.0))
+            .max_w(design.px(340.0))
+            .p(design.px(4.0))
+            .rounded(design.px(8.0))
             .bg(design.panel)
             .border_1()
             .border_color(design.border)
@@ -1474,13 +1474,13 @@ impl Branches {
                 crate::ui::RowState::NORMAL,
                 design,
             )
-            .h(px(26.0))
+            .h(design.px(26.0))
             .w_full()
             .min_w_0()
             .overflow_hidden()
             .mx(px(0.0))
             .px_2()
-            .rounded(px(5.0))
+            .rounded(design.px(5.0))
             .text_size(px(design.small()))
             .text_color(design.text)
             .child(div().min_w_0().truncate().child(label));
@@ -2244,7 +2244,7 @@ fn item_element(
             )
         }
         SidebarItem::Placeholder { text, .. } => {
-            empty_row_at(text, px(42.0), colors).into_any_element()
+            empty_row_at(text, colors.design.px(42.0), colors).into_any_element()
         }
     }
 }
@@ -2268,13 +2268,13 @@ fn section_header(
             .disclosure(open)
             .icon(style::glyph_icon(
                 section.icon(),
-                14.0,
+                colors.design.scale(14.0),
                 colors.muted_foreground,
             ))
             // A list item is only as tall as the heading measured, so every
             // section heading must match a row's height.
-            .h(px(ITEM_HEIGHT))
-            .pr(px(18.0))
+            .h(colors.design.px(ITEM_HEIGHT))
+            .pr(colors.design.px(18.0))
             .on_click(move |_, cx| {
                 click_entity.update(cx, |view, cx| {
                     view.branches.toggle(index);
@@ -2285,7 +2285,7 @@ fn section_header(
         header = header.trailing(
             div()
                 .flex_none()
-                .text_size(px(9.0))
+                .text_size(colors.design.px(9.0))
                 .font_weight(FontWeight::NORMAL)
                 .child(t!("branch.working").to_string()),
         );
@@ -2333,14 +2333,14 @@ fn folder_row(
         crate::ui::RowState::NORMAL,
         &colors.design,
     )
-    .h(px(ITEM_HEIGHT))
+    .h(colors.design.px(ITEM_HEIGHT))
     .w_full()
     .min_w_0()
     .overflow_hidden()
     .mx(px(0.0))
-    .pr(px(18.0))
-    .pl(px(base + depth as f32 * 14.0))
-    .rounded(px(7.0))
+    .pr(colors.design.px(18.0))
+    .pl(colors.design.px(base + depth as f32 * 14.0))
+    .rounded(colors.design.px(7.0))
     .text_size(px(colors.design.small()))
     .text_color(colors.sidebar_foreground)
     .cursor_pointer()
@@ -2350,7 +2350,7 @@ fn folder_row(
         } else {
             IconName::ChevronRight
         })
-        .with_size(px(12.0))
+        .with_size(colors.design.px(12.0))
         .text_color(colors.muted_foreground),
     )
     .child(
@@ -2359,7 +2359,7 @@ fn folder_row(
         } else {
             IconName::FolderClosed
         })
-        .with_size(px(13.0))
+        .with_size(colors.design.px(13.0))
         .text_color(colors.muted_foreground),
     )
     .child(
@@ -2402,7 +2402,7 @@ impl Render for BranchDragChip {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .id("branch-drag-chip")
-            .p(px(2.0))
+            .p(self.design.px(2.0))
             .rounded_full()
             .bg(self.design.panel)
             .border_1()
@@ -2639,12 +2639,12 @@ fn remote_group_header(
             .disclosure(!collapsed)
             .icon(style::glyph_icon(
                 style::glyph::CLOUD,
-                14.0,
+                colors.design.scale(14.0),
                 colors.sidebar_foreground,
             ))
             .text_size(px(colors.design.small()))
             .text_color(colors.sidebar_foreground)
-            .h(px(ITEM_HEIGHT))
+            .h(colors.design.px(ITEM_HEIGHT))
             .on_click(move |_, cx| {
                 let group = click_group.clone();
                 click_entity.update(cx, |view, cx| {
@@ -2778,7 +2778,7 @@ fn local_row(
         crate::ui::RowState::NORMAL.head(active).revealed(revealed),
         colors,
     )
-    .pl(px(depth as f32 * 14.0))
+    .pl(colors.design.px(depth as f32 * 14.0))
     .cursor_pointer();
     if upstream_gone {
         let mut marker = div()
@@ -2788,7 +2788,7 @@ fn local_row(
             .items_center()
             .child(
                 Icon::new(IconName::Unlink)
-                    .with_size(px(12.0))
+                    .with_size(colors.design.px(12.0))
                     .text_color(colors.design.tag_text),
             );
         if let Some(note) = upstream_note.clone() {
@@ -2815,7 +2815,7 @@ fn local_row(
         // the closed eye is the same icon the menu's "Hide in history" uses.
         row = row.child(
             Icon::new(IconName::EyeOff)
-                .with_size(px(12.0))
+                .with_size(colors.design.px(12.0))
                 .text_color(colors.muted_foreground),
         );
     }
@@ -3124,11 +3124,11 @@ fn remote_row(
         crate::ui::RowState::NORMAL.revealed(revealed),
         colors,
     )
-    .pl(px(42.0 + depth as f32 * 14.0));
+    .pl(colors.design.px(42.0 + depth as f32 * 14.0));
     if hidden {
         row_element = row_element.child(
             Icon::new(IconName::EyeOff)
-                .with_size(px(12.0))
+                .with_size(colors.design.px(12.0))
                 .text_color(colors.muted_foreground),
         );
     }
@@ -3288,7 +3288,7 @@ fn tag_row(
         crate::ui::RowState::NORMAL.revealed(revealed),
         colors,
     )
-    .pl(px(depth as f32 * 14.0))
+    .pl(colors.design.px(depth as f32 * 14.0))
     .cursor_pointer()
     .on_click(move |_, window, cx| {
         entity.update(cx, |view, cx| {
@@ -3346,13 +3346,13 @@ fn submodule_row(
         crate::ui::RowState::NORMAL.selected(selected),
         &colors.design,
     )
-    .h(px(ITEM_HEIGHT))
+    .h(colors.design.px(ITEM_HEIGHT))
     .w_full()
     .min_w_0()
     .overflow_hidden()
     .mx(px(0.0))
-    .pr(px(18.0))
-    .rounded(px(7.0))
+    .pr(colors.design.px(18.0))
+    .rounded(colors.design.px(7.0))
     .text_size(px(colors.design.small()))
     .text_color(colors.sidebar_foreground)
     .child(div().flex_1().min_w_0().truncate().child(name.to_owned()))
@@ -3534,13 +3534,13 @@ fn worktree_row(
         crate::ui::RowState::NORMAL.head(current).selected(selected),
         &colors.design,
     )
-    .h(px(ITEM_HEIGHT))
+    .h(colors.design.px(ITEM_HEIGHT))
     .w_full()
     .min_w_0()
     .overflow_hidden()
     .mx(px(0.0))
-    .pr(px(18.0))
-    .rounded(px(7.0))
+    .pr(colors.design.px(18.0))
+    .rounded(colors.design.px(7.0))
     .text_size(px(colors.design.small()))
     .text_color(colors.sidebar_foreground)
     .child(div().flex_1().min_w_0().truncate().child(label.to_owned()))
@@ -4410,7 +4410,7 @@ fn row_with_icon(
 ) -> Stateful<Div> {
     let name = strip_stash_prefix(name);
     let row = crate::ui::list_row(id, state, &colors.design)
-        .h(px(ITEM_HEIGHT))
+        .h(colors.design.px(ITEM_HEIGHT))
         // A list item is laid out at its content width unless it is told to
         // fill, which would leave most of the row outside its hitbox.
         .w_full()
@@ -4419,12 +4419,19 @@ fn row_with_icon(
         .mx(px(0.0))
         // Leave room on the right so trailing labels stay clear of the
         // overlay vertical scrollbar.
-        .pr(px(18.0))
-        .rounded(px(7.0))
+        .pr(colors.design.px(18.0))
+        .rounded(colors.design.px(7.0))
         .text_size(px(colors.design.small()))
         .text_color(colors.sidebar_foreground);
     let row = match item_icon {
-        Some(item_icon) => row.child(glyph(item_icon, 14.0, colors.muted_foreground).flex_none()),
+        Some(item_icon) => row.child(
+            glyph(
+                item_icon,
+                colors.design.scale(14.0),
+                colors.muted_foreground,
+            )
+            .flex_none(),
+        ),
         None => row,
     };
     row.child(div().flex_1().min_w_0().truncate().child(name.to_owned()))
@@ -4566,10 +4573,10 @@ fn empty_row_at(text: &str, indent: Pixels, colors: &Colors) -> Div {
     div()
         .pl(indent)
         .pr_2()
-        .h(px(ITEM_HEIGHT))
+        .h(colors.design.px(ITEM_HEIGHT))
         .flex()
         .items_center()
-        .text_size(px(11.0))
+        .text_size(colors.design.px(11.0))
         .text_color(colors.muted_foreground)
         .child(text.to_owned())
 }
@@ -4610,13 +4617,13 @@ fn create_card(
     let mut card = dialog_card(colors, entity, focus)
         .child(
             div()
-                .text_size(px(13.0))
+                .text_size(colors.design.px(13.0))
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(t!("branch.dialog.create").to_string()),
         )
         .child(
             div()
-                .text_size(px(11.0))
+                .text_size(colors.design.px(11.0))
                 .text_color(colors.muted_foreground)
                 .child(t!(
                     "branch.dialog.new_branch_start",
@@ -4633,7 +4640,7 @@ fn create_card(
     if let Some(error) = &form.error {
         card = card.child(
             div()
-                .text_size(px(11.0))
+                .text_size(colors.design.px(11.0))
                 .text_color(colors.danger)
                 .child(error.clone()),
         );
@@ -4676,7 +4683,7 @@ fn dialog_card(colors: &Colors, entity: &Entity<RepoView>, focus: Option<&FocusH
         }
     };
     div()
-        .w(px(420.0))
+        .w(colors.design.px(420.0))
         .p_4()
         .flex()
         .flex_col()
@@ -4685,7 +4692,7 @@ fn dialog_card(colors: &Colors, entity: &Entity<RepoView>, focus: Option<&FocusH
         .bg(colors.overlay)
         .border_1()
         .border_color(colors.border)
-        .text_size(px(12.0))
+        .text_size(colors.design.px(12.0))
         .text_color(colors.foreground)
         .occlude()
         .when_some(focus, |card, focus| card.track_focus(focus))
@@ -4755,13 +4762,13 @@ fn rename_card(
     let mut card = dialog_card(colors, entity, focus)
         .child(
             div()
-                .text_size(px(13.0))
+                .text_size(colors.design.px(13.0))
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(t!("branch.dialog.rename").to_string()),
         )
         .child(
             div()
-                .text_size(px(11.0))
+                .text_size(colors.design.px(11.0))
                 .text_color(colors.muted_foreground)
                 .child(t!("branch.dialog.renaming", branch = form.branch)),
         )
@@ -4770,7 +4777,7 @@ fn rename_card(
         Some(label) => {
             card = card.child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(colors.design.px(11.0))
                     .text_color(colors.muted_foreground)
                     .child(t!("branch.dialog.current_upstream", label = label)),
             );
@@ -4784,7 +4791,7 @@ fn rename_card(
                     )
                     .child(
                         div()
-                            .text_size(px(10.0))
+                            .text_size(colors.design.px(10.0))
                             .text_color(colors.muted_foreground)
                             .child(
                                 "Pushes the new name, deletes the old remote branch and sets \
@@ -4796,7 +4803,7 @@ fn rename_card(
         None => {
             card = card.child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(colors.design.px(11.0))
                     .text_color(colors.muted_foreground)
                     .child(t!("branch.dialog.no_upstream").to_string()),
             );
@@ -4805,7 +4812,7 @@ fn rename_card(
     if let Some(error) = &form.error {
         card = card.child(
             div()
-                .text_size(px(11.0))
+                .text_size(colors.design.px(11.0))
                 .text_color(colors.danger)
                 .child(error.clone()),
         );
@@ -4828,13 +4835,13 @@ fn upstream_card(
     let mut card = dialog_card(colors, entity, focus)
         .child(
             div()
-                .text_size(px(13.0))
+                .text_size(colors.design.px(13.0))
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(t!("branch.dialog.set_upstream").to_string()),
         )
         .child(
             div()
-                .text_size(px(11.0))
+                .text_size(colors.design.px(11.0))
                 .text_color(colors.muted_foreground)
                 .child(match &form.current {
                     Some(current) => t!(
@@ -4850,7 +4857,7 @@ fn upstream_card(
     if form.choices.is_empty() {
         card = card.child(
             div()
-                .text_size(px(11.0))
+                .text_size(colors.design.px(11.0))
                 .text_color(colors.muted_foreground)
                 .child(t!("branch.dialog.no_remote_branches").to_string()),
         );
@@ -4891,7 +4898,7 @@ fn upstream_card(
                 .flex()
                 .flex_col()
                 .gap_1()
-                .max_h(px(200.0))
+                .max_h(colors.design.px(200.0))
                 .overflow_y_scroll()
                 .children(rows),
         );
@@ -4900,7 +4907,7 @@ fn upstream_card(
     if let Some(error) = &form.error {
         card = card.child(
             div()
-                .text_size(px(11.0))
+                .text_size(colors.design.px(11.0))
                 .text_color(colors.danger)
                 .child(error.clone()),
         );
@@ -4933,26 +4940,26 @@ fn add_remote_card(
     let mut card = dialog_card(colors, entity, focus)
         .child(
             div()
-                .text_size(px(13.0))
+                .text_size(colors.design.px(13.0))
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(t!("branch.dialog.add_remote").to_string()),
         )
         .child(
             div()
-                .text_size(px(11.0))
+                .text_size(colors.design.px(11.0))
                 .text_color(colors.muted_foreground)
                 .child(t!("branch.dialog.add_remote_detail").to_string()),
         )
         .child(
             div()
-                .text_size(px(11.0))
+                .text_size(colors.design.px(11.0))
                 .font_weight(FontWeight::MEDIUM)
                 .child(t!("branch.dialog.name").to_string()),
         )
         .child(Input::new(&form.name).w_full())
         .child(
             div()
-                .text_size(px(11.0))
+                .text_size(colors.design.px(11.0))
                 .font_weight(FontWeight::MEDIUM)
                 .child(t!("branch.dialog.url").to_string()),
         )
@@ -4966,7 +4973,7 @@ fn add_remote_card(
     if let Some(error) = &form.error {
         card = card.child(
             div()
-                .text_size(px(11.0))
+                .text_size(colors.design.px(11.0))
                 .text_color(colors.danger)
                 .child(error.clone()),
         );
@@ -4989,13 +4996,13 @@ fn rename_remote_card(
     let mut card = dialog_card(colors, entity, focus)
         .child(
             div()
-                .text_size(px(13.0))
+                .text_size(colors.design.px(13.0))
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(t!("branch.dialog.rename_remote").to_string()),
         )
         .child(
             div()
-                .text_size(px(11.0))
+                .text_size(colors.design.px(11.0))
                 .text_color(colors.muted_foreground)
                 .child(t!("branch.dialog.renaming_remote", name = form.name).to_string()),
         )
@@ -5003,7 +5010,7 @@ fn rename_remote_card(
     if let Some(error) = &form.error {
         card = card.child(
             div()
-                .text_size(px(11.0))
+                .text_size(colors.design.px(11.0))
                 .text_color(colors.danger)
                 .child(error.clone()),
         );
@@ -5026,13 +5033,13 @@ fn edit_remote_card(
     let mut card = dialog_card(colors, entity, focus)
         .child(
             div()
-                .text_size(px(13.0))
+                .text_size(colors.design.px(13.0))
                 .font_weight(FontWeight::SEMIBOLD)
                 .child(t!("branch.dialog.edit_remote", name = form.name)),
         )
         .child(
             div()
-                .text_size(px(11.0))
+                .text_size(colors.design.px(11.0))
                 .font_weight(FontWeight::MEDIUM)
                 .child(t!("branch.dialog.fetch_url").to_string()),
         )
@@ -5042,7 +5049,7 @@ fn edit_remote_card(
             card = card
                 .child(
                     div()
-                        .text_size(px(11.0))
+                        .text_size(colors.design.px(11.0))
                         .font_weight(FontWeight::MEDIUM)
                         .child(t!("branch.dialog.push_url").to_string()),
                 )
@@ -5051,7 +5058,7 @@ fn edit_remote_card(
         None => {
             card = card.child(
                 div()
-                    .text_size(px(11.0))
+                    .text_size(colors.design.px(11.0))
                     .text_color(colors.muted_foreground)
                     .child(t!("branch.dialog.push_uses_fetch").to_string()),
             );
@@ -5060,7 +5067,7 @@ fn edit_remote_card(
     if let Some(error) = &form.error {
         card = card.child(
             div()
-                .text_size(px(11.0))
+                .text_size(colors.design.px(11.0))
                 .text_color(colors.danger)
                 .child(error.clone()),
         );
@@ -6728,10 +6735,11 @@ mod tests {
     #[test]
     fn a_refresh_keeps_the_row_at_the_top_of_the_viewport() {
         let branches = Branches::default();
+        let design = Design::default();
         let tags: Vec<String> = (1..=10).map(|number| format!("v{number}")).collect();
         let tag_refs: Vec<&str> = tags.iter().map(String::as_str).collect();
         let before = Rc::new(flatten(&branches, sidebar_data(&[], &[], &tag_refs, &[])));
-        branches.restore_scroll(&before);
+        branches.restore_scroll(&before, &design);
 
         // Five rows down: past the two empty sections' headings and
         // placeholders, so `v1` is the first tag at the top.
@@ -6749,7 +6757,7 @@ mod tests {
             &branches,
             sidebar_data(&[], &[], &inserted_refs, &[]),
         ));
-        branches.restore_scroll(&after);
+        branches.restore_scroll(&after, &design);
 
         assert_eq!(
             branches.scroll.0.borrow().base_handle.offset().y,
@@ -6761,8 +6769,9 @@ mod tests {
     #[test]
     fn a_refresh_that_keeps_the_list_keeps_the_scroll_offset() {
         let branches = Branches::default();
+        let design = Design::default();
         let items = Rc::new(flatten(&branches, sidebar_data(&["main"], &[], &[], &[])));
-        branches.restore_scroll(&items);
+        branches.restore_scroll(&items, &design);
         branches
             .scroll
             .0
@@ -6770,7 +6779,7 @@ mod tests {
             .base_handle
             .set_offset(point(px(0.0), px(-56.0)));
 
-        branches.restore_scroll(&items);
+        branches.restore_scroll(&items, &design);
 
         assert_eq!(
             branches.scroll.0.borrow().base_handle.offset().y,

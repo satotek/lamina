@@ -20,7 +20,7 @@ use std::sync::Arc;
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, Context, Entity, FocusHandle, Hsla, InteractiveElement, ParentElement,
-    SharedString, Styled, Subscription, UniformListScrollHandle, Window, actions, div, px,
+    SharedString, Styled, Subscription, UniformListScrollHandle, Window, actions, div,
 };
 use gpui_component::input::{InputEvent, TextareaState};
 use gpui_component::{ActiveTheme as _, Theme};
@@ -1769,7 +1769,7 @@ fn synthetic_state(
         div()
             .flex()
             .items_center()
-            .h(px(30.0))
+            .h(colors.design.px(30.0))
             .flex_none()
             .px_3()
             .bg(colors.title_bar)

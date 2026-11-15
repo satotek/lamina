@@ -808,7 +808,7 @@ impl RepoView {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(6.0))
+                    .gap(design.px(6.0))
                     .font_family(design.mono.clone())
                     .text_size(px(design.code))
                     .text_color(design.muted)
@@ -817,15 +817,18 @@ impl RepoView {
                     .child(id_span(entry.new_id)),
             )
             .child(
-                div().text_size(px(11.0)).text_color(design.muted).child(
-                    t!(
-                        "reflog.entry_detail",
-                        reference = entry.reference,
-                        author = entry.committer_name,
-                        time = style::relative_time(entry.time, style::now_epoch())
-                    )
-                    .to_string(),
-                ),
+                div()
+                    .text_size(design.px(11.0))
+                    .text_color(design.muted)
+                    .child(
+                        t!(
+                            "reflog.entry_detail",
+                            reference = entry.reference,
+                            author = entry.committer_name,
+                            time = style::relative_time(entry.time, style::now_epoch())
+                        )
+                        .to_string(),
+                    ),
             )
             .into_any_element()
     }
@@ -967,7 +970,7 @@ fn reflog_row(
         ui::RowState::NORMAL.selected(selected),
         design,
     )
-    .h(px(ROW_HEIGHT))
+    .h(design.px(ROW_HEIGHT))
     .cursor_pointer()
     .child(ui::status_badge(
         kind_label(entry.kind),
@@ -980,7 +983,7 @@ fn reflog_row(
             .flex_col()
             .flex_1()
             .min_w_0()
-            .gap(px(1.0))
+            .gap(design.px(1.0))
             .child(
                 div()
                     .min_w_0()
@@ -993,7 +996,7 @@ fn reflog_row(
                     .min_w_0()
                     .truncate()
                     .font_family(design.mono.clone())
-                    .text_size(px(10.5))
+                    .text_size(design.px(10.5))
                     .text_color(design.muted)
                     .child(second),
             ),

@@ -26,16 +26,17 @@ impl RepoView {
             border: design.border,
             accent: design.accent,
             accent_foreground: design.on_accent,
+            zoom: design.zoom,
         });
 
         let mut bar = div()
             .flex()
             .items_center()
             .justify_between()
-            .h(px(26.0))
+            .h(design.px(26.0))
             .flex_none()
             .px_3()
-            .gap(px(10.0))
+            .gap(design.px(10.0))
             .bg(design.chrome)
             .border_t_1()
             .border_color(design.border)
@@ -44,14 +45,14 @@ impl RepoView {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(10.0))
+                    .gap(design.px(10.0))
                     .flex_1()
                     .min_w_0()
                     .child(
                         div()
                             .flex_none()
-                            .w(px(7.0))
-                            .h(px(7.0))
+                            .w(design.px(7.0))
+                            .h(design.px(7.0))
                             .rounded_full()
                             .bg(design.add_text),
                     )
@@ -71,7 +72,7 @@ impl RepoView {
         }
         bar.child(
             div()
-                .max_w(px(720.0))
+                .max_w(design.px(720.0))
                 .truncate()
                 .text_color(if error.is_some() {
                     design.remove_text

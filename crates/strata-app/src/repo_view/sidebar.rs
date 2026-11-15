@@ -39,8 +39,17 @@ const SIDEBAR_SHARE: f32 = 0.22;
 /// that room back as the window narrows instead of pushing the panes below
 /// their minimums. It also grows smoothly with the window, so the main area
 /// never shrinks as the window gets wider.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn width_for(viewport: f32) -> f32 {
-    (viewport * SIDEBAR_SHARE).clamp(SIDEBAR_MIN_WIDTH, SIDEBAR_WIDTH)
+    width_for_zoom(viewport, 1.0)
+}
+
+pub(super) fn width_for_zoom(viewport: f32, zoom: f32) -> f32 {
+    let min = (SIDEBAR_MIN_WIDTH * zoom).min(viewport * 0.45);
+    let max = (SIDEBAR_WIDTH * zoom).max(min);
+    (viewport * SIDEBAR_SHARE)
+        .clamp(min, max)
+        .min((viewport * 0.45).max(min))
 }
 
 /// The width the sidebar takes from the window while it is shown.
@@ -48,11 +57,16 @@ pub(super) fn width_for(viewport: f32) -> f32 {
 /// The collapsed rail is a fixed narrow strip; expanding asks [`width_for`]
 /// again, so the sidebar comes back at the width the window gives it rather
 /// than at one remembered from a different window size.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn layout_width(viewport: f32, collapsed: bool) -> f32 {
+    layout_width_for_zoom(viewport, collapsed, 1.0)
+}
+
+pub(super) fn layout_width_for_zoom(viewport: f32, collapsed: bool, zoom: f32) -> f32 {
     if collapsed {
-        ui::RAIL_WIDTH
+        ui::RAIL_WIDTH * zoom
     } else {
-        width_for(viewport)
+        width_for_zoom(viewport, zoom)
     }
 }
 
@@ -73,7 +87,7 @@ impl RepoView {
             .w(px(width))
             .h_full()
             .flex_none()
-            .gap(px(14.0))
+            .gap(design.px(14.0))
             .py_3()
             .px_2()
             .overflow_hidden()
@@ -146,7 +160,7 @@ impl RepoView {
             .child(
                 ui::rail_item(
                     "rail-working-tree",
-                    icon(IconName::FileText, 15.0, design.text),
+                    icon(IconName::FileText, design.scale(15.0), design.text),
                     t!("sidebar.working_tree").to_string(),
                     design,
                 )
@@ -159,7 +173,7 @@ impl RepoView {
             .child(
                 ui::rail_item(
                     "rail-history",
-                    glyph(style::glyph::COMMIT, 15.0, design.text),
+                    glyph(style::glyph::COMMIT, design.scale(15.0), design.text),
                     t!("sidebar.history").to_string(),
                     design,
                 )
@@ -173,7 +187,7 @@ impl RepoView {
             .child(
                 ui::rail_item(
                     "rail-reflog",
-                    icon(IconName::ClockArrowDown, 15.0, design.text),
+                    icon(IconName::ClockArrowDown, design.scale(15.0), design.text),
                     t!("sidebar.reflog").to_string(),
                     design,
                 )
@@ -197,7 +211,7 @@ impl RepoView {
             rail = rail.child(
                 ui::rail_item(
                     format!("rail-section-{}", section.id()),
-                    glyph(summary.icon, 15.0, design.text),
+                    glyph(summary.icon, design.scale(15.0), design.text),
                     summary.title,
                     design,
                 )
@@ -218,7 +232,7 @@ impl RepoView {
             t!("sidebar.showing_only", name = name).to_string(),
             design,
         )
-        .rounded(px(6.0))
+        .rounded(design.px(6.0))
         // The sidebar is narrow; the banner keeps the full sentence readable
         // by dropping a size and tightening its own padding.
         .px_2()
@@ -248,9 +262,9 @@ impl RepoView {
             .flex()
             .items_center()
             .gap_2()
-            .h(px(30.0))
+            .h(design.px(30.0))
             .px_2()
-            .rounded(px(7.0))
+            .rounded(design.px(7.0))
             .text_size(px(design.ui))
             .cursor_pointer()
             .when(worktree, |row| row.bg(design.selected))
@@ -258,7 +272,7 @@ impl RepoView {
             .on_click(
                 cx.listener(|this, _: &ClickEvent, window, cx| this.open_worktree(window, cx)),
             )
-            .child(icon(IconName::FileText, 15.0, design.text))
+            .child(icon(IconName::FileText, design.scale(15.0), design.text))
             .child(
                 div()
                     .flex_1()
@@ -270,10 +284,10 @@ impl RepoView {
                 row.child(
                     div()
                         .flex_none()
-                        .px(px(7.0))
+                        .px(design.px(7.0))
                         .rounded_full()
                         .bg(design.accent_soft)
-                        .text_size(px(11.0))
+                        .text_size(design.px(11.0))
                         .font_weight(FontWeight::SEMIBOLD)
                         .text_color(design.accent_text)
                         .child(changes.to_string()),
@@ -285,9 +299,9 @@ impl RepoView {
             .flex()
             .items_center()
             .gap_2()
-            .h(px(30.0))
+            .h(design.px(30.0))
             .px_2()
-            .rounded(px(7.0))
+            .rounded(design.px(7.0))
             .text_size(px(design.ui))
             .cursor_pointer()
             .when(history, |row| row.bg(design.selected))
@@ -299,7 +313,7 @@ impl RepoView {
             }))
             .child(glyph(
                 style::glyph::COMMIT,
-                15.0,
+                design.scale(15.0),
                 if history {
                     design.accent_text
                 } else {
@@ -320,9 +334,9 @@ impl RepoView {
             .flex()
             .items_center()
             .gap_2()
-            .h(px(30.0))
+            .h(design.px(30.0))
             .px_2()
-            .rounded(px(7.0))
+            .rounded(design.px(7.0))
             .text_size(px(design.ui))
             .cursor_pointer()
             .when(reflog, |row| row.bg(design.selected))
@@ -330,7 +344,7 @@ impl RepoView {
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.open_reflog(window, cx)))
             .child(icon(
                 IconName::ClockArrowDown,
-                15.0,
+                design.scale(15.0),
                 if reflog {
                     design.accent_text
                 } else {
@@ -349,7 +363,7 @@ impl RepoView {
         div()
             .flex()
             .flex_col()
-            .gap(px(2.0))
+            .gap(design.px(2.0))
             .child(working_tree)
             .child(history)
             .child(reflog_entry)

@@ -196,7 +196,7 @@ impl State {
             .flex()
             .items_center()
             .gap_1()
-            .h(px(34.0))
+            .h(design.px(34.0))
             .flex_none()
             .px_3p5()
             .bg(design.background)
@@ -262,19 +262,22 @@ impl State {
             .items_center()
             .gap_2()
             .child(
-                div().text_size(px(11.0)).text_color(design.muted).child(
-                    t!(
-                        "image_diff.opacity",
-                        percent = format!("{:.0}", value * 100.0)
-                    )
-                    .to_string(),
-                ),
+                div()
+                    .text_size(design.px(11.0))
+                    .text_color(design.muted)
+                    .child(
+                        t!(
+                            "image_diff.opacity",
+                            percent = format!("{:.0}", value * 100.0)
+                        )
+                        .to_string(),
+                    ),
             )
             .child(
                 div()
                     .relative()
-                    .w(px(120.0))
-                    .h(px(14.0))
+                    .w(design.px(120.0))
+                    .h(design.px(14.0))
                     .cursor_ew_resize()
                     .id("image-onion-slider")
                     .on_drag(OnionDrag, |drag, _, _, cx| cx.new(|_| *drag))
@@ -286,30 +289,30 @@ impl State {
                     .child(
                         div()
                             .absolute()
-                            .top(px(5.0))
+                            .top(design.px(5.0))
                             .left_0()
                             .right_0()
-                            .h(px(4.0))
+                            .h(design.px(4.0))
                             .rounded_full()
                             .bg(design.field),
                     )
                     .child(
                         div()
                             .absolute()
-                            .top(px(5.0))
+                            .top(design.px(5.0))
                             .left_0()
                             .w(relative(value))
-                            .h(px(4.0))
+                            .h(design.px(4.0))
                             .rounded_full()
                             .bg(design.accent),
                     )
                     .child(
                         div()
                             .absolute()
-                            .top(px(1.0))
+                            .top(design.px(1.0))
                             .left(relative(value))
-                            .ml(px(-6.0))
-                            .size(px(12.0))
+                            .ml(design.px(-6.0))
+                            .size(design.px(12.0))
                             .rounded_full()
                             .bg(design.accent)
                             .border_1()
@@ -417,7 +420,7 @@ pub(crate) fn labelled_picture(
         .flex_1()
         .min_w_0()
         .min_h_0()
-        .child(side_label(&label.into(), side, label_color))
+        .child(side_label(&label.into(), side, label_color, design))
         .child(frame)
         .into_any_element()
 }
@@ -550,8 +553,8 @@ fn swipe(
             .top_0()
             .bottom_0()
             .left(relative(fraction))
-            .ml(px(-6.0))
-            .w(px(12.0))
+            .ml(design.px(-6.0))
+            .w(design.px(12.0))
             .cursor_ew_resize()
             .id("image-swipe-handle")
             .on_drag(SwipeDrag, |drag, _, _, cx| cx.new(|_| *drag))
@@ -560,17 +563,17 @@ fn swipe(
                     .absolute()
                     .top_0()
                     .bottom_0()
-                    .left(px(5.0))
-                    .w(px(2.0))
+                    .left(design.px(5.0))
+                    .w(design.px(2.0))
                     .bg(design.accent),
             )
             .child(
                 div()
                     .absolute()
                     .top(relative(0.5))
-                    .left(px(1.0))
-                    .size(px(10.0))
-                    .mt(px(-5.0))
+                    .left(design.px(1.0))
+                    .size(design.px(10.0))
+                    .mt(design.px(-5.0))
                     .rounded_full()
                     .bg(design.accent),
             ),
@@ -588,13 +591,13 @@ fn swipe(
                 .items_center()
                 .justify_between()
                 .px_3p5()
-                .h(px(24.0))
+                .h(design.px(24.0))
                 .flex_none()
-                .text_size(px(11.0))
+                .text_size(design.px(11.0))
                 .text_color(design.muted)
-                .child(side_label(&t!("image_diff.old"), old, design.muted))
+                .child(side_label(&t!("image_diff.old"), old, design.muted, design))
                 .child(t!("image_diff.drag_divider").to_string())
-                .child(side_label(&t!("image_diff.new"), new, design.muted)),
+                .child(side_label(&t!("image_diff.new"), new, design.muted, design)),
         )
         .child(area_element)
         .into_any_element()
@@ -653,11 +656,11 @@ fn onion(state: &State, diff: &ImageDiff, design: &Design, missing: bool) -> Any
                 .items_center()
                 .justify_between()
                 .px_3p5()
-                .h(px(24.0))
+                .h(design.px(24.0))
                 .flex_none()
-                .text_size(px(11.0))
+                .text_size(design.px(11.0))
                 .text_color(design.muted)
-                .child(side_label(&t!("image_diff.old"), old, design.muted))
+                .child(side_label(&t!("image_diff.old"), old, design.muted, design))
                 .child(
                     t!(
                         "image_diff.new_at",
@@ -665,7 +668,7 @@ fn onion(state: &State, diff: &ImageDiff, design: &Design, missing: bool) -> Any
                     )
                     .to_string(),
                 )
-                .child(side_label(&t!("image_diff.new"), new, design.muted)),
+                .child(side_label(&t!("image_diff.new"), new, design.muted, design)),
         )
         .child(stack)
         .into_any_element()
@@ -726,7 +729,14 @@ fn positioned_image(
                 .object_fit(ObjectFit::Contain)
                 .with_fallback({
                     let color = design.muted;
-                    move || centered_fallback(t!("image_diff.cannot_decode").to_string(), color)
+                    let text_size = design.px(12.0);
+                    move || {
+                        centered_fallback(
+                            t!("image_diff.cannot_decode").to_string(),
+                            color,
+                            text_size,
+                        )
+                    }
                 }),
         )
         .into_any_element()
@@ -756,18 +766,23 @@ fn drawn_image(state: &State, source: Arc<Image>, side: &ImageSide, design: &Des
         .object_fit(ObjectFit::Contain)
         .with_fallback({
             let color = design.muted;
-            move || centered_fallback(t!("image_diff.cannot_decode").to_string(), color)
+            let text_size = design.px(12.0);
+            move || centered_fallback(t!("image_diff.cannot_decode").to_string(), color, text_size)
         })
         .into_any_element()
 }
 
-fn centered_fallback(text: impl Into<gpui::SharedString>, color: Hsla) -> AnyElement {
+fn centered_fallback(
+    text: impl Into<gpui::SharedString>,
+    color: Hsla,
+    text_size: Pixels,
+) -> AnyElement {
     div()
         .size_full()
         .flex()
         .items_center()
         .justify_center()
-        .text_size(px(12.0))
+        .text_size(text_size)
         .text_color(color)
         .child(text.into())
         .into_any_element()
@@ -781,7 +796,7 @@ fn centered_message(text: impl Into<gpui::SharedString>, design: &Design) -> Any
         .items_center()
         .justify_center()
         .p_4()
-        .text_size(px(12.0))
+        .text_size(design.px(12.0))
         .text_color(design.muted)
         .child(text.into())
         .into_any_element()
@@ -797,7 +812,7 @@ fn placeholder(side: &ImageSide, missing: bool) -> String {
     }
 }
 
-fn side_label(label: &str, side: &ImageSide, color: Hsla) -> AnyElement {
+fn side_label(label: &str, side: &ImageSide, color: Hsla, design: &Design) -> AnyElement {
     let mut text = String::from(label);
     if let (Some(width), Some(height)) = (side.width, side.height) {
         text.push_str(&t!("image_diff.dimensions", width = width, height = height));
@@ -805,11 +820,11 @@ fn side_label(label: &str, side: &ImageSide, color: Hsla) -> AnyElement {
     text.push_str(&t!("image_diff.size", size = format_size(side.size)));
     div()
         .flex_none()
-        .h(px(24.0))
+        .h(design.px(24.0))
         .flex()
         .items_center()
         .px_3p5()
-        .text_size(px(11.0))
+        .text_size(design.px(11.0))
         .text_color(color)
         .child(text)
         .into_any_element()

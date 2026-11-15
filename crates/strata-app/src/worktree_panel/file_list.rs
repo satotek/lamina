@@ -58,7 +58,7 @@ impl WorktreePanel {
         div()
             .flex()
             .flex_col()
-            .w(px(LIST_WIDTH))
+            .w(colors.design.px(LIST_WIDTH))
             .flex_none()
             .min_h_0()
             .border_r_1()
@@ -163,7 +163,7 @@ impl WorktreePanel {
             .px_3()
             .pt_3()
             .pb_1p5()
-            .h(px(24.0))
+            .h(colors.design.px(24.0))
             .rounded(px(0.0)),
         );
 
@@ -172,8 +172,8 @@ impl WorktreePanel {
                 .child(
                     div()
                         .px_3()
-                        .h(px(24.0))
-                        .text_size(px(11.0))
+                        .h(colors.design.px(24.0))
+                        .text_size(colors.design.px(11.0))
                         .text_color(colors.muted_foreground)
                         .child(t!("common.none").to_string()),
                 )
@@ -220,7 +220,7 @@ impl WorktreePanel {
         })
         .track_scroll(&scroll)
         .with_scrollbar(&scroll)
-        .h(px(ROW_HEIGHT * visible_rows as f32))
+        .h(colors.design.px(ROW_HEIGHT * visible_rows as f32))
         .flex_none();
 
         section = section.child(list);
@@ -251,10 +251,10 @@ fn file_row(
     .when_some(dir, |row, dir| {
         row.child(
             div()
-                .max_w(px(120.0))
+                .max_w(context.colors.design.px(120.0))
                 .flex_none()
                 .truncate()
-                .text_size(px(11.0))
+                .text_size(context.colors.design.px(11.0))
                 .text_color(context.colors.muted_foreground)
                 .child(dir.to_owned()),
         )
