@@ -94,6 +94,15 @@ impl<T> TabDeck<T> {
         self.active
     }
 
+    /// Inserts `item` at `index` (clamped to the end) and activates it,
+    /// returning the index it landed on.
+    pub fn insert(&mut self, index: usize, item: T) -> usize {
+        let index = index.min(self.items.len());
+        self.items.insert(index, item);
+        self.active = index;
+        index
+    }
+
     /// Switches to `index` if it is in bounds and differs from the active tab.
     pub fn select(&mut self, index: usize) -> bool {
         if index >= self.items.len() || index == self.active {
@@ -170,6 +179,58 @@ impl<T> TabDeck<T> {
             self.active += 1;
         }
         true
+    }
+}
+
+/// How many closed tabs one window remembers for "Reopen closed tab".
+pub const MAX_CLOSED_TABS: usize = 10;
+
+/// A repository tab that was closed, with the position it had.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClosedTab {
+    pub path: PathBuf,
+    /// Index the tab had in the deck when it was closed.
+    pub index: usize,
+}
+
+/// The most recently closed tabs of one window, oldest first.
+///
+/// Kept per window and not persisted: a tab closed in a session that has ended
+/// is not what reopening means.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClosedTabStack {
+    entries: Vec<ClosedTab>,
+}
+
+impl ClosedTabStack {
+    /// Records a closed tab, dropping the oldest once the stack is full.
+    pub fn push(&mut self, tab: ClosedTab) {
+        self.entries.push(tab);
+        while self.entries.len() > MAX_CLOSED_TABS {
+            self.entries.remove(0);
+        }
+    }
+
+    /// The most recent entry `is_valid` accepts, dropping the entries skipped
+    /// on the way. A repository deleted since it was closed is skipped so the
+    /// user gets the next older tab instead of nothing.
+    pub fn pop_existing(&mut self, mut is_valid: impl FnMut(&Path) -> bool) -> Option<ClosedTab> {
+        while let Some(tab) = self.entries.pop() {
+            if is_valid(&tab.path) {
+                return Some(tab);
+            }
+        }
+        None
+    }
+
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 }
 
@@ -364,6 +425,63 @@ mod tests {
         assert_eq!(deck.close_active(), CloseOutcome::ClosedLast("b"));
         assert!(deck.is_empty());
         assert_eq!(deck.active_index(), 0);
+    }
+
+    #[test]
+    fn insert_puts_a_tab_at_its_old_position_and_activates_it() {
+        let mut deck = TabDeck::from_items(vec!["a", "b", "c"], 2);
+        assert_eq!(deck.insert(1, "b2"), 1);
+        assert_eq!(deck.items(), &["a", "b2", "b", "c"]);
+        assert_eq!(deck.active(), Some(&"b2"));
+
+        // A position past the end lands at the end, like opening a tab.
+        assert_eq!(deck.insert(99, "d"), 4);
+        assert_eq!(deck.items(), &["a", "b2", "b", "c", "d"]);
+        assert_eq!(deck.active(), Some(&"d"));
+    }
+
+    #[test]
+    fn the_closed_tab_stack_keeps_the_most_recent_ten() {
+        let mut stack = ClosedTabStack::default();
+        for index in 0..MAX_CLOSED_TABS + 2 {
+            stack.push(ClosedTab {
+                path: PathBuf::from(format!("/repo/{index}")),
+                index,
+            });
+        }
+        assert_eq!(stack.len(), MAX_CLOSED_TABS);
+
+        let newest = stack.pop_existing(|_| true).expect("newest entry");
+        assert_eq!(
+            newest.path,
+            PathBuf::from(format!("/repo/{}", MAX_CLOSED_TABS + 1))
+        );
+        assert_eq!(newest.index, MAX_CLOSED_TABS + 1);
+    }
+
+    #[test]
+    fn reopening_skips_repositories_that_no_longer_exist() {
+        let mut stack = ClosedTabStack::default();
+        let keep = PathBuf::from("/repo/keep");
+        stack.push(ClosedTab {
+            path: keep.clone(),
+            index: 0,
+        });
+        stack.push(ClosedTab {
+            path: PathBuf::from("/repo/gone"),
+            index: 1,
+        });
+
+        let reopened = stack.pop_existing(|path| path == keep).expect("kept entry");
+        assert_eq!(
+            reopened,
+            ClosedTab {
+                path: keep,
+                index: 0
+            }
+        );
+        assert!(stack.is_empty(), "the missing entry must be dropped too");
+        assert_eq!(stack.pop_existing(|_| true), None);
     }
 
     #[test]

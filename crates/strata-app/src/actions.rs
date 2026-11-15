@@ -58,6 +58,9 @@ actions!(
         NewTab,
         /// Closes the active tab, or the window when it is the last tab.
         CloseTab,
+        /// Reopens the most recently closed repository tab at its old position.
+        /// Handled by `Workspace`.
+        ReopenClosedTab,
         /// Switches to the next repository tab.
         NextTab,
         /// Switches to the previous repository tab.

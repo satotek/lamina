@@ -161,9 +161,9 @@ use crate::actions::ToggleTerminal;
 use crate::actions::{
     CloneRepository, CloseCompare, CloseTab, ExtendSelectionNext, ExtendSelectionPrevious,
     NavigateBack, NewRepository, NewTab, NextTab, OpenGitConfig, OpenInEditor, OpenRepository,
-    OpenSettings, OpenTerminalHere, PreviousTab, Quit, REPO_VIEW, REPO_VIEW_LIST, SelectFirst,
-    SelectLast, SelectNext, SelectPageDown, SelectPageUp, SelectPrevious, SelectTab1, SelectTab2,
-    SelectTab3, SelectTab4, SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9,
+    OpenSettings, OpenTerminalHere, PreviousTab, Quit, REPO_VIEW, REPO_VIEW_LIST, ReopenClosedTab,
+    SelectFirst, SelectLast, SelectNext, SelectPageDown, SelectPageUp, SelectPrevious, SelectTab1,
+    SelectTab2, SelectTab3, SelectTab4, SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9,
     StashChanges, SwitchBranch, ToggleDetailsMaximized, ToggleFrameStats, TogglePalette,
     ToggleSidebar, ToggleWholeFile, UndoLastAction, WORKSPACE,
 };
@@ -384,6 +384,14 @@ pub static ACTIONS: &[ActionSpec] = &[
         [binding("secondary-w", Some(WORKSPACE))],
         4,
         false
+    ),
+    action!(
+        "strata::ReopenClosedTab",
+        "Reopen closed tab",
+        Actions,
+        Some(WORKSPACE),
+        ReopenClosedTab,
+        [binding("secondary-shift-t", Some(WORKSPACE))]
     ),
     action!(
         "strata::NextTab",
@@ -1889,6 +1897,7 @@ mod tests {
             ("secondary-[", "NavigateBack", "RepoView"),
             ("secondary-t", "NewTab", "Workspace"),
             ("secondary-w", "CloseTab", "Workspace"),
+            ("secondary-shift-t", "ReopenClosedTab", "Workspace"),
             ("ctrl-tab", "NextTab", "Workspace"),
             ("ctrl-shift-tab", "PreviousTab", "Workspace"),
             ("secondary-1", "SelectTab1", "Workspace"),

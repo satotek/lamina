@@ -26,8 +26,8 @@ use strata_core::session::Session;
 
 use crate::actions::{
     CloneRepository, CloseTab, NewRepository, NewTab, NextTab, OpenRepository, PreviousTab,
-    SelectTab1, SelectTab2, SelectTab3, SelectTab4, SelectTab5, SelectTab6, SelectTab7, SelectTab8,
-    SelectTab9, WORKSPACE,
+    ReopenClosedTab, SelectTab1, SelectTab2, SelectTab3, SelectTab4, SelectTab5, SelectTab6,
+    SelectTab7, SelectTab8, SelectTab9, WORKSPACE,
 };
 use crate::debug_launch::{self, DebugDialog, DebugLaunch};
 use crate::picker::{Mode, OpenTarget, Picker};
@@ -35,7 +35,7 @@ use crate::recent::{self, RecentRepositories};
 use crate::repo_view::{Launch, RepoView};
 use crate::settings::Settings;
 use crate::style::Design;
-use crate::tabs::{CloseOutcome, SavedSession, SavedWindow, TabDeck};
+use crate::tabs::{CloseOutcome, ClosedTab, ClosedTabStack, SavedSession, SavedWindow, TabDeck};
 
 const DEFAULT_WINDOW_SIZE: (f32, f32) = (1360.0, 860.0);
 
@@ -142,6 +142,9 @@ enum OpenDisposition {
 pub struct Workspace {
     content: Content,
     window_id: WindowId,
+    /// Repository tabs closed in this window, newest last, for
+    /// "Reopen closed tab".
+    closed_tabs: ClosedTabStack,
     /// `System` follows the OS. Repository views subscribe for themselves; the
     /// welcome screen has no view of its own to do that, so the workspace
     /// keeps the subscription while it is showing one.
@@ -256,6 +259,7 @@ impl Workspace {
             // Repository views manage window appearance subscriptions on their own.
             _appearance: None,
             window_id,
+            closed_tabs: ClosedTabStack::default(),
             #[cfg(test)]
             recent_dir: None,
             #[cfg(test)]
@@ -291,6 +295,7 @@ impl Workspace {
         Self {
             content: Content::Welcome(view),
             window_id,
+            closed_tabs: ClosedTabStack::default(),
             _appearance: Some(appearance),
             #[cfg(test)]
             recent_dir: None,
@@ -767,6 +772,10 @@ impl Workspace {
             return;
         };
         let old_active = deck.active_index();
+        // Keep the position for "Reopen closed tab": closing drops the slot.
+        if let Some(path) = deck.get(index).and_then(|slot| slot.path.clone()) {
+            self.closed_tabs.push(ClosedTab { path, index });
+        }
         match deck.close(index) {
             CloseOutcome::OutOfBounds => {}
             CloseOutcome::ClosedLast(removed) => {
@@ -802,6 +811,60 @@ impl Workspace {
                 let active = deck.active_index();
                 self.close_tab(active, window, cx);
             }
+        }
+    }
+
+    /// Reopens the most recently closed repository tab at the position it had.
+    ///
+    /// Entries whose directory has disappeared, or is no longer a repository,
+    /// are skipped newest first, so the shortcut still finds the tab the user
+    /// means after a folder was deleted or moved.
+    pub(crate) fn reopen_closed_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        while let Some(closed) = self.closed_tabs.pop_existing(|path| path.is_dir()) {
+            let launch = self.open_launch(&closed.path, cx);
+            if let Launch::Error { error, .. } = &launch {
+                log::warn!("cannot reopen {}: {error}", closed.path.display());
+                continue;
+            }
+            let path = repo_path(&launch);
+            let title = launch.title();
+            let workspace = cx.weak_entity();
+            let view = cx.new(|cx| {
+                RepoView::new_in_workspace_active(launch, Some(workspace), None, true, window, cx)
+            });
+            let slot = RepoSlot {
+                view,
+                path: path.clone(),
+                parents: NavigationStack::default(),
+            };
+            let inserted = if let Content::Tabs(deck) = &mut self.content {
+                if let Some(active) = deck.active_mut() {
+                    active
+                        .view
+                        .update(cx, |view, cx| view.set_active(false, cx));
+                }
+                deck.insert(closed.index, slot)
+            } else {
+                // The welcome screen never has entries of its own, but a
+                // reopened tab is still a better outcome than nothing.
+                self.content = Content::Tabs(TabDeck::from_items(vec![slot], 0));
+                0
+            };
+
+            window.set_window_title(&title);
+            if let Some(path) = &path {
+                self.record_recent(path);
+            }
+            self.persist_session(cx);
+            self.refresh_tab_strip(cx);
+            if let Content::Tabs(deck) = &self.content
+                && let Some(slot) = deck.get(inserted)
+            {
+                let focus = slot.view.read(cx).view_focus();
+                window.defer(cx, move |window, cx| focus.focus(window, cx));
+            }
+            self.finish_navigation(window, cx);
+            return;
         }
     }
 
@@ -1037,7 +1100,10 @@ impl Render for Workspace {
             }))
             .on_action(
                 cx.listener(|this, _: &CloseTab, window, cx| this.close_active_tab(window, cx)),
-            );
+            )
+            .on_action(cx.listener(|this, _: &ReopenClosedTab, window, cx| {
+                this.reopen_closed_tab(window, cx);
+            }));
         root.text_style().font_fallbacks = Some(crate::style::font_fallbacks());
         if tab_count >= 2 {
             root = root
