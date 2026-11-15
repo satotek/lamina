@@ -37,6 +37,8 @@ mod uncommitted;
 mod uncommitted_diff;
 mod worktrees;
 
+pub(crate) use history_ops::history_filter_menu;
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -403,7 +405,10 @@ pub struct RepoView {
     /// is opened again.
     commit_graph_dismissed: bool,
     /// Canonical working-tree root, the key "Don't ask" is stored under.
-    repository_key: Option<PathBuf>,
+    pub(crate) repository_key: Option<PathBuf>,
+    /// Full ref names the history graph leaves out. The refs themselves stay in
+    /// the sidebar; only the commits reachable from them alone leave the walk.
+    pub(crate) hidden_refs: Vec<String>,
 
     /// Running maximum of graph widths, updated as chunks arrive.
     lanes: LaneWidth,
@@ -624,6 +629,7 @@ impl RepoView {
             commit_graph_writing: false,
             commit_graph_dismissed: false,
             repository_key: None,
+            hidden_refs: Vec::new(),
             lanes: LaneWidth::default(),
             selected: None,
             uncommitted_selected: false,
@@ -747,6 +753,14 @@ impl RepoView {
                 }));
                 view.repository_key = Some(commit_graph::repository_key(session.repo()));
                 view.session = Some(*session);
+                if let Some(key) = view.repository_key.clone() {
+                    view.hidden_refs = crate::settings::Settings::get(cx).history.hidden_refs(&key);
+                }
+                if !view.hidden_refs.is_empty()
+                    && let Some(session) = view.session.as_ref()
+                {
+                    session.set_hidden_refs(view.hidden_refs.clone());
+                }
                 view.search.init_input(window, cx);
                 // The title bar's undo tooltip names the last action, so the
                 // rows are read before the reflog pane is ever opened.

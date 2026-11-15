@@ -433,6 +433,9 @@ impl RepoView {
         };
 
         let mut column = div().flex().flex_col().flex_1().min_h_0().min_w_0();
+        if self.hidden_ref_count() > 0 {
+            column = column.child(self.hidden_refs_banner(entity.clone(), design));
+        }
         column = column.child(commit_header(design, columns));
         if self.search.is_active() || self.search.mode().is_content() {
             column = column.child(self.search_bar(entity, design));
@@ -452,6 +455,29 @@ impl RepoView {
             );
         }
         column.into_any_element()
+    }
+
+    /// The strip above the commit header while the graph leaves refs out.
+    ///
+    /// It names the count rather than the branches: the sidebar's closed-eye
+    /// icons say which ones, and the history pane should not grow a list that
+    /// pushes the commits down.
+    fn hidden_refs_banner(&self, entity: gpui::Entity<Self>, design: &Design) -> AnyElement {
+        let count = self.hidden_ref_count();
+        let show_all =
+            crate::ui::button("show-all-hidden-refs", t!("sidebar.show_all").to_string())
+                .size(crate::ui::ButtonSize::Tiny)
+                .kind(crate::ui::ButtonKind::Ghost)
+                .on_click(move |_, _, cx| {
+                    entity.update(cx, |view, cx| view.show_hidden_refs(cx));
+                });
+        crate::ui::banner(
+            crate::ui::BannerKind::Info,
+            t!("history.hidden_refs", count = count).to_string(),
+            design,
+        )
+        .action(show_all)
+        .into_any_element()
     }
 
     /// Match toggles and the match count, shown only while a search filters

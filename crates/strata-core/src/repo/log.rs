@@ -6,6 +6,7 @@ mod walk;
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use gix::bstr::ByteSlice as _;
 use gix::objs::FindExt as _;
 use gix::objs::commit::ref_iter::Token as CommitToken;
 
@@ -245,16 +246,26 @@ impl Repo {
     }
 
     pub fn walk_commits(&self) -> Result<CommitWalk> {
-        self.walk_commits_with(None)
+        self.walk_commits_with(&[], None)
     }
 
     /// [`walk_commits`](Self::walk_commits) that stops once `cancelled` returns
-    /// `true`, for a caller that must be able to give up on a long walk.
-    pub(crate) fn walk_commits_with(&self, cancelled: Option<CancelCheck>) -> Result<CommitWalk> {
+    /// `true`, for a caller that must be able to give up on a long walk, and
+    /// that leaves the tips of `hidden_refs` out of the starting points.
+    ///
+    /// A hidden ref still exists and still appears in the ref list; only the
+    /// walk it would start is dropped, so commits reachable from another ref
+    /// stay. `HEAD` is never hidden: the checked-out branch's own commits are
+    /// what the user is looking at.
+    pub(crate) fn walk_commits_with(
+        &self,
+        hidden_refs: &[String],
+        cancelled: Option<CancelCheck>,
+    ) -> Result<CommitWalk> {
         let repo = self.local();
         // A missing or corrupt commit-graph is not fatal: object reads still work.
         let graph = repo.commit_graph_if_enabled().ok().flatten();
-        let tips = walk_tips(&repo, graph.as_ref())?;
+        let tips = walk_tips(&repo, graph.as_ref(), hidden_refs)?;
         let shallow = Shallow::load(&repo)?;
         let walk = walk::Walk::new(
             repo.objects.clone(),
@@ -339,7 +350,7 @@ impl Repo {
     ) -> Result<(PathWalk, Shallow, Option<super::bloom::CommitGraphBloom>)> {
         let repo = self.local();
         let graph = repo.commit_graph_if_enabled().ok().flatten();
-        let tips = walk_tips(&repo, graph.as_ref())?;
+        let tips = walk_tips(&repo, graph.as_ref(), &[])?;
         let shallow = Shallow::load(&repo)?;
         let bloom = graph
             .as_ref()
@@ -508,9 +519,14 @@ fn is_commit(
 
 /// HEAD plus every user-facing ref target, deduplicated, matching the
 /// `HEAD --branches --remotes --tags refs/stash` revision set.
+///
+/// `hidden_refs` names refs whose tips do not start the walk; comparing on the
+/// full name keeps a hidden branch from also dropping an unrelated tag that
+/// happens to point at the same commit.
 fn walk_tips(
     repo: &gix::Repository,
     graph: Option<&gix::commitgraph::Graph>,
+    hidden_refs: &[String],
 ) -> Result<Vec<gix::ObjectId>> {
     let mut checked = HashSet::new();
     let mut seen = HashSet::new();
@@ -532,6 +548,13 @@ fn walk_tips(
         };
         let inner = reference.detach();
         if !is_user_ref(inner.name.as_bstr()) {
+            continue;
+        }
+        let name = inner.name.as_bstr();
+        if hidden_refs
+            .iter()
+            .any(|hidden| hidden.as_bytes() == name.as_bytes())
+        {
             continue;
         }
         let gix::refs::Target::Object(target) = inner.target else {
@@ -696,6 +719,65 @@ mod tests {
             walked[0].shallow_boundary,
             "a depth-one clone's only commit is its boundary"
         );
+    }
+
+    #[test]
+    fn hidden_refs_keep_their_commits_out_of_the_walk() {
+        let repo = TestRepo::new();
+        repo.write("base.txt", "base\n");
+        let base = repo.commit("base");
+        repo.git(&["checkout", "-q", "-b", "topic"]);
+        repo.write("topic.txt", "topic\n");
+        let topic = repo.commit("topic only");
+        repo.git(&["checkout", "-q", "main"]);
+        repo.write("main.txt", "main\n");
+        let main = repo.commit("main only");
+
+        let opened = repo.open();
+        let ids: Vec<crate::Oid> = opened
+            .walk_commits_with(&["refs/heads/topic".into()], None)
+            .expect("walk")
+            .map(|commit| commit.expect("commit").id)
+            .collect();
+        assert!(!ids.contains(&topic), "the hidden branch's commit is gone");
+        assert!(ids.contains(&main), "the other branch is still walked");
+        assert!(
+            ids.contains(&base),
+            "a commit both branches reach stays: only the hidden tip is dropped"
+        );
+
+        let all: Vec<crate::Oid> = opened
+            .walk_commits()
+            .expect("walk")
+            .map(|commit| commit.expect("commit").id)
+            .collect();
+        assert!(all.contains(&topic), "hiding is undone by an empty list");
+    }
+
+    #[test]
+    fn a_refs_only_walk_lists_that_branch_and_its_ancestors() {
+        let repo = TestRepo::new();
+        repo.write("base.txt", "base\n");
+        let base = repo.commit("base");
+        repo.git(&["checkout", "-q", "-b", "topic"]);
+        repo.write("topic.txt", "topic\n");
+        let topic = repo.commit("topic only");
+        repo.git(&["checkout", "-q", "main"]);
+        repo.write("main.txt", "main\n");
+        let main = repo.commit("main only");
+
+        let opened = repo.open();
+        let ids: Vec<crate::Oid> = opened
+            .walk_commits_from_refs(&["refs/heads/topic".into()])
+            .expect("walk")
+            .map(|commit| commit.expect("commit").id)
+            .collect();
+        assert_eq!(
+            ids,
+            [topic, base],
+            "only the soloed branch and its ancestors are walked"
+        );
+        assert!(!ids.contains(&main));
     }
 
     #[test]

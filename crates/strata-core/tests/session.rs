@@ -1201,9 +1201,48 @@ fn history_scope_walks_only_the_chosen_refs_and_all_restores_everything() {
     let restored = harness.wait_for_complete(3);
     let mut restored_ids = loaded_ids(&restored);
     restored_ids.sort();
-    let mut expected = vec![base, feature, main];
+    let mut expected = vec![base.clone(), feature.clone(), main.clone()];
     expected.sort();
     assert_eq!(restored_ids, expected, "All restores the full history");
+
+    // Hiding a ref drops its tip from the walk without touching the refs the
+    // sidebar shows.
+    let before = harness.session.snapshot().generation;
+    harness
+        .session
+        .set_hidden_refs(vec!["refs/heads/feature".into()]);
+    assert_eq!(
+        harness.session.hidden_refs(),
+        ["refs/heads/feature".to_owned()]
+    );
+    let hidden = harness.wait_until(TIMEOUT, |snapshot| {
+        snapshot.generation > before && snapshot.commits.complete && snapshot.commits.len() == 2
+    });
+    let mut hidden_ids = loaded_ids(&hidden);
+    hidden_ids.sort();
+    let mut expected = vec![base.clone(), main.clone()];
+    expected.sort();
+    assert_eq!(
+        hidden_ids, expected,
+        "the hidden branch's commit leaves the graph"
+    );
+    assert!(
+        hidden
+            .refs
+            .iter()
+            .any(|reference| reference.short_name == "feature"),
+        "the ref itself stays in the snapshot"
+    );
+
+    let before = harness.session.snapshot().generation;
+    harness.session.set_hidden_refs(Vec::new());
+    let shown = harness.wait_until(TIMEOUT, |snapshot| {
+        snapshot.generation > before && snapshot.commits.complete && snapshot.commits.len() == 3
+    });
+    assert!(
+        loaded_ids(&shown).contains(&feature),
+        "showing all restores it"
+    );
 }
 
 #[test]

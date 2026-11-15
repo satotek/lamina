@@ -57,7 +57,9 @@ fn load(shared: &Arc<Shared>, generation: u64) -> Result<()> {
     };
     let started = Instant::now();
     let walk = match shared.history_scope() {
-        HistoryScope::All => shared.repo.walk_commits_with(Some(cancelled))?,
+        HistoryScope::All => shared
+            .repo
+            .walk_commits_with(&shared.hidden_refs(), Some(cancelled))?,
         HistoryScope::Refs(specs) => shared
             .repo
             .walk_commits_from_refs_with(&specs, Some(cancelled))?,

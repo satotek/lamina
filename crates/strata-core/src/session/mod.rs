@@ -1164,6 +1164,21 @@ impl Session {
         self.shared.history_scope()
     }
 
+    /// Ref names kept out of the full history walk. Their refs stay in the
+    /// snapshot; only commits reachable from them alone leave the graph.
+    ///
+    /// The next load drops the hidden tips, and [`Session::reload`] is what
+    /// makes that load happen.
+    pub fn set_hidden_refs(&self, refs: Vec<String>) {
+        self.shared.set_hidden_refs(refs);
+        self.reload();
+    }
+
+    /// The ref names the current or next history load hides.
+    pub fn hidden_refs(&self) -> Vec<String> {
+        self.shared.hidden_refs()
+    }
+
     pub fn git(&self) -> &Git {
         &self.shared.git
     }

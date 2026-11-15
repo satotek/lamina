@@ -654,6 +654,9 @@ pub(crate) enum BranchAction {
     Rebase,
     Rename,
     Delete,
+    Solo,
+    Hide,
+    ShowAll,
 }
 
 /// Which branch entries make sense for `kind`.
@@ -662,8 +665,19 @@ pub(crate) enum BranchAction {
 /// rebased onto itself, and deleting it would refuse anyway; renaming it is
 /// the one action that still applies. A remote branch has no local name to
 /// rename or delete, so it only offers the three history actions.
-pub(crate) fn branch_actions(kind: RefKind, is_current: bool) -> Vec<BranchAction> {
-    match kind {
+///
+/// `hidden` is this ref's own state, so a hidden branch does not offer "hide"
+/// again; `any_hidden` adds the way back to every branch.
+pub(crate) fn branch_actions(
+    kind: RefKind,
+    is_current: bool,
+    hidden: bool,
+    any_hidden: bool,
+) -> Vec<BranchAction> {
+    if kind == RefKind::Tag {
+        return Vec::new();
+    }
+    let mut actions = match kind {
         RefKind::LocalBranch if is_current => vec![BranchAction::Rename],
         RefKind::LocalBranch => vec![
             BranchAction::Checkout,
@@ -678,7 +692,16 @@ pub(crate) fn branch_actions(kind: RefKind, is_current: bool) -> Vec<BranchActio
             BranchAction::Rebase,
         ],
         RefKind::Tag => Vec::new(),
+    };
+    // Hiding the checked-out branch changes nothing: HEAD always walks.
+    if !is_current && !hidden {
+        actions.push(BranchAction::Hide);
     }
+    actions.push(BranchAction::Solo);
+    if any_hidden {
+        actions.push(BranchAction::ShowAll);
+    }
+    actions
 }
 
 /// The top of the commit menu: every branch pointing at the commit.
@@ -727,10 +750,15 @@ fn branch_actions_menu(
 ) -> PopupMenu {
     let busy_reason = busy.then(|| t!("branch.reason.busy").to_string());
     let is_current = branch.kind == RefKind::LocalBranch && branch.name == current;
-    for action in branch_actions(branch.kind, is_current) {
+    let hidden = entity.read(cx).is_ref_hidden(branch.kind, &branch.name);
+    let any_hidden = entity.read(cx).hidden_ref_count() > 0;
+    for action in branch_actions(branch.kind, is_current, hidden, any_hidden) {
         let name = branch.name.clone();
         let kind = branch.kind;
         let item = match action {
+            BranchAction::Solo => solo_history_item(kind, &name, entity),
+            BranchAction::Hide => hide_history_item(kind, &name, entity),
+            BranchAction::ShowAll => show_all_history_item(entity),
             BranchAction::Rebase => {
                 let Some((_, target)) = entity.read(cx).branch_rebase_target(kind, &name) else {
                     continue;
@@ -789,6 +817,61 @@ fn branch_actions_menu(
         menu = menu.item(item);
     }
     menu
+}
+
+/// The refs a repository's history leaves out, as the sidebar and the commit
+/// menu offer them.
+///
+/// The sidebar calls this for its own branch rows; the commit menu's branch
+/// section appends the same entries through [`branch_actions_menu`], so both
+/// places offer the same three commands.
+pub(crate) fn history_filter_menu(
+    mut menu: PopupMenu,
+    kind: RefKind,
+    name: &str,
+    is_current: bool,
+    entity: &Entity<RepoView>,
+    cx: &App,
+) -> PopupMenu {
+    let hidden = entity.read(cx).is_ref_hidden(kind, name);
+    let any_hidden = entity.read(cx).hidden_ref_count() > 0;
+    if !is_current && !hidden {
+        menu = menu.item(hide_history_item(kind, name, entity));
+    }
+    menu = menu.item(solo_history_item(kind, name, entity));
+    if any_hidden {
+        menu = menu.item(show_all_history_item(entity));
+    }
+    menu
+}
+
+fn hide_history_item(kind: RefKind, name: &str, entity: &Entity<RepoView>) -> PopupMenuItem {
+    let entity = entity.clone();
+    let name = name.to_owned();
+    PopupMenuItem::new(t!("branch.menu.hide_in_history").to_string()).on_click(
+        move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
+            entity.update(cx, |view, cx| view.hide_ref_in_history(kind, &name, cx));
+        },
+    )
+}
+
+fn solo_history_item(kind: RefKind, name: &str, entity: &Entity<RepoView>) -> PopupMenuItem {
+    let entity = entity.clone();
+    let name = name.to_owned();
+    PopupMenuItem::new(t!("branch.menu.show_only").to_string()).on_click(
+        move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
+            entity.update(cx, |view, cx| view.show_only_ref(kind, &name, cx));
+        },
+    )
+}
+
+fn show_all_history_item(entity: &Entity<RepoView>) -> PopupMenuItem {
+    let entity = entity.clone();
+    PopupMenuItem::new(t!("branch.menu.show_all_hidden").to_string()).on_click(
+        move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
+            entity.update(cx, |view, cx| view.show_hidden_refs(cx));
+        },
+    )
 }
 
 /// The context menu for one commit row.
@@ -2001,30 +2084,60 @@ mod tests {
     #[test]
     fn the_checked_out_branch_only_offers_its_rename() {
         assert_eq!(
-            branch_actions(RefKind::LocalBranch, true),
-            vec![BranchAction::Rename],
-            "checking out, merging or rebasing a branch onto itself is a no-op"
+            branch_actions(RefKind::LocalBranch, true, false, false),
+            vec![BranchAction::Rename, BranchAction::Solo],
+            "checking out, merging or rebasing a branch onto itself is a no-op, and HEAD always walks"
         );
         assert_eq!(
-            branch_actions(RefKind::LocalBranch, false),
+            branch_actions(RefKind::LocalBranch, false, false, false),
             vec![
                 BranchAction::Checkout,
                 BranchAction::Merge,
                 BranchAction::Rebase,
                 BranchAction::Rename,
                 BranchAction::Delete,
+                BranchAction::Hide,
+                BranchAction::Solo,
             ]
         );
         assert_eq!(
-            branch_actions(RefKind::RemoteBranch, false),
+            branch_actions(RefKind::RemoteBranch, false, false, false),
             vec![
                 BranchAction::Checkout,
                 BranchAction::Merge,
                 BranchAction::Rebase,
+                BranchAction::Hide,
+                BranchAction::Solo,
             ],
             "a remote branch cannot be renamed or deleted from here"
         );
-        assert!(branch_actions(RefKind::Tag, false).is_empty());
+        assert!(branch_actions(RefKind::Tag, false, false, false).is_empty());
+    }
+
+    #[test]
+    fn a_hidden_branch_offers_the_way_back_instead_of_hiding_again() {
+        assert_eq!(
+            branch_actions(RefKind::LocalBranch, false, true, true),
+            vec![
+                BranchAction::Checkout,
+                BranchAction::Merge,
+                BranchAction::Rebase,
+                BranchAction::Rename,
+                BranchAction::Delete,
+                BranchAction::Solo,
+                BranchAction::ShowAll,
+            ]
+        );
+        assert!(
+            branch_actions(RefKind::LocalBranch, false, false, true)
+                .contains(&BranchAction::ShowAll),
+            "another hidden branch still offers the way back"
+        );
+        assert!(
+            !branch_actions(RefKind::LocalBranch, false, false, false)
+                .contains(&BranchAction::ShowAll),
+            "nothing is hidden, so there is nothing to show"
+        );
     }
 
     #[test]

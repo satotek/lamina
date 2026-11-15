@@ -853,6 +853,7 @@ impl Branches {
         pull_requests: &BranchPullRequests,
         enabled: bool,
         busy: bool,
+        hidden_refs: &[String],
         colors: &Colors,
         entity: &Entity<RepoView>,
     ) -> AnyElement {
@@ -866,6 +867,7 @@ impl Branches {
         let list_colors = colors.clone();
         let list_entity = entity.clone();
         let list_pull_requests = pull_requests.clone();
+        let list_hidden = hidden_refs.to_vec();
         let list = uniform_list("sidebar-refs", items.len(), move |range, _window, _cx| {
             range
                 .map(|index| {
@@ -877,6 +879,7 @@ impl Branches {
                         &list_pull_requests,
                         enabled,
                         busy,
+                        &list_hidden,
                         &list_colors,
                         list_entity.clone(),
                     )
@@ -2088,6 +2091,7 @@ fn item_element(
     pull_requests: &BranchPullRequests,
     enabled: bool,
     busy: bool,
+    hidden_refs: &[String],
     colors: &Colors,
     entity: Entity<RepoView>,
 ) -> AnyElement {
@@ -2141,6 +2145,7 @@ fn item_element(
             pull_requests.get(name),
             pull_requests.note(),
             reveal.is_ref(RefKind::LocalBranch, name),
+            hidden_refs.contains(&ref_full_name(RefKind::LocalBranch, name)),
             enabled,
             busy,
             colors,
@@ -2160,6 +2165,7 @@ fn item_element(
             *depth,
             local_name.as_deref(),
             reveal.is_ref(RefKind::RemoteBranch, name),
+            hidden_refs.contains(&ref_full_name(RefKind::RemoteBranch, name)),
             enabled,
             busy,
             colors,
@@ -2759,6 +2765,7 @@ fn local_row(
     pull_request: Option<&strata_core::forge::PullRequestSummary>,
     pull_request_note: Option<&str>,
     revealed: bool,
+    hidden: bool,
     enabled: bool,
     busy: bool,
     colors: &Colors,
@@ -2801,6 +2808,16 @@ fn local_row(
                 label.row_tooltip(move |window, cx| Tooltip::new(note.clone()).build(window, cx));
         }
         row = row.child(label);
+    }
+
+    if hidden {
+        // The row still lists the branch, but the graph no longer walks it:
+        // the closed eye is the same icon the menu's "Hide in history" uses.
+        row = row.child(
+            Icon::new(IconName::EyeOff)
+                .with_size(px(12.0))
+                .text_color(colors.muted_foreground),
+        );
     }
 
     if let Some(pull_request) = pull_request {
@@ -2906,36 +2923,32 @@ fn local_row(
                     },
                 )
             };
+            let menu = menu.item(
+                PopupMenuItem::new(crate::ui::menu_label(
+                    t!("branch.menu.checkout").to_string(),
+                    checkout_blocked.as_ref(),
+                ))
+                .disabled(checkout_blocked.is_some())
+                .on_click({
+                    let entity = entity_menu.clone();
+                    let branch = branch.clone();
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        let branch = branch.clone();
+                        entity.update(cx, |view, cx| {
+                            view.checkout_branch(RefKind::LocalBranch, &branch, window, cx);
+                        });
+                    }
+                }),
+            );
+            let menu = crate::repo_view::history_filter_menu(
+                menu,
+                RefKind::LocalBranch,
+                &branch,
+                active,
+                &entity_menu,
+                cx,
+            );
             let menu = menu
-                .item(
-                    PopupMenuItem::new(crate::ui::menu_label(
-                        t!("branch.menu.checkout").to_string(),
-                        checkout_blocked.as_ref(),
-                    ))
-                    .disabled(checkout_blocked.is_some())
-                    .on_click({
-                        let entity = entity_menu.clone();
-                        let branch = branch.clone();
-                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                            let branch = branch.clone();
-                            entity.update(cx, |view, cx| {
-                                view.checkout_branch(RefKind::LocalBranch, &branch, window, cx);
-                            });
-                        }
-                    }),
-                )
-                .item(
-                    PopupMenuItem::new(t!("branch.menu.show_only").to_string()).on_click({
-                        let entity = entity_menu.clone();
-                        let branch = branch.clone();
-                        move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
-                            let branch = branch.clone();
-                            entity.update(cx, |view, cx| {
-                                view.show_only_ref(RefKind::LocalBranch, &branch, cx)
-                            });
-                        }
-                    }),
-                )
                 .separator()
                 .item(compare)
                 .item(
@@ -3098,18 +3111,26 @@ fn remote_row(
     depth: usize,
     local_name: Option<&str>,
     revealed: bool,
+    hidden: bool,
     enabled: bool,
     busy: bool,
     colors: &Colors,
     entity: Entity<RepoView>,
 ) -> AnyElement {
-    let row_element = row(
+    let mut row_element = row(
         ("remote-branch", index),
         label,
         crate::ui::RowState::NORMAL.revealed(revealed),
         colors,
     )
     .pl(px(42.0 + depth as f32 * 14.0));
+    if hidden {
+        row_element = row_element.child(
+            Icon::new(IconName::EyeOff)
+                .with_size(px(12.0))
+                .text_color(colors.muted_foreground),
+        );
+    }
     // A remote ref without a local counterpart (the symbolic `origin/HEAD`)
     // has nothing to check out or merge.
     if local_name.is_none() {
@@ -3164,7 +3185,7 @@ fn remote_row(
             let rebase = entity_menu
                 .read(cx)
                 .branch_rebase_target(RefKind::RemoteBranch, &remote);
-            menu.item(
+            let menu = menu.item(
                 PopupMenuItem::new(crate::ui::menu_label(
                     t!("branch.menu.checkout").to_string(),
                     blocked.as_ref(),
@@ -3180,20 +3201,16 @@ fn remote_row(
                         });
                     }
                 }),
-            )
-            .item(
-                PopupMenuItem::new(t!("branch.menu.show_only").to_string()).on_click({
-                    let entity = entity_menu.clone();
-                    let remote = remote.clone();
-                    move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
-                        let remote = remote.clone();
-                        entity.update(cx, |view, cx| {
-                            view.show_only_ref(RefKind::RemoteBranch, &remote, cx)
-                        });
-                    }
-                }),
-            )
-            .item(
+            );
+            let menu = crate::repo_view::history_filter_menu(
+                menu,
+                RefKind::RemoteBranch,
+                &remote,
+                false,
+                &entity_menu,
+                cx,
+            );
+            menu.item(
                 PopupMenuItem::new(crate::ui::menu_label(
                     t!("branch.menu.merge_into_current").to_string(),
                     blocked.as_ref(),
@@ -4140,6 +4157,64 @@ impl RepoView {
         session.set_history_scope(HistoryScope::All);
         self.branches.set_scope(None);
         self.branches.clear_revealed();
+        cx.notify();
+    }
+
+    /// Whether `kind`/`short_name` is kept out of the history graph.
+    pub(crate) fn is_ref_hidden(&self, kind: RefKind, short_name: &str) -> bool {
+        let full_name = ref_full_name(kind, short_name);
+        self.hidden_refs.contains(&full_name)
+    }
+
+    /// How many refs the history graph leaves out.
+    pub(crate) fn hidden_ref_count(&self) -> usize {
+        self.hidden_refs.len()
+    }
+
+    /// Leaves `kind`/`short_name`'s history out of the graph until "show all".
+    ///
+    /// The ref itself stays in the sidebar, so the branch can still be checked
+    /// out or merged; only the walk that starts at its tip is dropped.
+    pub(crate) fn hide_ref_in_history(
+        &mut self,
+        kind: RefKind,
+        short_name: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if self.session.is_none() {
+            return;
+        }
+        let full_name = ref_full_name(kind, short_name);
+        if self.hidden_refs.contains(&full_name) {
+            return;
+        }
+        self.hidden_refs.push(full_name.clone());
+        if let Some(key) = self.repository_key.clone() {
+            crate::settings::update(cx, |settings| {
+                settings.history.hide_ref(&key, full_name.clone())
+            });
+        }
+        if let Some(session) = self.session.as_ref() {
+            session.set_hidden_refs(self.hidden_refs.clone());
+        }
+        cx.notify();
+    }
+
+    /// Restores every hidden ref to the history graph.
+    pub(crate) fn show_hidden_refs(&mut self, cx: &mut Context<Self>) {
+        if self.session.is_none() {
+            return;
+        }
+        if self.hidden_refs.is_empty() {
+            return;
+        }
+        self.hidden_refs.clear();
+        if let Some(key) = self.repository_key.clone() {
+            crate::settings::update(cx, |settings| settings.history.show_all_refs(&key));
+        }
+        if let Some(session) = self.session.as_ref() {
+            session.set_hidden_refs(Vec::new());
+        }
         cx.notify();
     }
 
@@ -5173,6 +5248,18 @@ pub(crate) fn upstream_note(upstream: &UpstreamInfo) -> Option<String> {
     }
     (upstream.ahead.is_none() || upstream.behind.is_none())
         .then(|| t!("branch.upstream.shallow").to_string())
+}
+
+/// The full ref name of a ref the sidebar lists by its short name.
+///
+/// The walk hides refs by full name, so the prefix has to match the kind: a
+/// local `topic` and a remote `topic` are different refs.
+pub(crate) fn ref_full_name(kind: RefKind, short_name: &str) -> String {
+    match kind {
+        RefKind::LocalBranch => format!("refs/heads/{short_name}"),
+        RefKind::RemoteBranch => format!("refs/remotes/{short_name}"),
+        RefKind::Tag => format!("refs/tags/{short_name}"),
+    }
 }
 
 /// `origin/feature/login` -> `feature/login`. The remote name is the first path
@@ -7214,6 +7301,7 @@ mod tests {
                         false,
                         true,
                         false,
+                        false,
                         &colors,
                         self.repo.clone(),
                     ))
@@ -7231,6 +7319,7 @@ mod tests {
                         false,
                         true,
                         false,
+                        false,
                         &colors,
                         self.repo.clone(),
                     ))
@@ -7247,6 +7336,7 @@ mod tests {
                         None,
                         false,
                         true,
+                        false,
                         false,
                         &colors,
                         self.repo.clone(),

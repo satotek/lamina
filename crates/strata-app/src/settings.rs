@@ -226,6 +226,60 @@ pub struct HistorySettings {
     pub show_uncommitted_changes: bool,
     pub date_format: DateFormat,
     pub file_list_mode: FileListMode,
+    /// Refs hidden from the history graph, one entry per repository.
+    pub hidden_refs: Vec<HiddenHistoryRefs>,
+}
+
+/// The refs one repository's history graph leaves out.
+///
+/// A ref name alone would be ambiguous across repositories: `topic` is common,
+/// and the same checkout can be opened under two paths.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HiddenHistoryRefs {
+    /// Canonical working-tree root, the key the commit-graph offer also uses.
+    pub repository: PathBuf,
+    /// Full ref names, e.g. `refs/heads/topic`.
+    pub refs: Vec<String>,
+}
+
+impl HistorySettings {
+    /// The full ref names hidden for the repository at `repository`.
+    pub fn hidden_refs(&self, repository: &Path) -> Vec<String> {
+        self.hidden_refs
+            .iter()
+            .find(|entry| entry.repository == repository)
+            .map(|entry| entry.refs.clone())
+            .unwrap_or_default()
+    }
+
+    /// Hides one more ref for `repository`, keeping the list sorted so the
+    /// saved file does not depend on the order branches were hidden in.
+    pub fn hide_ref(&mut self, repository: &Path, full_name: String) {
+        let entry = match self
+            .hidden_refs
+            .iter_mut()
+            .find(|entry| entry.repository == repository)
+        {
+            Some(entry) => entry,
+            None => {
+                self.hidden_refs.push(HiddenHistoryRefs {
+                    repository: repository.to_path_buf(),
+                    refs: Vec::new(),
+                });
+                self.hidden_refs.last_mut().expect("the entry just pushed")
+            }
+        };
+        if !entry.refs.contains(&full_name) {
+            entry.refs.push(full_name);
+            entry.refs.sort();
+        }
+    }
+
+    /// Shows every ref of `repository` again and forgets its entry.
+    pub fn show_all_refs(&mut self, repository: &Path) {
+        self.hidden_refs
+            .retain(|entry| entry.repository != repository);
+    }
 }
 
 impl Default for HistorySettings {
@@ -239,6 +293,7 @@ impl Default for HistorySettings {
             show_uncommitted_changes: true,
             date_format: DateFormat::Relative,
             file_list_mode: FileListMode::List,
+            hidden_refs: Vec::new(),
         }
     }
 }
@@ -819,6 +874,42 @@ mod tests {
         let loaded = Settings::load(&path);
         assert!(loaded.commit_graph.asks(&asked));
         assert!(!loaded.commit_graph.asks(&silenced));
+    }
+
+    #[test]
+    fn hidden_history_refs_are_per_repository_and_survive_a_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let first = PathBuf::from("/work/repo-a");
+        let second = PathBuf::from("/work/repo-b");
+
+        let mut settings = Settings::default();
+        assert!(settings.history.hidden_refs(&first).is_empty());
+        settings.history.hide_ref(&first, "refs/heads/topic".into());
+        settings
+            .history
+            .hide_ref(&first, "refs/remotes/origin/topic".into());
+        settings
+            .history
+            .hide_ref(&second, "refs/heads/other".into());
+
+        settings.save(&path).unwrap();
+        let loaded = Settings::load(&path);
+        assert_eq!(
+            loaded.history.hidden_refs(&first),
+            ["refs/heads/topic", "refs/remotes/origin/topic"],
+            "one repository's hidden refs do not leak into another's"
+        );
+        assert_eq!(loaded.history.hidden_refs(&second), ["refs/heads/other"]);
+
+        let mut loaded = loaded;
+        loaded.history.show_all_refs(&first);
+        assert!(loaded.history.hidden_refs(&first).is_empty());
+        assert_eq!(
+            loaded.history.hidden_refs(&second),
+            ["refs/heads/other"],
+            "showing all for one repository leaves the other alone"
+        );
     }
 
     #[test]

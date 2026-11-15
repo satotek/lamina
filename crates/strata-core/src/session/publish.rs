@@ -72,6 +72,10 @@ pub(crate) struct Shared {
     /// Starting points of the next history walk. Read by the loader when it
     /// starts, so a watch-triggered reload keeps the scope the UI chose.
     history_scope: RwLock<HistoryScope>,
+    /// Ref names whose tips do not start the full history walk, so a branch
+    /// the user hid keeps its refs in the sidebar but its unique commits out
+    /// of the graph. Empty means everything is shown.
+    hidden_refs: RwLock<Vec<String>>,
     cancelled_diffs: Mutex<HashSet<DiffTicket>>,
     operation_active: AtomicBool,
     pending_refresh: Mutex<PendingRefresh>,
@@ -93,6 +97,7 @@ impl Shared {
             next_operation: AtomicU64::new(0),
             next_ticket: AtomicU64::new(0),
             history_scope: RwLock::new(HistoryScope::All),
+            hidden_refs: RwLock::new(Vec::new()),
             cancelled_diffs: Mutex::new(HashSet::new()),
             operation_active: AtomicBool::new(false),
             pending_refresh: Mutex::new(PendingRefresh::default()),
@@ -173,6 +178,20 @@ impl Shared {
             .history_scope
             .write()
             .unwrap_or_else(PoisonError::into_inner) = scope;
+    }
+
+    pub(crate) fn hidden_refs(&self) -> Vec<String> {
+        self.hidden_refs
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    pub(crate) fn set_hidden_refs(&self, refs: Vec<String>) {
+        *self
+            .hidden_refs
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = refs;
     }
 
     pub(crate) fn set_operation_running(&self, running: bool) {

@@ -402,6 +402,7 @@ impl RepoView {
             &self.pull_requests.branches(),
             self.session.is_some(),
             self.is_busy(),
+            &self.hidden_refs,
             &colors,
             entity,
         )
