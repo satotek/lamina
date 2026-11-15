@@ -129,7 +129,7 @@ impl Design {
         };
         let palette = theme::resolve(theme_id, is_dark);
         Self::from_palette(
-            palette,
+            &palette,
             settings,
             theme.font_family.clone(),
             theme.mono_font_family.clone(),
@@ -315,7 +315,7 @@ impl Default for Design {
         // gpui-component's sans family) and `Settings::default`, so the default
         // design is the light palette with no user choices applied.
         Self::from_palette(
-            theme::default_for(false),
+            &theme::default_for(false),
             &Settings::default(),
             ".SystemUIFont".into(),
             "monospace".into(),
@@ -826,7 +826,8 @@ mod tests {
             }
         }
 
-        for palette in theme::all() {
+        for entry in theme::all() {
+            let palette = &entry.palette;
             let design = design_for_theme(
                 &palette.id,
                 palette.appearance == theme::ThemeAppearance::Dark,
@@ -887,7 +888,8 @@ mod tests {
 
         // The tint strengthens away from the surface: darker in the light
         // theme, lighter in the dark one.
-        for palette in theme::all() {
+        for entry in theme::all() {
+            let palette = &entry.palette;
             let darker = palette.appearance == theme::ThemeAppearance::Light;
             let design = design_for_theme(&palette.id, !darker);
             assert_eq!(

@@ -51,10 +51,29 @@ Strata は個人開発のオープンソースプロジェクトとして公開�
 - 各レイヤー（local / worktree / global / system / XDG / 環境変数 / コマンドライン）を横断する Git 設定ビューア＆エディタを備え、`include` / `includeIf` の確認や、書き込み前のコマンド・差分プレビューが可能です。
 
 ### ワークスペース・カスタマイズ・埋め込みターミナル
-- 複数タブ・複数ウィンドウ、セッション復元、最近開いたリポジトリピッカー、ライト／ダーク／システム連動テーマ、UI フォント・コードフォントのカスタマイズ、日英 UI 切り替え（`システム` は OS の言語に追従）に対応しています。
+- 複数タブ・複数ウィンドウ、セッション復元、最近開いたリポジトリピッカー、ライト／ダーク／システム連動テーマ（同梱テーマおよびユーザー作成の TOML パレットに対応）、UI フォント・コードフォントのカスタマイズ、日英 UI 切り替え（`システム` は OS の言語に追従）に対応しています。
 - コマンドパレット、`keymap.json` およびキーボード設定画面によるキーバインド変更、`commands.json` によるカスタムコマンド定義（`${repo}` / `${branch}` / `${commit}` / `${file}` / `${remote}` 変数展開付き）を行えます。
 - リポジトリタブごとに埋め込み PTY ターミナルパネル（`libghostty-vt` と `portable-pty` による `strata-term`、Cargo の `terminal` feature で有効化）を利用できます。
 - 日本語およびレガシー文字コードに対応しています。UTF-8、UTF-16LE/BE（BOM 付き）、`.gitattributes` の `working-tree-encoding`、自動判定（`Shift_JIS`、`EUC-JP`、`ISO-2022-JP` など）を用いて表示用にデコードしつつ、差分計算・パッチ適用・書き込み時には元のバイト列をそのまま維持します。
+
+## カスタマイズ
+
+### カスタムテーマ
+
+Strata は設定ディレクトリ内の `themes/` フォルダ（`STRATA_CONFIG_DIR` を設定している場合は `$STRATA_CONFIG_DIR/themes/`）からユーザー定義の `*.toml` カラーテーマを読み込みます。
+
+- **macOS:** `~/Library/Application Support/Strata/themes/`
+- **Windows:** `%APPDATA%\Strata\themes\`
+- **Linux:** `$XDG_CONFIG_HOME/strata/themes/`（未設定時は `~/.config/strata/themes/`）
+
+最初から正しい形式のファイルを作るには、**設定 → 外観** を開いて **「現在のテーマを書き出す」** をクリックします。すべてのトークンが揃った `<id>-custom.toml` がテーマフォルダに作成され、**「テーマフォルダを開く」** からすぐに開けます。選択中のユーザーテーマを編集して保存すると、開いているすべてのウィンドウに即時反映されます。
+
+必須フィールド（すべてのトークンが必須で、未定義キーはエラーになります。色は `#rrggbb` または `#rrggbbaa` の 16 進文字列で指定します）:
+
+- トップレベル: `id`（一意な文字列。同梱テーマの ID は上書き不可）、`name`（ピッカー上の表示名）、`appearance`（`"light"` または `"dark"`）
+- `[colors]`: UI・バッジ・差分・シンタックスハイライト用の 36 トークンすべて
+- `[terminal]`: `foreground`、`background`、`cursor`、`selection`、および ANSI 16 色（`black`–`white` と `bright_black`–`bright_white`）
+- `[graph]`: `lanes`（8 色の配列）
 
 ## インストール（GitHub Releases）
 

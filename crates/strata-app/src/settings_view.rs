@@ -73,6 +73,7 @@ fn open(cx: &mut App) {
     // This window is where the user looks after installing a program, and the
     // detection thread keeps the previous answer until the new one arrives.
     crate::tools::redetect(cx);
+    crate::style::theme::reload(cx);
 
     let bounds = Bounds::centered(None, size(px(WIDTH), px(HEIGHT)), cx);
     let opened = cx.open_window(

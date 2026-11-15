@@ -38,6 +38,7 @@ pub fn banner(kind: BannerKind, message: impl Into<SharedString>, design: &Desig
         kind,
         message: message.into(),
         detail: None,
+        wrap: false,
         actions: Vec::new(),
         design: design.clone(),
         style: StyleRefinement::default(),
@@ -49,6 +50,7 @@ pub struct Banner {
     kind: BannerKind,
     message: SharedString,
     detail: Option<SharedString>,
+    wrap: bool,
     actions: Vec<AnyElement>,
     design: Design,
     style: StyleRefinement,
@@ -64,6 +66,12 @@ impl Banner {
     /// compete with the action the banner asks for.
     pub fn detail(mut self, detail: impl Into<SharedString>) -> Self {
         self.detail = Some(detail.into());
+        self
+    }
+
+    /// Allow the message and detail to wrap across lines instead of truncating.
+    pub fn wrap(mut self) -> Self {
+        self.wrap = true;
         self
     }
 }
@@ -82,11 +90,20 @@ impl RenderOnce for Banner {
             actions = actions.child(action);
         }
         let mut text = div().flex_1().min_w_0().flex().flex_col();
-        text = text.child(div().truncate().child(self.message));
+        let message = if self.wrap {
+            div().min_w_0().child(self.message)
+        } else {
+            div().truncate().child(self.message)
+        };
+        text = text.child(message);
         if let Some(detail) = self.detail {
+            let detail_div = if self.wrap {
+                div().min_w_0()
+            } else {
+                div().truncate()
+            };
             text = text.child(
-                div()
-                    .truncate()
+                detail_div
                     .text_size(px(self.design.tiny()))
                     .opacity(0.8)
                     .child(detail),

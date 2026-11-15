@@ -51,10 +51,29 @@ Strata is in early (`0.x`) development as a personal open-source project—expec
 - Git config inspector and editor across all configuration layers with `include`/`includeIf` inspection and command/diff preview before writing.
 
 ### Workspace, Customization & Embedded Terminal
-- Multi-tab and multi-window workspace with session restore, recent repository picker, light/dark/system theme, customizable UI and code fonts, and English/Japanese UI (`System` follows the OS language).
+- Multi-tab and multi-window workspace with session restore, recent repository picker, light/dark/system theme (with bundled and user-provided TOML palettes), customizable UI and code fonts, and English/Japanese UI (`System` follows the OS language).
 - Command palette, customizable keybindings (`keymap.json` and Keyboard settings), and custom commands (`commands.json` with `${repo}`, `${branch}`, `${commit}`, `${file}`, and `${remote}` variables).
 - Embedded PTY terminal panel per repository tab (`strata-term`, built on `libghostty-vt` and `portable-pty`, optional via the Cargo `terminal` feature).
 - Japanese and legacy text encoding support: UTF-8, UTF-16LE/BE (BOM), `.gitattributes` `working-tree-encoding`, and automatic detection (`Shift_JIS`, `EUC-JP`, `ISO-2022-JP`, etc.) for display while preserving original bytes on writes and patches.
+
+## Customization
+
+### Custom Themes
+
+Strata loads user-defined `*.toml` colour themes from the `themes/` subdirectory of your configuration folder (or `$STRATA_CONFIG_DIR/themes/` when `STRATA_CONFIG_DIR` is set):
+
+- **macOS:** `~/Library/Application Support/Strata/themes/`
+- **Windows:** `%APPDATA%\Strata\themes\`
+- **Linux:** `$XDG_CONFIG_HOME/strata/themes/` (defaults to `~/.config/strata/themes/`)
+
+To start from a complete working file, open **Settings → Appearance** and click **Export current theme as a file**. That writes `<id>-custom.toml` into your themes folder with every token populated, and **Open themes folder** opens that directory. Saving edits to an active user theme re-applies it live across open windows.
+
+Required fields (every token is required, unknown fields are rejected, and all colours use `#rrggbb` or `#rrggbbaa` hex strings):
+
+- Top-level: `id` (unique string; bundled IDs cannot be overridden), `name` (picker label), `appearance` (`"light"` or `"dark"`)
+- `[colors]`: all 36 UI, badge, diff, and syntax tokens
+- `[terminal]`: `foreground`, `background`, `cursor`, `selection`, plus all 16 ANSI colours (`black`–`white` and `bright_black`–`bright_white`)
+- `[graph]`: `lanes` (array of 8 hex colours)
 
 ## Installation (GitHub Releases)
 

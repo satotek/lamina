@@ -119,6 +119,7 @@ fn main() {
 
     app.run(move |cx: &mut App| {
         gpui_component::init(cx);
+        style::theme::init(cx);
         settings::init(cx);
         i18n::apply(cx);
         tools::init(cx);
@@ -145,6 +146,7 @@ fn main() {
         keymap::apply_user(cx);
         keymap::watch(cx);
         commands::watch(cx);
+        style::theme::watch(cx);
 
         open_start(start, debug, cx);
         cx.activate(true);

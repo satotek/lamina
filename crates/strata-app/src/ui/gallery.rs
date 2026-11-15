@@ -441,21 +441,24 @@ impl Render for Gallery {
                         ),
                 ),
         ));
-        column =
-            column.child(section(
-                "Theme swatches",
-                &design,
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_2()
-                    .child(swatch_strip(design.lane, &design))
-                    .child(div().flex().flex_wrap().items_center().gap_4().children(
-                        style::theme::all().iter().map(|theme| {
-                            swatch_label(theme.name.clone(), theme.swatches(), &design)
-                        }),
-                    )),
-            ));
+        column = column.child(section(
+            "Theme swatches",
+            &design,
+            div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .child(swatch_strip(design.lane, &design))
+                .child(div().flex().flex_wrap().items_center().gap_4().children(
+                    style::theme::all().into_iter().map(|entry| {
+                        swatch_label(
+                            entry.palette.name.clone(),
+                            entry.palette.swatches(),
+                            &design,
+                        )
+                    }),
+                )),
+        ));
 
         column = column.child(section(
             "Confirmation",

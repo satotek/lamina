@@ -20,10 +20,13 @@ use gpui_component::group_box::GroupBoxVariant;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::label::Label;
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_component::notification::Notification;
 use gpui_component::setting::{
     NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage,
 };
-use gpui_component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
+use gpui_component::{
+    ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _, h_flex, v_flex,
+};
 use gpui_kit_assets::IconName;
 
 use super::SIDEBAR_MAX;
@@ -31,7 +34,7 @@ use super::change::{self, Section};
 use crate::actions::OpenGitConfig;
 use crate::settings::{self, DateFormat, DiffLayout, Settings, ThemeMode};
 use crate::style::Design;
-use crate::style::theme::{self, ThemeAppearance};
+use crate::style::theme::{self, ThemeAppearance, ThemeErrorKind, ThemeSource};
 use crate::tools::Tooling;
 
 /// Font families offered beside the free-text font fields.
@@ -133,6 +136,7 @@ fn appearance(control: f32, design: &Design) -> SettingPage {
                 palette_field(ThemeAppearance::Dark, control),
             )
             .description(t!("settings.theme.dark_theme_description").to_string()),
+            SettingItem::render(user_themes_row),
         ]),
     )
     .groups(
@@ -1247,14 +1251,17 @@ fn palette_field(appearance: ThemeAppearance, control: f32) -> SettingField<Shar
         } else {
             &Settings::get(cx).appearance.light_theme
         };
-        let active = theme::resolve(active_id, is_dark);
-        let active_id_owned = active.id.clone();
+        let active = theme::resolve_entry(active_id, is_dark);
+        let active_id_owned = active.palette.id.clone();
+        let user_tag = t!("settings.theme.user_tag").to_string();
+        let active_tag = (active.source == ThemeSource::User).then_some(user_tag.clone());
 
         Button::new(element_id)
             .w(px(control))
-            .child(crate::ui::swatch_label(
-                active.name.clone(),
-                active.swatches(),
+            .child(crate::ui::swatch_label_with_tag(
+                active.palette.name.clone(),
+                active_tag,
+                active.palette.swatches(),
                 &design,
             ))
             .dropdown_caret(true)
@@ -1262,35 +1269,210 @@ fn palette_field(appearance: ThemeAppearance, control: f32) -> SettingField<Shar
             .disabled(options.is_disabled())
             .with_size(options.size())
             .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
-                theme::for_appearance(appearance)
-                    .fold(menu, |menu, palette| {
-                        let checked = palette.id == active_id_owned;
-                        let id = palette.id.clone();
-                        let name = palette.name.clone();
-                        let swatches = palette.swatches();
-                        menu.item(
-                            PopupMenuItem::element(move |_, cx| {
-                                let design = Design::new(cx.theme(), Settings::get(cx));
-                                crate::ui::swatch_label(name.clone(), swatches, &design)
-                            })
-                            .checked(checked)
-                            .on_click(move |_, _, cx| {
-                                let id = id.clone();
-                                settings::update(cx, |settings| {
-                                    if is_dark {
-                                        change::dark_theme(settings, &id);
-                                    } else {
-                                        change::light_theme(settings, &id);
-                                    }
-                                });
-                                settings::apply_theme(None, cx);
-                            }),
-                        )
-                    })
-                    .min_w(px(control))
+                let entries = theme::for_appearance(appearance);
+                let (bundled, user): (Vec<_>, Vec<_>) = entries
+                    .into_iter()
+                    .partition(|entry| entry.source == ThemeSource::Bundled);
+                let add_entry = |menu: gpui_component::menu::PopupMenu,
+                                 entry: theme::ThemeEntry| {
+                    let checked = entry.palette.id == active_id_owned;
+                    let id = entry.palette.id.clone();
+                    let name = entry.palette.name.clone();
+                    let swatches = entry.palette.swatches();
+                    let tag = (entry.source == ThemeSource::User).then_some(user_tag.clone());
+                    menu.item(
+                        PopupMenuItem::element(move |_, cx| {
+                            let design = Design::new(cx.theme(), Settings::get(cx));
+                            crate::ui::swatch_label_with_tag(
+                                name.clone(),
+                                tag.clone(),
+                                swatches,
+                                &design,
+                            )
+                        })
+                        .checked(checked)
+                        .on_click(move |_, _, cx| {
+                            let id = id.clone();
+                            settings::update(cx, |settings| {
+                                if is_dark {
+                                    change::dark_theme(settings, &id);
+                                } else {
+                                    change::light_theme(settings, &id);
+                                }
+                            });
+                            settings::apply_theme(None, cx);
+                        }),
+                    )
+                };
+
+                let mut menu = bundled.into_iter().fold(menu, add_entry);
+                if !user.is_empty() {
+                    menu = menu.separator();
+                    menu = user.into_iter().fold(menu, add_entry);
+                }
+                menu.min_w(px(control))
             })
             .into_any_element()
     })
+}
+
+fn user_themes_row(
+    _options: &gpui_component::setting::RenderOptions,
+    _window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let design = Design::new(cx.theme(), Settings::get(cx));
+    let dir_label = theme::user_themes_dir().map_or_else(
+        || t!("settings.theme.no_config_directory").to_string(),
+        |dir| dir.display().to_string(),
+    );
+    let errors = theme::load_errors();
+
+    v_flex()
+        .gap_2()
+        .w_full()
+        .child(
+            h_flex()
+                .items_center()
+                .flex_wrap()
+                .gap_2()
+                .child(
+                    crate::ui::button(
+                        "open-themes-folder",
+                        t!("settings.theme.open_folder").to_string(),
+                    )
+                    .size(crate::ui::ButtonSize::Small)
+                    .on_click(|_, window, cx| match theme::user_themes_dir() {
+                        Some(dir) => {
+                            if let Err(error) = std::fs::create_dir_all(&dir) {
+                                window.push_notification(
+                                    Notification::error(
+                                        t!("settings.theme.open_folder_error", error = error)
+                                            .to_string(),
+                                    ),
+                                    cx,
+                                );
+                            } else {
+                                cx.open_with_system(&dir);
+                            }
+                        }
+                        None => {
+                            window.push_notification(
+                                Notification::error(
+                                    t!("settings.theme.no_config_directory").to_string(),
+                                ),
+                                cx,
+                            );
+                        }
+                    }),
+                )
+                .child(
+                    crate::ui::button(
+                        "export-current-theme",
+                        t!("settings.theme.export_current").to_string(),
+                    )
+                    .size(crate::ui::ButtonSize::Small)
+                    .on_click(|_, window, cx| {
+                        let is_dark = cx.theme().is_dark();
+                        let settings = Settings::get(cx);
+                        let active_id = if is_dark {
+                            &settings.appearance.dark_theme
+                        } else {
+                            &settings.appearance.light_theme
+                        };
+                        let active = theme::resolve(active_id, is_dark);
+                        match theme::export_to_user_dir(&active) {
+                            Ok(path) => {
+                                theme::reload(cx);
+                                let file = path
+                                    .file_name()
+                                    .map(|name| name.to_string_lossy().into_owned())
+                                    .unwrap_or_else(|| path.display().to_string());
+                                window.push_notification(
+                                    Notification::success(
+                                        t!("settings.theme.exported", file = file).to_string(),
+                                    ),
+                                    cx,
+                                );
+                            }
+                            Err(error) => {
+                                window.push_notification(
+                                    Notification::error(
+                                        t!("settings.theme.export_error", error = error)
+                                            .to_string(),
+                                    ),
+                                    cx,
+                                );
+                            }
+                        }
+                    }),
+                )
+                .child(
+                    crate::ui::button("reload-themes", t!("settings.theme.reload").to_string())
+                        .size(crate::ui::ButtonSize::Small)
+                        .on_click(|_, _, cx| theme::reload(cx)),
+                ),
+        )
+        .child(
+            div()
+                .min_w_0()
+                .truncate()
+                .text_size(px(design.tiny()))
+                .text_color(design.muted)
+                .child(dir_label),
+        )
+        .when(!errors.is_empty(), |this| {
+            this.child(
+                v_flex().gap_1().w_full().children(
+                    errors
+                        .iter()
+                        .map(|error| theme_error_banner(error, &design)),
+                ),
+            )
+        })
+        .into_any_element()
+}
+
+fn theme_error_banner(error: &theme::ThemeLoadError, design: &Design) -> AnyElement {
+    let (lead, detail) = match &error.kind {
+        ThemeErrorKind::ReadDirFailed(detail) => (
+            t!("settings.theme.error_read_dir", path = &error.file).to_string(),
+            Some(detail.as_str()),
+        ),
+        ThemeErrorKind::ReadFailed(detail) => (
+            t!("settings.theme.error_read", file = &error.file).to_string(),
+            Some(detail.as_str()),
+        ),
+        ThemeErrorKind::ParseFailed(detail) => (
+            t!("settings.theme.error_invalid", file = &error.file).to_string(),
+            Some(detail.as_str()),
+        ),
+        ThemeErrorKind::CollidesWithBundled(id) => (
+            t!(
+                "settings.theme.error_bundled_collision",
+                file = &error.file,
+                id = id
+            )
+            .to_string(),
+            None,
+        ),
+        ThemeErrorKind::DuplicateUserId(id) => (
+            t!(
+                "settings.theme.error_duplicate_id",
+                file = &error.file,
+                id = id
+            )
+            .to_string(),
+            None,
+        ),
+    };
+    let mut banner = crate::ui::banner(crate::ui::BannerKind::Warning, lead, design)
+        .wrap()
+        .rounded(px(6.0));
+    if let Some(detail) = detail {
+        banner = banner.detail(detail.to_owned());
+    }
+    banner.into_any_element()
 }
 
 /// The language dropdown. A change is applied to every open window at once,
