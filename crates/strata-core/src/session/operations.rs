@@ -203,6 +203,7 @@ fn changes_refs(operation: &Operation) -> bool {
             | Operation::Rebase { .. }
             | Operation::Reset { .. }
             | Operation::UndoReflog { .. }
+            | Operation::RedoReflog { .. }
             | Operation::CreateTag { .. }
             | Operation::DeleteTag { .. }
             | Operation::ContinueInProgress
@@ -374,6 +375,7 @@ fn execute(shared: &Arc<Shared>, id: OperationId, operation: &Operation) -> Resu
         } => git.rebase(*onto, *upstream, *autostash),
         Operation::Reset { target, mode } => git.reset(*target, *mode),
         Operation::UndoReflog { entry } => git.undo_reflog(entry.as_ref()).map(|_| ()),
+        Operation::RedoReflog { entry } => git.redo_reflog(entry),
         Operation::CreateTag {
             name,
             target,

@@ -8,6 +8,10 @@
 //! A checkout is undone by switching back to the branch the reflog message
 //! names, which is the state the user sees rather than a detached commit.
 //!
+//! Redo is the same move reversed, so it needs no separate record: the entry
+//! names both targets. It is only allowed while HEAD still sits at the target
+//! the undo left behind, because anything newer means the user moved on.
+//!
 //! Published history is not rewritten: if a remote-tracking branch already
 //! contains the commit being moved away from, the undo is refused, the same
 //! ancestry check history edits use to warn before a force push.
@@ -131,6 +135,85 @@ impl Git {
             None => self.plan_undo_last_action()?,
         };
         self.apply_undo(&plan)
+    }
+
+    /// Re-applies an undone action, putting the branch or checkout back where
+    /// the undo found it.
+    ///
+    /// The entry records both targets, which is what makes a redo possible at
+    /// all. It is only safe while HEAD still sits at the entry's old target:
+    /// anything newer means the user has moved on, and resetting would discard
+    /// work the undo never saw.
+    pub fn redo_reflog(&self, entry: &ReflogEntry) -> Result<()> {
+        let repo = Repo::open(self.workdir())?;
+        self.ensure_can_undo(&repo)?;
+        if !entry.kind.can_restore() {
+            return Err(Error::other(format!(
+                "cannot redo this entry: `{}` is not an action strata knows how to redo",
+                entry.message
+            )));
+        }
+        let head = repo.head()?;
+        if head_target(&repo)? != Some(entry.old_id) {
+            return Err(Error::other(
+                "cannot redo: the repository moved since the undo",
+            ));
+        }
+        if entry.kind == ReflogKind::Checkout {
+            return self.redo_checkout(&repo, entry);
+        }
+        let HeadInfo::Branch { short_name, .. } = head else {
+            return Err(Error::other(
+                "cannot redo: HEAD is detached; check out the branch first",
+            ));
+        };
+        if entry.reference != "HEAD" && entry.reference != *short_name {
+            return Err(Error::other(format!(
+                "cannot redo {} while {short_name} is checked out; switch to {} first",
+                entry.reference, entry.reference
+            )));
+        }
+        if entry.new_id.is_null() {
+            return Err(Error::other(
+                "cannot redo: this entry has no target to move back to",
+            ));
+        }
+        ensure_worktree_keeps(&repo, entry.old_id, entry.new_id)?;
+        self.run(&["reset", "--keep", &entry.new_id.to_string()], None)
+            .map(|_| ())
+    }
+
+    /// Switches to the branch or commit the undone checkout had moved to.
+    fn redo_checkout(&self, repo: &Repo, entry: &ReflogEntry) -> Result<()> {
+        let Some(destination) = checkout_destination(&entry.message) else {
+            return Err(Error::other(format!(
+                "cannot redo: `{}` does not name the branch it switched to",
+                entry.message
+            )));
+        };
+        // The switch would overwrite the same paths a reset would; the check is
+        // shared so both report the same problem the same way.
+        if let Some(current) = head_target(repo)?
+            && !entry.new_id.is_null()
+            && entry.new_id != current
+        {
+            ensure_worktree_keeps(repo, current, entry.new_id)?;
+        }
+        if repo
+            .local_branch_names()?
+            .iter()
+            .any(|name| name.as_str() == destination)
+        {
+            return self.run(&["switch", destination], None).map(|_| ());
+        }
+        if !entry.new_id.is_null() {
+            return self
+                .run(&["switch", "--detach", &entry.new_id.to_string()], None)
+                .map(|_| ());
+        }
+        Err(Error::other(format!(
+            "cannot redo: `{destination}` is not a local branch and the entry has no commit"
+        )))
     }
 
     /// Refuses while git has an operation half-done: undoing a history move in
@@ -257,6 +340,16 @@ fn checkout_source(message: &str) -> Option<&str> {
     None
 }
 
+/// The ref a checkout moved to, which is where redoing that checkout goes.
+fn checkout_destination(message: &str) -> Option<&str> {
+    for prefix in ["checkout: moving from ", "switch: moving from "] {
+        if let Some(rest) = message.strip_prefix(prefix) {
+            return rest.split_once(" to ").map(|(_, target)| target);
+        }
+    }
+    None
+}
+
 /// Refuses when the worktree or index holds changes on a path the move would
 /// rewrite, mirroring what `git reset --keep` treats as a local change.
 ///
@@ -336,6 +429,11 @@ mod tests {
             Some("topic")
         );
         assert_eq!(checkout_source("commit: no move"), None);
+        assert_eq!(
+            checkout_destination("checkout: moving from main to feature/x"),
+            Some("feature/x")
+        );
+        assert_eq!(checkout_destination("commit: no move"), None);
     }
 
     fn repo_with_two_commits() -> (TestRepo, Oid, Oid) {
@@ -365,6 +463,90 @@ mod tests {
         assert_eq!(repo.head(), first);
         assert!(!repo.path().join("b.txt").exists(), "the commit is gone");
         assert_eq!(repo.git(&["status", "--porcelain=v2"]), "");
+    }
+
+    #[test]
+    fn redoing_an_undo_brings_the_commit_back() {
+        let (repo, first, second) = repo_with_two_commits();
+
+        let plan = repo.git_handle().plan_undo_last_action().expect("plan");
+        repo.git_handle().apply_undo(&plan).expect("undo");
+        assert_eq!(repo.head(), first);
+
+        repo.git_handle().redo_reflog(&plan.entry).expect("redo");
+        assert_eq!(repo.head(), second, "the undone commit is back");
+        assert_eq!(
+            std::fs::read_to_string(repo.path().join("b.txt")).expect("worktree file"),
+            "two\n",
+            "the redo restores the worktree from the commit"
+        );
+        assert_eq!(repo.git(&["status", "--porcelain=v2"]), "");
+    }
+
+    #[test]
+    fn redoing_an_undone_checkout_switches_back_to_where_it_went() {
+        let (repo, _first, second) = repo_with_two_commits();
+        repo.git(&["branch", "topic"]);
+        repo.git(&["checkout", "-q", "topic"]);
+
+        let plan = repo.git_handle().plan_undo_last_action().expect("plan");
+        repo.git_handle().apply_undo(&plan).expect("undo");
+        assert_eq!(
+            repo.git(&["rev-parse", "--abbrev-ref", "HEAD"]).trim(),
+            "main"
+        );
+
+        repo.git_handle().redo_reflog(&plan.entry).expect("redo");
+        assert_eq!(
+            repo.git(&["rev-parse", "--abbrev-ref", "HEAD"]).trim(),
+            "topic"
+        );
+        assert_eq!(repo.head(), second);
+    }
+
+    #[test]
+    fn a_redo_refuses_once_the_branch_has_moved() {
+        let (repo, _first, _second) = repo_with_two_commits();
+        let plan = repo.git_handle().plan_undo_last_action().expect("plan");
+        repo.git_handle().apply_undo(&plan).expect("undo");
+        repo.write("c.txt", "three\n");
+        repo.commit("three");
+
+        let error = repo
+            .git_handle()
+            .redo_reflog(&plan.entry)
+            .expect_err("a branch that moved past the undo cannot be redone");
+        assert!(
+            error.to_string().contains("moved since the undo"),
+            "{error}"
+        );
+        assert_eq!(
+            repo.git(&["log", "-1", "--format=%s"]).trim(),
+            "three",
+            "nothing was reset"
+        );
+    }
+
+    #[test]
+    fn a_redo_refuses_an_entry_undo_never_restored() {
+        let (repo, _first, _second) = repo_with_two_commits();
+        let mut entry = repo
+            .open()
+            .reflog(10)
+            .expect("reflog")
+            .into_iter()
+            .find(|entry| entry.reference == "HEAD" && entry.kind == ReflogKind::Commit)
+            .expect("the commit entry");
+        entry.kind = ReflogKind::BranchCreate;
+
+        let error = repo
+            .git_handle()
+            .redo_reflog(&entry)
+            .expect_err("an entry strata cannot undo has no redo");
+        assert!(
+            error.to_string().contains("cannot redo this entry"),
+            "{error}"
+        );
     }
 
     #[test]

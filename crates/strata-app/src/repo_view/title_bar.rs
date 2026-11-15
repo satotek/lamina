@@ -242,12 +242,16 @@ impl RepoView {
             .mx_1p5()
             .bg(design.border);
 
+        let undo_redo = fit
+            .undo_redo
+            .then(|| self.undo_redo_buttons(design, window));
         let nav = div()
             .flex()
             .items_center()
             .gap(px(2.0))
             .flex_none()
             .occlude()
+            .when_some(undo_redo, |nav, buttons| nav.child(buttons))
             .child(self.remote_buttons(
                 source.as_ref(),
                 &remote::Colors {
@@ -349,13 +353,23 @@ const SEPARATOR_WIDTH: f32 = 13.0;
 /// The terminal and settings buttons.
 const TOOL_BUTTON_WIDTH: f32 = 32.0;
 
-/// The width of the title bar's actions: the remote row, the stash action
-/// (52 px with its label, 32 as an icon), the separator, the terminal and the
-/// settings. They never leave the window, so this is what the rest of the bar
-/// has to leave room for.
-const fn actions_width(remote: f32, stash: f32) -> f32 {
+/// The undo and redo pair, with the same 2 px gap the network actions use.
+const UNDO_REDO_WIDTH: f32 = 2.0 * TOOL_BUTTON_WIDTH + ACTION_GAP;
+
+/// The width of the title bar's actions: the undo/redo pair, the remote row,
+/// the stash action (52 px with its label, 32 as an icon), the separator, the
+/// terminal and the settings. They never leave the window, so this is what the
+/// rest of the bar has to leave room for. The undo pair is the part that gives
+/// way at the narrowest widths, where its shortcuts still run it.
+const fn actions_width(remote: f32, stash: f32, undo_redo: bool) -> f32 {
+    let undo = if undo_redo {
+        UNDO_REDO_WIDTH + ACTION_GAP
+    } else {
+        0.0
+    };
     remote
         + ACTION_GAP
+        + undo
         + stash
         + ACTION_GAP
         + SEPARATOR_WIDTH
@@ -364,16 +378,6 @@ const fn actions_width(remote: f32, stash: f32) -> f32 {
         + ACTION_GAP
         + TOOL_BUTTON_WIDTH
 }
-
-/// The actions at their full size.
-const ACTIONS_WIDTH: f32 = actions_width(REMOTE_ACTIONS_WIDTH, 64.0);
-
-/// The same row with the stash action drawn as an icon only.
-const COMPACT_ACTIONS_WIDTH: f32 = actions_width(REMOTE_ACTIONS_WIDTH, 32.0);
-
-/// The same row with the remote actions drawn as icons too, for the narrowest
-/// tier.
-const NARROW_ACTIONS_WIDTH: f32 = actions_width(COMPACT_REMOTE_ACTIONS_WIDTH, 32.0);
 
 /// Below this width the remote buttons lose their labels, since that frees
 /// more room for the search field and the back button than the labels are
@@ -409,12 +413,13 @@ const MIN_BRANCH_WIDTH: f32 = 60.0;
 ///
 /// The actions on the right always stay in the window, down to the 720 px
 /// minimum size. Everything between them and the app mark gives way in one
-/// order as the window narrows: the search hint, the wordmark, the upstream
-/// tracking label, the remote buttons' labels, the repository and branch caps,
-/// the back button's label, and finally the branch chip. The search field is
-/// the last thing to go: it is the only part with no icon-only form, so it is
-/// narrowed to [`MIN_SEARCH_WIDTH`] before it disappears. The name caps are
-/// what the row reserves; a longer name truncates inside its cap.
+/// order as the window narrows: the undo/redo pair, the search hint, the
+/// wordmark, the upstream tracking label, the remote buttons' labels, the
+/// repository and branch caps, the back button's label, and finally the branch
+/// chip. The search field is the last thing to go: it is the only part with no
+/// icon-only form, so it is narrowed to [`MIN_SEARCH_WIDTH`] before it
+/// disappears. The name caps are what the row reserves; a longer name
+/// truncates inside its cap.
 #[derive(Clone, Copy, Debug)]
 struct TitleBarFit {
     /// The search column. It is dropped only when even the barest name row
@@ -432,6 +437,9 @@ struct TitleBarFit {
     stash_label: bool,
     /// Fetch, Pull and Push as icons only, with the labels in their tooltips.
     remote_compact: bool,
+    /// The undo/redo pair before the remote actions. It gives way at the
+    /// narrowest widths, where the shortcuts still run both actions.
+    undo_redo: bool,
     /// Whether the "Back to <parent>" label is shown beside its arrow icon.
     back_label: bool,
     back_width: f32,
@@ -452,6 +460,7 @@ impl TitleBarFit {
             track,
             stash_label: width >= 1300.0,
             remote_compact: width < REMOTE_ICONS_BELOW,
+            undo_redo: true,
             back_label,
             back_width,
             repository_width,
@@ -507,17 +516,17 @@ impl TitleBarFit {
     }
 
     /// The width the actions row reserves for the details it currently shows.
-    ///
-    /// The middle case is only reached while `shed` is still deciding: the
-    /// stash label is the last of the wide-window details to go, and once the
-    /// search has room, the loop stops with it still in place.
     fn actions_width(&self) -> f32 {
-        match (self.stash_label, self.remote_compact) {
-            (true, false) => ACTIONS_WIDTH,
-            (false, false) => COMPACT_ACTIONS_WIDTH,
-            (false, true) => NARROW_ACTIONS_WIDTH,
-            (true, true) => actions_width(COMPACT_REMOTE_ACTIONS_WIDTH, 64.0),
-        }
+        let remote = if self.remote_compact {
+            COMPACT_REMOTE_ACTIONS_WIDTH
+        } else {
+            REMOTE_ACTIONS_WIDTH
+        };
+        actions_width(
+            remote,
+            if self.stash_label { 64.0 } else { 32.0 },
+            self.undo_redo,
+        )
     }
 
     /// What is left for the search field once the name row and the actions
@@ -563,7 +572,13 @@ impl TitleBarFit {
     /// Gives up one detail, the least costly first, to make room for the
     /// search field. Returns false once nothing else may give way.
     fn shed(&mut self) -> bool {
-        if self.track {
+        if self.undo_redo {
+            // The pair is the newest detail and the one with a complete
+            // alternative: both actions keep their shortcuts, so it gives way
+            // before the remote labels and the chips that identify the
+            // repository.
+            self.undo_redo = false;
+        } else if self.track {
             self.track = false;
         } else if self.wordmark {
             self.wordmark = false;
@@ -709,6 +724,45 @@ impl RepoView {
                     entity.update(cx, |this, cx| this.open_terminal_here(cx));
                 }
             })
+            .into_any_element()
+    }
+
+    /// The title bar's Undo and Redo pair, left of the remote actions.
+    ///
+    /// The tooltips name the entry each button would move to, so the pair says
+    /// more than "undo"; a disabled side carries the reason it cannot run.
+    fn undo_redo_buttons(&self, design: &Design, window: &Window) -> AnyElement {
+        let (undo_enabled, undo_tooltip) = self.undo_button_state(window);
+        let (redo_enabled, redo_tooltip) = self.redo_button_state(window);
+        div()
+            .flex()
+            .items_center()
+            .gap(px(ACTION_GAP))
+            .flex_none()
+            .child(
+                crate::ui::icon_button("undo-last-action", IconName::Undo)
+                    .ghost()
+                    .w(px(TOOL_BUTTON_WIDTH))
+                    .h(px(TOOL_BUTTON_WIDTH))
+                    .text_color(design.muted)
+                    .tooltip(undo_tooltip)
+                    .disabled(!undo_enabled)
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(Box::new(actions::UndoLastAction), cx);
+                    }),
+            )
+            .child(
+                crate::ui::icon_button("redo-last-action", IconName::Redo)
+                    .ghost()
+                    .w(px(TOOL_BUTTON_WIDTH))
+                    .h(px(TOOL_BUTTON_WIDTH))
+                    .text_color(design.muted)
+                    .tooltip(redo_tooltip)
+                    .disabled(!redo_enabled)
+                    .on_click(|_, window, cx| {
+                        window.dispatch_action(Box::new(actions::RedoLastAction), cx);
+                    }),
+            )
             .into_any_element()
     }
 }
@@ -888,6 +942,22 @@ mod tests {
     }
 
     #[test]
+    fn the_undo_pair_shows_once_the_bar_has_room_for_it() {
+        assert!(
+            TitleBarFit::new(1360.0, false).undo_redo,
+            "a default-sized window shows undo and redo beside the remote actions"
+        );
+        assert!(
+            TitleBarFit::new(1360.0, true).undo_redo,
+            "the pair survives the back button at a default size"
+        );
+        assert!(
+            !TitleBarFit::new(style::MIN_WINDOW_SIZE.0, true).undo_redo,
+            "at the app minimum the search field comes before the pair"
+        );
+    }
+
+    #[test]
     fn a_narrow_window_hides_details_instead_of_overflowing() {
         let fit = TitleBarFit::new(800.0, false);
         assert!(!fit.wordmark, "the wordmark goes before the name chips");
@@ -934,8 +1004,8 @@ mod tests {
         assert_eq!(fit.repository_width, 220.0);
         assert_eq!(fit.branch_width, 240.0);
         assert!(
-            fit.search_width > 300.0,
-            "a 1600 px window has room for a wide search field"
+            fit.search_width > 280.0,
+            "a 1600 px window has a wide search field beside the undo pair"
         );
     }
 

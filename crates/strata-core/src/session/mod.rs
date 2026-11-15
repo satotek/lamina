@@ -454,6 +454,14 @@ pub enum Operation {
     UndoReflog {
         entry: Option<ReflogEntry>,
     },
+    /// Re-applies an undone action: the state the undo moved away from. A
+    /// branch move runs `git reset --keep` back to the entry's new target; a
+    /// checkout switches to the branch or commit it left. Refused once the
+    /// branch has moved again, because the recorded ids no longer describe
+    /// what the user last saw.
+    RedoReflog {
+        entry: ReflogEntry,
+    },
     /// A lightweight tag when `message` is `None`, an annotated one otherwise.
     CreateTag {
         name: String,

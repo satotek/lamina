@@ -736,6 +736,9 @@ impl RepoView {
                 view.repository_key = Some(commit_graph::repository_key(session.repo()));
                 view.session = Some(*session);
                 view.search.init_input(window, cx);
+                // The title bar's undo tooltip names the last action, so the
+                // rows are read before the reflog pane is ever opened.
+                view.refresh_reflog(cx);
                 view.sync_autofetch(cx);
                 view.check_lfs_notice(cx);
                 if view.active {
@@ -1403,6 +1406,14 @@ impl RepoView {
     ) -> Option<OperationId> {
         if self.session.is_none() || self.is_busy() {
             return None;
+        }
+        // A new edit makes the recorded redo point at a state the user has
+        // left; only the undo and redo themselves keep the stack.
+        if !matches!(
+            operation,
+            Operation::UndoReflog { .. } | Operation::RedoReflog { .. }
+        ) {
+            self.clear_redo();
         }
         let Some(session) = &self.session else {
             return None;

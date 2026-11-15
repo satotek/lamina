@@ -20,9 +20,9 @@ use super::{PAGE, RepoView};
 use crate::actions::ToggleTerminal;
 use crate::actions::{
     self, CloseCompare, ExtendSelectionNext, ExtendSelectionPrevious, NavigateBack, OpenInEditor,
-    OpenTerminalHere, SelectFirst, SelectLast, SelectNext, SelectPageDown, SelectPageUp,
-    SelectPrevious, StashChanges, SwitchBranch, ToggleDetailsMaximized, ToggleFrameStats,
-    ToggleSidebar, ToggleWholeFile, UndoLastAction,
+    OpenTerminalHere, RedoLastAction, SelectFirst, SelectLast, SelectNext, SelectPageDown,
+    SelectPageUp, SelectPrevious, StashChanges, SwitchBranch, ToggleDetailsMaximized,
+    ToggleFrameStats, ToggleSidebar, ToggleWholeFile, UndoLastAction,
 };
 use crate::branches::CreateBranchFromHead;
 use crate::commands::RunCustomCommand;
@@ -110,6 +110,11 @@ impl Render for RepoView {
             .on_action(
                 cx.listener(|this, _: &UndoLastAction, window, cx| {
                     this.undo_last_action(window, cx)
+                }),
+            )
+            .on_action(
+                cx.listener(|this, _: &RedoLastAction, window, cx| {
+                    this.redo_last_action(window, cx)
                 }),
             )
             .on_action(cx.listener(|this, _: &OpenTerminalHere, _, cx| this.open_terminal_here(cx)))

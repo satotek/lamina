@@ -167,11 +167,11 @@ use crate::actions::ToggleTerminal;
 use crate::actions::{
     CloneRepository, CloseCompare, CloseTab, ExtendSelectionNext, ExtendSelectionPrevious,
     NavigateBack, NewRepository, NewTab, NextTab, OpenGitConfig, OpenInEditor, OpenRepository,
-    OpenSettings, OpenTerminalHere, PreviousTab, Quit, REPO_VIEW, REPO_VIEW_LIST, ReopenClosedTab,
-    SelectFirst, SelectLast, SelectNext, SelectPageDown, SelectPageUp, SelectPrevious, SelectTab1,
-    SelectTab2, SelectTab3, SelectTab4, SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9,
-    StashChanges, SwitchBranch, ToggleDetailsMaximized, ToggleFrameStats, TogglePalette,
-    ToggleSidebar, ToggleWholeFile, UndoLastAction, WORKSPACE,
+    OpenSettings, OpenTerminalHere, PreviousTab, Quit, REPO_VIEW, REPO_VIEW_LIST, RedoLastAction,
+    ReopenClosedTab, SelectFirst, SelectLast, SelectNext, SelectPageDown, SelectPageUp,
+    SelectPrevious, SelectTab1, SelectTab2, SelectTab3, SelectTab4, SelectTab5, SelectTab6,
+    SelectTab7, SelectTab8, SelectTab9, StashChanges, SwitchBranch, ToggleDetailsMaximized,
+    ToggleFrameStats, TogglePalette, ToggleSidebar, ToggleWholeFile, UndoLastAction, WORKSPACE,
 };
 use crate::branch_switcher::{
     BranchSwitcherConfirm, BranchSwitcherDismiss, BranchSwitcherNext, BranchSwitcherPrevious,
@@ -360,6 +360,16 @@ pub static ACTIONS: &[ActionSpec] = &[
         UndoLastAction,
         [binding("secondary-z", Some(REPO_VIEW_LIST))],
         24,
+        true
+    ),
+    action!(
+        "strata::RedoLastAction",
+        "Redo Last Action",
+        Actions,
+        Some(REPO_VIEW_LIST),
+        RedoLastAction,
+        [binding("secondary-shift-z", Some(REPO_VIEW_LIST))],
+        38,
         true
     ),
     action!(
@@ -2010,6 +2020,7 @@ mod tests {
             ("secondary-shift-s", "StashChanges", "RepoView"),
             ("secondary-b", "SwitchBranch", "RepoView"),
             ("secondary-z", "UndoLastAction", "RepoView && !Input"),
+            ("secondary-shift-z", "RedoLastAction", "RepoView && !Input"),
             ("alt-left", "NavigateBack", "RepoView"),
             #[cfg(target_os = "macos")]
             ("secondary-[", "NavigateBack", "RepoView"),
@@ -2184,7 +2195,7 @@ mod tests {
             }
         }
         // Every built-in palette entry has a registry row.
-        let expected_count = if cfg!(feature = "terminal") { 42 } else { 41 };
+        let expected_count = if cfg!(feature = "terminal") { 43 } else { 42 };
         assert_eq!(orders.len(), expected_count);
     }
 

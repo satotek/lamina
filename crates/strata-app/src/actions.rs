@@ -80,6 +80,9 @@ actions!(
         /// Restores the state before the newest reflog action strata can undo.
         /// Handled on `RepoView` by `reflog.rs`.
         UndoLastAction,
+        /// Re-applies the last action this view undid. Handled on `RepoView`
+        /// by `reflog.rs`.
+        RedoLastAction,
         /// Opens a terminal in the repository's working tree. Handled on
         /// `RepoView` by `title_bar.rs`.
         OpenTerminalHere,
