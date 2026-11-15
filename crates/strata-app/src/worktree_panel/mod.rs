@@ -11,6 +11,7 @@
 mod commit_box;
 mod file_list;
 mod hunks;
+mod ignore;
 
 use std::collections::{BTreeSet, HashMap};
 use std::rc::Rc;

@@ -14,6 +14,7 @@ use strata_core::lfs::{LfsInfo, LfsLock};
 use strata_core::session::{Operation, RepoSnapshot};
 use strata_core::{ChangeKind, FileChange};
 
+use super::ignore;
 use super::{Colors, Selection, Side, WorktreePanel};
 use crate::repo_view::RepoView;
 use crate::scrollbar::WithScrollbar as _;
@@ -298,7 +299,7 @@ fn file_row(
         gpui::ElementId::named_usize(format!("worktree-file-menu-{}", side as u8), index),
         &context.colors.design,
         trigger,
-        move |menu, _window, cx| {
+        move |menu, window, cx| {
             let count = menu_entity.read(cx).worktree.selection.len();
             // The menu acts on the pointed-at row even when the selection
             // holds several files.
@@ -397,6 +398,45 @@ fn file_row(
                         discard_entity
                             .update(cx, |this, cx| this.discard_unstaged_selection(window, cx));
                     }));
+
+                    // Ignoring writes a plain `.gitignore` line, so it is only
+                    // offered for a path git does not track yet.
+                    if untracked {
+                        let patterns = ignore::patterns(&menu_path);
+                        let ignore_entity = menu_entity.clone();
+                        menu = menu.submenu(
+                            t!("worktree.ignore").to_string(),
+                            window,
+                            cx,
+                            move |submenu, _window, _cx| {
+                                let mut submenu = submenu;
+                                for entry in &patterns {
+                                    let entity = ignore_entity.clone();
+                                    let pattern = entry.pattern.clone();
+                                    submenu = submenu.item(
+                                        PopupMenuItem::new(entry.label.clone()).on_click(
+                                            move |_, _window, cx| {
+                                                let pattern = pattern.clone();
+                                                entity.update(cx, |this, cx| {
+                                                    this.ignore_worktree_path(pattern, cx)
+                                                });
+                                            },
+                                        ),
+                                    );
+                                }
+                                submenu
+                            },
+                        );
+
+                        let edit_entity = menu_entity.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new(t!("worktree.ignore.edit").to_string()).on_click(
+                                move |_, _window, cx| {
+                                    edit_entity.update(cx, |this, cx| this.edit_gitignore(cx));
+                                },
+                            ),
+                        );
+                    }
                 }
                 Side::Staged => {
                     let unstage_entity = menu_entity.clone();
