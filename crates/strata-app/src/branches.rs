@@ -2152,14 +2152,13 @@ fn item_element(
             index,
             depth,
             local_name,
-            existing,
+            existing: _,
         } => remote_row(
             name,
             label,
             *index,
             *depth,
             local_name.as_deref(),
-            *existing,
             reveal.is_ref(RefKind::RemoteBranch, name),
             enabled,
             busy,
@@ -2827,8 +2826,7 @@ fn local_row(
                 if event.click_count() < 2 {
                     view.reveal_ref(RefKind::LocalBranch, &branch, window, cx);
                 } else if !busy && !active {
-                    let label = t!("branch.op.checkout", branch = branch).to_string();
-                    view.run_operation(Operation::Checkout { branch }, label, window, cx);
+                    view.checkout_branch(RefKind::LocalBranch, &branch, window, cx);
                 }
             });
         })
@@ -2921,13 +2919,7 @@ fn local_row(
                         move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                             let branch = branch.clone();
                             entity.update(cx, |view, cx| {
-                                let label = t!("branch.op.checkout", branch = branch).to_string();
-                                view.run_operation(
-                                    Operation::Checkout { branch },
-                                    label,
-                                    window,
-                                    cx,
-                                );
+                                view.checkout_branch(RefKind::LocalBranch, &branch, window, cx);
                             });
                         }
                     }),
@@ -2958,16 +2950,7 @@ fn local_row(
                         move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                             let branch = branch.clone();
                             entity.update(cx, |view, cx| {
-                                let label = t!("branch.op.merge", branch = branch).to_string();
-                                view.run_operation(
-                                    Operation::Merge {
-                                        branch,
-                                        no_ff: false,
-                                    },
-                                    label,
-                                    window,
-                                    cx,
-                                );
+                                view.merge_branch(&branch, window, cx);
                             });
                         }
                     }),
@@ -3014,7 +2997,7 @@ fn local_row(
                         move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                             let branch = branch.clone();
                             entity.update(cx, |view, cx| {
-                                view.open_rename_branch(branch, window, cx);
+                                view.rename_branch(&branch, window, cx);
                             });
                         }
                     }),
@@ -3066,7 +3049,7 @@ fn local_row(
                         move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                             let branch = branch.clone();
                             entity.update(cx, |view, cx| {
-                                view.confirm_delete_branch(branch, window, cx);
+                                view.delete_branch_here(&branch, window, cx);
                             });
                         }
                     }),
@@ -3114,7 +3097,6 @@ fn remote_row(
     index: usize,
     depth: usize,
     local_name: Option<&str>,
-    existing: bool,
     revealed: bool,
     enabled: bool,
     busy: bool,
@@ -3128,9 +3110,11 @@ fn remote_row(
         colors,
     )
     .pl(px(42.0 + depth as f32 * 14.0));
-    let Some(local_name) = local_name.map(str::to_owned) else {
+    // A remote ref without a local counterpart (the symbolic `origin/HEAD`)
+    // has nothing to check out or merge.
+    if local_name.is_none() {
         return row_element.into_any_element();
-    };
+    }
     if !enabled {
         return row_element.into_any_element();
     }
@@ -3155,17 +3139,15 @@ fn remote_row(
     let row_element = {
         let click_entity = entity.clone();
         let remote = name.to_owned();
-        let target = local_name.clone();
         row_element
             .cursor_pointer()
             .on_click(move |event, window, cx| {
                 let remote = remote.clone();
-                let target = target.clone();
                 click_entity.update(cx, |view, cx| {
                     if event.click_count() < 2 {
                         view.reveal_ref(RefKind::RemoteBranch, &remote, window, cx);
                     } else if !busy {
-                        checkout_remote(view, &remote, &target, existing, window, cx)
+                        view.checkout_branch(RefKind::RemoteBranch, &remote, window, cx)
                     }
                 });
             })
@@ -3191,12 +3173,10 @@ fn remote_row(
                 .on_click({
                     let entity = entity_menu.clone();
                     let remote = remote.clone();
-                    let target = local_name.clone();
                     move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                         let remote = remote.clone();
-                        let target = target.clone();
                         entity.update(cx, |view, cx| {
-                            checkout_remote(view, &remote, &target, existing, window, cx)
+                            view.checkout_branch(RefKind::RemoteBranch, &remote, window, cx)
                         });
                     }
                 }),
@@ -3225,16 +3205,7 @@ fn remote_row(
                     move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                         let remote = remote.clone();
                         entity.update(cx, |view, cx| {
-                            let label = t!("branch.op.merge", branch = remote).to_string();
-                            view.run_operation(
-                                Operation::Merge {
-                                    branch: remote,
-                                    no_ff: false,
-                                },
-                                label,
-                                window,
-                                cx,
-                            );
+                            view.merge_branch(&remote, window, cx);
                         });
                     }
                 }),
@@ -3846,6 +3817,93 @@ impl RepoView {
         if let Some(focus) = self.branches.dialog_focus.clone() {
             window.defer(cx, move |window, cx| window.focus(&focus, cx));
         }
+    }
+
+    /// Checks out a branch: a local branch directly, a remote one as its local
+    /// counterpart, created from the remote ref when it does not exist yet.
+    ///
+    /// The context menus and the sidebar's rows share this, so a branch is
+    /// checked out the same way wherever it was clicked.
+    pub(crate) fn checkout_branch(
+        &mut self,
+        kind: RefKind,
+        name: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.is_busy() {
+            return;
+        }
+        match kind {
+            RefKind::LocalBranch => {
+                let label = t!("branch.op.checkout", branch = name).to_string();
+                self.run_operation(
+                    Operation::Checkout {
+                        branch: name.to_owned(),
+                    },
+                    label,
+                    window,
+                    cx,
+                );
+            }
+            RefKind::RemoteBranch => {
+                let Some(local) = local_name_for_remote(name) else {
+                    return;
+                };
+                let existing = self.has_local_branch(local);
+                checkout_remote(self, name, local, existing, window, cx);
+            }
+            RefKind::Tag => {}
+        }
+    }
+
+    /// Merges `branch` into the checked-out one.
+    pub(crate) fn merge_branch(
+        &mut self,
+        branch: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let label = t!("branch.op.merge", branch = branch).to_string();
+        self.run_operation(
+            Operation::Merge {
+                branch: branch.to_owned(),
+                no_ff: false,
+            },
+            label,
+            window,
+            cx,
+        );
+    }
+
+    /// Renames a local branch through the same form the sidebar opens.
+    pub(crate) fn rename_branch(
+        &mut self,
+        branch: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_rename_branch(branch.to_owned(), window, cx);
+    }
+
+    /// Deletes a local branch through the same confirmation the sidebar opens.
+    pub(crate) fn delete_branch_here(
+        &mut self,
+        branch: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.confirm_delete_branch(branch.to_owned(), window, cx);
+    }
+
+    fn has_local_branch(&self, branch: &str) -> bool {
+        self.session.as_ref().is_some_and(|session| {
+            session
+                .snapshot()
+                .refs
+                .iter()
+                .any(|info| info.kind == RefKind::LocalBranch && info.short_name == branch)
+        })
     }
 
     pub(crate) fn open_rename_branch(

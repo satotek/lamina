@@ -639,6 +639,158 @@ pub(crate) struct MultiPickContext {
     blocked: Option<String>,
 }
 
+/// A branch ref that points at the commit a menu was opened on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BranchAtCommit {
+    pub(crate) kind: RefKind,
+    pub(crate) name: String,
+}
+
+/// The branch actions offered for a ref.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum BranchAction {
+    Checkout,
+    Merge,
+    Rebase,
+    Rename,
+    Delete,
+}
+
+/// Which branch entries make sense for `kind`.
+///
+/// The checked-out branch cannot be checked out, merged into itself or
+/// rebased onto itself, and deleting it would refuse anyway; renaming it is
+/// the one action that still applies. A remote branch has no local name to
+/// rename or delete, so it only offers the three history actions.
+pub(crate) fn branch_actions(kind: RefKind, is_current: bool) -> Vec<BranchAction> {
+    match kind {
+        RefKind::LocalBranch if is_current => vec![BranchAction::Rename],
+        RefKind::LocalBranch => vec![
+            BranchAction::Checkout,
+            BranchAction::Merge,
+            BranchAction::Rebase,
+            BranchAction::Rename,
+            BranchAction::Delete,
+        ],
+        RefKind::RemoteBranch => vec![
+            BranchAction::Checkout,
+            BranchAction::Merge,
+            BranchAction::Rebase,
+        ],
+        RefKind::Tag => Vec::new(),
+    }
+}
+
+/// The top of the commit menu: every branch pointing at the commit.
+///
+/// One branch's entries sit inline, so the common case is one click. Several
+/// branches become one submenu each, because five entries per branch would
+/// bury the commit actions below them.
+fn branch_section(
+    menu: PopupMenu,
+    commit: Oid,
+    state: &MenuState,
+    entity: &Entity<RepoView>,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    let branches = entity.read(cx).branches_at_commit(commit);
+    if branches.is_empty() {
+        return menu;
+    }
+    let current = state.branch_label();
+    let busy = state.busy();
+    if let [branch] = branches.as_slice() {
+        return branch_actions_menu(menu.separator(), branch, &current, busy, entity, cx)
+            .separator();
+    }
+    let mut menu = menu.separator();
+    for branch in branches {
+        let label = branch.name.clone();
+        let current = current.clone();
+        let entity = entity.clone();
+        menu = menu.submenu(label, window, cx, move |submenu, _, cx| {
+            branch_actions_menu(submenu, &branch, &current, busy, &entity, cx)
+        });
+    }
+    menu.separator()
+}
+
+/// One branch's entries, in the order [`branch_actions`] lists them.
+fn branch_actions_menu(
+    mut menu: PopupMenu,
+    branch: &BranchAtCommit,
+    current: &str,
+    busy: bool,
+    entity: &Entity<RepoView>,
+    cx: &App,
+) -> PopupMenu {
+    let busy_reason = busy.then(|| t!("branch.reason.busy").to_string());
+    let is_current = branch.kind == RefKind::LocalBranch && branch.name == current;
+    for action in branch_actions(branch.kind, is_current) {
+        let name = branch.name.clone();
+        let kind = branch.kind;
+        let item = match action {
+            BranchAction::Rebase => {
+                let Some((_, target)) = entity.read(cx).branch_rebase_target(kind, &name) else {
+                    continue;
+                };
+                rebase_menu_item(target, current, Some(&name), entity.clone())
+            }
+            BranchAction::Checkout => {
+                let label = t!("history_ops.branch.checkout", branch = name).to_string();
+                PopupMenuItem::new(menu_label(label, busy_reason.as_ref()))
+                    .disabled(busy_reason.is_some())
+                    .on_click({
+                        let entity = entity.clone();
+                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                            entity.update(cx, |view, cx| {
+                                view.checkout_branch(kind, &name, window, cx)
+                            });
+                        }
+                    })
+            }
+            BranchAction::Merge => {
+                let label =
+                    t!("history_ops.branch.merge", branch = name, current = current).to_string();
+                PopupMenuItem::new(menu_label(label, busy_reason.as_ref()))
+                    .disabled(busy_reason.is_some())
+                    .on_click({
+                        let entity = entity.clone();
+                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                            entity.update(cx, |view, cx| view.merge_branch(&name, window, cx));
+                        }
+                    })
+            }
+            BranchAction::Rename => {
+                let label = t!("history_ops.branch.rename", branch = name).to_string();
+                PopupMenuItem::new(menu_label(label, busy_reason.as_ref()))
+                    .disabled(busy_reason.is_some())
+                    .on_click({
+                        let entity = entity.clone();
+                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                            entity.update(cx, |view, cx| view.rename_branch(&name, window, cx));
+                        }
+                    })
+            }
+            BranchAction::Delete => {
+                let label = t!("history_ops.branch.delete", branch = name).to_string();
+                PopupMenuItem::new(menu_label(label, busy_reason.as_ref()))
+                    .disabled(busy_reason.is_some())
+                    .on_click({
+                        let entity = entity.clone();
+                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                            entity
+                                .update(cx, |view, cx| view.delete_branch_here(&name, window, cx));
+                        }
+                    })
+            }
+        };
+        menu = menu.item(item);
+    }
+    menu
+}
+
 /// The context menu for one commit row.
 ///
 /// Clipboard entries are always available; the history actions need a real
@@ -657,6 +809,12 @@ pub(crate) fn commit_menu(
     // row to act on, so the menu offers the multi-pick instead.
     if let Some(multi) = multi {
         return multi_commit_menu(menu, &multi, entity);
+    }
+    // The branches pointing at this commit act on the branch, not the commit,
+    // so they lead the menu: that is what a right-click on a tagged tip is
+    // usually for.
+    if let (Some(commit), Some(state)) = (target.id, state.as_ref()) {
+        menu = branch_section(menu, commit, state, &entity, window, cx);
     }
     let copy_id = target
         .id
@@ -1060,6 +1218,29 @@ impl RepoView {
             MenuState::read(snapshot.head.as_ref(), snapshot.state, self.is_busy())
                 .with_worktree(&snapshot.status),
         )
+    }
+
+    /// The branches whose tip is `commit`, local branches first.
+    ///
+    /// Tags are left out: their entries live in the commit menu's own section
+    /// and have different actions.
+    pub(super) fn branches_at_commit(&self, commit: Oid) -> Vec<BranchAtCommit> {
+        let Some(session) = self.session.as_ref() else {
+            return Vec::new();
+        };
+        session
+            .snapshot()
+            .refs
+            .iter()
+            .filter(|reference| {
+                reference.target == commit
+                    && matches!(reference.kind, RefKind::LocalBranch | RefKind::RemoteBranch)
+            })
+            .map(|reference| BranchAtCommit {
+                kind: reference.kind,
+                name: reference.short_name.clone(),
+            })
+            .collect()
     }
 
     /// The multi-selection's pick menu, or `None` while at most one row is
@@ -1815,6 +1996,35 @@ mod tests {
             short_name: short_name.into(),
             target: Some(target),
         }
+    }
+
+    #[test]
+    fn the_checked_out_branch_only_offers_its_rename() {
+        assert_eq!(
+            branch_actions(RefKind::LocalBranch, true),
+            vec![BranchAction::Rename],
+            "checking out, merging or rebasing a branch onto itself is a no-op"
+        );
+        assert_eq!(
+            branch_actions(RefKind::LocalBranch, false),
+            vec![
+                BranchAction::Checkout,
+                BranchAction::Merge,
+                BranchAction::Rebase,
+                BranchAction::Rename,
+                BranchAction::Delete,
+            ]
+        );
+        assert_eq!(
+            branch_actions(RefKind::RemoteBranch, false),
+            vec![
+                BranchAction::Checkout,
+                BranchAction::Merge,
+                BranchAction::Rebase,
+            ],
+            "a remote branch cannot be renamed or deleted from here"
+        );
+        assert!(branch_actions(RefKind::Tag, false).is_empty());
     }
 
     #[test]
