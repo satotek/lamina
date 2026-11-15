@@ -104,7 +104,7 @@ impl RepoView {
             .min_w_0()
             .min_h_0()
             .flex_none()
-            .child(self.commit_pane(entity.clone(), design, width));
+            .child(self.commit_pane(entity.clone(), design, width, cx));
         list_pane = match measured {
             Some(area) => list_pane.h(px(ui::split_pixels(
                 fraction,
@@ -208,29 +208,50 @@ impl RepoView {
                 next_entity.update(cx, |this, cx| this.move_selection(1, cx));
             });
 
-        let label = match &row {
-            Some(row) => div()
+        let label = if self.uncommitted_selected {
+            let summary = self
+                .uncommitted_summary()
+                .unwrap_or_else(|| t!("history.uncommitted.summary").to_string());
+            div()
                 .flex()
                 .items_center()
                 .gap_2()
                 .flex_1()
                 .min_w_0()
-                .child(div().min_w_0().truncate().child(row.summary.to_string()))
+                .child(div().min_w_0().truncate().child(summary))
                 .child(
                     div()
                         .flex_none()
-                        .font_family(design.mono.clone())
-                        .text_size(px(design.code))
+                        .text_size(px(design.tiny()))
                         .text_color(design.muted)
-                        .child(row.id.to_string()),
+                        .child(t!("history.uncommitted.badge_worktree").to_string()),
                 )
-                .into_any_element(),
-            None => div()
-                .flex_1()
-                .text_size(px(design.small()))
-                .text_color(design.muted)
-                .child(t!("split.no_commit_selected"))
-                .into_any_element(),
+                .into_any_element()
+        } else {
+            match &row {
+                Some(row) => div()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .flex_1()
+                    .min_w_0()
+                    .child(div().min_w_0().truncate().child(row.summary.to_string()))
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_family(design.mono.clone())
+                            .text_size(px(design.code))
+                            .text_color(design.muted)
+                            .child(row.id.to_string()),
+                    )
+                    .into_any_element(),
+                None => div()
+                    .flex_1()
+                    .text_size(px(design.small()))
+                    .text_color(design.muted)
+                    .child(t!("split.no_commit_selected"))
+                    .into_any_element(),
+            }
         };
 
         div()

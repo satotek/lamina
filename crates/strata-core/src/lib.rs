@@ -26,8 +26,8 @@ pub mod watch;
 
 #[cfg(test)]
 mod i18n_tests;
-#[cfg(test)]
-mod test_support;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 
 pub use error::{Error, Result};
 pub use types::*;

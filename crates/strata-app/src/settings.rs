@@ -223,6 +223,7 @@ pub struct HistorySettings {
     pub show_stashes: bool,
     pub show_commit_signatures: bool,
     pub show_changed_file_count: bool,
+    pub show_uncommitted_changes: bool,
     pub date_format: DateFormat,
     pub file_list_mode: FileListMode,
 }
@@ -235,6 +236,7 @@ impl Default for HistorySettings {
             show_stashes: true,
             show_commit_signatures: true,
             show_changed_file_count: true,
+            show_uncommitted_changes: true,
             date_format: DateFormat::Relative,
             file_list_mode: FileListMode::List,
         }

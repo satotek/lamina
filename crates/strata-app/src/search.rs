@@ -895,7 +895,7 @@ impl RepoView {
             });
         }
         if let Some(index) = self.selected {
-            self.scroll_to_position(index);
+            self.scroll_to_position(self.visual_commit_position(index, cx));
         }
         self.focus_root(window, cx);
         cx.notify();
@@ -960,11 +960,14 @@ impl RepoView {
         self.move_selection(delta, cx);
     }
 
-    /// Enter only means something while results are being walked; in the plain
-    /// history list it must not move the selection.
-    pub(crate) fn submit_search(&mut self, cx: &mut Context<Self>) {
+    /// Enter walks search results while active, or opens the working-tree view
+    /// when pressed on the synthetic uncommitted row in the plain history list.
+    pub(crate) fn submit_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.file_history.is_some() || self.search.is_active() {
             self.step_results(1, cx);
+        } else if self.mode == crate::worktree_panel::MainMode::History && self.uncommitted_selected
+        {
+            self.open_worktree(window, cx);
         }
     }
 

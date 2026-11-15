@@ -88,7 +88,7 @@ impl Render for RepoView {
             )
             .on_action(cx.listener(|this, _: &SelectPageUp, _, cx| this.move_selection(-PAGE, cx)))
             .on_action(cx.listener(|this, _: &SelectPageDown, _, cx| this.move_selection(PAGE, cx)))
-            .on_action(cx.listener(|this, _: &SelectFirst, _, cx| this.jump(0, cx)))
+            .on_action(cx.listener(|this, _: &SelectFirst, _, cx| this.select_first(cx)))
             .on_action(cx.listener(|this, _: &SelectLast, _, cx| this.select_last(cx)))
             .on_action(cx.listener(|this, _: &ToggleFrameStats, _, cx| this.toggle_frame_stats(cx)))
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| this.toggle_sidebar(cx)))
@@ -105,7 +105,9 @@ impl Render for RepoView {
             .on_action(cx.listener(|this, _: &SearchDismiss, window, cx| this.dismiss(window, cx)))
             .on_action(cx.listener(|this, _: &SearchNext, _, cx| this.step_results(1, cx)))
             .on_action(cx.listener(|this, _: &SearchPrevious, _, cx| this.step_results(-1, cx)))
-            .on_action(cx.listener(|this, _: &SearchSubmit, _, cx| this.submit_search(cx)))
+            .on_action(
+                cx.listener(|this, _: &SearchSubmit, window, cx| this.submit_search(window, cx)),
+            )
             .on_action(
                 cx.listener(|this, _: &StashChanges, window, cx| this.stash_changes(window, cx)),
             )

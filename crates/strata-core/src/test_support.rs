@@ -12,7 +12,8 @@ use crate::git_cli::Git;
 use crate::repo::Repo;
 
 /// A fresh repository in a temporary directory.
-pub(crate) struct TestRepo {
+#[cfg_attr(not(test), allow(dead_code))]
+pub struct TestRepo {
     _dir: tempfile::TempDir,
     /// The worktree root. A clone lives in a subdirectory so the fixture's
     /// config file does not make the clone destination non-empty.
@@ -21,13 +22,16 @@ pub(crate) struct TestRepo {
 }
 
 /// The author and committer every fixture commit uses.
-pub(crate) const AUTHOR_NAME: &str = "Strata Test";
-pub(crate) const AUTHOR_EMAIL: &str = "strata@example.invalid";
+#[cfg_attr(not(test), allow(dead_code))]
+pub const AUTHOR_NAME: &str = "Strata Test";
+#[cfg_attr(not(test), allow(dead_code))]
+pub const AUTHOR_EMAIL: &str = "strata@example.invalid";
 /// A fixed timestamp keeps commit ids and blame ordering reproducible.
 const TIME: &str = "1700000000 +0000";
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl TestRepo {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         let repo = Self::with_dir(tempfile::TempDir::new().expect("temporary directory"));
         repo.git(&["init", "-q"]);
         repo
@@ -35,7 +39,7 @@ impl TestRepo {
 
     /// A repository in a fresh temporary directory, cloned from `source` with
     /// `args`. The source is a local `file://` URL so the clone needs no network.
-    pub(crate) fn clone_from(source: &TestRepo, args: &[&str]) -> Self {
+    pub fn clone_from(source: &TestRepo, args: &[&str]) -> Self {
         let repo = Self::with_dir(tempfile::TempDir::new().expect("temporary directory"));
         let url = format!("file://{}", source.path().display());
         let mut argv = vec!["clone"];
@@ -72,18 +76,18 @@ impl TestRepo {
         }
     }
 
-    pub(crate) fn path(&self) -> &Path {
+    pub fn path(&self) -> &Path {
         &self.root
     }
 
     /// Write a file relative to the worktree, creating parent directories.
-    pub(crate) fn write(&self, path: &str, contents: &str) {
+    pub fn write(&self, path: &str, contents: &str) {
         self.write_bytes(path, contents.as_bytes());
     }
 
     /// Write raw bytes relative to the worktree, for encodings other than
     /// UTF-8 and for paths that are not text.
-    pub(crate) fn write_bytes(&self, path: impl AsRef<Path>, contents: &[u8]) {
+    pub fn write_bytes(&self, path: impl AsRef<Path>, contents: &[u8]) {
         let path = self.path().join(path);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).expect("create parent directory");
@@ -92,7 +96,7 @@ impl TestRepo {
     }
 
     /// Run git and require success, returning its stdout as text.
-    pub(crate) fn git(&self, args: &[&str]) -> String {
+    pub fn git(&self, args: &[&str]) -> String {
         let output = self.git_output(args);
         assert!(
             output.status.success(),
@@ -103,12 +107,12 @@ impl TestRepo {
     }
 
     /// Run git and return the raw result, for commands a test expects to fail.
-    pub(crate) fn git_output(&self, args: &[&str]) -> Output {
+    pub fn git_output(&self, args: &[&str]) -> Output {
         self.command("git").args(args).output().expect("run git")
     }
 
     /// Stage everything and commit with `message`, returning the new commit.
-    pub(crate) fn commit(&self, message: &str) -> Oid {
+    pub fn commit(&self, message: &str) -> Oid {
         self.git(&["add", "-A"]);
         self.git(&["commit", "-q", "-m", message]);
         self.head()
@@ -116,7 +120,7 @@ impl TestRepo {
 
     /// Stage everything and commit as `name <email>`, for a repository whose
     /// history should carry a non-ASCII author.
-    pub(crate) fn commit_as(&self, name: &str, email: &str, message: &str) -> Oid {
+    pub fn commit_as(&self, name: &str, email: &str, message: &str) -> Oid {
         self.git(&["add", "-A"]);
         let output = self
             .command("git")
@@ -136,11 +140,11 @@ impl TestRepo {
     }
 
     /// The commit `HEAD` points at.
-    pub(crate) fn head(&self) -> Oid {
+    pub fn head(&self) -> Oid {
         self.rev("HEAD")
     }
 
-    pub(crate) fn rev(&self, spec: &str) -> Oid {
+    pub fn rev(&self, spec: &str) -> Oid {
         self.git(&["rev-parse", spec])
             .trim()
             .parse()
@@ -148,20 +152,20 @@ impl TestRepo {
     }
 
     /// The commits in `range`, oldest first, like `git rev-list --reverse`.
-    pub(crate) fn rev_list(&self, range: &str) -> Vec<Oid> {
+    pub fn rev_list(&self, range: &str) -> Vec<Oid> {
         self.git(&["rev-list", "--reverse", range])
             .lines()
             .map(|line| line.trim().parse().expect("valid object id"))
             .collect()
     }
 
-    pub(crate) fn open(&self) -> Repo {
+    pub fn open(&self) -> Repo {
         Repo::open(self.path()).expect("open test repository")
     }
 
     /// A `Git` handle that runs with the same isolated environment as the
     /// fixture's own commands.
-    pub(crate) fn git_handle(&self) -> Git {
+    pub fn git_handle(&self) -> Git {
         Git::new(self.path().to_path_buf())
             .with_env("GIT_CONFIG_GLOBAL", &self.config)
             .with_env("GIT_CONFIG_NOSYSTEM", "1")
@@ -174,7 +178,7 @@ impl TestRepo {
     }
 
     /// A `git` command with the fixture environment applied.
-    pub(crate) fn command(&self, program: &str) -> Command {
+    pub fn command(&self, program: &str) -> Command {
         let mut command = Command::new(program);
         command
             .current_dir(self.path())
@@ -196,12 +200,19 @@ impl TestRepo {
     }
 }
 
+impl Default for TestRepo {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// A path written the way it belongs in a git config value.
 ///
 /// Backslash is an escape character in that format, so a native Windows path
 /// written raw makes the whole file unreadable. Git stores such paths with
 /// forward slashes itself, which every platform accepts.
-pub(crate) fn config_path(path: &Path) -> String {
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn config_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
@@ -211,7 +222,8 @@ pub(crate) fn config_path(path: &Path) -> String {
 /// With `["--depth", "2"]` the clone keeps the rename commit and the merge
 /// below it, which makes the merge the shallow boundary: neither of its two
 /// parents is in the clone.
-pub(crate) fn shallow_clone_fixture(args: &[&str]) -> (TestRepo, TestRepo) {
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn shallow_clone_fixture(args: &[&str]) -> (TestRepo, TestRepo) {
     let source = TestRepo::new();
     source.write("base.txt", "base\n");
     source.commit("base");

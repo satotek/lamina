@@ -191,6 +191,10 @@ pub fn show_changed_file_count(settings: &mut Settings, show: bool) {
     settings.history.show_changed_file_count = show;
 }
 
+pub fn show_uncommitted_changes(settings: &mut Settings, show: bool) {
+    settings.history.show_uncommitted_changes = show;
+}
+
 pub fn date_format(settings: &mut Settings, format: DateFormat) {
     settings.history.date_format = format;
 }
@@ -294,6 +298,7 @@ mod tests {
         show_stashes(&mut settings, false);
         show_commit_signatures(&mut settings, false);
         show_changed_file_count(&mut settings, false);
+        show_uncommitted_changes(&mut settings, false);
         date_format(&mut settings, DateFormat::Absolute);
         git_executable(&mut settings, "/opt/git/bin/git");
         auto_fetch_minutes(&mut settings, 15);

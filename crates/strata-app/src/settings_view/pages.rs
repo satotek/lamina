@@ -370,7 +370,15 @@ fn history(control: f32, design: &Design) -> SettingPage {
         ),
     )
     .groups(
-        card(t!("settings.history.rows").to_string()).item(
+        card(t!("settings.history.rows").to_string()).items([
+            SettingItem::new(
+                t!("settings.history.uncommitted_changes").to_string(),
+                toggle(
+                    |settings| settings.history.show_uncommitted_changes,
+                    change::show_uncommitted_changes,
+                ),
+            )
+            .description(t!("settings.history.uncommitted_changes_description").to_string()),
             SettingItem::new(
                 t!("settings.history.changed_file_count").to_string(),
                 toggle(
@@ -379,7 +387,7 @@ fn history(control: f32, design: &Design) -> SettingPage {
                 ),
             )
             .description(t!("settings.history.changed_file_count_description").to_string()),
-        ),
+        ]),
     )
 }
 

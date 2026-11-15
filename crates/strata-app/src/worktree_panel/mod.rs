@@ -1563,7 +1563,7 @@ fn contains(snapshot: &RepoSnapshot, side: Side, path: &str) -> bool {
 
 /// Unstaged rows as the list shows them: conflicted paths live in their own
 /// section, so staging or discarding "all" must not sweep them up.
-fn visible_unstaged(status: &WorktreeStatus) -> Vec<&FileChange> {
+pub(crate) fn visible_unstaged(status: &WorktreeStatus) -> Vec<&FileChange> {
     status
         .unstaged
         .iter()

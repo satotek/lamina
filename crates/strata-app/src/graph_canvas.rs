@@ -132,6 +132,37 @@ pub fn graph_column(
     )
 }
 
+/// Graph geometry for the synthetic uncommitted row at the top of the list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UncommittedGraph {
+    pub head_lane: u16,
+    pub head_color: u16,
+    pub has_head_edge: bool,
+    pub merge_target: Option<(u16, u16)>,
+    pub lanes: u16,
+}
+
+/// Graph column for the synthetic uncommitted row: a hollow dashed circle on
+/// `HEAD`'s lane, a dashed edge down to `HEAD`, and an optional dashed curve to
+/// `MERGE_HEAD`'s lane while merging.
+pub fn uncommitted_graph_column(
+    graph: UncommittedGraph,
+    colors: [Hsla; LANES],
+    fade: Hsla,
+) -> impl IntoElement {
+    let lanes = graph.lanes.max(1);
+    let width = px(indent(lanes));
+    div().w(width).h_full().flex_none().child(
+        canvas(
+            move |bounds, _window, _cx| bounds,
+            move |bounds, _, window, _cx| {
+                paint_uncommitted_row(graph, &colors, fade, bounds, window)
+            },
+        )
+        .size_full(),
+    )
+}
+
 struct OwnedRow {
     node_lane: u16,
     node_color: u16,
@@ -427,6 +458,233 @@ fn paint_node(bounds: Bounds<Pixels>, middle: Pixels, lane: u16, color: Hsla, wi
 
 fn lane_x(bounds: Bounds<Pixels>, lane: u16) -> Pixels {
     bounds.origin.x + px(lane_offset(lane))
+}
+
+fn cubic_bezier_pt(curve: Curve, t: f32) -> Pt {
+    let u = 1.0 - t;
+    let uu = u * u;
+    let tt = t * t;
+    let uuu = uu * u;
+    let uut3 = 3.0 * uu * t;
+    let utt3 = 3.0 * u * tt;
+    let ttt = tt * t;
+    Pt {
+        x: uuu * curve.from.x
+            + uut3 * curve.control_a.x
+            + utt3 * curve.control_b.x
+            + ttt * curve.to.x,
+        y: uuu * curve.from.y
+            + uut3 * curve.control_a.y
+            + utt3 * curve.control_b.y
+            + ttt * curve.to.y,
+    }
+}
+
+/// Parametric dashed spans in `[0.0, 1.0]` for the bottom-half cubic curve,
+/// leaving space around the node center at `t = 0`.
+const CURVE_DASHES: [(f32, f32); 3] = [(0.18, 0.36), (0.50, 0.68), (0.82, 1.0)];
+
+fn dashed_curve_segments(curve: Curve) -> Vec<Vec<Pt>> {
+    const STEPS: usize = 6;
+    CURVE_DASHES
+        .iter()
+        .map(|&(start, end)| {
+            (0..=STEPS)
+                .map(|step| {
+                    let t = start + (end - start) * (step as f32 / STEPS as f32);
+                    cubic_bezier_pt(curve, t)
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn dashed_circle_arcs(center_x: f32, center_y: f32, radius: f32) -> Vec<Vec<(f32, f32)>> {
+    use std::f32::consts::TAU;
+    const DASHES: usize = 6;
+    const DUTY: f32 = 0.62;
+    const STEPS: usize = 4;
+    let period = TAU / DASHES as f32;
+    (0..DASHES)
+        .map(|index| {
+            let start = index as f32 * period;
+            let span = period * DUTY;
+            (0..=STEPS)
+                .map(|step| {
+                    let angle = start + span * (step as f32 / STEPS as f32);
+                    (
+                        center_x + radius * angle.cos(),
+                        center_y + radius * angle.sin(),
+                    )
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn paint_uncommitted_row(
+    graph: UncommittedGraph,
+    colors: &[Hsla; LANES],
+    fade: Hsla,
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+) {
+    let top = bounds.origin.y;
+    let height = bounds.size.height;
+    let middle = top + height / 2.0;
+    let left = bounds.origin.x;
+
+    let clipped = graph.lanes > MAX_LANES;
+    let visible = graph.lanes.min(MAX_LANES);
+    let clip = if clipped {
+        Bounds::new(bounds.origin, size(px(clip_edge()), height))
+    } else {
+        bounds
+    };
+
+    window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
+        if let Some((merge_lane, merge_color)) = graph.merge_target {
+            if merge_lane != graph.head_lane && graph.head_lane.min(merge_lane) < visible {
+                let head_x = lane_offset(graph.head_lane);
+                let merge_x = lane_offset(merge_lane);
+                let curve = Curve {
+                    from: Pt { x: head_x, y: 0.5 },
+                    control_a: Pt { x: head_x, y: 0.75 },
+                    control_b: Pt {
+                        x: merge_x,
+                        y: 0.75,
+                    },
+                    to: Pt { x: merge_x, y: 1.0 },
+                };
+                let mut builder = PathBuilder::stroke(px(STROKE_WIDTH));
+                for polyline in dashed_curve_segments(curve) {
+                    if let Some((first, rest)) = polyline.split_first() {
+                        builder.move_to(lane_point(left, top, height, *first));
+                        for pt in rest {
+                            builder.line_to(lane_point(left, top, height, *pt));
+                        }
+                    }
+                }
+                if let Ok(path) = builder.build() {
+                    window.paint_path(path, colors[slot(merge_color)]);
+                }
+            } else if !graph.has_head_edge && merge_lane < visible {
+                paint_dashed_vertical(
+                    left,
+                    top,
+                    middle,
+                    height,
+                    merge_lane,
+                    colors[slot(merge_color)],
+                    window,
+                );
+            }
+        }
+
+        if graph.has_head_edge && graph.head_lane < visible {
+            paint_dashed_vertical(
+                left,
+                top,
+                middle,
+                height,
+                graph.head_lane,
+                colors[slot(graph.head_color)],
+                window,
+            );
+        }
+    });
+
+    if clipped {
+        let edge = bounds.origin.x + px(clip_edge());
+        window.paint_quad(fill(
+            Bounds::new(
+                point(edge - px(FADE_WIDTH), top),
+                size(px(FADE_WIDTH), height),
+            ),
+            linear_gradient(
+                90.0,
+                linear_color_stop(fade.opacity(0.0), 0.0),
+                linear_color_stop(fade, 1.0),
+            ),
+        ));
+    }
+
+    let head_color = colors[slot(graph.head_color)];
+    if graph.head_lane < visible {
+        let center_x = lane_offset(graph.head_lane);
+        let diameter = NODE_RADIUS * 2.0;
+        // Hollow interior masks the top of any downward edge under the ring.
+        window.paint_quad(
+            fill(
+                Bounds::new(
+                    point(left + px(center_x - NODE_RADIUS), middle - px(NODE_RADIUS)),
+                    size(px(diameter), px(diameter)),
+                ),
+                fade,
+            )
+            .corner_radii(px(NODE_RADIUS)),
+        );
+        let mut builder = PathBuilder::stroke(px(STROKE_WIDTH));
+        for arc in dashed_circle_arcs(center_x, 0.0, NODE_RADIUS - STROKE_WIDTH * 0.5) {
+            if let Some((first, rest)) = arc.split_first() {
+                builder.move_to(point(left + px(first.0), middle + px(first.1)));
+                for pt in rest {
+                    builder.line_to(point(left + px(pt.0), middle + px(pt.1)));
+                }
+            }
+        }
+        if let Ok(path) = builder.build() {
+            window.paint_path(path, head_color);
+        }
+    } else if let Some(x) = node_marker(graph.head_lane, graph.lanes) {
+        let diameter = MARKER_RADIUS * 2.0;
+        window.paint_quad(
+            fill(
+                Bounds::new(
+                    point(left + px(x - MARKER_RADIUS), middle - px(MARKER_RADIUS)),
+                    size(px(diameter), px(diameter)),
+                ),
+                fade,
+            )
+            .corner_radii(px(MARKER_RADIUS)),
+        );
+        let mut builder = PathBuilder::stroke(px(STROKE_WIDTH));
+        for arc in dashed_circle_arcs(x, 0.0, MARKER_RADIUS - STROKE_WIDTH * 0.5) {
+            if let Some((first, rest)) = arc.split_first() {
+                builder.move_to(point(left + px(first.0), middle + px(first.1)));
+                for pt in rest {
+                    builder.line_to(point(left + px(pt.0), middle + px(pt.1)));
+                }
+            }
+        }
+        if let Ok(path) = builder.build() {
+            window.paint_path(path, head_color);
+        }
+    }
+}
+
+fn paint_dashed_vertical(
+    left: Pixels,
+    top: Pixels,
+    middle: Pixels,
+    height: Pixels,
+    lane: u16,
+    color: Hsla,
+    window: &mut Window,
+) {
+    const DASH: f32 = 2.5;
+    const GAP: f32 = 2.0;
+    let x = left + px(lane_offset(lane)) - px(STROKE_WIDTH / 2.0);
+    let bottom = top + height;
+    let mut y = middle + px(NODE_RADIUS + 1.0);
+    while y < bottom {
+        let dash_height = px(DASH).min(bottom - y);
+        window.paint_quad(fill(
+            Bounds::new(point(x, y), size(px(STROKE_WIDTH), dash_height)),
+            color,
+        ));
+        y += px(DASH + GAP);
+    }
 }
 
 #[cfg(test)]
@@ -732,5 +990,52 @@ mod tests {
         assert_eq!(lines.curves.len(), 2, "crossing edges are painted");
         assert_eq!(lines.curves[0].0, 2);
         assert_eq!(lines.curves[1].0, 3);
+    }
+
+    #[test]
+    fn uncommitted_hollow_node_builds_six_dashed_arcs_around_node_radius() {
+        let arcs = dashed_circle_arcs(lane_offset(1), 0.0, NODE_RADIUS - STROKE_WIDTH * 0.5);
+        assert_eq!(arcs.len(), 6);
+        let expected_r = NODE_RADIUS - STROKE_WIDTH * 0.5;
+        for arc in &arcs {
+            assert!(arc.len() >= 2);
+            for &(x, y) in arc {
+                let dx = x - lane_offset(1);
+                let dist = (dx * dx + y * y).sqrt();
+                assert!((dist - expected_r).abs() < 1e-4);
+            }
+        }
+    }
+
+    #[test]
+    fn uncommitted_merge_curve_splits_into_three_bottom_half_dashes() {
+        let curve = Curve {
+            from: Pt {
+                x: lane_offset(0),
+                y: 0.5,
+            },
+            control_a: Pt {
+                x: lane_offset(0),
+                y: 0.75,
+            },
+            control_b: Pt {
+                x: lane_offset(2),
+                y: 0.75,
+            },
+            to: Pt {
+                x: lane_offset(2),
+                y: 1.0,
+            },
+        };
+        let dashes = dashed_curve_segments(curve);
+        assert_eq!(dashes.len(), 3);
+        let first_pt = dashes.first().unwrap().first().unwrap();
+        let last_pt = dashes.last().unwrap().last().unwrap();
+        assert!(
+            first_pt.y > 0.5,
+            "curve starts below the hollow circle center"
+        );
+        assert!((last_pt.x - lane_offset(2)).abs() < 1e-4);
+        assert!((last_pt.y - 1.0).abs() < 1e-4);
     }
 }

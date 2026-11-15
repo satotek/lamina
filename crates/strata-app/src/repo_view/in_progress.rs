@@ -166,14 +166,14 @@ impl InProgress {
         true
     }
 
-    fn details_for(&self, state: RepoState) -> Option<&InProgressDetails> {
+    pub(super) fn details_for(&self, state: RepoState) -> Option<&InProgressDetails> {
         self.details
             .as_ref()
             .filter(|details| details_match_state(details, state))
     }
 }
 
-fn details_match_state(details: &InProgressDetails, state: RepoState) -> bool {
+pub(super) fn details_match_state(details: &InProgressDetails, state: RepoState) -> bool {
     matches!(
         (details, state),
         (InProgressDetails::Rebase { .. }, RepoState::Rebasing)

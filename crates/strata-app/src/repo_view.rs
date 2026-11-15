@@ -33,6 +33,7 @@ mod split;
 mod status_bar;
 mod title_bar;
 mod tree_view;
+mod uncommitted;
 mod worktrees;
 
 use std::collections::HashMap;
@@ -407,6 +408,8 @@ pub struct RepoView {
     lanes: LaneWidth,
     /// The focused row; the details pane and the single commit actions read it.
     pub(crate) selected: Option<usize>,
+    /// True when the synthetic uncommitted row at visual index 0 is selected.
+    pub(crate) uncommitted_selected: bool,
     /// The rows selected in the commit list. Its focused row mirrors
     /// `selected`, so single selection works exactly as it did before.
     selection: CommitSelection,
@@ -620,6 +623,7 @@ impl RepoView {
             repository_key: None,
             lanes: LaneWidth::default(),
             selected: None,
+            uncommitted_selected: false,
             selection: CommitSelection::default(),
             selection_commit: None,
             edit_selection: None,
@@ -1613,12 +1617,93 @@ impl RepoView {
         window.focus(&self.focus, cx);
     }
 
+    /// Whether the synthetic uncommitted row sits at the top of the commit list.
+    pub(crate) fn has_uncommitted_row(&self, cx: &App) -> bool {
+        if self.smoke || self.fake.is_some() || self.search.filter().is_some() {
+            return false;
+        }
+        if !crate::settings::Settings::get(cx)
+            .history
+            .show_uncommitted_changes
+        {
+            return false;
+        }
+        self.session
+            .as_ref()
+            .is_some_and(|session| uncommitted::should_show_row(&session.snapshot()))
+    }
+
+    pub(crate) fn uncommitted_summary(&self) -> Option<String> {
+        let session = self.session.as_ref()?;
+        let snapshot = session.snapshot();
+        let details = self.in_progress.details_for(snapshot.state);
+        Some(uncommitted::summary_text(&snapshot, details))
+    }
+
+    pub(crate) fn uncommitted_counts(&self) -> uncommitted::UncommittedCounts {
+        let Some(session) = self.session.as_ref() else {
+            return uncommitted::UncommittedCounts::default();
+        };
+        uncommitted::counts(&session.snapshot())
+    }
+
+    pub(crate) fn uncommitted_graph(&self) -> Option<crate::graph_canvas::UncommittedGraph> {
+        let session = self.session.as_ref()?;
+        let snapshot = session.snapshot();
+        let details = self.in_progress.details_for(snapshot.state);
+        Some(uncommitted::graph_info(&snapshot, details))
+    }
+
+    /// Maps a commit index in the unfiltered history list to its visual row
+    /// position in `uniform_list`.
+    pub(crate) fn visual_commit_position(&self, index: usize, cx: &App) -> usize {
+        index + usize::from(self.has_uncommitted_row(cx))
+    }
+
+    /// Selects the synthetic uncommitted row at visual position 0.
+    pub(crate) fn select_uncommitted(&mut self, cx: &mut Context<Self>) {
+        if !self.has_uncommitted_row(cx) {
+            return;
+        }
+        if self.uncommitted_selected {
+            return;
+        }
+        self.branches.clear_revealed();
+        self.branches.clear_selected_extra();
+        self.uncommitted_selected = true;
+        self.selected = None;
+        self.selection.clear();
+        self.selection_commit = None;
+        self.revealed_commit = None;
+        self.selected_file = None;
+        self.files = None;
+        self.files_lfs = Arc::new(HashMap::new());
+        self.files_error = None;
+        self.diff_scroll = UniformListScrollHandle::default();
+        self.tree.close();
+        self.discard_blame();
+        self.cancel_diff();
+        self.drop_selection_diff();
+        self.commit_scroll.scroll_to_item(0, ScrollStrategy::Center);
+        self.notify_if_active(cx);
+    }
+
     /// Keeps the selection valid as commits arrive or the history is replaced.
     fn sync_selection(&mut self, cx: &mut Context<Self>) {
+        let has_uncommitted = self.has_uncommitted_row(cx);
+        if self.uncommitted_selected {
+            if has_uncommitted {
+                return;
+            }
+            self.uncommitted_selected = false;
+        }
         let Some(source) = self.source() else {
             return;
         };
         if source.is_empty() {
+            if has_uncommitted {
+                self.select_uncommitted(cx);
+            }
             return;
         }
         if self.selection.is_multi() {
@@ -1658,9 +1743,14 @@ impl RepoView {
             Some(index) => self.selection.len() == 1 && self.selection.contains(index),
             None => self.selection.len() == 0,
         };
-        if index == self.selected && commit == self.selection_commit && single {
+        if !self.uncommitted_selected
+            && index == self.selected
+            && commit == self.selection_commit
+            && single
+        {
             return;
         }
+        self.uncommitted_selected = false;
         self.selection.select_one(index);
         self.focus_commit(index, commit, cx);
     }
@@ -1674,6 +1764,7 @@ impl RepoView {
         // revealed; the reveal tint belongs to that jump only.
         self.branches.clear_revealed();
         self.branches.clear_selected_extra();
+        self.uncommitted_selected = false;
         self.selected = index;
         self.selection_commit = commit;
         // The reveal mark belongs to the ref the sidebar showed, not to
@@ -1729,6 +1820,7 @@ impl RepoView {
             self.select_result(index, position, cx);
             return;
         }
+        self.uncommitted_selected = false;
         let previous = self.selected;
         self.selection.click(index, shift, secondary, order);
         let focused = self.selection.focused();
@@ -1759,6 +1851,12 @@ impl RepoView {
         if len == 0 {
             return;
         }
+        if self.uncommitted_selected {
+            if delta > 0 {
+                self.select(Some(0), cx);
+            }
+            return;
+        }
         // A filtered list ranges over its visible rows, in the order displayed.
         let order: Vec<usize> = match self.search.filter() {
             Some(rows) => rows.as_ref().clone(),
@@ -1769,7 +1867,12 @@ impl RepoView {
             return;
         };
         if let Some(position) = order.iter().position(|row| *row == focused) {
-            self.scroll_to_position(position);
+            let visual = if self.search.filter().is_some() {
+                position
+            } else {
+                self.visual_commit_position(position, cx)
+            };
+            self.scroll_to_position(visual);
         }
         if Some(focused) == previous {
             self.sync_selection_diff(cx);
@@ -2015,11 +2118,19 @@ impl RepoView {
             self.show_changed_file_count = show_changed_file_count;
             self.sync_changed_file_count_setting(cx);
         }
+        let show_uncommitted = crate::settings::Settings::get(cx)
+            .history
+            .show_uncommitted_changes;
+        if !show_uncommitted && self.uncommitted_selected {
+            self.uncommitted_selected = false;
+            self.sync_selection(cx);
+        }
         if !self.active {
             return;
         }
         let options = history_diff_options(cx);
         if options == self.diff_options {
+            self.notify_if_active(cx);
             return;
         }
         self.diff_options = options;
@@ -2160,9 +2271,19 @@ impl RepoView {
         cx.notify();
     }
 
+    fn select_first(&mut self, cx: &mut Context<Self>) {
+        self.jump_visual(0, cx);
+    }
+
     fn select_last(&mut self, cx: &mut Context<Self>) {
-        let last = self.commit_count().saturating_sub(1);
-        self.jump(last, cx);
+        let count = self.commit_count();
+        if count == 0 {
+            if self.has_uncommitted_row(cx) {
+                self.select_uncommitted(cx);
+            }
+            return;
+        }
+        self.jump(count - 1, cx);
     }
 
     pub(crate) fn move_selection(&mut self, delta: isize, cx: &mut Context<Self>) {
@@ -2171,13 +2292,19 @@ impl RepoView {
             self.step_compare_file(delta, cx);
             return;
         }
-        let len = self.commit_count();
-        if len == 0 {
+        let has_uncommitted = self.has_uncommitted_row(cx);
+        let total = self.commit_count() + usize::from(has_uncommitted);
+        if total == 0 {
             return;
         }
-        let current = self.selected.unwrap_or(0) as isize;
-        let next = (current + delta).clamp(0, len as isize - 1) as usize;
-        self.jump(next, cx);
+        let current = if self.uncommitted_selected && has_uncommitted {
+            0
+        } else {
+            self.selected
+                .map_or(0, |index| index + usize::from(has_uncommitted))
+        } as isize;
+        let next = (current + delta).clamp(0, total as isize - 1) as usize;
+        self.jump_visual(next, cx);
     }
 
     /// Selects and scrolls to the commit a sidebar entry points at. Nothing
@@ -2259,9 +2386,22 @@ impl RepoView {
             .scroll_to_item(position, ScrollStrategy::Center);
     }
 
-    fn jump(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn jump_visual(&mut self, position: usize, cx: &mut Context<Self>) {
+        let has_uncommitted = self.has_uncommitted_row(cx);
+        if has_uncommitted && position == 0 {
+            self.select_uncommitted(cx);
+            return;
+        }
+        let index = position.saturating_sub(usize::from(has_uncommitted));
         self.commit_scroll
-            .scroll_to_item(index, ScrollStrategy::Center);
+            .scroll_to_item(position, ScrollStrategy::Center);
+        self.select(Some(index), cx);
+    }
+
+    fn jump(&mut self, index: usize, cx: &mut Context<Self>) {
+        let position = self.visual_commit_position(index, cx);
+        self.commit_scroll
+            .scroll_to_item(position, ScrollStrategy::Center);
         self.select(Some(index), cx);
     }
 
@@ -2269,6 +2409,7 @@ impl RepoView {
     /// builds a multi-selection. `rows` is in display order, newest first.
     fn debug_multi_select(&mut self, rows: &[usize], cx: &mut Context<Self>) {
         let order: Vec<usize> = (0..self.commit_count()).collect();
+        self.uncommitted_selected = false;
         self.selection.clear();
         // Oldest first so the newest row, which the details pane follows, ends
         // up focused.
@@ -2278,8 +2419,9 @@ impl RepoView {
             }
         }
         let focused = self.selection.focused();
+        let position = self.visual_commit_position(rows[0], cx);
         self.commit_scroll
-            .scroll_to_item(rows[0], ScrollStrategy::Center);
+            .scroll_to_item(position, ScrollStrategy::Center);
         let commit =
             focused.and_then(|index| self.source().and_then(|source| source.commit_id(index)));
         self.focus_commit(focused, commit, cx);

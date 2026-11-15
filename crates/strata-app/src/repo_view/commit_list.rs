@@ -131,18 +131,40 @@ impl RepoView {
         entity: gpui::Entity<Self>,
         design: &Design,
         width: f32,
+        cx: &gpui::App,
     ) -> AnyElement {
         let Some(source) = self.source() else {
             return empty_pane(&t!("history.empty.no_repository"), design);
         };
         let len = source.len();
-        if len == 0 {
+        let has_uncommitted = self.has_uncommitted_row(cx);
+        if len == 0 && !has_uncommitted {
             return empty_pane(&t!("history.empty.no_commits"), design);
         }
 
+        let uncommitted_selected = has_uncommitted && self.uncommitted_selected;
+        let uncommitted_summary = has_uncommitted
+            .then(|| self.uncommitted_summary())
+            .flatten();
+        let uncommitted_counts = if has_uncommitted {
+            self.uncommitted_counts()
+        } else {
+            Default::default()
+        };
+        let uncommitted_graph = has_uncommitted.then(|| self.uncommitted_graph()).flatten();
+        let uncommitted_state = self
+            .session
+            .as_ref()
+            .map(|session| session.snapshot().state)
+            .unwrap_or(strata_core::RepoState::Normal);
+        let widest = self
+            .lanes
+            .widest()
+            .max(uncommitted_graph.map_or(1, |graph| graph.lanes));
+
         // The decision uses the widest graph in the list, not the row's own:
         // columns that came and went between rows would read as noise.
-        let columns = CommitColumns::for_width(width, graph_canvas::indent(self.lanes.widest()));
+        let columns = CommitColumns::for_width(width, graph_canvas::indent(widest));
         let now = style::now_epoch();
         let selection = self.selection.clone();
         let revealed = self.revealed_commit();
@@ -152,7 +174,9 @@ impl RepoView {
         // snapshot, taken once per frame rather than per row.
         let menu_state = self.history_menu_state();
         let filter = self.search.filter().cloned();
-        let count = filter.as_ref().map_or(len, |rows| rows.len());
+        let count = filter
+            .as_ref()
+            .map_or(len + usize::from(has_uncommitted), |rows| rows.len());
         // The rows as displayed, which is what a shift range and arrow moves
         // walk; a filtered list shows a subset of the history indices.
         let order: Rc<Vec<usize>> = Rc::new(match &filter {
@@ -178,12 +202,58 @@ impl RepoView {
                     .map(|position| {
                         let entity = list_entity.clone();
                         let focus = focus.clone();
+                        if has_uncommitted && position == 0 {
+                            let row_ui_state = row_state(uncommitted_selected, false);
+                            let graph =
+                                uncommitted_graph.unwrap_or(graph_canvas::UncommittedGraph {
+                                    head_lane: 0,
+                                    head_color: 0,
+                                    has_head_edge: false,
+                                    merge_target: None,
+                                    lanes: 1,
+                                });
+                            let summary = uncommitted_summary
+                                .clone()
+                                .unwrap_or_else(|| t!("history.uncommitted.summary").to_string());
+                            let tooltip_text =
+                                SharedString::from(t!("history.uncommitted.tooltip").to_string());
+                            let click_entity = entity.clone();
+                            return uncommitted_row(
+                                &summary,
+                                uncommitted_counts,
+                                uncommitted_state,
+                                graph,
+                                show_changed_counts,
+                                row_ui_state,
+                                &row_design,
+                                columns,
+                            )
+                            .cursor_pointer()
+                            .row_tooltip(move |window, cx| {
+                                Tooltip::new(tooltip_text.clone()).build(window, cx)
+                            })
+                            .on_click(move |event, window, cx| {
+                                let open = event.click_count() >= 2;
+                                let focus = focus.clone();
+                                click_entity.update(cx, |this, cx| {
+                                    if open {
+                                        this.open_worktree(window, cx);
+                                    } else {
+                                        this.select_uncommitted(cx);
+                                        window.focus(&focus, cx);
+                                    }
+                                });
+                            })
+                            .into_any_element();
+                        }
+
                         // While a search filters the list, `position` is a row of
                         // the result set and `index` the commit it points at.
+                        let commit_pos = position - usize::from(has_uncommitted);
                         let index = filter
                             .as_ref()
-                            .and_then(|rows| rows.get(position).copied())
-                            .unwrap_or(position);
+                            .and_then(|rows| rows.get(commit_pos).copied())
+                            .unwrap_or(commit_pos);
                         let Some(mut row) = source_for_list.row(index) else {
                             return div().into_any_element();
                         };
@@ -687,6 +757,83 @@ fn commit_row(
                 .text_size(px(design.code))
                 .text_color(design.muted)
                 .child(data.id.to_string()),
+        )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn uncommitted_row(
+    summary: &str,
+    counts: super::uncommitted::UncommittedCounts,
+    repo_state: strata_core::RepoState,
+    graph: graph_canvas::UncommittedGraph,
+    show_changed_counts: bool,
+    state: crate::ui::RowState,
+    design: &Design,
+    columns: CommitColumns,
+) -> gpui::Stateful<Div> {
+    let fade = crate::ui::row_surface(state, design);
+    let badge_tone = if counts.conflicts > 0 {
+        crate::ui::BadgeTone::Danger
+    } else if repo_state != strata_core::RepoState::Normal {
+        crate::ui::BadgeTone::Warning
+    } else {
+        crate::ui::BadgeTone::Accent
+    };
+    crate::ui::list_row("uncommitted-row", state, design)
+        .gap_3()
+        .h(px(graph_canvas::ROW_HEIGHT))
+        .w_full()
+        .mx(px(0.0))
+        .px_3()
+        .child(graph_canvas::uncommitted_graph_column(
+            graph,
+            design.lane,
+            fade,
+        ))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .overflow_hidden()
+                .child(crate::ui::status_badge(
+                    t!("history.uncommitted.badge_worktree").to_string(),
+                    badge_tone,
+                    design,
+                ))
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(design.text)
+                        .font_weight(FontWeight::MEDIUM)
+                        .child(summary.to_string()),
+                )
+                .when(show_changed_counts && counts.total() > 0, |cell| {
+                    cell.child(div().flex_1().min_w_0())
+                        .child(crate::ui::changed_file_count_badge(
+                            "uncommitted-files",
+                            counts.total(),
+                            design,
+                        ))
+                }),
+        )
+        .when(columns.author, |row| {
+            row.child(div().w(px(AUTHOR_WIDTH)).flex_none())
+        })
+        .when(columns.date, |row| {
+            row.child(div().w(px(DATE_WIDTH)).flex_none())
+        })
+        .child(
+            div()
+                .w(px(COMMIT_WIDTH))
+                .flex_none()
+                .font_family(design.mono.clone())
+                .text_size(px(design.code))
+                .text_color(design.muted)
+                .child("-------"),
         )
 }
 
