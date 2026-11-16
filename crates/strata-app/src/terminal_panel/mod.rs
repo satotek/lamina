@@ -121,6 +121,9 @@ struct TerminalTab {
     id: u64,
     number: usize,
     session: Option<TerminalSession>,
+    /// Set while the tab waits for the panel's first layout before it spawns its
+    /// shell, so the shell starts at the real grid size instead of the default.
+    spawn_pending: bool,
     snapshot: TerminalSnapshot,
     osc_title: Option<String>,
     spawn_error: Option<String>,
@@ -154,6 +157,7 @@ impl TerminalTab {
             id,
             number,
             session: None,
+            spawn_pending: false,
             snapshot: TerminalSnapshot::default(),
             osc_title: None,
             spawn_error: None,
@@ -212,6 +216,9 @@ pub struct TerminalPanel {
     rows: u16,
     last_bounds: Option<Bounds<Pixels>>,
     last_theme: Option<TerminalTheme>,
+    /// Whether a new shell waits until the panel has been laid out before it
+    /// starts, so it spawns at the real grid size rather than the placeholder.
+    spawn_awaits_bounds: bool,
     _subscriptions: Vec<Subscription>,
     #[cfg(test)]
     quiet: bool,
@@ -224,7 +231,10 @@ impl Focusable for TerminalPanel {
 }
 
 impl TerminalPanel {
-    /// Creates a terminal panel and spawns its initial shell tab in `working_dir`.
+    /// Creates a terminal panel with an initial shell tab in `working_dir`.
+    ///
+    /// The shell starts on the panel's first layout, so it spawns at the grid
+    /// size the user actually sees.
     pub fn new(
         working_dir: PathBuf,
         parent_focus: FocusHandle,
@@ -232,7 +242,16 @@ impl TerminalPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::create(working_dir, parent_focus, on_close, false, window, cx)
+        let spawn_awaits_bounds = true;
+        Self::create(
+            working_dir,
+            parent_focus,
+            on_close,
+            spawn_awaits_bounds,
+            false,
+            window,
+            cx,
+        )
     }
 
     #[cfg(test)]
@@ -243,13 +262,47 @@ impl TerminalPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::create(working_dir, parent_focus, on_close, true, window, cx)
+        // Quiet panels are never laid out and their events are drained by hand,
+        // so their shells start right away.
+        let spawn_awaits_bounds = false;
+        Self::create(
+            working_dir,
+            parent_focus,
+            on_close,
+            spawn_awaits_bounds,
+            true,
+            window,
+            cx,
+        )
+    }
+
+    /// Like [`Self::new_quiet`], but with production spawn timing so a test can
+    /// observe the shell waiting for the panel's first bounds.
+    #[cfg(test)]
+    pub(crate) fn new_quiet_awaiting_bounds(
+        working_dir: PathBuf,
+        parent_focus: FocusHandle,
+        on_close: Option<CloseHandler>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let spawn_awaits_bounds = true;
+        Self::create(
+            working_dir,
+            parent_focus,
+            on_close,
+            spawn_awaits_bounds,
+            true,
+            window,
+            cx,
+        )
     }
 
     fn create(
         working_dir: PathBuf,
         parent_focus: FocusHandle,
         on_close: Option<CloseHandler>,
+        spawn_awaits_bounds: bool,
         #[cfg_attr(not(test), allow(unused_variables))] quiet: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -305,6 +358,7 @@ impl TerminalPanel {
             rows: DEFAULT_ROWS,
             last_bounds: None,
             last_theme: Some(theme.clone()),
+            spawn_awaits_bounds,
             _subscriptions: vec![in_sub, out_sub, appearance_sub, settings_sub],
             #[cfg(test)]
             quiet,
@@ -605,7 +659,7 @@ impl TerminalPanel {
         if self.zoom != new_zoom {
             self.zoom = new_zoom;
             if let Some(bounds) = self.last_bounds {
-                self.resize_for_bounds(bounds);
+                self.resize_for_bounds(bounds, cx);
             }
             changed = true;
         }
@@ -616,7 +670,7 @@ impl TerminalPanel {
             self.font_size = new_size;
             self.cell_size = measure_cell_size(window, &self.font_family, self.font_size);
             if let Some(bounds) = self.last_bounds {
-                self.resize_for_bounds(bounds);
+                self.resize_for_bounds(bounds, cx);
             }
             changed = true;
         } else if self.font_family != new_font || self.font_size != new_size {
@@ -649,6 +703,17 @@ impl TerminalPanel {
         focused: bool,
         cx: &mut Context<Self>,
     ) {
+        // A shell started before the panel has been laid out only knows the
+        // placeholder grid, and ConPTY keeps wrapping its output at that width
+        // until something resizes it. The panel spawns such a tab from
+        // `resize_for_bounds` instead, once the real grid size is known.
+        if !self.spawn_ready() {
+            if let Some(tab) = self.tab_by_id_mut(tab_id) {
+                tab.spawn_pending = true;
+            }
+            return;
+        }
+
         let configured = Settings::get(cx).tools.embedded_shell.as_deref();
         let parsed = parse_shell_command(configured);
         let panel_cols = self.cols;
@@ -676,6 +741,7 @@ impl TerminalPanel {
         tab.dragging_selection = false;
         tab.marked_text = None;
         tab.marked_selected_utf16 = 0..0;
+        tab.spawn_pending = false;
         tab.cols = panel_cols;
         tab.rows = panel_rows;
 
@@ -810,6 +876,9 @@ impl TerminalPanel {
                 tab.exited_status = Some(status);
                 cx.notify();
             }
+            TerminalEvent::ResizeFailed(error) => {
+                log::warn!("terminal resize failed: {error}");
+            }
         }
     }
 
@@ -836,7 +905,12 @@ impl TerminalPanel {
         .detach();
     }
 
-    fn resize_for_bounds(&mut self, bounds: Bounds<Pixels>) {
+    /// Whether the panel knows the grid size a new shell should start at.
+    fn spawn_ready(&self) -> bool {
+        !self.spawn_awaits_bounds || self.last_bounds.is_some()
+    }
+
+    fn resize_for_bounds(&mut self, bounds: Bounds<Pixels>, cx: &mut Context<Self>) {
         self.last_bounds = Some(bounds);
         let (new_cols, new_rows) = grid_dimensions_for_bounds(bounds, self.cell_size, self.zoom);
         self.cols = new_cols;
@@ -845,6 +919,30 @@ impl TerminalPanel {
         for tab in self.tabs.items_mut() {
             tab.sync_size(new_cols, new_rows, cell_size);
         }
+        self.spawn_pending_tabs(cx);
+    }
+
+    /// Starts the shells of tabs created before the panel had real bounds.
+    fn spawn_pending_tabs(&mut self, cx: &mut Context<Self>) {
+        let pending: Vec<u64> = self
+            .tabs
+            .items()
+            .iter()
+            .filter(|tab| tab.spawn_pending)
+            .map(|tab| tab.id)
+            .collect();
+        if pending.is_empty() {
+            return;
+        }
+        // This usually runs from the grid's prepaint, so the frame being built
+        // still shows the empty grid; the notify below (or the session's first
+        // output event) repaints it.
+        let theme = self.current_theme(cx);
+        for tab_id in pending {
+            self.spawn_session_for_tab(tab_id, theme.clone(), false, cx);
+        }
+        // A failed spawn only sets `spawn_error`, which needs a frame to show.
+        cx.notify();
     }
 
     fn copy_selection(&self, cx: &mut App) -> bool {
@@ -1512,8 +1610,8 @@ impl Render for TerminalPanel {
                 input_entity: entity,
                 scrollbar: tab.scrollbar.clone(),
                 on_bounds_changed: Box::new(move |bounds, cx| {
-                    let _ = weak.update(cx, |panel, _| {
-                        panel.resize_for_bounds(bounds);
+                    let _ = weak.update(cx, |panel, cx| {
+                        panel.resize_for_bounds(bounds, cx);
                     });
                 }),
             });
@@ -2052,10 +2150,13 @@ mod tests {
             assert_eq!(panel.active_selection(), Some(sel));
 
             // Resize applies across all tabs.
-            panel.resize_for_bounds(Bounds::new(
-                gpui::point(px(0.0), px(0.0)),
-                gpui::size(px(800.0), px(300.0)),
-            ));
+            panel.resize_for_bounds(
+                Bounds::new(
+                    gpui::point(px(0.0), px(0.0)),
+                    gpui::size(px(800.0), px(300.0)),
+                ),
+                cx,
+            );
             let dims = panel.tab_cols_rows();
             assert_eq!(dims.len(), 2);
             assert_eq!(dims[0], dims[1]);
@@ -2075,6 +2176,73 @@ mod tests {
                     t!("terminal.tab_title", index = 3).to_string(),
                 ]
             );
+        });
+    }
+
+    #[cfg(not(windows))]
+    #[gpui::test]
+    fn tab_created_before_bounds_spawns_at_the_bounds_size(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            gpui_component::init(cx);
+            let mut settings = Settings::default();
+            settings.tools.embedded_shell = Some("/bin/sh".to_owned());
+            cx.set_global(settings);
+        });
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let workdir = dir.path().to_path_buf();
+        let window = cx.add_window(|window, cx| {
+            let parent = cx.focus_handle();
+            let panel = TerminalPanel::new_quiet_awaiting_bounds(workdir, parent, None, window, cx);
+            // Nothing has been laid out yet, so the shell must not start at the
+            // placeholder grid.
+            assert!(
+                !panel.has_session(),
+                "the shell must wait until the panel knows its size"
+            );
+            assert_eq!(panel.tab_cols_rows(), vec![(DEFAULT_COLS, DEFAULT_ROWS)]);
+            panel
+        });
+        let panel = window.root(cx).expect("root panel");
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+
+        // The first paint reports the panel bounds, which is where the waiting
+        // shell has to start.
+        vcx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+
+        panel.update_in(&mut vcx, |panel, _, cx| {
+            let bounds = panel.last_bounds.expect("the panel drew with bounds");
+            let expected = grid_dimensions_for_bounds(bounds, panel.cell_size, panel.zoom);
+            assert!(
+                expected.0 > DEFAULT_COLS,
+                "the bounds must be wider than the default grid for this to prove anything"
+            );
+            assert!(
+                panel.has_session(),
+                "the shell must start once the first bounds are known"
+            );
+            assert_eq!(panel.tab_cols_rows(), vec![expected]);
+
+            let snapshot = panel.snapshot();
+            assert_eq!(
+                (snapshot.cols, snapshot.rows),
+                expected,
+                "the shell must start at the bounds-derived grid, not the default one"
+            );
+
+            // A later bounds change resizes the running session instead of
+            // spawning another one.
+            let narrower = Bounds::new(
+                gpui::point(px(0.0), px(0.0)),
+                gpui::size(px(600.0), px(240.0)),
+            );
+            panel.resize_for_bounds(narrower, cx);
+            let resized = grid_dimensions_for_bounds(narrower, panel.cell_size, panel.zoom);
+            assert!(resized.0 < expected.0);
+            assert_eq!(panel.tab_cols_rows(), vec![resized]);
         });
     }
 
