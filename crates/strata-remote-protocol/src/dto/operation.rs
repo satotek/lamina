@@ -1,13 +1,13 @@
 //! Mutations the helper is willing to run.
 //!
-//! The values mirror [`strata_core::session::Operation`]. Variants the remote
-//! tab does not offer (LFS, worktrees, interactive rebase, reflog undo, tags,
-//! remotes, custom patch files) stay off the wire, so a peer cannot ask the
-//! helper to run them by sending a frame.
+//! The values mirror [`strata_core::session::Operation`]. A variant that is
+//! not listed here stays off the wire, so a peer cannot ask the helper to run
+//! it by sending a frame.
 
 use serde::{Deserialize, Serialize};
 
 use crate::codec::ProtocolError;
+use crate::dto::query::ReflogEntryDto;
 use crate::dto::repo::{self, ObjectId};
 
 /// `Operation` variants this protocol does not carry, or a line index that
@@ -238,6 +238,13 @@ pub enum OperationDto {
     },
     ContinueInProgress,
     AbortInProgress,
+    /// `None` undoes the newest HEAD action the helper can restore.
+    UndoReflog {
+        entry: Option<ReflogEntryDto>,
+    },
+    RedoReflog {
+        entry: ReflogEntryDto,
+    },
 }
 
 impl TryFrom<&strata_core::session::Operation> for OperationDto {
@@ -395,6 +402,12 @@ impl TryFrom<&strata_core::session::Operation> for OperationDto {
             },
             Operation::ContinueInProgress => Self::ContinueInProgress,
             Operation::AbortInProgress => Self::AbortInProgress,
+            Operation::UndoReflog { entry } => Self::UndoReflog {
+                entry: entry.as_ref().map(ReflogEntryDto::from),
+            },
+            Operation::RedoReflog { entry } => Self::RedoReflog {
+                entry: ReflogEntryDto::from(entry),
+            },
             // Kept off the wire on purpose: the remote tab still refuses these.
             Operation::AddRemote { .. }
             | Operation::RenameRemote { .. }
@@ -403,8 +416,6 @@ impl TryFrom<&strata_core::session::Operation> for OperationDto {
             | Operation::OpenMergetool { .. }
             | Operation::RebaseEdit { .. }
             | Operation::ApplyPatch { .. }
-            | Operation::UndoReflog { .. }
-            | Operation::RedoReflog { .. }
             | Operation::CreateTag { .. }
             | Operation::DeleteTag { .. }
             | Operation::SubmoduleUpdate { .. }
@@ -562,6 +573,12 @@ impl TryFrom<OperationDto> for strata_core::session::Operation {
             },
             OperationDto::ContinueInProgress => Operation::ContinueInProgress,
             OperationDto::AbortInProgress => Operation::AbortInProgress,
+            OperationDto::UndoReflog { entry } => Operation::UndoReflog {
+                entry: entry.map(TryInto::try_into).transpose()?,
+            },
+            OperationDto::RedoReflog { entry } => Operation::RedoReflog {
+                entry: entry.try_into()?,
+            },
         })
     }
 }
@@ -603,6 +620,7 @@ mod tests {
     use strata_core::merge::ContentHash;
     use strata_core::patch::LineSelection;
     use strata_core::session::{ConflictSide, Operation, RemoteBranch, ResetMode};
+    use strata_core::{ReflogEntry, ReflogKind};
 
     use super::*;
 
@@ -746,6 +764,31 @@ mod tests {
             },
             Operation::ContinueInProgress,
             Operation::AbortInProgress,
+            Operation::UndoReflog { entry: None },
+            Operation::UndoReflog {
+                entry: Some(ReflogEntry {
+                    reference: "HEAD".into(),
+                    old_id: commit,
+                    new_id: oid(),
+                    committer_name: "Strata Test".into(),
+                    committer_email: "strata@example.invalid".into(),
+                    time: 1_700_000_000,
+                    message: "commit: second".into(),
+                    kind: ReflogKind::Commit,
+                }),
+            },
+            Operation::RedoReflog {
+                entry: ReflogEntry {
+                    reference: "HEAD".into(),
+                    old_id: commit,
+                    new_id: oid(),
+                    committer_name: "Strata Test".into(),
+                    committer_email: "strata@example.invalid".into(),
+                    time: 1_700_000_000,
+                    message: "commit: second".into(),
+                    kind: ReflogKind::Commit,
+                },
+            },
         ];
         for operation in &operations {
             assert!(is_supported_operation(operation), "{operation:?}");

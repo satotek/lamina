@@ -536,11 +536,6 @@ impl RepoView {
     /// The tooltip names the entry undo would target, so the button says what
     /// it is about to do instead of repeating its own label.
     pub(crate) fn undo_button_state(&self, window: &Window) -> (bool, String) {
-        // Restoring an entry is a write the helper does not run. The list
-        // itself is readable.
-        if self.is_ssh() {
-            return (false, crate::remote_open::unavailable_reason());
-        }
         let entry = self.reflog.newest_restorable();
         match blocked_reason(entry, self.button_gate(), self.head_branch().as_deref()) {
             Some(reason) => (
@@ -570,10 +565,6 @@ impl RepoView {
 
     /// Whether the title bar's Redo button is enabled, and the tooltip it shows.
     pub(crate) fn redo_button_state(&self, window: &Window) -> (bool, String) {
-        // Same write as undo: the helper lists the reflog and does not replay it.
-        if self.is_ssh() {
-            return (false, crate::remote_open::unavailable_reason());
-        }
         let entry = self.reflog.redo.top();
         let head = self.source().and_then(|source| head_target(source.head()));
         match redo_blocked_reason(entry, self.button_gate(), head) {

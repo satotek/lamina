@@ -631,6 +631,6 @@ mod tests {
     fn the_handshake_version_requires_a_current_helper() {
         // Deploy replaces a helper whose `--self-check` reports a different
         // protocol. Keeping the number here makes an accidental revert fail.
-        assert_eq!(crate::PROTOCOL_VERSION, 6);
+        assert_eq!(crate::PROTOCOL_VERSION, 7);
     }
 }

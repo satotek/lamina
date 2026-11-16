@@ -51,4 +51,11 @@ pub use message::{ErrorKind, Event, Message, RemoteError, Request, Response};
 /// cannot install a watch still serves the repository; the app refreshes it
 /// explicitly. An older helper fails the handshake, which is what makes the
 /// app replace it.
-pub const PROTOCOL_VERSION: u32 = 6;
+///
+/// Version 7 carries writes a remote tab runs through the same `Run` path as
+/// a local one. It starts with reflog undo and redo. Later additions in this
+/// revision are worktrees, submodule update, LFS, repository configuration,
+/// tags and remotes, and the reads those views need. Paths in those messages
+/// are checked on the helper before git sees them. An older helper fails the
+/// handshake, which is what makes the app replace it.
+pub const PROTOCOL_VERSION: u32 = 7;
