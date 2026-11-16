@@ -1256,9 +1256,9 @@ pub(crate) fn commit_menu(
     // One grouped entry rather than a submenu, so the compare view is one
     // click away from the commit it starts at.
     menu = menu.separator();
-    // Two-way compare is a ticketed query. Saving a patch still writes a file
-    // on this machine. Creating a worktree runs on the helper.
-    let remote_reason = state.ssh.then(crate::remote_open::unavailable_reason);
+    // Two-way compare is a ticketed query. Saving a patch asks the helper for
+    // the bytes and writes the file here. Creating a worktree runs on the
+    // helper.
     // A menu only opens with a session, so the repository is there.
     let compare_blocked = super::compare::with_head_blocked(true, Some(commit), state.head);
     menu = menu.item(
@@ -1297,7 +1297,7 @@ pub(crate) fn commit_menu(
 
     let busy_reason = state.busy().then(|| t!("branch.reason.busy").to_string());
     let worktree_reason = busy_reason.clone();
-    let patch_reason = remote_reason.or(busy_reason);
+    let patch_reason = busy_reason;
     let worktree_short = short.clone();
     let create_worktree = {
         let entity = entity.clone();

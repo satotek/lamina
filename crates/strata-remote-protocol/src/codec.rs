@@ -474,6 +474,7 @@ mod tests {
             },
             Request::LfsAvailable,
             Request::LfsLocks,
+            Request::FormatPatch { commit: oid },
             Request::GitConfig,
             Request::PreviewGitConfig {
                 path: "/repo/.git/config".into(),
@@ -597,6 +598,9 @@ mod tests {
                     owner: Some("Ada".into()),
                     locked_at: None,
                 }],
+            },
+            Response::FormatPatch {
+                patch: b"From 1 Mon Sep 17 00:00:00 2001\n".to_vec(),
             },
             Response::GitConfig {
                 config: Box::new(crate::dto::GitConfigDto {

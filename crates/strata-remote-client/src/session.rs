@@ -1590,8 +1590,8 @@ impl RepoReader for RemoteReader {
     }
 }
 
-/// CLI helpers that can run on the host. `format_patch` stays local because
-/// saving a patch is still a file on this machine.
+/// CLI helpers that can run on the host. Saving a patch still writes a file
+/// on this machine, but the bytes it saves come from the helper.
 struct RemoteExtras {
     inner: std::sync::Weak<Inner>,
     root: PathBuf,
@@ -1629,8 +1629,17 @@ impl GitExtras for RemoteExtras {
         }
     }
 
-    fn format_patch(&self, _commit: Oid) -> Result<Vec<u8>> {
-        Err(Error::other(UNSUPPORTED))
+    fn format_patch(&self, commit: Oid) -> Result<Vec<u8>> {
+        let inner = self
+            .inner
+            .upgrade()
+            .ok_or_else(|| Error::other("the remote session was closed"))?;
+        match inner.call(Request::FormatPatch {
+            commit: commit.into(),
+        })? {
+            Response::FormatPatch { patch } => Ok(patch),
+            other => Err(unexpected(other)),
+        }
     }
 }
 

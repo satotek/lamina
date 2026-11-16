@@ -366,6 +366,7 @@ fn is_blocking_read(request: &Request) -> bool {
             | Request::LfsLocks
             | Request::GitConfig
             | Request::PreviewGitConfig { .. }
+            | Request::FormatPatch { .. }
     )
 }
 
@@ -544,7 +545,8 @@ fn answer_control(shared: &Arc<ServerShared>, chunk: usize, request: Request) ->
         | Request::LfsAvailable
         | Request::LfsLocks
         | Request::GitConfig
-        | Request::PreviewGitConfig { .. } => {
+        | Request::PreviewGitConfig { .. }
+        | Request::FormatPatch { .. } => {
             // `dispatch` sends these to a worker. Reaching here is a bug.
             Response::Error(RemoteError::other(
                 "internal error: a read was handled on the request loop",
@@ -888,6 +890,15 @@ fn answer_read(
             },
             Err(error) => Response::Error(remote_error(error)),
         },
+        Request::FormatPatch { commit } => {
+            let result = proto::ObjectId::try_into(commit)
+                .map_err(protocol_error)
+                .and_then(|commit| extras.format_patch(commit).map_err(remote_error));
+            match result {
+                Ok(patch) => Response::FormatPatch { patch },
+                Err(error) => Response::Error(error),
+            }
+        }
         Request::GitConfig => {
             let root = repository_path(reader);
             match strata_core::repo::GitConfig::load(&root) {
