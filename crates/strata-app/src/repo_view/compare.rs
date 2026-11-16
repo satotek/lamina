@@ -1146,12 +1146,7 @@ impl RepoView {
                 }
             }
         } else {
-            ui::message(
-                t!("worktree.computing_diff").to_string(),
-                design.muted,
-                design,
-            )
-            .into_any_element()
+            ui::loading_state(t!("worktree.computing_diff").to_string(), design).into_any_element()
         };
 
         div()

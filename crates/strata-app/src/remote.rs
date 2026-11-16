@@ -27,6 +27,7 @@ use gpui_kit_assets::IconName;
 use strata_core::session::{Operation, OperationId, RepoSnapshot};
 use strata_core::{HeadInfo, RefInfo, RefKind, UpstreamInfo};
 
+use crate::activity::ActivityKind;
 use crate::data::Source;
 use crate::repo_view::RepoView;
 
@@ -934,6 +935,7 @@ impl RepoView {
             return;
         };
         let id = session.run(operation);
+        self.activity.begin(id, ActivityKind::Remote, cx);
         self.remote.running = Some(Running {
             id,
             kind,

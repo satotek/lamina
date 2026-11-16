@@ -194,6 +194,9 @@ impl Render for RepoView {
         {
             root = root.child(strip);
         }
+        // The hairline sits at the top of the content so an operation is
+        // visible while the status bar is not where the user is looking.
+        root = root.child(self.activity_progress(&design));
         if let Some((path, error)) = &self.error {
             root = root.child(self.error_screen(path, error, &design));
         } else {

@@ -36,6 +36,7 @@ use strata_core::{ChangeKind, FileChange, RepoState, WorktreeStatus};
 use commit_box::{commit_enabled, previous_message, trim_message};
 use hunks::{panel_rows_expanded, picked_in_range, picked_selection};
 
+use crate::activity::ActivityKind;
 use crate::conflicts::{
     Conflicts, MarkFileResolved, NextConflict, PreviousConflict, ResetConflict, TakeBase,
     TakeBothOursFirst, TakeBothTheirsFirst, TakeOurs, TakeTheirs, UseOurs, UseTheirs,
@@ -771,12 +772,13 @@ impl WorktreePanel {
         self.diff.cancel()
     }
 
-    fn run(&mut self, session: &Session, kind: PendingKind, operation: Operation) {
+    fn run(&mut self, session: &Session, kind: PendingKind, operation: Operation) -> OperationId {
         let id = session.run(operation);
         self.pending = Some((id, kind));
         self.dirty = true;
         self.error = None;
         self.notice = None;
+        id
     }
 
     fn set_amend(
@@ -811,6 +813,22 @@ impl WorktreePanel {
 // ---------------------------------------------------------------------------
 
 impl RepoView {
+    /// Runs a working-tree mutation and records it for the activity indicator,
+    /// which needs the operation kind before the id can be matched to it.
+    fn start_worktree_operation(
+        &mut self,
+        kind: PendingKind,
+        operation: Operation,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let activity = ActivityKind::of(&operation);
+        let id = self.worktree.run(session, kind, operation);
+        self.activity.begin(id, activity, cx);
+    }
+
     pub(crate) fn open_worktree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.leave_reflog(cx);
         self.mode = MainMode::Worktree;
@@ -1017,11 +1035,10 @@ impl RepoView {
         if paths.is_empty() {
             return;
         }
-        let Some(session) = self.session.as_ref() else {
+        if self.session.is_none() {
             return;
-        };
-        self.worktree
-            .run(session, PendingKind::Stage, Operation::StagePaths(paths));
+        }
+        self.start_worktree_operation(PendingKind::Stage, Operation::StagePaths(paths), cx);
         cx.notify();
     }
 
@@ -1041,14 +1058,10 @@ impl RepoView {
         if paths.is_empty() {
             return;
         }
-        let Some(session) = self.session.as_ref() else {
+        if self.session.is_none() {
             return;
-        };
-        self.worktree.run(
-            session,
-            PendingKind::Unstage,
-            Operation::UnstagePaths(paths),
-        );
+        }
+        self.start_worktree_operation(PendingKind::Unstage, Operation::UnstagePaths(paths), cx);
         cx.notify();
     }
 
@@ -1350,8 +1363,7 @@ impl RepoView {
         if paths.is_empty() {
             return;
         }
-        self.worktree
-            .run(session, PendingKind::Stage, Operation::StagePaths(paths));
+        self.start_worktree_operation(PendingKind::Stage, Operation::StagePaths(paths), cx);
         cx.notify();
     }
 
@@ -1369,11 +1381,7 @@ impl RepoView {
         if paths.is_empty() {
             return;
         }
-        self.worktree.run(
-            session,
-            PendingKind::Unstage,
-            Operation::UnstagePaths(paths),
-        );
+        self.start_worktree_operation(PendingKind::Unstage, Operation::UnstagePaths(paths), cx);
         cx.notify();
     }
 
@@ -1441,15 +1449,15 @@ impl RepoView {
             }
             _ => return,
         };
-        let Some(session) = self.session.as_ref() else {
-            return;
-        };
         let kind = match action {
             HunkAction::Stage => PendingKind::Stage,
             HunkAction::Unstage => PendingKind::Unstage,
             HunkAction::Discard => unreachable!("handled above"),
         };
-        self.worktree.run(session, kind, operation);
+        if self.session.is_none() {
+            return;
+        }
+        self.start_worktree_operation(kind, operation, cx);
         cx.notify();
     }
 
@@ -1537,14 +1545,11 @@ impl RepoView {
         ) {
             return;
         }
-        self.worktree.run(
-            session,
-            PendingKind::Commit,
-            Operation::Commit {
-                message,
-                amend: self.worktree.amend,
-            },
-        );
+        let operation = Operation::Commit {
+            message,
+            amend: self.worktree.amend,
+        };
+        self.start_worktree_operation(PendingKind::Commit, operation, cx);
         cx.notify();
     }
 
@@ -1555,11 +1560,8 @@ impl RepoView {
         operations: Vec<Operation>,
         cx: &mut Context<Self>,
     ) {
-        let Some(session) = self.session.as_ref() else {
-            return;
-        };
         for operation in operations {
-            self.worktree.run(session, kind, operation);
+            self.start_worktree_operation(kind, operation, cx);
         }
         cx.notify();
     }

@@ -288,7 +288,7 @@ impl RepoView {
                 return message(error, design.remove_text, design);
             }
             if self.selection_diff.plan().is_none() {
-                return message(t!("details.reading_range").as_ref(), design.muted, design);
+                return loading(t!("details.reading_range").as_ref(), design);
             }
         }
         let Some(files) = &self.files else {
@@ -297,7 +297,7 @@ impl RepoView {
             } else {
                 t!("details.reading_files").to_string()
             };
-            return message(&text, design.muted, design);
+            return loading(&text, design);
         };
         if files.is_empty() {
             let text = if self.selection.is_multi() {
@@ -315,7 +315,7 @@ impl RepoView {
             return message(error, design.remove_text, design);
         }
         let Some(view) = self.diff.view().cloned() else {
-            return message(t!("worktree.computing_diff").as_ref(), design.muted, design);
+            return loading(t!("worktree.computing_diff").as_ref(), design);
         };
         if let Some(image) =
             crate::image_diff::body(&self.image_diff, &view, design, self.entity(), cx)
@@ -436,6 +436,12 @@ impl RepoView {
 
 fn message(text: &str, color: Hsla, design: &Design) -> AnyElement {
     crate::ui::message(text, color, design).into_any_element()
+}
+
+/// A pane that is waiting for a diff: a spinner and a short label rather than
+/// a blank area, which is what a big diff would otherwise show for a while.
+fn loading(text: &str, design: &Design) -> AnyElement {
+    crate::ui::loading_state(text.to_string(), design).into_any_element()
 }
 
 #[cfg(test)]

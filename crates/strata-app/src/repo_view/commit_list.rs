@@ -159,6 +159,12 @@ impl RepoView {
         };
         let len = source.len();
         let has_uncommitted = self.has_uncommitted_row(cx);
+        if len == 0 && !has_uncommitted && !source.complete() {
+            // The walk has not published its first page yet. Saying "no
+            // commits" here would be a lie in a large repository.
+            return crate::ui::loading_state(t!("common.loading").to_string(), design)
+                .into_any_element();
+        }
         if len == 0 && !has_uncommitted {
             return empty_pane(&t!("history.empty.no_commits"), design);
         }

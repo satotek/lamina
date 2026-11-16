@@ -63,6 +63,7 @@ use strata_core::session::{
 };
 use strata_core::{FileChange, HeadInfo, Oid, RefKind};
 
+use crate::activity::{Activity, ActivityKind};
 use crate::branch_switcher::BranchSwitcher;
 use crate::branches::{BranchStart, Branches};
 use crate::data::{self, LaneWidth, Source};
@@ -383,6 +384,9 @@ pub struct RepoView {
     extra_lists: ExtraLists,
     /// Fetch/pull/push state, progress and the dialogs that decide them.
     pub(crate) remote: Remote,
+    /// Commands this view started that have not reported back, for the activity
+    /// indicator every surface reads.
+    pub(crate) activity: Activity,
     /// The branch badges' pull-request cache and the checkout dialog.
     pub(crate) pull_requests: PullRequests,
     /// Commit search over the loaded history, with its text field.
@@ -629,6 +633,7 @@ impl RepoView {
             branch_switcher: BranchSwitcher::default(),
             extra_lists: ExtraLists::default(),
             remote: Remote::default(),
+            activity: Activity::default(),
             pull_requests: PullRequests::default(),
             search: SearchState::default(),
             file_history: None,
@@ -1261,6 +1266,10 @@ impl RepoView {
             }
             SessionEvent::OperationFinished { id, error } => {
                 let failed = error.is_some();
+                // The indicator stops here rather than when the next snapshot
+                // lands, so a command that has reported back is not still
+                // shown as running.
+                self.activity.finish(id);
                 // The session refreshed the status before it reported the end,
                 // so this snapshot already has the conflicts the command left.
                 let conflicts = self
@@ -1502,7 +1511,9 @@ impl RepoView {
             });
         }
         let kind = FinishedOperation::of(&operation);
+        let activity = ActivityKind::of(&operation);
         let id = session.run(operation);
+        self.activity.begin(id, activity, cx);
         self.in_progress.submitted(id, kind);
         self.branches.start(id, label, retry);
         cx.notify();

@@ -89,6 +89,7 @@ pub(crate) fn open_clone(
                         ui::button("clone-ok", t!("clone.clone").to_string())
                             .size(ui::ButtonSize::Medium)
                             .disabled(running)
+                            .loading(running)
                             .on_click(move |_, window, cx| {
                                 confirm.update(cx, |dialog, cx| dialog.submit(window, cx));
                             }),
@@ -141,6 +142,7 @@ pub(crate) fn open_init(
                         ui::button("init-ok", t!("init.create").to_string())
                             .size(ui::ButtonSize::Medium)
                             .disabled(busy)
+                            .loading(busy)
                             .on_click(move |_, window, cx| {
                                 confirm.update(cx, |dialog, cx| dialog.submit(window, cx));
                             })

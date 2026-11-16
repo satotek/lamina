@@ -7,7 +7,7 @@ use gpui_component::input::Textarea;
 use strata_core::HeadInfo;
 use strata_core::session::{RepoSnapshot, Session};
 
-use super::{Colors, WorktreePanel};
+use super::{Colors, PendingKind, WorktreePanel};
 use crate::repo_view::RepoView;
 
 impl WorktreePanel {
@@ -69,6 +69,7 @@ impl WorktreePanel {
 
         let commit_button = {
             let entity = entity.clone();
+            let committing = matches!(self.pending, Some((_, PendingKind::Commit)));
             crate::ui::button(
                 "commit-button",
                 if staged == 1 {
@@ -79,6 +80,7 @@ impl WorktreePanel {
             )
             .size(crate::ui::ButtonSize::Medium)
             .disabled(!enabled)
+            .loading(committing)
             .child(
                 div()
                     .px(colors.design.px(5.0))

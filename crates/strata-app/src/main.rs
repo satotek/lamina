@@ -27,6 +27,7 @@ extern crate rust_i18n;
 rust_i18n::i18n!("locales", fallback = "en");
 
 mod actions;
+mod activity;
 mod assets;
 mod autofetch;
 mod branch_switcher;

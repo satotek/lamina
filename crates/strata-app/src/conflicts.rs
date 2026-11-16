@@ -48,6 +48,7 @@ use strata_core::{
     ChangeKind, ConflictEntry, ConflictKind, ConflictSides, HeadInfo, Oid, RepoState,
 };
 
+use crate::activity::ActivityKind;
 use crate::diff_view::{self, DiffColors, DiffStyle};
 use crate::merge_editor::{Choice as MergeChoice, LineMark, MergeModel, MergeRow, Side, Ticked};
 use crate::repo_view::RepoView;
@@ -1078,7 +1079,10 @@ impl RepoView {
         let Some(session) = self.session.as_ref() else {
             return;
         };
-        let id = session.run(Operation::ResolveConflict { path, side });
+        let operation = Operation::ResolveConflict { path, side };
+        let activity = ActivityKind::of(&operation);
+        let id = session.run(operation);
+        self.activity.begin(id, activity, cx);
         self.worktree.conflicts.start(id, PendingAction::Resolve);
         cx.notify();
     }
@@ -1421,7 +1425,9 @@ impl RepoView {
             },
             None => Operation::MarkResolved(vec![path]),
         };
+        let activity = ActivityKind::of(&operation);
         let id = session.run(operation);
+        self.activity.begin(id, activity, cx);
         self.worktree
             .conflicts
             .start(id, PendingAction::MarkResolved);
@@ -1523,6 +1529,7 @@ impl RepoView {
             return;
         };
         let id = session.run(Operation::OpenMergetool { path });
+        self.activity.begin(id, ActivityKind::Other, cx);
         self.worktree.conflicts.start(id, PendingAction::Mergetool);
         cx.notify();
     }

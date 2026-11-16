@@ -15,7 +15,7 @@ use strata_core::session::{Operation, RepoSnapshot};
 use strata_core::{ChangeKind, FileChange};
 
 use super::ignore;
-use super::{Colors, Selection, Side, WorktreePanel};
+use super::{Colors, PendingKind, Selection, Side, WorktreePanel};
 use crate::repo_view::RepoView;
 use crate::scrollbar::WithScrollbar as _;
 use crate::style;
@@ -118,6 +118,7 @@ impl WorktreePanel {
         let button = match side {
             Side::Unstaged => {
                 let entity = entity.clone();
+                let staging = matches!(self.pending, Some((_, PendingKind::Stage)));
                 crate::ui::button(
                     gpui::ElementId::named_usize("stage-all", side as usize),
                     t!("worktree.stage_all").to_string(),
@@ -127,6 +128,7 @@ impl WorktreePanel {
                 // overflows the 290 px column and clips "Unstage all".
                 .size(crate::ui::ButtonSize::Tiny)
                 .disabled(files.is_empty())
+                .loading(staging)
                 .on_click(move |_, _, cx| {
                     entity.update(cx, |this, cx| this.stage_all_worktree(cx));
                 })
@@ -134,6 +136,7 @@ impl WorktreePanel {
             }
             Side::Staged => {
                 let entity = entity.clone();
+                let unstaging = matches!(self.pending, Some((_, PendingKind::Unstage)));
                 crate::ui::button(
                     gpui::ElementId::named_usize("unstage-all", side as usize),
                     t!("worktree.unstage_all").to_string(),
@@ -143,6 +146,7 @@ impl WorktreePanel {
                 // overflows the 290 px column and clips "Unstage all".
                 .size(crate::ui::ButtonSize::Tiny)
                 .disabled(files.is_empty())
+                .loading(unstaging)
                 .on_click(move |_, _, cx| {
                     entity.update(cx, |this, cx| this.unstage_all_worktree(cx));
                 })

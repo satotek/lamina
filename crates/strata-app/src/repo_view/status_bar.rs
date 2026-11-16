@@ -1,7 +1,8 @@
-//! The status bar: the last git command, a running remote operation and the
-//! last error.
+//! The status bar: what runs now, the last git command and the last error.
 
 use gpui::{AnyElement, IntoElement, ParentElement, Styled, div, px};
+
+use std::time::Instant;
 
 use super::RepoView;
 use crate::remote;
@@ -20,6 +21,10 @@ impl RepoView {
         let command = strata_core::text::truncate_width(&command, 160);
         let error = self.status_error.clone();
         let note = self.status_note.clone();
+        // The activity segment names what is running; the command log keeps the
+        // actual argv as secondary text, because that is what users ask for
+        // when a command is slow.
+        let activity = self.activity.status(Instant::now());
         let operation = self.remote_status(&remote::Colors {
             foreground: design.text,
             muted_foreground: design.muted,
@@ -28,6 +33,43 @@ impl RepoView {
             accent_foreground: design.on_accent,
             zoom: design.zoom,
         });
+
+        let mut leading = div()
+            .flex()
+            .items_center()
+            .gap(design.px(10.0))
+            .flex_1()
+            .min_w_0();
+        if let Some(activity) = activity {
+            leading = leading
+                .child(crate::ui::spinner("status-activity", design, 11.0))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(design.accent)
+                        .child(activity.label),
+                );
+            if let Some(elapsed) = activity.elapsed {
+                leading = leading.child(div().flex_none().text_color(design.muted).child(elapsed));
+            }
+        } else {
+            leading = leading.child(
+                div()
+                    .flex_none()
+                    .w(design.px(7.0))
+                    .h(design.px(7.0))
+                    .rounded_full()
+                    .bg(design.add_text),
+            );
+        }
+        leading = leading.child(
+            div()
+                .min_w_0()
+                .truncate()
+                .font_family(design.mono.clone())
+                .text_color(design.muted)
+                .child(command),
+        );
 
         let mut bar = div()
             .flex()
@@ -41,30 +83,7 @@ impl RepoView {
             .border_t_1()
             .border_color(design.border)
             .text_size(px(design.small()))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(design.px(10.0))
-                    .flex_1()
-                    .min_w_0()
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(design.px(7.0))
-                            .h(design.px(7.0))
-                            .rounded_full()
-                            .bg(design.add_text),
-                    )
-                    .child(
-                        div()
-                            .min_w_0()
-                            .truncate()
-                            .font_family(design.mono.clone())
-                            .text_color(design.muted)
-                            .child(command),
-                    ),
-            );
+            .child(leading);
         // Only while a fetch, pull or push runs: the bar otherwise keeps its
         // command log and last-error slots.
         if let Some(operation) = operation {

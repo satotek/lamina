@@ -253,9 +253,8 @@ impl WorktreePanel {
                 (Some(error), _) => {
                     crate::ui::message(error, colors.danger, &colors.design).into_any_element()
                 }
-                (None, None) => crate::ui::message(
+                (None, None) => crate::ui::loading_state(
                     t!("worktree.computing_diff").to_string(),
-                    colors.muted_foreground,
                     &colors.design,
                 )
                 .into_any_element(),

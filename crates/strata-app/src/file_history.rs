@@ -927,11 +927,8 @@ impl RepoView {
                 }
             }
         } else {
-            message(
-                t!("worktree.computing_diff").to_string(),
-                colors.muted_foreground,
-                colors,
-            )
+            crate::ui::loading_state(t!("worktree.computing_diff").to_string(), &colors.design)
+                .into_any_element()
         };
 
         div()
