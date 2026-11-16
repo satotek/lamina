@@ -42,7 +42,27 @@ impl RepoView {
         self.block_graph_moves(&mut map);
         self.block_history_writes(&mut map);
         self.block_navigation(&mut map);
+        self.block_local_machine_commands(&mut map);
         map
+    }
+
+    /// Commands that need this machine: the config file, a local terminal, or
+    /// an editor. Their handlers already return without doing anything on a
+    /// remote tab; the palette has to say why, or the row looks enabled.
+    fn block_local_machine_commands(&self, map: &mut AvailabilityMap) {
+        if !self.is_ssh() {
+            return;
+        }
+        let reason = Some(crate::remote_open::unavailable_reason());
+        for action in [
+            "strata::OpenGitConfig",
+            "strata::OpenTerminalHere",
+            "strata::OpenInEditor",
+        ] {
+            map.block(action, reason.clone());
+        }
+        #[cfg(feature = "terminal")]
+        map.block("strata::ToggleTerminal", reason);
     }
 
     /// The selected rows' real commits, oldest first. The synthetic benchmark
@@ -328,6 +348,58 @@ mod tests {
         assert_eq!(
             reason, None,
             "a non-current branch with a merge base can be compared"
+        );
+        assert_eq!(
+            blocked_reason(&view, &mut vcx, "strata::OpenGitConfig"),
+            None,
+            "a local repository can show its config"
+        );
+        assert_eq!(
+            blocked_reason(&view, &mut vcx, "strata::OpenTerminalHere"),
+            None
+        );
+        assert_eq!(
+            blocked_reason(&view, &mut vcx, "strata::OpenInEditor"),
+            None
+        );
+    }
+
+    #[gpui::test]
+    fn a_remote_tab_names_why_local_machine_commands_cannot_run(cx: &mut gpui::TestAppContext) {
+        cx.update(prepare);
+        let window = cx.add_window(|window, cx| {
+            RepoView::new(
+                Launch::Remote(crate::remote_open::RemoteLaunch {
+                    spec: crate::remote_open::RemoteSpec {
+                        host: "git@example.com".into(),
+                        port: None,
+                        path: "/home/repo".into(),
+                    },
+                    auto_connect: false,
+                    ssh: None,
+                }),
+                window,
+                cx,
+            )
+        });
+        let view = window.root(cx).expect("the window's root view");
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        let reason = crate::remote_open::unavailable_reason();
+        for action in [
+            "strata::OpenGitConfig",
+            "strata::OpenTerminalHere",
+            "strata::OpenInEditor",
+        ] {
+            assert_eq!(
+                blocked_reason(&view, &mut vcx, action).as_deref(),
+                Some(reason.as_str()),
+                "{action}"
+            );
+        }
+        #[cfg(feature = "terminal")]
+        assert_eq!(
+            blocked_reason(&view, &mut vcx, "strata::ToggleTerminal").as_deref(),
+            Some(reason.as_str())
         );
     }
 }
