@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::codec::ProtocolError;
+use crate::dto::config::{ConfigChangeDto, ConfigLayerDto};
 use crate::dto::query::ReflogEntryDto;
 use crate::dto::repo::{self, ObjectId};
 
@@ -280,6 +281,17 @@ pub enum OperationDto {
     LfsPull {
         path: String,
     },
+    /// `git config --file`. `path` must be a file the helper already lists.
+    WriteGitConfig {
+        path: String,
+        layer: ConfigLayerDto,
+        key: String,
+        change: ConfigChangeDto,
+        len: u64,
+        hash: u64,
+        modified_secs: Option<u64>,
+        modified_nanos: Option<u32>,
+    },
 }
 
 impl TryFrom<&lamina_core::session::Operation> for OperationDto {
@@ -467,6 +479,25 @@ impl TryFrom<&lamina_core::session::Operation> for OperationDto {
             Operation::LfsLock { path } => Self::LfsLock { path: path.clone() },
             Operation::LfsUnlock { path } => Self::LfsUnlock { path: path.clone() },
             Operation::LfsPull { path } => Self::LfsPull { path: path.clone() },
+            Operation::WriteGitConfig {
+                path,
+                layer,
+                key,
+                change,
+                len,
+                hash,
+                modified_secs,
+                modified_nanos,
+            } => Self::WriteGitConfig {
+                path: path_on_wire(path)?,
+                layer: (*layer).into(),
+                key: key.clone(),
+                change: ConfigChangeDto::from(change),
+                len: *len,
+                hash: *hash,
+                modified_secs: *modified_secs,
+                modified_nanos: *modified_nanos,
+            },
             // Kept off the wire on purpose: the remote tab still refuses these.
             Operation::AddRemote { .. }
             | Operation::RenameRemote { .. }
@@ -655,6 +686,25 @@ impl TryFrom<OperationDto> for lamina_core::session::Operation {
             OperationDto::LfsLock { path } => Operation::LfsLock { path },
             OperationDto::LfsUnlock { path } => Operation::LfsUnlock { path },
             OperationDto::LfsPull { path } => Operation::LfsPull { path },
+            OperationDto::WriteGitConfig {
+                path,
+                layer,
+                key,
+                change,
+                len,
+                hash,
+                modified_secs,
+                modified_nanos,
+            } => Operation::WriteGitConfig {
+                path: std::path::PathBuf::from(path),
+                layer: layer.into(),
+                key,
+                change: change.into(),
+                len,
+                hash,
+                modified_secs,
+                modified_nanos,
+            },
         })
     }
 }
@@ -909,6 +959,16 @@ mod tests {
             },
             Operation::LfsPull {
                 path: "data.bin".into(),
+            },
+            Operation::WriteGitConfig {
+                path: std::path::PathBuf::from("/tmp/repo/.git/config"),
+                layer: lamina_core::repo::ConfigLayer::Local,
+                key: "user.name".into(),
+                change: lamina_core::git_cli::ConfigChange::Set("Ada".into()),
+                len: 12,
+                hash: 34,
+                modified_secs: Some(1_700_000_000),
+                modified_nanos: Some(0),
             },
         ];
         for operation in &operations {

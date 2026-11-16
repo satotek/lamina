@@ -180,6 +180,17 @@ pub enum Request {
     LfsAvailable,
     /// Locks `git lfs locks --json` reports.
     LfsLocks,
+    /// The configuration the repository sees, including global files on the host.
+    GitConfig,
+    /// Run one config change against a temporary copy of `path`.
+    ///
+    /// `path` must be a file the helper's own config read lists as writable.
+    PreviewGitConfig {
+        path: String,
+        layer: crate::dto::ConfigLayerDto,
+        key: String,
+        change: crate::dto::ConfigChangeDto,
+    },
 }
 
 /// A direct answer to one [`Request`].
@@ -289,6 +300,19 @@ pub enum Response {
     },
     LfsLocks {
         locks: Vec<crate::dto::LfsLockDto>,
+    },
+    GitConfig {
+        config: Box<crate::dto::GitConfigDto>,
+    },
+    /// Texts and the stamp of a config preview. The diff is built by the app.
+    ConfigPreview {
+        command: String,
+        before: String,
+        after: String,
+        len: u64,
+        hash: u64,
+        modified_secs: Option<u64>,
+        modified_nanos: Option<u32>,
     },
 }
 

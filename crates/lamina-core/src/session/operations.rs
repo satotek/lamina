@@ -10,7 +10,7 @@ use crate::Result;
 use crate::diff::{DiffOptions, diff_bytes};
 use crate::encoding::decode_for_display;
 use crate::error::{Error, OPERATION_CANCELLED};
-use crate::git_cli::{ApplyMode, CommitOptions};
+use crate::git_cli::{ApplyMode, CommitOptions, ConfigStamp, ConfigTarget, ConfigWrite};
 use crate::patch::{BytePatchFile, LineEnding, LineSelection, PatchMode, build_patch_bytes};
 use crate::session::history::LoadCommand;
 use crate::session::publish::Shared;
@@ -433,6 +433,34 @@ fn execute(
         Operation::LfsLock { path } => git.lfs_lock(path),
         Operation::LfsUnlock { path } => git.lfs_unlock(path),
         Operation::LfsPull { path } => git.lfs_pull(path),
+        Operation::WriteGitConfig {
+            path,
+            layer,
+            key,
+            change,
+            len,
+            hash,
+            modified_secs,
+            modified_nanos,
+        } => {
+            // The path is checked against the files this repository writes
+            // before git config creates or edits anything.
+            crate::repo::require_writable_config_file(git.workdir(), path)?;
+            let write = ConfigWrite::new(
+                ConfigTarget::new(path.clone(), *layer),
+                key.clone(),
+                change.clone(),
+            );
+            git.config_apply_stamp(
+                &write,
+                &ConfigStamp {
+                    len: *len,
+                    hash: *hash,
+                    modified_secs: *modified_secs,
+                    modified_nanos: *modified_nanos,
+                },
+            )
+        }
         Operation::WriteCommitGraph => {
             let mut progress = ProgressReporter::new(shared, id);
             let cancelled = || cancel_flag.load(Ordering::SeqCst) || shared.is_shutdown();

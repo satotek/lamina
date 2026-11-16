@@ -999,13 +999,25 @@ impl RepoView {
 
     /// Tells the config viewer which repository the next command opens.
     fn publish_repository(&self, cx: &mut App) {
-        if self.is_ssh() {
-            crate::git_config_view::clear_repository(cx);
-            return;
-        }
         let Some(session) = &self.session else {
+            if self.is_ssh() {
+                crate::git_config_view::clear_repository(cx);
+            }
             return;
         };
+        if self.is_ssh() {
+            // The files are on the host, so the helper reads and writes them;
+            // the label says which machine they belong to.
+            match session.git_config_access() {
+                Some(access) => crate::git_config_view::set_remote_repository(
+                    access,
+                    session.location().display(),
+                    cx,
+                ),
+                None => crate::git_config_view::clear_repository(cx),
+            }
+            return;
+        }
         let Some(path) = session.location().local_path().map(Path::to_path_buf) else {
             return;
         };
