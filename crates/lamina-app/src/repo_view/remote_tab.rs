@@ -6,6 +6,7 @@
 //! deadlocks the read loop.
 
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use futures::StreamExt as _;
 use futures::channel::mpsc as futures_mpsc;
@@ -303,6 +304,49 @@ impl RepoView {
                 .is_some_and(|tab| tab.placeholder || tab.error.is_some())
     }
 
+    /// Asks for a fresh status. A remote tab has no watcher yet, so this is
+    /// the only way the working tree catches up with changes made elsewhere.
+    /// A local tab uses the same request; its watcher is not replaced.
+    pub(crate) fn refresh_working_tree(&mut self, cx: &mut Context<Self>) {
+        if self.session.is_none() {
+            if self.is_ssh() {
+                self.status_note = Some(t!("title_bar.not_connected").to_string());
+                self.notify_if_active(cx);
+            }
+            return;
+        }
+        self.reload_working_tree(cx);
+    }
+
+    fn reload_working_tree(&mut self, cx: &mut Context<Self>) {
+        // Shared with the focus refresh, so focusing the window just after
+        // an explicit refresh does not ask the helper twice.
+        self.last_remote_refresh = Some(Instant::now());
+        if let Some(session) = self.session.as_ref() {
+            session.reload();
+        }
+        cx.notify();
+    }
+
+    pub(super) fn on_window_activated(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !window.is_window_active() {
+            return;
+        }
+        self.refresh_remote_on_focus(cx);
+    }
+
+    /// Reloads a connected remote tab when the window is focused, at most
+    /// once per [`REMOTE_REFRESH_INTERVAL`]. Local tabs already watch the disk.
+    fn refresh_remote_on_focus(&mut self, cx: &mut Context<Self>) {
+        if !self.is_ssh() || self.session.is_none() || self.remote_not_connected() {
+            return;
+        }
+        if !remote_refresh_due(self.last_remote_refresh, Instant::now()) {
+            return;
+        }
+        self.reload_working_tree(cx);
+    }
+
     pub(crate) fn is_ssh(&self) -> bool {
         self.remote_tab.is_some()
             || self
@@ -512,6 +556,15 @@ impl RepoView {
     }
 }
 
+/// How often a focused window may ask a remote helper for a fresh status.
+const REMOTE_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+
+/// True when a focus refresh should run. An explicit refresh records `last`,
+/// so the two do not stack.
+pub(super) fn remote_refresh_due(last: Option<Instant>, now: Instant) -> bool {
+    last.is_none_or(|at| now.saturating_duration_since(at) >= REMOTE_REFRESH_INTERVAL)
+}
+
 fn connect_actions(
     entity: gpui::WeakEntity<RepoView>,
     primary: String,
@@ -557,16 +610,26 @@ fn retry_button(entity: Entity<RepoView>, id: &'static str) -> impl IntoElement 
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     #[cfg(unix)]
     use std::path::{Path, PathBuf};
-    #[cfg(unix)]
-    use std::time::{Duration, Instant};
 
     use gpui::TestAppContext;
 
     use super::super::Launch;
     use super::super::RepoView;
+    use super::remote_refresh_due;
     use crate::remote_open::{RemoteLaunch, RemoteSpec};
+
+    #[test]
+    fn a_focus_refresh_waits_five_seconds() {
+        let now = Instant::now();
+        assert!(remote_refresh_due(None, now));
+        assert!(!remote_refresh_due(Some(now), now));
+        assert!(!remote_refresh_due(Some(now), now + Duration::from_secs(4)));
+        assert!(remote_refresh_due(Some(now), now + Duration::from_secs(5)));
+    }
     #[cfg(unix)]
     use crate::remote_open::{SshOverride, unavailable_reason};
 

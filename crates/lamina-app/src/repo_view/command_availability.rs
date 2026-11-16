@@ -48,7 +48,21 @@ impl RepoView {
             (!self.can_cancel_running_operation())
                 .then(|| t!("status.nothing_running").to_string()),
         );
+        map.block("lamina::RefreshWorkingTree", self.refresh_blocked());
         map
+    }
+
+    /// Refresh needs a session. A remote tab that has not connected yet says
+    /// so, instead of looking like a command that ran and did nothing.
+    fn refresh_blocked(&self) -> Option<String> {
+        if self.session.is_some() {
+            return None;
+        }
+        Some(if self.is_ssh() {
+            t!("title_bar.not_connected").to_string()
+        } else {
+            t!("compare.no_repository").to_string()
+        })
     }
 
     /// Commands that need this machine: the config file, a local terminal, or
@@ -372,6 +386,11 @@ mod tests {
             Some(t!("status.nothing_running").as_ref()),
             "an idle repository has nothing to cancel"
         );
+        assert_eq!(
+            blocked_reason(&view, &mut vcx, "lamina::RefreshWorkingTree"),
+            None,
+            "a local repository can reload its working tree"
+        );
     }
 
     #[gpui::test]
@@ -415,6 +434,11 @@ mod tests {
             blocked_reason(&view, &mut vcx, "lamina::CancelRunningOperation").as_deref(),
             Some(t!("status.nothing_running").as_ref()),
             "a disconnected tab is not running a command"
+        );
+        assert_eq!(
+            blocked_reason(&view, &mut vcx, "lamina::RefreshWorkingTree").as_deref(),
+            Some(t!("title_bar.not_connected").as_ref()),
+            "refresh cannot run until the tab is connected"
         );
     }
 }
