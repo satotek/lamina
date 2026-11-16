@@ -5,9 +5,11 @@
 //! for a fetch when one is due. The task holds the view weakly and stops when
 //! the window is gone, so it never outlives its repository.
 //!
-//! A fetch is skipped, not postponed, while the session is busy: the next tick
-//! tries again. A short tick plus an interval comparison is cheaper than a
-//! timer that has to be rebuilt whenever the setting changes.
+//! A fetch is skipped, not postponed, while the session is busy or a remote
+//! tab is disconnected: the next tick tries again. A short tick plus an
+//! interval comparison is cheaper than a timer that has to be rebuilt
+//! whenever the setting changes. A remote tab uses the same interval and the
+//! same quiet fetch as a local one.
 
 use std::time::{Duration, Instant};
 
@@ -32,40 +34,41 @@ pub(crate) fn start(
         loop {
             cx.background_executor().timer(TICK).await;
 
-            let Ok((active, has_session, minutes)) = this.read_with(cx, |view, cx| {
+            let Ok((active, connected, busy, minutes)) = this.read_with(cx, |view, cx| {
                 (
                     view.is_active(),
-                    view.session.is_some(),
+                    view.autofetch_ready(),
+                    view.has_operation_in_progress(),
                     Settings::get(cx).behaviour.auto_fetch_minutes,
                 )
             }) else {
                 // The window or view is gone, and with it the repository.
                 return;
             };
-            // Stop polling when inactive, `--fake`, or disabled.
-            if !active || !has_session || minutes == 0 {
+            // Stop polling when inactive, `--fake`, or disabled. A lost
+            // connection stays in the loop: the next tick tries again once
+            // the helper is back, instead of waiting for the tab to reopen.
+            if !active || minutes == 0 {
                 return;
             }
-            if !due(minutes, last.elapsed()) {
+            if !should_autofetch(connected, busy, minutes) || !due(minutes, last.elapsed()) {
                 continue;
             }
 
             // The command refuses while an operation runs; leaving `last` alone
-            // then makes the next tick try again.
+            // then makes the next tick try again. `Trigger::Automatic` is the
+            // quiet path: success does not toast.
             let started = window.update(cx, |_, window, cx| {
                 this.update(cx, |view, cx| {
-                    if !view.is_active() {
-                        return false;
-                    }
-                    let busy = view
-                        .session
-                        .as_ref()
-                        .is_none_or(|session| session.snapshot().busy.is_some());
-                    if busy {
+                    if !should_autofetch(
+                        view.is_active() && view.autofetch_ready(),
+                        view.has_operation_in_progress(),
+                        minutes,
+                    ) {
                         return false;
                     }
                     view.remote_command(Command::Fetch, Trigger::Automatic, window, cx);
-                    true
+                    view.remote.is_running()
                 })
                 .unwrap_or(false)
             });
@@ -81,6 +84,16 @@ pub(crate) fn start(
 /// Whether `elapsed` covers the configured interval. Zero disables auto-fetch.
 fn due(minutes: u32, elapsed: Duration) -> bool {
     minutes > 0 && elapsed >= Duration::from_secs(u64::from(minutes) * 60)
+}
+
+/// Whether this tick should start a quiet fetch.
+///
+/// A remote tab is included once it has a live connection. Disconnected and
+/// busy are skipped, not postponed past the interval: the following tick
+/// tries again. The fetch itself uses [`Trigger::Automatic`], which stays
+/// quiet unless it fails.
+pub(crate) fn should_autofetch(connected: bool, busy: bool, minutes: u32) -> bool {
+    connected && !busy && minutes > 0
 }
 
 #[cfg(test)]
@@ -100,5 +113,28 @@ mod tests {
     fn the_tick_is_shorter_than_the_shortest_interval() {
         assert!(TICK < Duration::from_secs(5 * 60));
         assert!(TICK > Duration::ZERO);
+    }
+
+    #[test]
+    fn a_connected_idle_tab_schedules_a_quiet_fetch() {
+        assert!(should_autofetch(true, false, 15));
+        // The scheduler asks for `Trigger::Automatic`, which does not toast
+        // when the fetch works. A local tab and a remote tab share that path.
+        assert_eq!(Trigger::Automatic, quiet_fetch().1);
+        assert!(matches!(quiet_fetch().0, Command::Fetch));
+    }
+
+    #[test]
+    fn a_disconnected_or_busy_tab_does_not_schedule() {
+        assert!(!should_autofetch(false, false, 15));
+        assert!(!should_autofetch(true, true, 15));
+        assert!(!should_autofetch(false, true, 15));
+        assert!(!should_autofetch(true, false, 0));
+    }
+
+    /// The command the scheduler submits. Kept next to the gate so a remote
+    /// tab cannot grow a second, noisy fetch.
+    fn quiet_fetch() -> (Command, Trigger) {
+        (Command::Fetch, Trigger::Automatic)
     }
 }
