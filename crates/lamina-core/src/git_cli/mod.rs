@@ -73,6 +73,9 @@ pub struct Git {
     askpass: Option<Arc<dyn Fn(Prompt) -> Option<Answer> + Send + Sync>>,
     /// The executable that implements the helper mode, normally this binary.
     askpass_helper: PathBuf,
+    /// When set, a running child is killed once this returns true. Absent on
+    /// the fast path so a command with nobody to cancel does not poll.
+    cancel: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 impl Git {
@@ -98,6 +101,7 @@ impl Git {
             // git runs this path in helper mode; a bundle or an AppImage still
             // starts the same executable.
             askpass_helper: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("lamina")),
+            cancel: None,
         }
     }
 
@@ -160,6 +164,16 @@ impl Git {
     /// helper elsewhere can name it explicitly.
     pub fn with_askpass_helper(mut self, program: impl Into<PathBuf>) -> Self {
         self.askpass_helper = program.into();
+        self
+    }
+
+    /// Kill the git child when `cancelled` becomes true.
+    ///
+    /// The session arms this for the operation it is running, and also for
+    /// shutdown, so closing the connection does not leave the child behind.
+    /// A handle without it keeps the direct `wait` path.
+    pub fn with_cancel(mut self, cancelled: impl Fn() -> bool + Send + Sync + 'static) -> Self {
+        self.cancel = Some(Arc::new(cancelled));
         self
     }
 
@@ -227,6 +241,13 @@ impl Git {
     /// empty pick, and needs the streams to tell them apart, so it cannot use
     /// [`run`](Self::run), which folds a failure into a message.
     fn run_output(&self, args: &[String], stdin: Option<&[u8]>, internal: bool) -> Result<Output> {
+        if let Some(cancel) = &self.cancel {
+            let cancel = Arc::clone(cancel);
+            return match self.run_output_cancellable(args, stdin, &|| cancel())? {
+                Some(output) => Ok(output),
+                None => Err(Error::other(crate::error::OPERATION_CANCELLED)),
+            };
+        }
         let started_at = SystemTime::now();
         let (mut command, _askpass) = match self.prepared(args) {
             Ok(prepared) => prepared,
@@ -284,6 +305,7 @@ impl Git {
         if stdin.is_some() {
             command.stdin(Stdio::piped());
         }
+        isolate_for_cancel(&mut command);
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
@@ -294,7 +316,7 @@ impl Git {
         };
         let stdin_pipe = child.stdin.take();
         let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
-            let _ = child.kill();
+            kill_child_group(&mut child);
             let _ = child.wait();
             return Err(Error::other("git output pipes are unavailable"));
         };
@@ -339,7 +361,7 @@ impl Git {
                             .unwrap_or_else(PoisonError::into_inner)
                             .as_mut()
                         {
-                            let _ = child.kill();
+                            kill_child_group(child);
                         }
                         break;
                     }
@@ -375,7 +397,7 @@ impl Git {
                 .take()
                 .expect("child handle present");
             if cancelled() {
-                let _ = child.kill();
+                kill_child_group(&mut child);
             }
             let status = child.wait();
             (stdout_bytes, stderr_bytes, status)
@@ -405,6 +427,25 @@ impl Git {
         args: &[S],
         mut on_line: impl FnMut(StreamLine),
     ) -> Result<Output> {
+        if let Some(cancel) = &self.cancel {
+            let cancel = Arc::clone(cancel);
+            // The cancellable reader logs the real output and only reports
+            // whether the child finished. `stream` discards this `Output`;
+            // a zero status keeps a successful command an `Ok`.
+            let finished = self.run_stderr_cancellable(args, &|| cancel(), |text| {
+                on_line(StreamLine {
+                    text: text.to_owned(),
+                });
+            })?;
+            if !finished {
+                return Err(Error::other(crate::error::OPERATION_CANCELLED));
+            }
+            return Ok(Output {
+                status: zero_exit(),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            });
+        }
         let args = to_args(args);
         let started_at = SystemTime::now();
         let (mut command, _askpass) = match self.prepared(&args) {
@@ -481,6 +522,7 @@ impl Git {
                 return Err(error);
             }
         };
+        isolate_for_cancel(&mut command);
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
@@ -490,7 +532,7 @@ impl Git {
             }
         };
         let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
-            let _ = child.kill();
+            kill_child_group(&mut child);
             let _ = child.wait();
             return Err(Error::other("git output pipes are unavailable"));
         };
@@ -526,7 +568,7 @@ impl Git {
                             .unwrap_or_else(PoisonError::into_inner)
                             .as_mut()
                         {
-                            let _ = child.kill();
+                            kill_child_group(child);
                         }
                         break;
                     }
@@ -585,7 +627,7 @@ impl Git {
                 .take()
                 .expect("child handle present");
             if was_cancelled || read_result.is_err() || cancelled() {
-                let _ = child.kill();
+                kill_child_group(&mut child);
             }
             let status = child.wait();
             let stderr_bytes = stderr_reader.join().unwrap_or_default();
@@ -636,6 +678,7 @@ impl Git {
                 return Err(error);
             }
         };
+        isolate_for_cancel(&mut command);
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
@@ -645,7 +688,7 @@ impl Git {
             }
         };
         let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
-            let _ = child.kill();
+            kill_child_group(&mut child);
             let _ = child.wait();
             return Err(Error::other("git output pipes are unavailable"));
         };
@@ -680,7 +723,7 @@ impl Git {
                             .unwrap_or_else(PoisonError::into_inner)
                             .as_mut()
                         {
-                            let _ = child.kill();
+                            kill_child_group(child);
                         }
                         break;
                     }
@@ -715,7 +758,7 @@ impl Git {
                 .take()
                 .expect("child handle present");
             if read_result.is_err() || cancelled() {
-                let _ = child.kill();
+                kill_child_group(&mut child);
             }
             let status = child.wait();
             let stdout_bytes = stdout_reader.join().unwrap_or_default();
@@ -872,6 +915,54 @@ impl Git {
 
 fn to_args<S: AsRef<str>>(args: &[S]) -> Vec<String> {
     args.iter().map(|arg| arg.as_ref().to_owned()).collect()
+}
+
+/// Put a cancellable git in its own process group before `spawn`.
+///
+/// A hook or askpass child inherits git's pipes. Killing only the git pid
+/// leaves that child running, and the reader stays blocked until the child
+/// exits on its own.
+fn isolate_for_cancel(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    #[cfg(not(unix))]
+    let _ = command;
+}
+
+/// Stop `child` and, on Unix, the group [`isolate_for_cancel`] created.
+fn kill_child_group(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        // SAFETY: `kill` is the POSIX function. Declared locally so this crate
+        // does not take a libc dependency for one call.
+        unsafe extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
+        }
+        if let Ok(pid) = i32::try_from(child.id()) {
+            // SAFETY: `process_group(0)` made this pid the leader of a new
+            // group. A negative pid names that group, not this process.
+            unsafe {
+                kill(-pid, 9);
+            }
+        }
+    }
+    let _ = child.kill();
+}
+
+/// A successful [`std::process::ExitStatus`]. The standard library has no
+/// constructor, and the streaming cancel path has already logged the real one.
+fn zero_exit() -> std::process::ExitStatus {
+    #[cfg(unix)]
+    {
+        std::os::unix::process::ExitStatusExt::from_raw(0)
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::process::ExitStatusExt::from_raw(0)
+    }
 }
 
 fn command_error(args: &[String], output: &Output) -> Error {
