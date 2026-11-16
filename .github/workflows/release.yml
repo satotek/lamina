@@ -15,6 +15,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
+  # The About window embeds this rather than asking git, because a packaged
+  # checkout may not carry a .git directory.
+  STRATA_BUILD_COMMIT: ${{ github.sha }}
   # crates/strata-term/build.rs refuses any other Zig version.
   ZIG_VERSION: "0.17.1"
   # Linux releases build on ubuntu-22.04 for an older glibc floor. Its newest
