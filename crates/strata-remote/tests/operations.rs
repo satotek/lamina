@@ -127,6 +127,34 @@ fn reload_sees_a_file_written_outside_the_helper() {
 }
 
 #[test]
+fn checkout_commit_detaches_at_an_older_commit() {
+    let repo = TestRepo::new();
+    identity(&repo);
+    repo.write("README.md", "one\n");
+    let first = repo.commit("initial");
+    repo.write("README.md", "two\n");
+    let second = repo.commit("second");
+    let (remote, events, server) = serve(&repo);
+
+    // `Checkout` ends with `--`, so an object id would be a pathspec. This
+    // operation is `git checkout --detach` and must leave `main` where it is.
+    let id = remote.run(Operation::CheckoutCommit { commit: first });
+    let (error, _) = wait_finished(&events, id);
+    assert!(error.is_none(), "{error:?}");
+    wait_until(&remote, &events, |snapshot| {
+        matches!(
+            snapshot.head.as_ref(),
+            Some(HeadInfo::Detached { target }) if *target == first
+        )
+    });
+    assert_eq!(repo.head(), first);
+    assert_eq!(repo.rev("main"), second);
+
+    drop(remote);
+    server.join().expect("server thread");
+}
+
+#[test]
 fn a_commit_branch_stash_and_reset_round_trip() {
     let repo = TestRepo::new();
     identity(&repo);

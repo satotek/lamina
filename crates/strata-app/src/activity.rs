@@ -72,7 +72,7 @@ impl ActivityKind {
             Operation::CherryPick { .. } | Operation::CherryPickMany { .. } => Self::CherryPick,
             Operation::Revert { .. } => Self::Revert,
             Operation::Reset { .. } => Self::Reset,
-            Operation::Checkout { .. } => Self::Checkout,
+            Operation::Checkout { .. } | Operation::CheckoutCommit { .. } => Self::Checkout,
             Operation::Commit { amend: false, .. } => Self::Commit,
             Operation::Commit { amend: true, .. } => Self::Amend,
             Operation::StashPush { .. }
@@ -338,6 +338,10 @@ mod tests {
             operation_kind(Operation::Checkout {
                 branch: "main".to_owned(),
             }),
+            ActivityKind::Checkout
+        );
+        assert_eq!(
+            operation_kind(Operation::CheckoutCommit { commit: oid() }),
             ActivityKind::Checkout
         );
         assert_eq!(
