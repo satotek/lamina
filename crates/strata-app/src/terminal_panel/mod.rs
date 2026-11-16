@@ -331,17 +331,17 @@ impl TerminalPanel {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(windows)))]
     pub(crate) fn tab_count(&self) -> usize {
         self.tabs.len()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(windows)))]
     pub(crate) fn active_tab_index(&self) -> usize {
         self.tabs.active_index()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(windows)))]
     pub(crate) fn tab_titles(&self) -> Vec<String> {
         self.tabs
             .items()
@@ -370,7 +370,7 @@ impl TerminalPanel {
         self.last_theme.as_ref()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(windows)))]
     pub(crate) fn active_child_pid(&self) -> Option<u32> {
         self.tabs
             .active()
@@ -378,7 +378,7 @@ impl TerminalPanel {
             .and_then(TerminalSession::child_pid)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(windows)))]
     pub(crate) fn tab_child_pids(&self) -> Vec<Option<u32>> {
         self.tabs
             .items()
@@ -387,24 +387,24 @@ impl TerminalPanel {
             .collect()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(windows)))]
     pub(crate) fn active_exited_status(&self) -> Option<Option<&ExitStatus>> {
         self.tabs
             .active()
             .and_then(|tab| tab.exited_status.as_ref().map(Option::as_ref))
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(windows)))]
     pub(crate) fn active_bell_active(&self) -> bool {
         self.tabs.active().is_some_and(|tab| tab.bell_active)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(windows)))]
     pub(crate) fn active_osc_title(&self) -> Option<&str> {
         self.tabs.active().and_then(|tab| tab.osc_title.as_deref())
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(windows)))]
     pub(crate) fn tab_cols_rows(&self) -> Vec<(u16, u16)> {
         self.tabs
             .items()
@@ -413,19 +413,19 @@ impl TerminalPanel {
             .collect()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(windows)))]
     pub(crate) fn active_selection(&self) -> Option<TerminalSelection> {
         self.tabs.active().and_then(|tab| tab.selection)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(windows)))]
     pub(crate) fn set_active_selection_for_test(&mut self, sel: Option<TerminalSelection>) {
         if let Some(tab) = self.tabs.active_mut() {
             tab.selection = sel;
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(windows)))]
     pub(crate) fn active_tab_id(&self) -> Option<u64> {
         self.tabs.active().map(|tab| tab.id)
     }
@@ -1163,7 +1163,7 @@ impl TerminalPanel {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, not(windows)))]
     pub(crate) fn display_title(&self) -> String {
         self.tabs
             .active()
