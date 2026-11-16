@@ -421,6 +421,13 @@ mod tests {
                 query: crate::dto::QueryRequest::InProgressDetails,
             },
             Request::CancelQuery { ticket: 4 },
+            Request::FileInWorktree {
+                path: "conflict.txt".into(),
+            },
+            Request::ConflictSides {
+                path: "conflict.txt".into(),
+            },
+            Request::ConflictStyle,
         ];
         for request in requests {
             let mut bytes = Vec::new();
@@ -473,6 +480,17 @@ mod tests {
             Response::IsAncestor { yes: true },
             Response::MergeMessage {
                 message: Some("Merge branch 'feature'".into()),
+            },
+            Response::FileInWorktree {
+                data: Some(b"ours\n".to_vec()),
+            },
+            Response::ConflictSides {
+                base: Some(b"base\n".to_vec()),
+                ours: Some(b"ours\n".to_vec()),
+                theirs: None,
+            },
+            Response::ConflictStyle {
+                style: crate::dto::ConflictStyleDto::Diff3,
             },
         ];
         for response in responses {
@@ -540,6 +558,6 @@ mod tests {
     fn the_handshake_version_requires_a_current_helper() {
         // Deploy replaces a helper whose `--self-check` reports a different
         // protocol. Keeping the number here makes an accidental revert fail.
-        assert_eq!(crate::PROTOCOL_VERSION, 4);
+        assert_eq!(crate::PROTOCOL_VERSION, 5);
     }
 }
