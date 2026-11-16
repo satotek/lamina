@@ -855,6 +855,13 @@ impl RepoView {
         self.is_busy() || self.remote.is_running() || self.in_progress.is_running()
     }
 
+    /// Whether the status bar should offer Cancel. This is true as soon as the
+    /// view submits a command, not after the activity indicator's delay: a
+    /// fetch has no activity label, so the button is the only control.
+    pub(crate) fn can_cancel_running_operation(&self) -> bool {
+        !self.activity.is_empty() || self.remote.is_running()
+    }
+
     pub(crate) fn record_autofetch(&mut self, at: Instant) {
         self.last_autofetch = at;
     }
@@ -1350,8 +1357,15 @@ impl RepoView {
             SessionEvent::OperationFinished { id, error } => {
                 let failed = error.is_some();
                 // The outcome replaces whatever an earlier action left, so an
-                // old failure cannot sit beside a fresh success.
-                self.clear_status();
+                // old failure cannot sit beside a fresh success. A cancelled
+                // command is the exception: cancel already wrote its note, and
+                // this late report must not erase it.
+                let cancelled = error
+                    .as_deref()
+                    .is_some_and(|error| error.contains(strata_core::error::OPERATION_CANCELLED));
+                if !cancelled {
+                    self.clear_status();
+                }
                 // The indicator stops here rather than when the next snapshot
                 // lands, so a command that has reported back is not still
                 // shown as running.
@@ -1416,10 +1430,15 @@ impl RepoView {
                         self.notify_tab_state(cx);
                         return;
                     }
-                    self.status_error = Some(match label {
-                        Some(label) => format!("{label}: {}", one_line(&error)),
-                        None => one_line(&error),
-                    });
+                    // Cancel already cleared the segment and wrote the note.
+                    // Painting the session's cancellation line would turn that
+                    // into a red error after the user asked to stop.
+                    if !error.contains(strata_core::error::OPERATION_CANCELLED) {
+                        self.status_error = Some(match label {
+                            Some(label) => format!("{label}: {}", one_line(&error)),
+                            None => one_line(&error),
+                        });
+                    }
                 } else if let Some(pending) = multi_pick
                     && let Some(note) =
                         commit_selection::applied_note(pending.total, &pending.skipped)
@@ -1637,6 +1656,40 @@ impl RepoView {
         self.branches.start(id, label, retry);
         cx.notify();
         Some(id)
+    }
+
+    /// Stops every command this view is waiting on.
+    ///
+    /// The status segment is cleared here, before git actually dies. The
+    /// remote slot is taken so the later finished event does not also toast a
+    /// failure. Returns false when nothing was running.
+    pub(crate) fn cancel_running_operation(&mut self, cx: &mut Context<Self>) -> bool {
+        let mut ids = self.activity.ids();
+        if let Some(id) = self.remote.running_id()
+            && !ids.contains(&id)
+        {
+            ids.push(id);
+        }
+        if let Some(session) = self.session.as_ref()
+            && let Some(id) = session.snapshot().busy
+            && !ids.contains(&id)
+        {
+            ids.push(id);
+        }
+        if ids.is_empty() {
+            return false;
+        }
+        if let Some(session) = self.session.as_ref() {
+            for id in &ids {
+                session.cancel_operation(*id);
+            }
+        }
+        self.activity.clear();
+        self.remote.take_running_id();
+        self.status_error = None;
+        self.status_note = Some(t!("status.cancelled").to_string());
+        cx.notify();
+        true
     }
 
     /// The create-branch shortcut: starts from HEAD.

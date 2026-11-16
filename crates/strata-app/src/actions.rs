@@ -130,6 +130,10 @@ actions!(
         /// Applies a patch file chosen by the user. Handled on `RepoView` by
         /// `repo_view::patch`.
         ApplyPatch,
+        /// Stops the git command that is running, local or remote. Handled on
+        /// `RepoView`. Escape reaches it through search dismiss, because that
+        /// binding already owns the key.
+        CancelRunningOperation,
     ]
 );
 

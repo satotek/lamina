@@ -315,6 +315,9 @@ pub trait RepositorySession: Send {
 
     fn snapshot(&self) -> Arc<RepoSnapshot>;
     fn run(&self, op: Operation) -> OperationId;
+    /// Stops `id` if it is queued or inside git. The operation still finishes,
+    /// and the error text is [`crate::error::OPERATION_CANCELLED`].
+    fn cancel_operation(&self, id: OperationId);
     fn answer_askpass(&self, id: OperationId, answer: Option<String>) -> bool;
 
     fn request_diff(&self, request: DiffRequest) -> DiffTicket;
@@ -368,6 +371,10 @@ impl RepositorySession for Session {
 
     fn run(&self, op: Operation) -> OperationId {
         Session::run(self, op)
+    }
+
+    fn cancel_operation(&self, id: OperationId) {
+        Session::cancel_operation(self, id);
     }
 
     fn answer_askpass(&self, id: OperationId, answer: Option<String>) -> bool {

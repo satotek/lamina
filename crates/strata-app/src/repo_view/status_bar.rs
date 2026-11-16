@@ -134,6 +134,22 @@ impl RepoView {
             .gap(design.px(10.0))
             .flex_1()
             .min_w_0();
+        // Shown immediately, not after the activity delay. A fetch never gets
+        // an activity label, so this button is the way to stop it.
+        if self.can_cancel_running_operation() {
+            let entity = self.entity();
+            leading = leading.child(
+                crate::ui::button("status-cancel", t!("common.cancel").to_string())
+                    .ghost()
+                    .size(crate::ui::ButtonSize::Tiny)
+                    .tooltip(t!("action.cancel_running_operation").to_string())
+                    .on_click(move |_, _, cx| {
+                        entity.update(cx, |view, cx| {
+                            view.cancel_running_operation(cx);
+                        });
+                    }),
+            );
+        }
         if let Some(activity) = activity {
             leading = leading
                 .child(crate::ui::spinner("status-activity", design, 11.0))
@@ -203,7 +219,7 @@ impl RepoView {
 }
 
 #[cfg(test)]
-mod tests {
+mod status_clock_tests {
     use super::{STATUS_MESSAGE_TTL, Seen, StatusClock, status_message_expired};
     use std::time::{Duration, Instant};
 
@@ -248,5 +264,161 @@ mod tests {
             clock.observe("done", start + STATUS_MESSAGE_TTL * 2),
             Seen::Changed
         );
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
+
+    use gpui::{QuitMode, VisualTestContext};
+    use strata_core::session::Operation;
+    use strata_core::test_support::TestRepo;
+
+    use super::RepoView;
+    use crate::repo_view::Launch;
+
+    fn prepare(cx: &mut gpui::App) {
+        cx.set_quit_mode(QuitMode::Explicit);
+        gpui_component::init(cx);
+        cx.set_global(crate::settings::Settings::default());
+        crate::actions::bind(cx);
+    }
+
+    fn sh_quote(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+
+    /// A pre-commit hook that sleeps, so cancel has a live git child to kill.
+    fn install_slow_hook(repo: &TestRepo) -> std::path::PathBuf {
+        let hooks = repo.path().join(".git/hooks");
+        std::fs::create_dir_all(&hooks).expect("hooks dir");
+        let marker = repo.path().join(".git/hook-started");
+        let script = format!(
+            "#!/bin/sh\ntouch {}\nsleep 30\n",
+            sh_quote(&marker.display().to_string())
+        );
+        let hook = hooks.join("pre-commit");
+        std::fs::write(&hook, script).expect("write hook");
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).expect("hook mode");
+        repo.git(&["config", "core.hooksPath", &hooks.display().to_string()]);
+        marker
+    }
+
+    #[gpui::test]
+    fn cancelling_a_commit_reaches_the_session_and_clears_the_status(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // The session's worker threads wake the test scheduler from outside it.
+        cx.dispatcher.allow_parking();
+        cx.update(prepare);
+
+        let repo = TestRepo::new();
+        repo.git(&["config", "user.name", "Strata Test"]);
+        repo.git(&["config", "user.email", "strata@example.invalid"]);
+        repo.git(&["config", "commit.gpgsign", "false"]);
+        repo.write("README.md", "one\n");
+        let first = repo.commit("initial");
+        let marker = install_slow_hook(&repo);
+        repo.write("README.md", "two\n");
+        repo.git(&["add", "README.md"]);
+
+        let window = cx.add_window(|window, cx| {
+            RepoView::new(Launch::open_with(repo.path(), None), window, cx)
+        });
+        let view = window.root(cx).expect("the window's root view");
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            assert!(Instant::now() < deadline, "the history did not load");
+            std::thread::sleep(Duration::from_millis(20));
+            vcx.run_until_parked();
+            if view.read_with(&vcx, |view, _| view.commit_count()) >= 1 {
+                break;
+            }
+        }
+
+        vcx.update(|window, cx| {
+            view.update(cx, |view, cx| {
+                let started = view.run_operation(
+                    Operation::Commit {
+                        message: "should not land".into(),
+                        amend: false,
+                    },
+                    "Commit",
+                    window,
+                    cx,
+                );
+                assert!(started.is_some(), "the commit did not start");
+                assert!(
+                    view.can_cancel_running_operation(),
+                    "cancel must be offered before the activity delay"
+                );
+            });
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !marker.exists() {
+            assert!(
+                Instant::now() < deadline,
+                "the pre-commit hook did not start"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+            vcx.run_until_parked();
+        }
+
+        vcx.update(|_window, cx| {
+            view.update(cx, |view, cx| {
+                assert!(view.cancel_running_operation(cx));
+                assert!(
+                    view.activity.is_empty(),
+                    "cancel left the activity segment in place"
+                );
+                assert!(!view.remote.is_running());
+                assert_eq!(view.status_error, None);
+                assert_eq!(
+                    view.status_note.as_deref(),
+                    Some(t!("status.cancelled").as_ref())
+                );
+            });
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            std::thread::sleep(Duration::from_millis(20));
+            vcx.run_until_parked();
+            // `is_busy` stays true until OperationFinished, which is the event
+            // that would paint a red error if cancel were treated as a failure.
+            let settled = view.read_with(&vcx, |view, _| {
+                !view.is_busy() && view.status_error.is_none()
+            });
+            if settled {
+                assert_eq!(repo.head(), first, "the cancelled commit must not land");
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "cancel did not finish; head {} first {first}",
+                repo.head()
+            );
+        }
+
+        view.read_with(&vcx, |view, _| {
+            let snapshot = view.session.as_ref().expect("session").snapshot();
+            assert!(snapshot.busy.is_none());
+            assert!(
+                snapshot.head.is_some(),
+                "the tab can still read the repository"
+            );
+            assert_eq!(view.status_error, None, "cancel must not paint a red error");
+            assert_eq!(
+                view.status_note.as_deref(),
+                Some(t!("status.cancelled").as_ref())
+            );
+            assert!(!view.can_cancel_running_operation());
+        });
+        assert_eq!(repo.head(), first, "the cancelled commit must not land");
     }
 }

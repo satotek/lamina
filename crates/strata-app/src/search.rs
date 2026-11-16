@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{App, AppContext as _, Context, Entity, Subscription, Window, actions};
+use gpui_component::WindowExt as _;
 use gpui_component::input::{InputEvent, InputState};
 use strata_core::Oid;
 use strata_core::repo::{ContentSearchEntry, ContentSearchMode, ContentSearchQuery};
@@ -29,6 +30,24 @@ pub(crate) const SEARCH_BAR: &str = "CommitSearch";
 
 /// Quiet window between the last keystroke and the query.
 const DEBOUNCE: Duration = Duration::from_millis(120);
+
+/// Escape must not cancel git while it is closing a dialog or leaving a field.
+fn escape_can_cancel_operation(window: &mut Window, cx: &mut App) -> bool {
+    if window.has_active_dialog(cx) {
+        return false;
+    }
+    !window.context_stack().iter().any(context_owns_escape)
+}
+
+fn context_owns_escape(context: &gpui::KeyContext) -> bool {
+    fn blocks(key: &str) -> bool {
+        matches!(key, "Input" | "Textarea" | "TerminalPanel")
+    }
+    context
+        .primary()
+        .is_some_and(|entry| blocks(entry.key.as_ref()))
+        || context.secondary().any(|entry| blocks(entry.key.as_ref()))
+}
 
 actions!(
     strata_search,
@@ -910,7 +929,11 @@ impl RepoView {
         cx.notify();
     }
 
-    /// Escape: leave the file-history view first, then clear search.
+    /// Escape: leave the file-history view first, then clear search, then
+    /// cancel a running command.
+    ///
+    /// Search dismiss already owns Escape on the repository view. A second
+    /// binding would race it, so cancel is the last layer this handler peels.
     pub(crate) fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.close_file_history(window, cx) {
             return;
@@ -921,7 +944,16 @@ impl RepoView {
             self.close_compare(window, cx);
             return;
         }
-        self.clear_search(window, cx);
+        if self.search.is_active() || self.search.mode().is_content() {
+            self.clear_search(window, cx);
+            return;
+        }
+        // A dialog and a text field already consume Escape. Cancelling here
+        // would stop a push while the user is only leaving a prompt or a field.
+        if escape_can_cancel_operation(window, cx) && self.cancel_running_operation(cx) {
+            return;
+        }
+        self.focus_root(window, cx);
     }
 
     /// Switches between field search, `-S` content search, and `-G` regex search.

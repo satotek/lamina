@@ -472,6 +472,18 @@ impl Remote {
         self.running.is_some()
     }
 
+    pub(crate) fn running_id(&self) -> Option<OperationId> {
+        self.running.as_ref().map(|running| running.id)
+    }
+
+    /// Forgets the running command without announcing it.
+    ///
+    /// Cancel already told the user. [`Remote::on_finished`] would otherwise
+    /// toast the later cancellation as a failure.
+    pub(crate) fn take_running_id(&mut self) -> Option<OperationId> {
+        self.running.take().map(|running| running.id)
+    }
+
     /// True when `id` is the automatic fetch, which must never open a
     /// credential prompt. The askpass path asks this before it touches a
     /// window, so the timer cannot stop on a modal nobody is looking at.
