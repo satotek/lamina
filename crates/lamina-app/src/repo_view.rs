@@ -571,6 +571,9 @@ pub struct RepoView {
     last_remote_refresh: Option<Instant>,
     /// Held so the event loop is cancelled with the view.
     _bridge: Option<Task<()>>,
+    /// Copies the idle round trip onto the remote tab. The ping loop does not
+    /// emit a session event, so nothing else would repaint the status line.
+    _rtt: Option<Task<()>>,
     /// False while this repository sits in an inactive tab: session watcher
     /// keeps running in the background, but the view neither repaints nor polls.
     active: bool,
@@ -766,6 +769,7 @@ impl RepoView {
             _activation: activation,
             last_remote_refresh: None,
             _bridge: None,
+            _rtt: None,
             active,
             pending_sync: false,
             pending_reveal_conflicts: false,
@@ -1119,6 +1123,7 @@ impl RepoView {
             }
         }
         self._bridge.take();
+        self._rtt.take();
         #[cfg(feature = "terminal")]
         {
             self.terminal.take();

@@ -168,6 +168,15 @@ struct Inner {
     lost_text: Mutex<Option<String>>,
     last_rx: Mutex<Instant>,
     missed: AtomicU32,
+    /// Identifies one idle probe. Loss still counts unanswered probes with
+    /// `missed`: a busy connection resets that count without retiring a probe
+    /// that was already sent, so the two numbers cannot be the same.
+    next_ping: AtomicU64,
+    /// Send time of probes whose pong has not arrived.
+    pings: Mutex<HashMap<u64, Instant>>,
+    /// Latest idle round trip. Cleared with the connection so a dropped link
+    /// does not keep a sample from before it failed.
+    rtt: Mutex<Option<Duration>>,
     ping_interval: Duration,
     missed_limit: u32,
     first_chunk_timeout: Duration,
@@ -265,6 +274,9 @@ impl RemoteSession {
             lost_text: Mutex::new(None),
             last_rx: Mutex::new(Instant::now()),
             missed: AtomicU32::new(0),
+            next_ping: AtomicU64::new(0),
+            pings: Mutex::new(HashMap::new()),
+            rtt: Mutex::new(None),
             ping_interval: config.ping_interval,
             missed_limit: config.missed_pings.max(1),
             first_chunk_timeout: config.first_chunk_timeout,
@@ -449,17 +461,15 @@ fn ping_loop(inner: Arc<Inner>) {
             inner.fail(inner.failure_text(None));
             break;
         }
-        // Stream 0 is never a caller's request. The pong only exists so the
-        // reader sees a frame and clears the idle count; nobody is waiting.
+        // Stream 0 is never a caller's request. The nonce matches this probe
+        // to its pong; any frame still clears the missed-ping count.
+        let nonce = inner.next_ping.fetch_add(1, Ordering::SeqCst);
+        lock(&inner.pings).insert(nonce, Instant::now());
         if inner
-            .write_message(
-                0,
-                &Message::Request(Request::Ping {
-                    nonce: u64::from(missed),
-                }),
-            )
+            .write_message(0, &Message::Request(Request::Ping { nonce }))
             .is_err()
         {
+            lock(&inner.pings).remove(&nonce);
             break;
         }
         guard = lock(&inner.park);
@@ -515,6 +525,9 @@ impl Inner {
             return;
         }
         *lock(&self.lost_text) = Some(message.clone());
+        // A late pong must not resurrect a sample from the link that just died.
+        lock(&self.pings).clear();
+        *lock(&self.rtt) = None;
         let pending = std::mem::take(&mut *lock(&self.pending));
         drop(pending);
         let diffs = std::mem::take(&mut *lock(&self.diff_streams));
@@ -675,9 +688,30 @@ impl Inner {
         Ok(stream)
     }
 
+    fn note_pong(&self, nonce: u64) {
+        let sent = {
+            let mut pings = lock(&self.pings);
+            let sent = pings.remove(&nonce);
+            // A late reply for an older probe would replace a fresher sample.
+            if sent.is_some() {
+                pings.retain(|older, _| *older > nonce);
+            }
+            sent
+        };
+        if let Some(sent) = sent
+            && !self.lost.load(Ordering::SeqCst)
+        {
+            *lock(&self.rtt) = Some(sent.elapsed());
+        }
+    }
+
     fn dispatch(&self, frame: proto::Frame) {
         match frame.message {
             Message::Response(response) => {
+                if let Response::Pong { nonce } = &response {
+                    self.note_pong(*nonce);
+                    return;
+                }
                 if let Some(tx) = lock(&self.pending).remove(&frame.stream) {
                     let _ = tx.send(response);
                     return;
@@ -971,6 +1005,18 @@ impl Inner {
 impl RepositorySession for RemoteSession {
     fn location(&self) -> RepoLocation {
         self.location.clone()
+    }
+
+    fn connection_rtt(&self) -> Option<Duration> {
+        if self.inner.lost.load(Ordering::SeqCst) {
+            return None;
+        }
+        let sample = *lock(&self.inner.rtt);
+        if self.inner.lost.load(Ordering::SeqCst) {
+            None
+        } else {
+            sample
+        }
     }
 
     fn reader(&self) -> Arc<dyn RepoReader> {

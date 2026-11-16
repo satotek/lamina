@@ -40,6 +40,9 @@ pub(super) struct RemoteTab {
     buffering: bool,
     pending: Vec<SessionEvent>,
     error: Option<String>,
+    /// Latest idle round trip copied off the session. `None` until a probe is
+    /// answered, and while the tab is lost or reconnecting.
+    rtt: Option<Duration>,
 }
 
 impl RepoView {
@@ -68,6 +71,7 @@ impl RepoView {
             buffering: false,
             pending: Vec::new(),
             error: None,
+            rtt: None,
         });
         // No local checkout, so the commit-graph offer and the config viewer
         // have nothing to key off.
@@ -110,6 +114,7 @@ impl RepoView {
         tab.pending.clear();
         tab.lost = false;
         tab.reconnecting = self.session.is_some();
+        tab.rtt = None;
         let (sender, mut receiver) = futures_mpsc::unbounded();
         spawn_connect(spec, ssh, sender);
         // Replacing the task drops the previous receiver. The old worker's
@@ -231,6 +236,8 @@ impl RepoView {
             tab.reconnecting = false;
             tab.error = None;
             tab.placeholder = false;
+            // The previous session's sample is not this connection's.
+            tab.rtt = None;
         }
         let pending = self
             .remote_tab
@@ -250,6 +257,7 @@ impl RepoView {
         if let Some(old) = old {
             super::drop_session_in_background(old);
         }
+        self.watch_connection_rtt(cx);
         if let Some(handle) = self.window_handle {
             let title = self.title.clone();
             let _ = handle.update(cx, |_, window, _| window.set_window_title(&title));
@@ -512,8 +520,45 @@ impl RepoView {
         if let Some(tab) = &mut self.remote_tab {
             tab.lost = true;
             tab.reconnecting = false;
+            tab.rtt = None;
         }
         true
+    }
+
+    /// The status line's round trip, hidden while a banner already explains
+    /// that the connection is down or coming back.
+    pub(super) fn connection_quality(&self) -> Option<ConnectionRttStatus> {
+        let tab = self.remote_tab.as_ref()?;
+        if tab.lost || tab.reconnecting || self.session.is_none() {
+            return None;
+        }
+        tab.rtt.map(connection_rtt_status)
+    }
+
+    fn watch_connection_rtt(&mut self, cx: &mut Context<Self>) {
+        self._rtt = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let alive = this.update(cx, |this, cx| {
+                    let sample = this
+                        .session
+                        .as_ref()
+                        .and_then(|session| session.connection_rtt());
+                    let Some(tab) = this.remote_tab.as_mut() else {
+                        return false;
+                    };
+                    if tab.rtt == sample {
+                        return true;
+                    }
+                    tab.rtt = sample;
+                    this.notify_if_active(cx);
+                    true
+                });
+                if !alive.unwrap_or(false) {
+                    break;
+                }
+                cx.background_executor().timer(CONNECTION_RTT_POLL).await;
+            }
+        }));
     }
 
     pub(super) fn swallow_unsupported(&self, error: &str) -> bool {
@@ -561,6 +606,27 @@ impl RepoView {
 
 /// How often a focused window may ask a remote helper for a fresh status.
 const REMOTE_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
+
+/// How often the status line copies the idle round trip. The probe itself is
+/// slower; this only bounds how long a new sample waits to be drawn.
+const CONNECTION_RTT_POLL: Duration = Duration::from_secs(1);
+
+/// Shown as a slow connection above this idle round trip. The status tooltip
+/// names the same threshold, so the two have to move together.
+pub(super) const SLOW_CONNECTION: Duration = Duration::from_millis(300);
+
+pub(super) struct ConnectionRttStatus {
+    pub label: String,
+    pub slow: bool,
+}
+
+pub(super) fn connection_rtt_status(rtt: Duration) -> ConnectionRttStatus {
+    let ms = u64::try_from(rtt.as_millis()).unwrap_or(u64::MAX);
+    ConnectionRttStatus {
+        label: t!("status.ssh_rtt", ms = ms).to_string(),
+        slow: rtt > SLOW_CONNECTION,
+    }
+}
 
 /// True when a focus refresh should run. An explicit refresh records `last`,
 /// so the two do not stack.
@@ -622,8 +688,24 @@ mod tests {
 
     use super::super::Launch;
     use super::super::RepoView;
-    use super::remote_refresh_due;
+    use super::{connection_rtt_status, remote_refresh_due};
     use crate::remote_open::{RemoteLaunch, RemoteSpec};
+
+    #[test]
+    fn connection_rtt_labels_a_slow_link_above_300_ms() {
+        rust_i18n::set_locale("en");
+        let fine = connection_rtt_status(Duration::from_millis(42));
+        assert!(!fine.slow);
+        assert_eq!(fine.label, t!("status.ssh_rtt", ms = 42u64).to_string());
+
+        let edge = connection_rtt_status(Duration::from_millis(300));
+        assert!(!edge.slow);
+        assert_eq!(edge.label, t!("status.ssh_rtt", ms = 300u64).to_string());
+
+        let slow = connection_rtt_status(Duration::from_millis(301));
+        assert!(slow.slow);
+        assert_eq!(slow.label, t!("status.ssh_rtt", ms = 301u64).to_string());
+    }
 
     #[test]
     fn a_focus_refresh_waits_five_seconds() {
