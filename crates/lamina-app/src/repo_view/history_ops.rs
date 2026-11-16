@@ -1414,7 +1414,7 @@ pub(crate) fn commit_menu(
             // dialog opened in the same turn. Cherry-pick has no dialog, so
             // only Revert looked like a no-op.
             window.defer(cx, move |window, cx| {
-                let _ = entity.update(cx, |view, cx| {
+                entity.update(cx, |view, cx| {
                     view.confirm_revert(commit, short, window, cx);
                 });
             });
@@ -1424,7 +1424,6 @@ pub(crate) fn commit_menu(
         commit,
         t!("history_ops.menu.commit_label", short = short).to_string(),
     );
-
     menu = menu.separator().item(checkout).item(cherry).item(revert);
     if let Some(target) = rebase {
         menu = menu.item(rebase_menu_item(
