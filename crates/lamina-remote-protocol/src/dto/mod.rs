@@ -31,9 +31,9 @@ pub use query::{
     WorktreeInfoDto, query_from_session,
 };
 pub use repo::{
-    ChangeKindDto, CommitDto, ConflictEntryDto, ConflictKindDto, FileChangeDto, HeadDto, ObjectId,
-    RefInfoDto, RefKindDto, RemoteInfoDto, RepoStateDto, SnapshotDto, StashInfoDto, TreeEntryDto,
-    TreeEntryKindDto, UpstreamInfoDto, WorktreeStatusDto,
+    ChangeKindDto, CommitDto, ConflictEntryDto, ConflictKindDto, ConflictStyleDto, FileChangeDto,
+    HeadDto, ObjectId, RefInfoDto, RefKindDto, RemoteInfoDto, RepoStateDto, SnapshotDto,
+    StashInfoDto, TreeEntryDto, TreeEntryKindDto, UpstreamInfoDto, WorktreeStatusDto,
 };
 
 #[cfg(test)]

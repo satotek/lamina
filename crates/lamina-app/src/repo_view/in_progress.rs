@@ -580,11 +580,10 @@ fn abort_text(state: RepoState) -> Option<(String, String, String)> {
 
 /// Why "Resolve conflicts" cannot open, or `None` when it can.
 ///
-/// In-progress details name the commits, but the editor still needs the three
-/// index stages and the worktree file. Those reads are not on the wire, so
-/// the button stays closed on a remote tab.
-pub(crate) fn resolve_conflicts_blocked(ssh: bool) -> Option<String> {
-    ssh.then(crate::remote_open::unavailable_reason)
+/// The editor reads the index stages and the worktree file from the session,
+/// including a remote one, so the button is not closed for being remote.
+pub(crate) fn resolve_conflicts_blocked(_ssh: bool) -> Option<String> {
+    None
 }
 
 impl RepoView {
@@ -644,10 +643,6 @@ impl RepoView {
         let mut banner = crate::ui::banner(crate::ui::BannerKind::Warning, state.text, design);
 
         if state.conflicts > 0 {
-            // The conflict editor reads index stages and the worktree file.
-            // Those reads are not on the wire, so opening it on a remote tab
-            // fails with nothing on screen. Abort stays available: it is a
-            // supported write.
             let blocked = resolve_conflicts_blocked(self.is_ssh());
             let mut button = crate::ui::button(
                 "in-progress-resolve",
@@ -791,12 +786,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn resolve_conflicts_stays_closed_until_a_remote_tab_can_read_stages() {
+    fn resolve_conflicts_opens_on_a_remote_tab() {
         assert_eq!(resolve_conflicts_blocked(false), None);
-        assert_eq!(
-            resolve_conflicts_blocked(true).as_deref(),
-            Some(crate::remote_open::unavailable_reason().as_str())
-        );
+        assert_eq!(resolve_conflicts_blocked(true), None);
     }
 
     #[test]

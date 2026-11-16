@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
@@ -302,6 +302,9 @@ fn is_blocking_read(request: &Request) -> bool {
             | Request::CommitsBetween { .. }
             | Request::IsAncestor { .. }
             | Request::MergeMessage
+            | Request::FileInWorktree { .. }
+            | Request::ConflictSides { .. }
+            | Request::ConflictStyle
     )
 }
 
@@ -442,7 +445,10 @@ fn answer_control(shared: &Arc<ServerShared>, chunk: usize, request: Request) ->
         | Request::Parents { .. }
         | Request::CommitsBetween { .. }
         | Request::IsAncestor { .. }
-        | Request::MergeMessage => {
+        | Request::MergeMessage
+        | Request::FileInWorktree { .. }
+        | Request::ConflictSides { .. }
+        | Request::ConflictStyle => {
             // `dispatch` sends these to a worker. Reaching here is a bug.
             Response::Error(RemoteError::other(
                 "internal error: a read was handled on the request loop",
@@ -457,6 +463,15 @@ fn answer_control(shared: &Arc<ServerShared>, chunk: usize, request: Request) ->
                     return Some(Response::Error(protocol_error(error)));
                 }
             };
+            // ResolveWithContent writes bytes itself, so a path has to be
+            // checked before git sees it. A symlink whose name is a normal
+            // relative path still has to be resolved on this machine; that
+            // check lives in the write, which runs here.
+            if let Some(path) = escaping_write_path(&operation) {
+                return Some(Response::Error(RemoteError::other(format!(
+                    "path must stay inside the worktree: {path}"
+                ))));
+            }
             session.run_as(lamina_core::session::OperationId(id), operation);
             Response::Ok
         }
@@ -569,10 +584,85 @@ fn answer_read(reader: &Arc<dyn lamina_core::session::RepoReader>, request: Requ
             Ok(message) => Response::MergeMessage { message },
             Err(error) => Response::Error(remote_error(error)),
         },
+        Request::FileInWorktree { path } => {
+            if let Err(error) = require_worktree_path(&path) {
+                return Response::Error(error);
+            }
+            match reader.file_in_worktree(&path) {
+                Ok(data) => Response::FileInWorktree { data },
+                Err(error) => Response::Error(remote_error(error)),
+            }
+        }
+        Request::ConflictSides { path } => match reader.conflict_sides(&path) {
+            Ok(sides) => Response::ConflictSides {
+                base: sides.base,
+                ours: sides.ours,
+                theirs: sides.theirs,
+            },
+            Err(error) => Response::Error(remote_error(error)),
+        },
+        Request::ConflictStyle => Response::ConflictStyle {
+            style: reader.conflict_style().into(),
+        },
         other => Response::Error(RemoteError::other(format!(
             "internal error: {other:?} is not a repository read"
         ))),
     }
+}
+
+/// A path a conflict write would touch, when it is not a single relative path
+/// inside the worktree. `None` means every path the operation writes is safe
+/// to hand to git, or the operation does not write a worktree path.
+fn escaping_write_path(operation: &lamina_core::session::Operation) -> Option<&str> {
+    let paths: Vec<&str> = match operation {
+        lamina_core::session::Operation::ResolveWithContent { path, .. }
+        | lamina_core::session::Operation::ResolveConflict { path, .. } => vec![path.as_str()],
+        lamina_core::session::Operation::MarkResolved(paths) => {
+            paths.iter().map(String::as_str).collect()
+        }
+        _ => return None,
+    };
+    paths
+        .into_iter()
+        .find(|path| require_worktree_path(path).is_err())
+}
+
+/// Rejects an empty path, an absolute path, `..` and a `.git` component.
+///
+/// The bytes of a resolved file are written with `std::fs`, which does not
+/// apply git's pathspec rules. A symlink that points outside is not visible
+/// here; the write resolves it and refuses when the destination leaves the
+/// worktree.
+fn require_worktree_path(path: &str) -> Result<(), RemoteError> {
+    let relative = Path::new(path);
+    if relative.as_os_str().is_empty() {
+        return Err(RemoteError::other("path is empty"));
+    }
+    if relative.is_absolute() {
+        return Err(RemoteError::other(format!(
+            "path must stay inside the worktree: {path}"
+        )));
+    }
+    for component in relative.components() {
+        match component {
+            // Case-insensitive because Windows and default macOS checkouts
+            // are, so `.GIT` names the repository as well.
+            Component::Normal(name)
+                if name
+                    .to_str()
+                    .is_some_and(|name| name.eq_ignore_ascii_case(".git")) =>
+            {
+                return Err(RemoteError::other(format!("path points into .git: {path}")));
+            }
+            Component::Normal(_) => {}
+            _ => {
+                return Err(RemoteError::other(format!(
+                    "path must stay inside the worktree: {path}"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn on_session_event(shared: &Arc<ServerShared>, chunk: usize, event: SessionEvent) {

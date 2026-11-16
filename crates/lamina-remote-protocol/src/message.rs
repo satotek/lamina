@@ -6,8 +6,9 @@
 use serde::{Deserialize, Serialize};
 
 use crate::dto::{
-    CommitDto, DiffOptionsDto, DiffRequestDto, DiffViewDto, FileChangeDto, GraphRowDto, HeadDto,
-    ObjectId, OperationDto, QueryEvent, QueryRequest, SnapshotDto, TreeEntryDto,
+    CommitDto, ConflictStyleDto, DiffOptionsDto, DiffRequestDto, DiffViewDto, FileChangeDto,
+    GraphRowDto, HeadDto, ObjectId, OperationDto, QueryEvent, QueryRequest, SnapshotDto,
+    TreeEntryDto,
 };
 
 /// A message the app sends to the helper.
@@ -102,6 +103,18 @@ pub enum Request {
     CancelQuery {
         ticket: u64,
     },
+    /// Worktree bytes of `path`, or `None` when the path is absent. `path` is
+    /// relative to the repository; the helper rejects anything that would
+    /// leave it.
+    FileInWorktree {
+        path: String,
+    },
+    /// Index stages 1, 2 and 3 of a conflicted `path`.
+    ConflictSides {
+        path: String,
+    },
+    /// `merge.conflictStyle`, which only changes how unresolved text is shown.
+    ConflictStyle,
 }
 
 /// A direct answer to one [`Request`].
@@ -153,6 +166,18 @@ pub enum Response {
     },
     MergeMessage {
         message: Option<String>,
+    },
+    FileInWorktree {
+        data: Option<Vec<u8>>,
+    },
+    /// Stages are `None` when that side deleted the path.
+    ConflictSides {
+        base: Option<Vec<u8>>,
+        ours: Option<Vec<u8>>,
+        theirs: Option<Vec<u8>>,
+    },
+    ConflictStyle {
+        style: ConflictStyleDto,
     },
 }
 
