@@ -2,6 +2,9 @@ use std::path::PathBuf;
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
+/// User-facing text when a cancel request or a closed session kills the git child.
+pub const OPERATION_CANCELLED: &str = "the operation was cancelled";
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("I/O error: {0}")]

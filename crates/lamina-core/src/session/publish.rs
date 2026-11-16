@@ -77,6 +77,11 @@ pub(crate) struct Shared {
     /// of the graph. Empty means everything is shown.
     hidden_refs: RwLock<Vec<String>>,
     cancelled_diffs: Mutex<HashSet<DiffTicket>>,
+    /// Operations the client cancelled before or while they ran. The worker
+    /// removes the id once the job has noticed, so the set does not grow.
+    cancelled_operations: Mutex<HashSet<OperationId>>,
+    /// The operation the worker is inside, and the flag its git child polls.
+    live_cancel: Mutex<Option<(OperationId, Arc<AtomicBool>)>>,
     operation_active: AtomicBool,
     pending_refresh: Mutex<PendingRefresh>,
     /// One pending credential question per running operation. The waiter is
@@ -99,6 +104,8 @@ impl Shared {
             history_scope: RwLock::new(HistoryScope::All),
             hidden_refs: RwLock::new(Vec::new()),
             cancelled_diffs: Mutex::new(HashSet::new()),
+            cancelled_operations: Mutex::new(HashSet::new()),
+            live_cancel: Mutex::new(None),
             operation_active: AtomicBool::new(false),
             pending_refresh: Mutex::new(PendingRefresh::default()),
             prompts: Mutex::new(HashMap::new()),
@@ -138,6 +145,47 @@ impl Shared {
 
     pub(crate) fn begin_shutdown(&self) {
         self.shutdown.store(true, Ordering::SeqCst);
+        // The git child polls this flag. Setting it here is what makes dropping
+        // the session kill a command that is still running.
+        if let Some((_, flag)) = lock(&self.live_cancel).as_ref() {
+            flag.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Install the flag `execute` polls. A cancel that arrived while the job
+    /// was still queued is already true, so the worker does not start git.
+    pub(crate) fn arm_operation(&self, id: OperationId) -> Arc<AtomicBool> {
+        let flag = Arc::new(AtomicBool::new(false));
+        // Install before reading the set. A cancel that lands in between sees
+        // this flag; one that landed earlier is in the set.
+        *lock(&self.live_cancel) = Some((id, Arc::clone(&flag)));
+        if lock(&self.cancelled_operations).contains(&id) {
+            flag.store(true, Ordering::SeqCst);
+        }
+        flag
+    }
+
+    pub(crate) fn disarm_operation(&self, id: OperationId) {
+        let mut live = lock(&self.live_cancel);
+        if live.as_ref().is_some_and(|(live_id, _)| *live_id == id) {
+            *live = None;
+        }
+        drop(live);
+        lock(&self.cancelled_operations).remove(&id);
+    }
+
+    /// Record a cancel and trip the live flag when this operation is the one
+    /// inside git. Also answers a pending prompt with `None`, so a command
+    /// blocked on credentials does not wait out the prompt timeout.
+    pub(crate) fn cancel_operation(&self, id: OperationId) {
+        lock(&self.cancelled_operations).insert(id);
+        let flag = lock(&self.live_cancel)
+            .as_ref()
+            .and_then(|(live_id, flag)| (*live_id == id).then(|| Arc::clone(flag)));
+        if let Some(flag) = flag {
+            flag.store(true, Ordering::SeqCst);
+        }
+        let _ = self.answer_askpass(id, None);
     }
 
     pub(crate) fn next_operation_id(&self) -> OperationId {
