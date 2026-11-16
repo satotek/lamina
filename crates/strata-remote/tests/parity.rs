@@ -7,7 +7,9 @@
 //! and runs on every platform.
 
 use std::io::{Read, Write};
-use std::process::{Command, Stdio};
+use std::process::Command;
+#[cfg(unix)]
+use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
