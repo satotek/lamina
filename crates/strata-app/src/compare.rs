@@ -2076,7 +2076,14 @@ impl CompareView {
         );
 
         let back = has_back.then(|| {
-            let label = t!("compare.back_to_folder").to_string();
+            // A drilled-in repository comparison came back from a list of
+            // changed files; anything else came from a folder on disk.
+            let label = if self.root.revisions().is_some() || self.root.pair().is_some() {
+                t!("compare.back_to_file_list")
+            } else {
+                t!("compare.back_to_folder_list")
+            }
+            .to_string();
             let button = if fit.back_label {
                 ui::button("compare-back-folder", label.clone())
                     .ghost()
