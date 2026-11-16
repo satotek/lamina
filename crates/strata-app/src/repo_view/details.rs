@@ -713,7 +713,12 @@ impl RepoView {
                         let menu_path = path.clone();
                         let menu_work_dir = work_dir.clone();
                         let trigger = row.cursor_pointer().on_click(move |_event, _window, cx| {
-                            click_entity.update(cx, |this, cx| this.select_file(index, cx));
+                            click_entity.update(cx, |this, cx| {
+                                // The file tree stands in for the diff pane; a
+                                // click on a changed file asks for its diff.
+                                this.tree.close();
+                                this.select_file(index, cx);
+                            });
                         });
                         crate::ui::context_menu(
                             ("changed-file-menu", index),
