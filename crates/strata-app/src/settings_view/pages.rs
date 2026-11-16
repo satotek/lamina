@@ -21,25 +21,24 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::label::Label;
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::notification::Notification;
+use gpui_component::searchable_list::SearchableListItem;
+use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_component::setting::{
     NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable as _, Sizable as _, WindowExt as _, h_flex, v_flex,
+    ActiveTheme as _, Disableable as _, IndexPath, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit_assets::IconName;
 
 use super::SIDEBAR_MAX;
 use super::change::{self, Section};
 use crate::actions::OpenGitConfig;
+use crate::fonts::{self, FontChoice};
 use crate::settings::{self, DateFormat, DiffLayout, Settings, ThemeMode};
 use crate::style::Design;
 use crate::style::theme::{self, ThemeAppearance, ThemeErrorKind, ThemeSource};
 use crate::tools::Tooling;
-
-/// Font families offered beside the free-text font fields.
-const UI_FONTS: &[&str] = &["Inter", "SF Pro Text", "Segoe UI"];
-const CODE_FONTS: &[&str] = &["JetBrains Mono", "Cascadia Code", "Menlo", "Consolas"];
 
 /// The gutter the page list gives its cards, and the padding a card gives its
 /// rows. Both come from gpui-component; they are named here because the width a
@@ -155,13 +154,12 @@ fn appearance(control: f32, design: &Design) -> SettingPage {
         card(t!("settings.fonts.card").to_string(), design).items([
             SettingItem::new(
                 t!("settings.fonts.interface").to_string(),
-                text_field(
+                font_field(
                     t!("settings.fonts.system_default").to_string(),
-                    UI_FONTS,
                     control,
                     |settings| settings.appearance.ui_font.clone(),
                     change::ui_font,
-                    true,
+                    false,
                 ),
             )
             .description(t!("settings.fonts.interface_description").to_string()),
@@ -177,9 +175,8 @@ fn appearance(control: f32, design: &Design) -> SettingPage {
             ),
             SettingItem::new(
                 t!("settings.fonts.code").to_string(),
-                text_field(
+                font_field(
                     t!("settings.fonts.bundled_monospace").to_string(),
-                    CODE_FONTS,
                     control,
                     |settings| settings.appearance.code_font.clone(),
                     change::code_font,
@@ -511,7 +508,6 @@ fn tools(control: f32, design: &Design) -> SettingPage {
                 t!("settings.tools.root_override").to_string(),
                 text_field(
                     "/path/to/ghq/root",
-                    &[],
                     control,
                     |settings| {
                         settings
@@ -522,7 +518,6 @@ fn tools(control: f32, design: &Design) -> SettingPage {
                             .map(|root| root.display().to_string())
                     },
                     change::ghq_root,
-                    false,
                 ),
             )
             .description(t!("settings.tools.root_override_description").to_string()),
@@ -585,11 +580,9 @@ fn tools(control: f32, design: &Design) -> SettingPage {
                 t!("settings.tools.editor_command").to_string(),
                 text_field(
                     "code --goto {path}:{line}",
-                    &[],
                     control,
                     |settings| settings.tools.editor.clone(),
                     change::editor,
-                    false,
                 ),
             )
             .description(t!("settings.tools.editor_description").to_string()),
@@ -597,11 +590,9 @@ fn tools(control: f32, design: &Design) -> SettingPage {
                 t!("settings.tools.terminal_command").to_string(),
                 text_field(
                     "alacritty --working-directory {path}",
-                    &[],
                     control,
                     |settings| settings.tools.terminal.clone(),
                     change::terminal,
-                    false,
                 ),
             )
             .description(t!("settings.tools.terminal_description").to_string()),
@@ -612,11 +603,9 @@ fn tools(control: f32, design: &Design) -> SettingPage {
                 t!("settings.tools.embedded_shell").to_string(),
                 text_field(
                     "/bin/zsh -l",
-                    &[],
                     control,
                     |settings| settings.tools.embedded_shell.clone(),
                     change::embedded_shell,
-                    false,
                 ),
             )
             .description(t!("settings.tools.embedded_shell_description").to_string()),
@@ -1646,6 +1635,145 @@ fn number(
     .w(px(control))
 }
 
+/// The select rows a font picker carries.
+///
+/// The value is the stored setting itself: `None` is the default face row, so
+/// choosing it clears the setting instead of storing an empty family name.
+impl SearchableListItem for FontChoice {
+    type Value = Option<String>;
+
+    fn title(&self) -> SharedString {
+        SharedString::from(self.label.clone())
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.family
+    }
+}
+
+/// A font field: a searchable list of the installed families.
+///
+/// The list is built once per field, when the window first draws it, because
+/// enumerating fonts is slow; the select itself keeps the rows for its
+/// lifetime. A family stored in the settings is marked when the machine no
+/// longer has it, and the app draws the default instead.
+struct FontField {
+    select: Entity<SelectState<SearchableVec<FontChoice>>>,
+    _subscription: Subscription,
+}
+
+fn font_field(
+    default_label: String,
+    control: f32,
+    get: fn(&Settings) -> Option<String>,
+    set: fn(&mut Settings, &str),
+    monospace_first: bool,
+) -> SettingField<SharedString> {
+    SettingField::render(move |options, window, cx| {
+        let key = field_key(options, "font");
+        let state = font_state(
+            key,
+            default_label.clone(),
+            get,
+            set,
+            monospace_first,
+            window,
+            cx,
+        );
+        let select = state.read(cx).select.clone();
+        sync_font_selection(&state, get, window, cx);
+
+        Select::new(&select)
+            .placeholder(default_label.clone())
+            .search_placeholder(t!("settings.fonts.search").to_string())
+            .with_size(options.size())
+            .disabled(options.is_disabled())
+            .w(px(control))
+            .into_any_element()
+    })
+}
+
+fn font_state(
+    key: SharedString,
+    default_label: String,
+    get: fn(&Settings) -> Option<String>,
+    set: fn(&mut Settings, &str),
+    monospace_first: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<FontField> {
+    window.use_keyed_state(key, cx, move |window, cx| {
+        let current = get(Settings::get(cx));
+        let choices = fonts::picker_choices(
+            &fonts::families(cx),
+            current.as_deref(),
+            &default_label,
+            monospace_first,
+        );
+        // The installed spelling keeps a family typed with different case
+        // pointing at the row it now matches.
+        let selected = font_value(cx, current.as_deref());
+        let selected = choices
+            .iter()
+            .position(|choice| choice.family == selected)
+            .map(IndexPath::new);
+        let delegate = SearchableVec::new(choices);
+        let select = cx.new(|cx| SelectState::new(delegate, selected, window, cx).searchable(true));
+        let subscription = cx.subscribe(
+            &select,
+            move |_: &mut FontField, _, event: &SelectEvent<SearchableVec<FontChoice>>, cx| {
+                if let SelectEvent::Confirm(Some(value)) = event {
+                    settings::update(cx, |settings| {
+                        set(settings, value.as_deref().unwrap_or_default());
+                    });
+                    // The families live on the component theme, so they are
+                    // applied on the same click that stores them.
+                    crate::zoom::apply(cx);
+                    cx.refresh_windows();
+                }
+            },
+        );
+        FontField {
+            select,
+            _subscription: subscription,
+        }
+    })
+}
+
+/// The select value of a stored family: the installed spelling when there is
+/// one, the stored text otherwise.
+fn font_value(cx: &App, current: Option<&str>) -> Option<String> {
+    current.map(|family| {
+        fonts::installed_family(cx, family)
+            .map_or_else(|| family.to_owned(), |installed| installed.to_string())
+    })
+}
+
+/// Mirrors a setting changed outside the picker — a section reset, or another
+/// window — back into the trigger's selection.
+fn sync_font_selection(
+    state: &Entity<FontField>,
+    get: fn(&Settings) -> Option<String>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let value = font_value(cx, get(Settings::get(cx)).as_deref());
+    let selected = state
+        .read(cx)
+        .select
+        .read(cx)
+        .selected_value()
+        .cloned()
+        .flatten();
+    if selected != value {
+        state.update(cx, |state, cx| {
+            state.select.update(cx, |select, cx| {
+                select.set_selected_value(&value, window, cx);
+            });
+        });
+    }
+}
+
 /// The state of a text field: the input plus the subscription that writes each
 /// keystroke into the settings.
 struct TextField {
@@ -1655,56 +1783,24 @@ struct TextField {
 
 fn text_field(
     placeholder: impl Into<SharedString>,
-    suggestions: &'static [&'static str],
     control: f32,
     get: fn(&Settings) -> Option<String>,
     set: fn(&mut Settings, &str),
-    applies_fonts: bool,
 ) -> SettingField<SharedString> {
     let placeholder = placeholder.into();
     SettingField::render(move |options, window, cx| {
         let key = field_key(options, "text");
-        let state = text_state(
-            key.clone(),
-            placeholder.clone(),
-            get,
-            set,
-            applies_fonts,
-            window,
-            cx,
-        );
+        let state = text_state(key, placeholder.clone(), get, set, window, cx);
         let input = state.read(cx).input.clone();
-
-        let mut field = v_flex().gap_1().w(px(control)).child(
-            Input::new(&input)
-                .with_size(options.size())
-                .disabled(options.is_disabled()),
-        );
-        if !suggestions.is_empty() {
-            field = field.child(h_flex().gap_1().flex_wrap().children(
-                suggestions.iter().enumerate().map(|(index, suggestion)| {
-                    let input = input.clone();
-                    crate::ui::button(
-                        SharedString::from(format!("{key}-suggestion-{index}")),
-                        *suggestion,
-                    )
-                    .size(crate::ui::ButtonSize::Tiny)
-                    .ghost()
-                    .disabled(options.is_disabled())
-                    .on_click(move |_, window, cx| {
-                        settings::update(cx, |settings| set(settings, suggestion));
-                        input.update(cx, |input, cx| {
-                            input.set_value(*suggestion, window, cx);
-                        });
-                        if applies_fonts {
-                            crate::zoom::apply(cx);
-                        }
-                        cx.refresh_windows();
-                    })
-                }),
-            ));
-        }
-        field.into_any_element()
+        v_flex()
+            .gap_1()
+            .w(px(control))
+            .child(
+                Input::new(&input)
+                    .with_size(options.size())
+                    .disabled(options.is_disabled()),
+            )
+            .into_any_element()
     })
 }
 
@@ -1728,7 +1824,6 @@ fn git_field(control: f32) -> SettingField<SharedString> {
             "/usr/bin/git".into(),
             get,
             change::git_executable,
-            false,
             window,
             cx,
         );
@@ -1938,7 +2033,6 @@ fn text_state(
     placeholder: SharedString,
     get: fn(&Settings) -> Option<String>,
     set: fn(&mut Settings, &str),
-    applies_fonts: bool,
     window: &mut Window,
     cx: &mut App,
 ) -> Entity<TextField> {
@@ -1955,11 +2049,6 @@ fn text_state(
                 if matches!(event, InputEvent::Change) {
                     let value = input.read(cx).value().to_string();
                     settings::update(cx, |settings| set(settings, &value));
-                    // The font choices live on the component theme, so they are
-                    // applied on every keystroke rather than only stored.
-                    if applies_fonts {
-                        crate::zoom::apply(cx);
-                    }
                     cx.refresh_windows();
                 }
             },

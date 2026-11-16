@@ -44,8 +44,14 @@ pub fn families(cx: &App) -> Arc<Vec<String>> {
     resolved
 }
 
+/// The installed spelling of `family`, or `None` when this machine lacks it.
+///
 /// GPUI's virtual families start with a dot and resolve inside the platform
 /// text system, so they are always accepted.
+pub fn installed_family(cx: &App, family: &str) -> Option<SharedString> {
+    installed_family_in(&families(cx), family)
+}
+
 fn installed_family_in(installed: &[String], family: &str) -> Option<SharedString> {
     if family.starts_with('.') {
         return Some(SharedString::from(family));
@@ -103,6 +109,82 @@ pub fn code_font_family(settings: &Settings, cx: &App) -> SharedString {
         .unwrap_or_else(|| platform_code_font(&installed))
 }
 
+/// The bundled monospace face, or the closest installed stand-in.
+///
+/// The bundled face is not installed everywhere and GPUI panics on a missing
+/// family, so the first installed name that looks monospace is used instead.
+fn platform_code_font(installed: &[String]) -> SharedString {
+    let bundled = bundled_mono_font();
+    if installed_family_in(installed, &bundled).is_some() {
+        return bundled;
+    }
+    installed
+        .iter()
+        .find(|name| is_monospace_name(name))
+        .map_or_else(
+            || SharedString::from(SYSTEM_UI_FONT),
+            |name| SharedString::from(name.clone()),
+        )
+}
+
+fn bundled_mono_font() -> SharedString {
+    static MONO: OnceLock<SharedString> = OnceLock::new();
+    MONO.get_or_init(|| Theme::default().mono_font_family.clone())
+        .clone()
+}
+
+/// One row of a font picker. `family == None` is the row for the default face,
+/// which stores no family at all.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FontChoice {
+    pub family: Option<String>,
+    /// The text the row and the picker's trigger show.
+    pub label: String,
+}
+
+/// The rows a font picker offers, in display order.
+///
+/// `current` is the stored family. A stored family that is not installed still
+/// gets a row, labelled as missing, so the picker can show what is stored while
+/// the app draws the default.
+///
+/// `monospace_first` groups names that look like monospace faces above the
+/// rest; it is meant for the code font, where the interesting faces are the
+/// fixed-width ones.
+pub fn picker_choices(
+    installed: &[String],
+    current: Option<&str>,
+    default_label: &str,
+    monospace_first: bool,
+) -> Vec<FontChoice> {
+    let mut names = sorted_unique(installed.to_vec());
+    if monospace_first {
+        names.sort_by(|left, right| {
+            (!is_monospace_name(left), left.to_lowercase())
+                .cmp(&(!is_monospace_name(right), right.to_lowercase()))
+        });
+    }
+
+    let mut choices = Vec::with_capacity(names.len() + 2);
+    choices.push(FontChoice {
+        family: None,
+        label: default_label.to_owned(),
+    });
+    if let Some(current) = current
+        && installed_family_in(&names, current).is_none()
+    {
+        choices.push(FontChoice {
+            family: Some(current.to_owned()),
+            label: format!("{current} ({})", t!("settings.fonts.not_installed")),
+        });
+    }
+    choices.extend(names.into_iter().map(|name| FontChoice {
+        family: Some(name.clone()),
+        label: name,
+    }));
+    choices
+}
+
 /// Words in a family name that mark a monospace face.
 ///
 /// The text system lists families but not their spacing, so a face is guessed
@@ -128,30 +210,6 @@ fn is_monospace_name(name: &str) -> bool {
         || lower
             .split(|c: char| !c.is_alphanumeric())
             .any(|word| MONOSPACE_WORDS.contains(&word))
-}
-
-/// The bundled monospace face, or the closest installed stand-in.
-///
-/// The bundled face is not installed everywhere and GPUI panics on a missing
-/// family, so the first installed name that looks monospace is used instead.
-fn platform_code_font(installed: &[String]) -> SharedString {
-    let bundled = bundled_mono_font();
-    if installed_family_in(installed, &bundled).is_some() {
-        return bundled;
-    }
-    installed
-        .iter()
-        .find(|name| is_monospace_name(name))
-        .map_or_else(
-            || SharedString::from(SYSTEM_UI_FONT),
-            |name| SharedString::from(name.clone()),
-        )
-}
-
-fn bundled_mono_font() -> SharedString {
-    static MONO: OnceLock<SharedString> = OnceLock::new();
-    MONO.get_or_init(|| Theme::default().mono_font_family.clone())
-        .clone()
 }
 
 /// Sorts names case-insensitively and keeps one spelling per family.
@@ -200,6 +258,70 @@ mod tests {
             names(&["DejaVu Sans Mono", "Inter", "menlo"]),
             "sorted case-insensitively, de-duplicated, blanks dropped"
         );
+    }
+
+    #[test]
+    fn the_first_picker_row_is_the_default_and_stores_no_family() {
+        let choices = picker_choices(&names(&["Inter", "Menlo"]), None, "System default", false);
+        assert_eq!(
+            choices.first(),
+            Some(&FontChoice {
+                family: None,
+                label: "System default".to_owned(),
+            })
+        );
+        assert_eq!(choices.len(), 3, "the default row plus two families");
+        assert_eq!(choices[1].family.as_deref(), Some("Inter"));
+        assert_eq!(choices[1].label, "Inter");
+    }
+
+    #[test]
+    fn a_stored_family_that_is_not_installed_keeps_its_row() {
+        let choices = picker_choices(&names(&["Inter"]), Some("Retired Face"), "Default", false);
+        assert_eq!(
+            choices[1],
+            FontChoice {
+                family: Some("Retired Face".to_owned()),
+                label: "Retired Face (not installed)".to_owned(),
+            }
+        );
+        assert_eq!(choices[2].family.as_deref(), Some("Inter"));
+
+        let installed = picker_choices(&names(&["Inter"]), Some("inter"), "Default", false);
+        assert!(
+            installed
+                .iter()
+                .all(|choice| choice.family.as_deref() != Some("inter")),
+            "an installed family is listed once, under its installed spelling"
+        );
+    }
+
+    #[test]
+    fn the_code_picker_lists_monospace_faces_first() {
+        let choices = picker_choices(
+            &names(&["Inter", "Menlo", "Fira Code", "Helvetica"]),
+            None,
+            "Bundled monospace",
+            true,
+        );
+        let families: Vec<&str> = choices
+            .iter()
+            .filter_map(|choice| choice.family.as_deref())
+            .collect();
+        assert_eq!(families, ["Fira Code", "Menlo", "Helvetica", "Inter"]);
+
+        for (name, expected) in [
+            ("JetBrains Mono", true),
+            ("Fira Code", true),
+            ("Menlo", true),
+            ("Consolas", true),
+            ("Cascadia Code", true),
+            ("Inter", false),
+            ("Helvetica Neue", false),
+            ("Encode Sans", false),
+        ] {
+            assert_eq!(is_monospace_name(name), expected, "{name}");
+        }
     }
 
     #[test]
