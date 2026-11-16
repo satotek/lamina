@@ -948,12 +948,16 @@ impl RepoView {
 
     fn sync_after_snapshot(&mut self, cx: &mut Context<Self>) {
         if self.is_ssh() {
-            // History, diffs and the working tree are what a remote tab can
-            // refresh from the snapshot the helper just published. LFS, search
-            // and the extra lists still ask for reads the helper does not serve.
+            // LFS and pull requests stay on this machine. Ticketed reads go to
+            // the helper with the snapshot it just published.
             self.sync_selection(cx);
             self.note_remote_history();
             self.sync_worktree(cx);
+            self.search_on_snapshot(cx);
+            self.file_history_on_snapshot(cx);
+            self.reflog_on_snapshot(cx);
+            self.refresh_extra_lists();
+            self.refresh_in_progress_details();
             return;
         }
         self.sync_selection(cx);
@@ -1598,9 +1602,6 @@ impl RepoView {
     /// The request it replaces is cancelled: its answer would describe a
     /// repository state the sidebar no longer shows.
     fn refresh_extra_lists(&mut self) {
-        if self.is_ssh() {
-            return;
-        }
         let Some(session) = self.session.as_ref() else {
             return;
         };

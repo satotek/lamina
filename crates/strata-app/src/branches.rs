@@ -2934,14 +2934,13 @@ fn local_row(
                 busy.then_some(t!("branch.reason.busy").to_string())
             };
             let head = view.compare_head();
-            let compare_blocked = prefer_ssh(
-                ssh,
-                crate::repo_view::compare::with_current_branch_blocked(
-                    view.session.is_some(),
-                    active,
-                    busy,
-                    head,
-                ),
+            // Two-way compare is a ticketed query. Three-way still needs the
+            // merge-base read, which stays behind `prefer_ssh` below.
+            let compare_blocked = crate::repo_view::compare::with_current_branch_blocked(
+                view.session.is_some(),
+                active,
+                busy,
+                head,
             );
             let compare = {
                 let entity = entity_menu.clone();

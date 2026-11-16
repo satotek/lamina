@@ -221,33 +221,23 @@ impl RepoView {
         });
 
         // The real field lives in the title bar when a repository can search;
-        // `--fake` gets the same look without an editable field.
-        let ssh = self.is_ssh();
-        let search_field: AnyElement = if ssh {
-            div()
+        // `--fake` gets the same look without an editable field. A remote tab
+        // searches through the helper, so it uses the same field.
+        let search_field: AnyElement = match self.search.input() {
+            Some(input) => div()
+                .flex_1()
+                .min_w_0()
+                .child(Input::new(input).appearance(false).bordered(false).small())
+                .into_any_element(),
+            None => div()
                 .flex_1()
                 .min_w_0()
                 .truncate()
                 .child(t!("title_bar.search_commits").to_string())
-                .into_any_element()
-        } else {
-            match self.search.input() {
-                Some(input) => div()
-                    .flex_1()
-                    .min_w_0()
-                    .child(Input::new(input).appearance(false).bordered(false).small())
-                    .into_any_element(),
-                None => div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .child(t!("title_bar.search_commits").to_string())
-                    .into_any_element(),
-            }
+                .into_any_element(),
         };
         let mode = self.search.mode();
-        let show_mode_toggles =
-            fit.search_width >= design.scale(260.0) && self.session.is_some() && !ssh;
+        let show_mode_toggles = fit.search_width >= design.scale(260.0) && self.session.is_some();
         let search = div()
             .id("commit-search-field")
             .occlude()
@@ -263,12 +253,6 @@ impl RepoView {
             .bg(design.field)
             .text_color(design.muted)
             .cursor_text()
-            .when(ssh, |search| {
-                let reason = crate::remote_open::unavailable_reason();
-                search.tooltip(move |window, cx| {
-                    gpui_component::tooltip::Tooltip::new(reason.clone()).build(window, cx)
-                })
-            })
             .child(icon(IconName::Search, design.scale(14.0), design.muted))
             .child(search_field)
             .when(show_mode_toggles, |search| {

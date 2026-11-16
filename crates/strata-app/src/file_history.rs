@@ -260,7 +260,7 @@ impl RepoView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.refuse_if_ssh(cx) || self.session.is_none() {
+        if self.session.is_none() {
             return;
         }
         // The file history replaces the history pane, so the reflog has to
@@ -463,9 +463,6 @@ impl RepoView {
     /// Append-only snapshot publishes during the initial history walk leave the
     /// path-history walk running uninterrupted.
     pub(crate) fn file_history_on_snapshot(&mut self, cx: &mut Context<Self>) {
-        if self.is_ssh() {
-            return;
-        }
         let Some(session) = self.session.as_ref() else {
             return;
         };
@@ -527,6 +524,11 @@ impl RepoView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Three-way blob reads are not on the helper. The button is closed;
+        // this stops a later caller from opening an empty compare.
+        if self.refuse_if_ssh(cx) {
+            return;
+        }
         let Some(reader) = self.session.as_ref().map(|session| session.reader()) else {
             return;
         };
@@ -713,7 +715,10 @@ impl RepoView {
         let compare_three = {
             let entity = entity.clone();
             let picked = history.picked.len();
-            crate::ui::button(
+            // Picked versions are a three-way file read. The helper does not
+            // serve those blobs, so the button stays closed on a remote tab.
+            let remote = self.is_ssh();
+            let mut button = crate::ui::button(
                 "file-history-compare-three",
                 t!(
                     "file_history.three_way",
@@ -725,8 +730,11 @@ impl RepoView {
             .size(crate::ui::ButtonSize::Tiny)
             .ghost()
             .icon(gpui_kit_assets::IconName::Replace)
-            .disabled(picked != MAX_PICKED_VERSIONS)
-            .on_click(move |_, window, cx| {
+            .disabled(remote || picked != MAX_PICKED_VERSIONS);
+            if remote {
+                button = button.tooltip(crate::remote_open::unavailable_reason());
+            }
+            button.on_click(move |_, window, cx| {
                 entity.update(cx, |this, cx| {
                     this.open_file_history_three_way(window, cx);
                 });

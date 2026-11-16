@@ -222,6 +222,9 @@ impl RepoView {
     /// Undo only reports a reason when the run would refuse outright. An empty
     /// reflog is not one: running the command loads the rows first, and the
     /// handler says what happened once they arrive.
+    ///
+    /// A remote tab can read the reflog. Restoring an entry is a write the
+    /// helper does not run, so the command stays closed there.
     fn undo_blocked(&self) -> Option<String> {
         if self.is_ssh() {
             return Some(crate::remote_open::unavailable_reason());

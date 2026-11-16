@@ -1262,13 +1262,12 @@ pub(crate) fn commit_menu(
     // One grouped entry rather than a submenu, so the compare view is one
     // click away from the commit it starts at.
     menu = menu.separator();
-    // Compare, worktrees and patch files are not on the helper. The remote
-    // reason wins over a merely busy repository, matching the tag entries.
+    // Two-way compare is a ticketed query. Creating a worktree and saving a
+    // patch still need this machine, so the remote reason wins over busy
+    // for those entries.
     let remote_reason = state.ssh.then(crate::remote_open::unavailable_reason);
     // A menu only opens with a session, so the repository is there.
-    let compare_blocked = remote_reason
-        .clone()
-        .or_else(|| super::compare::with_head_blocked(true, Some(commit), state.head));
+    let compare_blocked = super::compare::with_head_blocked(true, Some(commit), state.head);
     menu = menu.item(
         PopupMenuItem::new(blocked_label(
             t!("history_ops.menu.compare_head").to_string(),
@@ -1285,9 +1284,7 @@ pub(crate) fn commit_menu(
             }
         }),
     );
-    let worktree_compare_blocked = remote_reason
-        .clone()
-        .or_else(|| super::compare::with_worktree_blocked(true, Some(commit)));
+    let worktree_compare_blocked = super::compare::with_worktree_blocked(true, Some(commit));
     menu = menu.item(
         PopupMenuItem::new(blocked_label(
             t!("history_ops.menu.compare_worktree").to_string(),
@@ -1379,12 +1376,7 @@ fn multi_commit_menu(
     // them all against, which the entry does not offer.
     if let [a, b] = multi.commits.as_slice() {
         // A menu only opens with a session, so the repository is there.
-        // Compare queries are not on the helper.
-        let blocked = if ssh {
-            Some(crate::remote_open::unavailable_reason())
-        } else {
-            super::compare::two_commit_blocked(true, &multi.commits)
-        };
+        let blocked = super::compare::two_commit_blocked(true, &multi.commits);
         let (a, b) = (*a, *b);
         menu = menu
             .item(

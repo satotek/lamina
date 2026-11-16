@@ -190,11 +190,7 @@ impl RepoView {
                 ui::rail_item(
                     "rail-reflog",
                     icon(IconName::ClockArrowDown, design.scale(15.0), design.text),
-                    if self.is_ssh() {
-                        crate::remote_open::unavailable_reason()
-                    } else {
-                        t!("sidebar.reflog").to_string()
-                    },
+                    t!("sidebar.reflog").to_string(),
                     design,
                 )
                 .selected(self.mode == MainMode::Reflog)
