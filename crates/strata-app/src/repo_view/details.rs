@@ -8,10 +8,11 @@ use std::sync::Arc;
 use gpui::prelude::*;
 use gpui::{
     AnyElement, App, ClickEvent, ClipboardItem, Context, FontWeight, InteractiveElement,
-    IntoElement, ParentElement, Styled, Window, div, px, uniform_list,
+    IntoElement, ParentElement, ScrollHandle, Styled, Window, div, px, uniform_list,
 };
 use gpui_component::Selectable as _;
 use gpui_component::menu::PopupMenuItem;
+use gpui_component::scroll::Scrollbar;
 use gpui_kit_assets::IconName;
 use strata_core::diff::LineKind;
 use strata_core::session::{QueryTicket, SelectionRangeMode};
@@ -74,6 +75,22 @@ const MESSAGE_CACHE: usize = 12;
 /// many source lines fit, so the fold is a height rather than a line count.
 const BODY_COLLAPSED_LINES: usize = 6;
 
+/// Share of the details pane an expanded body may take. The rest holds the
+/// summary, the body's own controls and the changed-file list, which the body
+/// would otherwise push out of the pane.
+const BODY_EXPANDED_FRACTION: f32 = 0.4;
+
+/// What the expanded body falls back to before the pane has been measured.
+const BODY_EXPANDED_DEFAULT_LINES: usize = 8;
+
+/// An expanded body never shows fewer lines than the fold does, so expanding
+/// always reveals more text than it hides.
+const BODY_EXPANDED_MIN_LINES: usize = BODY_COLLAPSED_LINES;
+
+/// A tall pane still leaves the changed-file list its share instead of the
+/// body taking all of it.
+const BODY_EXPANDED_MAX_LINES: usize = 18;
+
 /// The selected commit's message body, plus the recent bodies around it.
 ///
 /// The history carries only summaries, so the body is read on demand. An answer
@@ -93,6 +110,8 @@ pub(super) struct CommitMessageSlot {
     /// Whether the body on screen is unfolded. Only the current commit
     /// remembers this; the next one starts folded.
     expanded: bool,
+    /// Scroll offset of an expanded body. A new selection starts at the top.
+    body_scroll: ScrollHandle,
 }
 
 impl CommitMessageSlot {
@@ -102,6 +121,7 @@ impl CommitMessageSlot {
         if self.commit != commit {
             self.expanded = false;
         }
+        self.body_scroll = ScrollHandle::default();
         self.commit = commit;
         self.body = None;
         let commit = commit?;
@@ -406,6 +426,11 @@ impl RepoView {
     /// The body under the summary: muted wrapping plain text, folded to a few
     /// lines until the user asks for the rest. No markdown is interpreted,
     /// because a commit message is text rather than documentation.
+    ///
+    /// The unfolded body scrolls inside a cap taken from the pane's height. A
+    /// message long enough would otherwise grow the header past the pane and
+    /// push the toggle, author, id and parents out of sight, leaving no way to
+    /// fold it again with the mouse.
     fn commit_body(&self, body: &str, design: &Design) -> AnyElement {
         let expanded = self.commit_message.expanded();
         let long = body_needs_toggle(body);
@@ -424,6 +449,37 @@ impl RepoView {
                 .max_h(line_height * BODY_COLLAPSED_LINES as f32)
                 .overflow_hidden();
         }
+
+        let body_block = if long && expanded {
+            let handle = &self.commit_message.body_scroll;
+            let height = expanded_body_height(self.details_height.get(), f32::from(line_height));
+            let scroller = div()
+                .id("commit-body-scroll")
+                .w_full()
+                .max_h(px(height))
+                .min_h_0()
+                .overflow_y_scroll()
+                .track_scroll(handle)
+                .child(text);
+            // The wrapper is positioned for the overlay scrollbar, the same
+            // way the virtualised lists draw theirs.
+            div()
+                .relative()
+                .w_full()
+                .min_w_0()
+                .min_h_0()
+                .child(scroller)
+                .child(
+                    div().absolute().inset_0().child(
+                        Scrollbar::vertical(handle)
+                            .id("commit-body-scrollbar")
+                            .viewport_from_layout(),
+                    ),
+                )
+                .into_any_element()
+        } else {
+            text.into_any_element()
+        };
 
         let copy = body.to_owned();
         let mut footer = div().flex().items_center().gap_1().child(
@@ -458,7 +514,7 @@ impl RepoView {
             .flex()
             .flex_col()
             .gap_1()
-            .child(text)
+            .child(body_block)
             .child(footer)
             .into_any_element()
     }
@@ -1062,6 +1118,20 @@ fn body_needs_toggle(body: &str) -> bool {
     false
 }
 
+/// The height an expanded body may take, in pixels.
+///
+/// Until the pane is measured it falls back to a fixed line count; afterwards
+/// it takes a share of the pane, clamped so expanding always shows more than
+/// the fold and a tall pane still leaves the file list room.
+fn expanded_body_height(pane_height: Option<f32>, line_height: f32) -> f32 {
+    let min = line_height * BODY_EXPANDED_MIN_LINES as f32;
+    let max = line_height * BODY_EXPANDED_MAX_LINES as f32;
+    let wanted = pane_height.map_or(line_height * BODY_EXPANDED_DEFAULT_LINES as f32, |height| {
+        height * BODY_EXPANDED_FRACTION
+    });
+    wanted.clamp(min, max)
+}
+
 /// The commit HEAD points at, when the source knows it.
 pub(super) fn head_oid(source: Option<&Source>) -> Option<Oid> {
     match source?.head()? {
@@ -1331,6 +1401,144 @@ mod tests {
         assert!(
             body_needs_toggle(&"x".repeat(40 * 7)),
             "one long paragraph that wraps past the fold gets the toggle too"
+        );
+    }
+
+    #[test]
+    fn an_expanded_body_takes_a_capped_share_of_the_pane() {
+        let line = 18.0;
+        let height = expanded_body_height(Some(365.0), line);
+        assert!(
+            (height - 365.0 * BODY_EXPANDED_FRACTION).abs() < 1e-3,
+            "the body takes its share of the pane, not a fixed count: {height}"
+        );
+        assert!(
+            height < 365.0 - line * BODY_COLLAPSED_LINES as f32,
+            "the cap must leave the summary and controls below it their room"
+        );
+
+        assert_eq!(
+            expanded_body_height(None, line),
+            line * BODY_EXPANDED_DEFAULT_LINES as f32,
+            "before the pane is measured the body falls back to a line count"
+        );
+        assert_eq!(
+            expanded_body_height(Some(160.0), line),
+            line * BODY_COLLAPSED_LINES as f32,
+            "a short pane never expands to less than the fold shows"
+        );
+        assert_eq!(
+            expanded_body_height(Some(4000.0), line),
+            line * BODY_EXPANDED_MAX_LINES as f32,
+            "a tall pane keeps room for the changed-file list"
+        );
+    }
+
+    /// The details block, hosted alone in a pane the size reported for the bug,
+    /// must not grow past it: the toggle, author, id and parents all sit inside
+    /// that block, so a block that fits keeps them on screen and clickable.
+    #[gpui::test]
+    fn an_expanded_body_stays_inside_a_short_details_pane(cx: &mut gpui::TestAppContext) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        use gpui::{Bounds, Entity, Pixels, QuitMode, Render, VisualTestContext};
+        use gpui_component::Root;
+
+        use crate::repo_view::Launch;
+
+        const PANE_HEIGHT: f32 = 365.0;
+
+        cx.update(|cx| {
+            cx.set_quit_mode(QuitMode::Explicit);
+            gpui_component::init(cx);
+            cx.set_global(Settings::default());
+        });
+
+        let body = (0..25)
+            .map(|line| {
+                format!("line {line}: a sentence long enough to wrap in the details column")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(body_needs_toggle(&body), "the fixture must need the toggle");
+
+        let window = cx.add_window(|window, cx| RepoView::new(Launch::fake(8), window, cx));
+        let view = window.root(cx).expect("the window's root view");
+        cx.update(|cx| {
+            view.update(cx, |view, _| {
+                view.selected = Some(0);
+                view.commit_message.body = Some(std::sync::Arc::from(body.as_str()));
+                view.details_height.set(Some(PANE_HEIGHT));
+            });
+        });
+
+        struct DetailsProbe {
+            repo: Entity<RepoView>,
+            bounds: Rc<RefCell<Option<Bounds<Pixels>>>>,
+        }
+
+        impl Render for DetailsProbe {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let slot = self.bounds.clone();
+                let details = {
+                    let repo = self.repo.read(cx);
+                    let source = repo.source();
+                    let commit = source.as_ref().and_then(|source| source.commit(0));
+                    repo.commit_details(commit, &Design::default())
+                };
+                div().w(px(320.0)).h(px(PANE_HEIGHT)).child(
+                    div()
+                        .on_children_prepainted(move |children: Vec<Bounds<Pixels>>, _, _| {
+                            *slot.borrow_mut() = children.first().copied();
+                        })
+                        .child(details),
+                )
+            }
+        }
+
+        let measured: Rc<RefCell<Option<Bounds<Pixels>>>> = Rc::new(RefCell::new(None));
+        let probe_slot = measured.clone();
+        let probe_repo = view.clone();
+        let probe_window = cx.update(|cx| {
+            cx.open_window(Default::default(), |window, cx| {
+                let probe = cx.new(|_| DetailsProbe {
+                    repo: probe_repo,
+                    bounds: probe_slot,
+                });
+                cx.new(|cx| Root::new(probe, window, cx))
+            })
+            .expect("probe window")
+        });
+        let mut pcx = VisualTestContext::from_window(probe_window.into(), cx);
+        pcx.update(|window, cx| window.draw(cx).clear(cx));
+        let collapsed = measured
+            .borrow()
+            .expect("the folded details block was laid out")
+            .size
+            .height;
+        let collapsed = f32::from(collapsed);
+
+        pcx.update(|_, cx| {
+            view.update(cx, |view, _| view.commit_message.expanded = true);
+        });
+        pcx.update(|window, cx| window.draw(cx).clear(cx));
+        let bounds = measured
+            .borrow()
+            .expect("the expanded details block was laid out");
+        let height = f32::from(bounds.size.height);
+
+        assert!(
+            collapsed > 0.0,
+            "the details block must actually render for this test to mean anything"
+        );
+        assert!(
+            height > collapsed,
+            "the expanded body must show more than the folded one: {height} px vs {collapsed} px"
+        );
+        assert!(
+            height <= PANE_HEIGHT,
+            "an expanded body pushed the details block past its {PANE_HEIGHT} px pane: {height} px"
         );
     }
 }

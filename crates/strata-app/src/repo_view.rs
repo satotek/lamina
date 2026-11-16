@@ -41,6 +41,7 @@ mod worktrees;
 
 pub(crate) use history_ops::history_filter_menu;
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -455,6 +456,9 @@ pub struct RepoView {
     /// Measured extents of the two draggable History boundaries, refreshed
     /// after every layout pass.
     splits: split::SplitExtents,
+    /// Height of the details column as last laid out. A long commit body is
+    /// capped from it so its own controls stay on screen.
+    details_height: Rc<Cell<Option<f32>>>,
     focus: FocusHandle,
 
     files: Option<Vec<FileChange>>,
@@ -666,6 +670,7 @@ impl RepoView {
             diff_scroll: UniformListScrollHandle::default(),
             file_scroll: UniformListScrollHandle::default(),
             splits: split::SplitExtents::default(),
+            details_height: Rc::new(Cell::new(None)),
             focus,
             files: None,
             files_lfs: Arc::new(HashMap::new()),

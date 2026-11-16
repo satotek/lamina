@@ -126,6 +126,7 @@ impl RepoView {
                 });
 
         let measured_cell = self.splits.details.clone();
+        let measured_height = self.details_height.clone();
         div()
             .flex()
             .flex_col()
@@ -148,6 +149,11 @@ impl RepoView {
                     .on_children_prepainted(move |bounds: Vec<gpui::Bounds<gpui::Pixels>>, _, _| {
                         if let Some(area) = super::split::measure(&bounds, Axis::Horizontal) {
                             measured_cell.set(Some(area));
+                        }
+                        // The first child is the details column, which fills this
+                        // row's height.
+                        if let Some(details) = bounds.first() {
+                            measured_height.set(Some(f32::from(details.size.height)));
                         }
                     })
                     .child(left)
