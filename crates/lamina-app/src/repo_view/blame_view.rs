@@ -581,6 +581,9 @@ impl RepoView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.refuse_if_ssh(cx) {
+            return;
+        }
         self.open_blame_target(commit, path, cx);
         cx.bind_keys([KeyBinding::new("escape", CloseBlameView, Some(BLAME_VIEW))]);
         self.focus_root(window, cx);

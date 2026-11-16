@@ -17,6 +17,7 @@ terminal = ["dep:lamina-term"]
 
 [dependencies]
 lamina-core.workspace = true
+lamina-remote-client.workspace = true
 lamina-term = { path = "../lamina-term", optional = true }
 
 # GPUI itself is published to crates.io under `gpui-pre` by the GPUI Kit

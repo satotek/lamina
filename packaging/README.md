@@ -17,6 +17,7 @@ output lands in `dist/`, which is git-ignored.
 | `release/update-manifest.sh` | Signs the release archives and writes `latest.json` for the app's updater. |
 | `third-party/generate.sh` | Writes the third-party notices that every artifact carries. |
 | `third-party/libghostty-vt.md` | The part of those notices that cargo-about cannot see: the Zig side of the terminal backend. |
+| `third-party/remote-helper.md` | MIT notices for the C library linked into the musl remote helper, which is also outside the crate graph. |
 | `third-party/catppuccin.md` | MIT notice for the bundled Catppuccin colour palettes. |
 
 The app icon lives with the other resources, not here:
@@ -43,9 +44,13 @@ several minutes of Zig work.
 
 1. `version` fails unless the tag equals the `[workspace.package] version` in
    `Cargo.toml` (so `v0.1.0` needs `version = "0.1.0"`).
-2. `build` compiles with `--release --locked` on three runners, packages the
-   result with the scripts below, and uploads each archive as a workflow
-   artifact:
+2. `remote-helpers` cross-compiles `lamina-remote` for
+   `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` once, with
+   the same `LAMINA_BUILD_ID` as the app (the commit the workflow checked
+   out). Each platform build downloads that artifact.
+3. `build` compiles with `--release --locked` on three runners, packages the
+   result with the scripts below (including `remote-helpers/` next to the
+   executable), and uploads each archive as a workflow artifact:
    - `Lamina-<version>-macos-arm64.dmg` on `macos-15`
      (`aarch64-apple-darwin`)
    - `Lamina-<version>-windows-x64.zip` and
@@ -54,11 +59,12 @@ several minutes of Zig work.
    - `lamina-<version>-linux-x86_64.tar.gz` on `ubuntu-22.04`
      (`x86_64-unknown-linux-gnu`, the oldest hosted runner, so the archive
      needs no newer glibc than 2.35)
-3. `publish` (tags only) downloads the archives, signs them and writes
-   `latest.json` when the signing secret is present, writes `SHA256SUMS.txt`
-   (which covers the signatures and the manifest too) and creates a **draft**
-   GitHub release with generated notes. A manual dispatch stops after step 2 and
-   leaves the archives in the workflow run.
+4. `publish` (tags only) downloads the `dist-*` archives, signs them and
+   writes `latest.json` when the signing secret is present, writes
+   `SHA256SUMS.txt` (which covers the signatures and the manifest too) and
+   creates a **draft** GitHub release with generated notes. The helper artifact
+   is not a release asset. A manual dispatch stops after step 3 and leaves the
+   archives in the workflow run.
 
 Every artifact carries both licences and `THIRD-PARTY-NOTICES.md`, which
 `third-party/generate.sh` produces from `cargo-about` plus the pinned Zig
@@ -158,6 +164,13 @@ binary to `Contents/MacOS/lamina` and `Lamina.icns`, `LICENSE-MIT`,
 `dist/THIRD-PARTY-NOTICES.md`, so run `third-party/generate.sh` first, or point
 `NOTICES` at another file.
 
+When `REMOTE_HELPERS` is set, or `remote-helpers/` exists at the repository
+root, the musl binaries are copied to `Contents/Resources/remote-helpers` and
+`Contents/MacOS/remote-helpers` becomes a relative symlink to that directory.
+The symlink is what the app opens. It is created before the ad-hoc signature
+so the seal covers it. A regular file under `Contents/MacOS` would be nested
+code, and codesign cannot sign a Linux binary.
+
 Pass `--sign "Strata Code Signing"` (or set `LAMINA_SIGNING_IDENTITY`) to sign
 with the self-signed certificate instead, which keeps the app's identity the
 same across releases so updates keep Keychain and privacy grants.
@@ -196,8 +209,9 @@ PREFIX=$HOME/.local direnv exec . packaging/linux/install.sh
 `package.sh` builds the release binary and writes
 `dist/lamina-<version>-linux-<arch>.tar.gz`. The archive unpacks into one
 directory holding `lamina`, `lamina.desktop`, `icons/<size>.png` (16–512),
-`install.sh`, `LICENSE-MIT`, `LICENSE-APACHE` and `THIRD-PARTY-NOTICES.md`, so
-it installs on a machine with no toolchain:
+`install.sh`, `LICENSE-MIT`, `LICENSE-APACHE`, `THIRD-PARTY-NOTICES.md` and,
+when the helpers were staged, `remote-helpers/`. It installs on a machine
+with no toolchain:
 
 ```sh
 tar -xzf lamina-0.1.0-linux-x86_64.tar.gz
@@ -208,9 +222,11 @@ PREFIX=$HOME/.local lamina-0.1.0-linux-x86_64/install.sh
 release binary first and installs from the repository. Either way it drops the
 binary in `bin/`, `lamina.desktop` in `share/applications/`, the icons in
 `share/icons/hicolor/<size>x<size>/apps/lamina.png` and the licences in
-`share/doc/lamina/`. It is a convenience for a development machine or the
-release archive, not a distribution package: a distro build needs its own
-dependency and library-path handling.
+`share/doc/lamina/`. From a release archive it also installs
+`remote-helpers/` to `bin/remote-helpers/`, beside `lamina`, so the running
+app still finds the helpers next to its executable. It is a convenience for a
+development machine or the release archive, not a distribution package: a
+distro build needs its own dependency and library-path handling.
 
 `package.sh` takes `--target <triple>` and `--no-build` like the macOS scripts,
 and `NOTICES=<path>` to point at a notices file other than
@@ -234,7 +250,8 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\package.ps1 -Installe
 
 Builds with `cargo build --release --locked -p lamina-app` and writes
 `dist\Lamina-<version>-windows-x64.zip` containing `lamina.exe`, `README.txt`,
-both licences and `THIRD-PARTY-NOTICES.md`. `-Target <triple>` and `-NoBuild`
+both licences, `THIRD-PARTY-NOTICES.md` and, when the helpers were staged,
+`remote-helpers\` next to the executable. `-Target <triple>` and `-NoBuild`
 mirror the shell scripts, and the script resolves the binary through
 `CARGO_TARGET_DIR`. `build.rs` embeds `resources/icon/lamina.ico` in the
 executable, which is what Explorer, the taskbar and every window show, so the
@@ -268,10 +285,15 @@ nix shell nixpkgs#cargo-about --command \
 
 The script renders `about.hbs` through `cargo-about` (configuration in
 `about.toml`, which accepts only the licences actually present in the
-lockfile), appends `third-party/libghostty-vt.md` and
-`third-party/catppuccin.md`, and writes the result. It needs `cargo-about` on
-PATH; the Nix package and `cargo install cargo-about` both work, and CI installs
-it with `taiki-e/install-action`.
+lockfile), appends `third-party/libghostty-vt.md`,
+`third-party/remote-helper.md` and `third-party/catppuccin.md`, and writes the
+result. It needs `cargo-about` on PATH; the Nix package and
+`cargo install cargo-about` both work, and CI installs it with
+`taiki-e/install-action`.
+
+`about.toml` already accepts every licence in the `lamina-remote` crate
+graph: that graph is a subset of the workspace `cargo-about` walks for the
+app. The musl C library is not a crate; `remote-helper.md` covers it.
 
 The appended section matters because `cargo-about` only walks Cargo's graph:
 libghostty-vt, its Zig packages (Highway, Wuffs, Aro, `translate_c`, uucode) and

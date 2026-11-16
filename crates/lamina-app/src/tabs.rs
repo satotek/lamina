@@ -590,4 +590,33 @@ mod tests {
         std::fs::write(&file, b"{ not json").unwrap();
         assert_eq!(SavedSession::load(&file), SavedSession::default());
     }
+
+    #[test]
+    fn an_old_session_file_still_loads_and_a_remote_tab_needs_no_directory() {
+        let old = r#"{"windows":[{"tabs":["/tmp/repo"],"active":0}]}"#;
+        let session: SavedSession = serde_json::from_str(old).unwrap();
+        assert_eq!(
+            session,
+            SavedSession {
+                windows: vec![SavedWindow {
+                    tabs: vec![PathBuf::from("/tmp/repo")],
+                    active: 0,
+                }],
+            }
+        );
+
+        let remote = PathBuf::from("ssh://git.example.com:2222/home/repo");
+        let missing = PathBuf::from("/missing");
+        let window = SavedWindow {
+            tabs: vec![remote.clone(), missing, remote.clone()],
+            active: 0,
+        };
+        // The same predicate startup uses: an ssh URI is kept, a path that is
+        // not a directory is dropped, and a repeated URI stays one tab.
+        let resolved = window
+            .resolve_existing(|path| path.to_string_lossy().starts_with("ssh://") || path.is_dir())
+            .unwrap();
+        assert_eq!(resolved.tabs, vec![remote]);
+        assert_eq!(resolved.active, 0);
+    }
 }

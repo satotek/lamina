@@ -469,7 +469,7 @@ impl RepoView {
     /// can wait for tool detection: a view opened while `gh` is still being
     /// discovered would otherwise record "no gh" for the rest of the session.
     pub(crate) fn start_pull_request_refresh(&mut self, cx: &mut Context<Self>) {
-        if self.pull_requests.started || self.session.is_none() {
+        if self.is_ssh() || self.pull_requests.started || self.session.is_none() {
             return;
         }
         let Some(tooling) = Tooling::get(cx) else {
@@ -518,6 +518,9 @@ impl RepoView {
     /// `cause` decides whether the call is worth making now; the automatic one
     /// that would repeat a refresh made in the last minute does nothing.
     pub(crate) fn refresh_pull_requests(&mut self, cause: RefreshCause, cx: &mut Context<Self>) {
+        if self.refuse_if_ssh(cx) {
+            return;
+        }
         let Some(remote) = crate::github::remote_for(self, cx) else {
             self.pull_requests.clear();
             self.recompute_pull_request_map(cx);
@@ -607,6 +610,9 @@ impl RepoView {
 
     /// Opens the dialog listing the cache's open pull requests.
     pub(crate) fn open_checkout_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.refuse_if_ssh(cx) {
+            return;
+        }
         if self.is_busy() || self.pull_requests.checkout_running {
             self.status_note = Some(t!("pr.busy").to_string());
             cx.notify();

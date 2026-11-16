@@ -174,6 +174,11 @@ pub fn now_seconds() -> u64 {
 /// spelled path otherwise, because a removed directory still deserves a row the
 /// user can see and delete.
 fn normalize(path: &Path) -> PathBuf {
+    // An `ssh://` value is not a path on this machine. Canonicalising it would
+    // stat a nonsense location and could rewrite the stored form.
+    if path.to_string_lossy().starts_with("ssh://") {
+        return path.to_path_buf();
+    }
     lamina_core::fs_path::canonicalize(path)
 }
 
@@ -329,6 +334,45 @@ mod tests {
             repository_name(Path::new("/")),
             "/",
             "a root path has no file name of its own"
+        );
+    }
+
+    #[test]
+    fn an_ssh_entry_keeps_its_uri_and_names_the_repository() {
+        let mut recents = RecentRepositories::default();
+        let uri = PathBuf::from("ssh://git.example.com/home/repo");
+        recents.record(&uri, 10);
+        assert_eq!(recents.len(), 1);
+        assert_eq!(
+            recents.get(0).map(|entry| entry.path.clone()),
+            Some(uri.clone())
+        );
+        assert_eq!(recents.get(0).map(|entry| entry.opened_at), Some(10));
+        assert_eq!(repository_name(&uri), "repo");
+
+        let with_port = PathBuf::from("ssh://git.example.com:2222/home/repo");
+        assert_eq!(repository_name(&with_port), "repo");
+
+        // Recording the same URI again must not canonicalise it into a local
+        // path or store a second row.
+        recents.record(&uri, 20);
+        assert_eq!(recents.len(), 1);
+        assert_eq!(
+            recents.get(0).map(|entry| entry.path.clone()),
+            Some(uri.clone())
+        );
+        assert_eq!(recents.get(0).map(|entry| entry.opened_at), Some(20));
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("recent.json");
+        recents.save(&file).unwrap();
+        let loaded = RecentRepositories::load(&file);
+        assert_eq!(loaded.get(0).map(|entry| entry.path.clone()), Some(uri));
+        assert_eq!(
+            loaded
+                .get(0)
+                .map(|entry| entry.path.to_string_lossy().into_owned()),
+            Some("ssh://git.example.com/home/repo".to_owned())
         );
     }
 }

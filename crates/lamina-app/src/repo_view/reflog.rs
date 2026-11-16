@@ -248,6 +248,9 @@ pub(crate) fn redo_blocked_reason(
 impl RepoView {
     /// Opens the reflog list and asks for its rows.
     pub(crate) fn open_reflog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.refuse_if_ssh(cx) {
+            return;
+        }
         if self.mode == MainMode::Reflog {
             self.refresh_reflog(cx);
             cx.notify();
@@ -290,6 +293,9 @@ impl RepoView {
     }
 
     pub(super) fn refresh_reflog(&mut self, cx: &mut Context<Self>) {
+        if self.is_ssh() {
+            return;
+        }
         let Some(session) = self.session.as_ref() else {
             return;
         };
@@ -538,6 +544,9 @@ impl RepoView {
     /// The tooltip names the entry undo would target, so the button says what
     /// it is about to do instead of repeating its own label.
     pub(crate) fn undo_button_state(&self, window: &Window) -> (bool, String) {
+        if self.is_ssh() {
+            return (false, crate::remote_open::unavailable_reason());
+        }
         let entry = self.reflog.newest_restorable();
         match blocked_reason(entry, self.button_gate(), self.head_branch().as_deref()) {
             Some(reason) => (
@@ -567,6 +576,9 @@ impl RepoView {
 
     /// Whether the title bar's Redo button is enabled, and the tooltip it shows.
     pub(crate) fn redo_button_state(&self, window: &Window) -> (bool, String) {
+        if self.is_ssh() {
+            return (false, crate::remote_open::unavailable_reason());
+        }
         let entry = self.reflog.redo.top();
         let head = self.source().and_then(|source| head_target(source.head()));
         match redo_blocked_reason(entry, self.button_gate(), head) {

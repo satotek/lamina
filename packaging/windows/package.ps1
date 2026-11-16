@@ -1,7 +1,10 @@
-# Builds the release executable and zips it with a short README, the licences
-# and the third-party notices. -Installer additionally compiles the Inno Setup
-# installer dist\Lamina-<version>-windows-x64-setup.exe from the same staged
-# files, so both artifacts always carry identical bits.
+# Builds the release executable and zips it with a short README, the licences,
+# the third-party notices and, when they were built, the remote helpers;
+# -Installer additionally compiles the Inno Setup installer
+# dist\Lamina-<version>-windows-x64-setup.exe from the same staged files, so
+# both artifacts always carry identical bits. Helpers land in
+# remote-helpers\ next to lamina.exe. Their file mode does not matter: the
+# uploader marks the remote copy executable.
 #
 #     powershell -ExecutionPolicy Bypass -File packaging\windows\package.ps1
 #     powershell -ExecutionPolicy Bypass -File packaging\windows\package.ps1 -Target x86_64-pc-windows-msvc
@@ -61,6 +64,30 @@ Copy-Item (Join-Path $PSScriptRoot "README.txt") $stage
 Copy-Item (Join-Path $root "LICENSE-MIT") $stage
 Copy-Item (Join-Path $root "LICENSE-APACHE") $stage
 Copy-Item $Notices (Join-Path $stage "THIRD-PARTY-NOTICES.md")
+
+# Same pair deploy.rs uploads. A release that sets REMOTE_HELPERS, or that has
+# remote-helpers\ at the repository root, has to ship both.
+$helperSource = $null
+if ($env:REMOTE_HELPERS) {
+    if ([System.IO.Path]::IsPathRooted($env:REMOTE_HELPERS)) {
+        $helperSource = $env:REMOTE_HELPERS
+    } else {
+        $helperSource = Join-Path $root $env:REMOTE_HELPERS
+    }
+} elseif (Test-Path (Join-Path $root "remote-helpers")) {
+    $helperSource = Join-Path $root "remote-helpers"
+}
+if ($helperSource) {
+    if (-not (Test-Path $helperSource)) { throw "remote helper directory does not exist: $helperSource" }
+    $destHelpers = Join-Path $stage "remote-helpers"
+    New-Item -ItemType Directory -Force -Path $destHelpers | Out-Null
+    foreach ($triple in @("x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl")) {
+        $name = "lamina-remote-$triple"
+        $src = Join-Path $helperSource $name
+        if (-not (Test-Path $src)) { throw "missing remote helper $src" }
+        Copy-Item $src (Join-Path $destHelpers $name)
+    }
+}
 
 if (Test-Path $zip) { Remove-Item -Force $zip }
 Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $zip

@@ -5128,6 +5128,7 @@ dependencies = [
  "image",
  "keyring",
  "lamina-core",
+ "lamina-remote-client",
  "lamina-term",
  "log",
  "minisign",

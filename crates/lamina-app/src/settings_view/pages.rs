@@ -647,7 +647,15 @@ fn tools(control: f32, design: &Design) -> Page {
     .groups(
         card(t!("settings.tools.repository").to_string(), design).item(Item::render(|_, _, cx| {
             let design = Design::new(cx.theme(), Settings::get(cx));
+            let remote = crate::git_config_view::remote_repository(cx);
             let available = crate::git_config_view::has_repository(cx);
+            let note = if remote {
+                crate::remote_open::unavailable_reason()
+            } else if available {
+                t!("settings.tools.show_git_config_available").to_string()
+            } else {
+                t!("settings.tools.show_git_config_unavailable").to_string()
+            };
             v_flex()
                 .gap_1()
                 .child(
@@ -662,6 +670,9 @@ fn tools(control: f32, design: &Design) -> Page {
                             .size(crate::ui::ButtonSize::Small)
                             .kind(crate::ui::ButtonKind::Normal)
                             .disabled(!available)
+                            .when(remote, |button| {
+                                button.tooltip(crate::remote_open::unavailable_reason())
+                            })
                             .on_click(|_, window, cx| {
                                 window.dispatch_action(Box::new(OpenGitConfig), cx);
                             }),
@@ -670,11 +681,7 @@ fn tools(control: f32, design: &Design) -> Page {
                             div()
                                 .text_size(px(design.tiny()))
                                 .text_color(design.muted)
-                                .child(if available {
-                                    t!("settings.tools.show_git_config_available").to_string()
-                                } else {
-                                    t!("settings.tools.show_git_config_unavailable").to_string()
-                                }),
+                                .child(note),
                         ),
                 )
                 .into_any_element()

@@ -1073,7 +1073,7 @@ impl RepoView {
         side: ConflictSide,
         cx: &mut Context<Self>,
     ) {
-        if self.worktree.conflicts.pending.is_some() {
+        if self.refuse_if_ssh(cx) || self.worktree.conflicts.pending.is_some() {
             return;
         }
         let Some(session) = self.session.as_ref() else {
@@ -1403,6 +1403,9 @@ impl RepoView {
 
     /// Runs `MarkResolved` for the selected conflict, warning or not.
     pub(crate) fn stage_resolved_conflict(&mut self, cx: &mut Context<Self>) {
+        if self.refuse_if_ssh(cx) {
+            return;
+        }
         let Some(path) = self.worktree.selected_conflict().map(str::to_owned) else {
             return;
         };
@@ -1509,7 +1512,7 @@ impl RepoView {
     }
 
     pub(crate) fn open_merge_tool(&mut self, cx: &mut Context<Self>) {
-        if self.worktree.conflicts.pending.is_some() {
+        if self.refuse_if_ssh(cx) || self.worktree.conflicts.pending.is_some() {
             return;
         }
         let Some(path) = self.worktree.selected_conflict().map(str::to_owned) else {

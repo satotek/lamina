@@ -167,6 +167,7 @@ pub struct UiTab {
     active_bg: Option<Hsla>,
     tooltip: Option<SharedString>,
     hint: Option<SharedString>,
+    badge: Option<SharedString>,
     on_select: Option<SelectHandler>,
     on_close: Option<CloseHandler>,
     on_reorder: Option<ReorderHandler>,
@@ -193,6 +194,7 @@ pub fn tab(
         active_bg: None,
         tooltip: None,
         hint: None,
+        badge: None,
         on_select: None,
         on_close: None,
         on_reorder: None,
@@ -235,6 +237,12 @@ impl UiTab {
     /// The tip's first line, usually the repository name.
     pub fn tooltip(mut self, tooltip: impl Into<SharedString>) -> Self {
         self.tooltip = Some(tooltip.into());
+        self
+    }
+
+    /// A short mark drawn before the name, such as a remote repository.
+    pub fn badge(mut self, badge: impl Into<SharedString>) -> Self {
+        self.badge = Some(badge.into());
         self
     }
 
@@ -409,6 +417,19 @@ impl RenderOnce for UiTab {
                 });
         }
 
+        if let Some(badge) = self.badge.clone() {
+            tab = tab.child(
+                div()
+                    .flex_none()
+                    .px(colors.px(4.0))
+                    .rounded(colors.px(4.0))
+                    .bg(colors.field)
+                    .text_size(px(colors.font_size - colors.zoom))
+                    .text_color(colors.accent)
+                    .child(badge),
+            );
+        }
+
         tab = tab.child(div().flex_1().min_w_0().truncate().child(label));
 
         // The dot follows the name so the label keeps its leading edge and
@@ -498,6 +519,10 @@ fn path_hint(path: &Path) -> String {
 }
 
 fn path_hint_in(path: &Path, home: Option<&Path>) -> String {
+    let text = path.to_string_lossy();
+    if text.starts_with("ssh://") {
+        return lamina_core::text::truncate_width(&text, MAX_COLUMNS);
+    }
     let folded = match home.and_then(|home| path.strip_prefix(home).ok()) {
         Some(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
         Some(rest) => format!("~/{}", rest.display()),
