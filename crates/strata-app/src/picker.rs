@@ -242,6 +242,9 @@ impl Picker {
     fn load_recent_statuses(&mut self, cx: &mut Context<Self>) {
         for entry in self.recents.entries() {
             let path = entry.path.clone();
+            if crate::remote_open::is_stored_remote(&path) {
+                continue;
+            }
             if self.quick_statuses.contains_key(&path) {
                 continue;
             }
@@ -506,6 +509,18 @@ impl Picker {
         else {
             return;
         };
+        if let Err(message) = crate::remote_open::parse_stored_strict(&path) {
+            self.error = Some(message);
+            cx.notify();
+            return;
+        }
+        if crate::remote_open::is_stored_remote(&path) {
+            crate::workspace::open_new_window(path, cx);
+            if self.mode == Mode::Dialog && window.has_active_dialog(cx) {
+                window.defer(cx, |window, cx| window.close_dialog(cx));
+            }
+            return;
+        }
         match resolve_repository(&path) {
             Ok(root) => {
                 crate::workspace::open_new_window(root, cx);
@@ -752,7 +767,8 @@ impl Picker {
             column = column
                 .child(brand_block(design))
                 .child(self.search_field(cx, design))
-                .child(self.action_tiles(cx, design));
+                .child(self.action_tiles(cx, design))
+                .child(remote_repository_link(design));
         } else {
             column = column.child(self.search_field(cx, design));
         }
@@ -1094,6 +1110,24 @@ impl Picker {
     }
 }
 
+/// A text link under the welcome tiles. A sixth tile would not fit the
+/// minimum window, and opening a remote repository is the less common path.
+fn remote_repository_link(design: &Design) -> AnyElement {
+    div()
+        .id("picker-open-remote")
+        .flex()
+        .justify_center()
+        .w_full()
+        .cursor_pointer()
+        .text_size(px(design.small()))
+        .text_color(design.accent)
+        .child(t!("action.open_remote_repository").to_string())
+        .on_click(|_, window, cx| {
+            window.dispatch_action(Box::new(crate::actions::OpenRemoteRepository), cx);
+        })
+        .into_any_element()
+}
+
 fn brand_block(design: &Design) -> AnyElement {
     div()
         .flex()
@@ -1299,6 +1333,13 @@ fn recent_row(
     let opened = opened_label(entry.opened_at, now);
 
     let mut trailing: Vec<AnyElement> = Vec::new();
+    if crate::remote_open::is_stored_remote(&entry.path) {
+        trailing.push(ui::status_badge(
+            t!("remote_repo.badge").to_string(),
+            ui::BadgeTone::Accent,
+            design,
+        ));
+    }
     match quick_status {
         Some(RepoQuickState::NotFound) => {
             trailing.push(ui::status_badge(
@@ -1707,6 +1748,9 @@ pub(crate) fn expand_home_path(text: &str, home: Option<&Path>) -> PathBuf {
 /// Shortens `home` to `~` and middle-ellipsises long paths so the repo folder
 /// and leading root stay readable in narrow rows.
 pub(crate) fn format_repo_path(path: &Path, home: Option<&Path>, max_chars: usize) -> String {
+    if crate::remote_open::is_stored_remote(path) {
+        return middle_ellipsis(&path.to_string_lossy(), max_chars);
+    }
     let shortened = match home {
         Some(home) if path == home => "~".to_owned(),
         Some(home) => match path.strip_prefix(home) {

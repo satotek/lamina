@@ -279,7 +279,7 @@ impl RepoView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.session.is_none() {
+        if self.refuse_if_ssh(cx) || self.session.is_none() {
             return;
         }
         self.discard_file_history();

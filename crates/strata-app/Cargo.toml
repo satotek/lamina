@@ -17,6 +17,7 @@ terminal = ["dep:strata-term"]
 
 [dependencies]
 strata-core.workspace = true
+strata-remote-client.workspace = true
 strata-term = { path = "../strata-term", optional = true }
 
 # GPUI itself is published to crates.io under `gpui-pre` by the GPUI Kit

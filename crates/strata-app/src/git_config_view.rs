@@ -62,6 +62,8 @@ struct CurrentRepository {
     /// Shared with the repository's session, so a configuration write shows up
     /// in the same log as every other git command.
     command_log: Option<Arc<CommandLog>>,
+    /// The active tab is a remote repository, which has no local config file.
+    remote: bool,
 }
 
 impl Global for CurrentRepository {}
@@ -90,6 +92,7 @@ pub(crate) fn set_repository(path: PathBuf, command_log: Arc<CommandLog>, cx: &m
     let repository = CurrentRepository {
         path: Some(path),
         command_log: Some(command_log),
+        remote: false,
     };
     if cx.has_global::<CurrentRepository>() {
         *cx.global_mut::<CurrentRepository>() = repository;
@@ -102,6 +105,26 @@ pub(crate) fn set_repository(path: PathBuf, command_log: Arc<CommandLog>, cx: &m
 pub(crate) fn has_repository(cx: &App) -> bool {
     cx.try_global::<CurrentRepository>()
         .is_some_and(|repository| repository.path.is_some())
+}
+
+/// The active tab is a remote repository, so the config viewer has no file.
+pub(crate) fn remote_repository(cx: &App) -> bool {
+    cx.try_global::<CurrentRepository>()
+        .is_some_and(|repository| repository.remote && repository.path.is_none())
+}
+
+/// Forgets the published repository. A remote tab has no local checkout, and
+/// leaving the previous path set would open that repository's config instead.
+///
+/// A unit test that never called [`bind`] has no global; that is not an error.
+pub(crate) fn clear_repository(cx: &mut App) {
+    if !cx.has_global::<CurrentRepository>() {
+        return;
+    }
+    let repository = cx.global_mut::<CurrentRepository>();
+    repository.path = None;
+    repository.command_log = None;
+    repository.remote = true;
 }
 
 fn open(cx: &mut App) {

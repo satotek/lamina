@@ -126,6 +126,10 @@ impl RepoView {
     }
 
     fn flush_visible_signatures(&mut self, cx: &mut Context<Self>) {
+        if self.is_ssh() {
+            self.signatures.pending_visible.clear();
+            return;
+        }
         self.signatures.debounce = None;
         if self.smoke || !Settings::get(cx).history.show_commit_signatures {
             self.signatures.pending_visible.clear();
@@ -154,6 +158,9 @@ impl RepoView {
     }
 
     pub(super) fn load_selected_signature(&mut self, commit: Option<Oid>, cx: &mut Context<Self>) {
+        if self.is_ssh() {
+            return;
+        }
         self.signatures.details_expanded = false;
         if let (Some(session), Some((prev, _))) = (
             self.session.as_ref(),

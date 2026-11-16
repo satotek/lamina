@@ -118,6 +118,13 @@ impl RepoView {
                 window.dispatch_action(Box::new(actions::OpenRepository), cx);
             })
             .child(icon(IconName::Folder, design.scale(15.0), design.text))
+            .when(self.is_ssh(), |chip| {
+                chip.child(crate::ui::status_badge(
+                    t!("remote_repo.badge").to_string(),
+                    crate::ui::BadgeTone::Accent,
+                    design,
+                ))
+            })
             .child(
                 div()
                     .max_w(px(fit.repository_width))
@@ -192,21 +199,32 @@ impl RepoView {
 
         // The real field lives in the title bar when a repository can search;
         // `--fake` gets the same look without an editable field.
-        let search_field: AnyElement = match self.search.input() {
-            Some(input) => div()
-                .flex_1()
-                .min_w_0()
-                .child(Input::new(input).appearance(false).bordered(false).small())
-                .into_any_element(),
-            None => div()
+        let ssh = self.is_ssh();
+        let search_field: AnyElement = if ssh {
+            div()
                 .flex_1()
                 .min_w_0()
                 .truncate()
                 .child(t!("title_bar.search_commits").to_string())
-                .into_any_element(),
+                .into_any_element()
+        } else {
+            match self.search.input() {
+                Some(input) => div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(Input::new(input).appearance(false).bordered(false).small())
+                    .into_any_element(),
+                None => div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(t!("title_bar.search_commits").to_string())
+                    .into_any_element(),
+            }
         };
         let mode = self.search.mode();
-        let show_mode_toggles = fit.search_width >= design.scale(260.0) && self.session.is_some();
+        let show_mode_toggles =
+            fit.search_width >= design.scale(260.0) && self.session.is_some() && !ssh;
         let search = div()
             .id("commit-search-field")
             .occlude()
@@ -222,6 +240,12 @@ impl RepoView {
             .bg(design.field)
             .text_color(design.muted)
             .cursor_text()
+            .when(ssh, |search| {
+                let reason = crate::remote_open::unavailable_reason();
+                search.tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(reason.clone()).build(window, cx)
+                })
+            })
             .child(icon(IconName::Search, design.scale(14.0), design.muted))
             .child(search_field)
             .when(show_mode_toggles, |search| {
@@ -278,7 +302,16 @@ impl RepoView {
                 },
                 fit.remote_compact,
             ))
-            .child(stash_button(design, fit.stash_label))
+            .child(stash_button(
+                design,
+                fit.stash_label,
+                !self.is_ssh(),
+                if self.is_ssh() {
+                    crate::remote_open::unavailable_reason()
+                } else {
+                    t!("action.stash_changes").to_string()
+                },
+            ))
             .child(separator)
             .child(self.terminal_button(design, window))
             .child(
@@ -652,12 +685,18 @@ impl RepoView {
     /// The working tree root, or `None` for the synthetic benchmark and the
     /// error screen, which have no directory to open.
     pub(super) fn work_dir(&self) -> Option<PathBuf> {
+        if self.is_ssh() {
+            return None;
+        }
         let path = self.session.as_ref()?.reader().workdir()?.to_path_buf();
         Some(strata_core::fs_path::canonicalize(&path))
     }
 
     /// Opens a terminal in the repository's working tree.
     pub(crate) fn open_terminal_here(&mut self, cx: &mut Context<Self>) {
+        if self.refuse_if_ssh(cx) {
+            return;
+        }
         let Some(dir) = self.work_dir() else {
             self.report_tool_error(t!("title_bar.open_repository_first").to_string(), cx);
             return;
@@ -675,6 +714,9 @@ impl RepoView {
         line: Option<u32>,
         cx: &mut Context<Self>,
     ) {
+        if self.refuse_if_ssh(cx) {
+            return;
+        }
         let Some(dir) = self.work_dir() else {
             self.report_tool_error(t!("title_bar.open_repository_first").to_string(), cx);
             return;
@@ -735,13 +777,18 @@ impl RepoView {
     pub(super) fn terminal_button(&self, design: &Design, window: &Window) -> AnyElement {
         let open = self.terminal_open;
         let enabled = self.error.is_none() && self.terminal_working_dir().is_some();
+        let tooltip = if self.is_ssh() {
+            crate::remote_open::unavailable_reason()
+        } else {
+            self.terminal_toggle_tooltip(window)
+        };
         let entity = self.entity.clone();
         crate::ui::icon_toggle("open-terminal", IconName::SquareTerminal, open)
             .ghost()
             .w(design.px(TOOL_BUTTON_WIDTH))
             .h(design.px(TOOL_BUTTON_WIDTH))
             .text_color(if open { design.text } else { design.muted })
-            .tooltip(self.terminal_toggle_tooltip(window))
+            .tooltip(tooltip)
             .disabled(!enabled)
             .on_click(move |_, window, cx| {
                 if let Some(entity) = entity.upgrade() {
@@ -756,13 +803,18 @@ impl RepoView {
     #[cfg(not(feature = "terminal"))]
     fn terminal_button(&self, design: &Design, _window: &Window) -> AnyElement {
         let enabled = self.work_dir().is_some();
+        let tooltip = if self.is_ssh() {
+            crate::remote_open::unavailable_reason()
+        } else {
+            t!("action.open_terminal_here").to_string()
+        };
         let entity = self.entity.clone();
         crate::ui::icon_button("open-terminal", IconName::SquareTerminal)
             .ghost()
             .w(design.px(TOOL_BUTTON_WIDTH))
             .h(design.px(TOOL_BUTTON_WIDTH))
             .text_color(design.muted)
-            .tooltip(t!("action.open_terminal_here").to_string())
+            .tooltip(tooltip)
             .disabled(!enabled)
             .on_click(move |_, _, cx| {
                 if let Some(entity) = entity.upgrade() {
@@ -854,12 +906,13 @@ impl RepoView {
 /// The title bar's Stash action: the same icon-over-label shape as the remote
 /// buttons, but it dispatches an action instead of running a git command here.
 /// Without room for the label it keeps the icon, which the tooltip names.
-fn stash_button(design: &Design, label: bool) -> AnyElement {
+fn stash_button(design: &Design, label: bool, enabled: bool, tooltip: String) -> AnyElement {
     crate::ui::content_button("stash-button")
         .ghost()
         .w(design.px(if label { 64.0 } else { 32.0 }))
         .h(design.px(40.0))
-        .tooltip(t!("action.stash_changes").to_string())
+        .tooltip(tooltip)
+        .disabled(!enabled)
         .on_click(|_, window, cx| {
             window.dispatch_action(Box::new(actions::StashChanges), cx);
         })

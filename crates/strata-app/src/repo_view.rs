@@ -28,6 +28,7 @@ mod rebase_dialog;
 pub(crate) mod rebase_onto;
 mod rebase_plan;
 mod reflog;
+mod remote_tab;
 mod selection_diff;
 mod sidebar;
 mod signatures;
@@ -105,6 +106,9 @@ pub enum Launch {
     },
     /// Opening the path failed; the window shows the error instead of exiting.
     Error { path: String, error: String },
+    /// A repository on another machine. Connecting starts in the view, so a
+    /// restored tab can show Connect without dialling at startup.
+    Remote(crate::remote_open::RemoteLaunch),
 }
 
 impl Launch {
@@ -183,6 +187,10 @@ impl Launch {
             Launch::Fake { .. } => t!("history.window_synthetic").to_string(),
             Launch::Repo { title, .. } => title.clone(),
             Launch::Error { path, .. } => format!("Strata — {path}"),
+            Launch::Remote(launch) => {
+                let name = crate::remote_open::tab_title(&launch.spec.host, &launch.spec.path);
+                data::window_title(&name, None)
+            }
         }
     }
 }
@@ -514,6 +522,8 @@ pub struct RepoView {
     /// A transient message that is not a failure, such as which copy of a file
     /// the editor opened. Shown in the status bar while no error is.
     pub(crate) status_note: Option<String>,
+    /// Set for the life of a remote tab, including before a session exists.
+    remote_tab: Option<remote_tab::RemoteTab>,
 
     title: String,
     target_frame_ms: f32,
@@ -701,6 +711,7 @@ impl RepoView {
             status_error: None,
             multi_pick: None,
             status_note: None,
+            remote_tab: None,
             title,
             target_frame_ms: 1000.0 / 60.0,
             overlay: smoke,
@@ -794,6 +805,7 @@ impl RepoView {
                 }
             }
             Launch::Error { path, error } => view.error = Some((path, error)),
+            Launch::Remote(launch) => view.begin_remote(launch, window, cx),
         }
 
         view
@@ -846,6 +858,7 @@ impl RepoView {
     fn sync_autofetch(&mut self, cx: &mut Context<Self>) {
         let should_run = self.active
             && self.session.is_some()
+            && !self.is_ssh()
             && crate::settings::Settings::get(cx)
                 .behaviour
                 .auto_fetch_minutes
@@ -863,6 +876,10 @@ impl RepoView {
 
     /// Tells the config viewer which repository the next command opens.
     fn publish_repository(&self, cx: &mut App) {
+        if self.is_ssh() {
+            crate::git_config_view::clear_repository(cx);
+            return;
+        }
         let Some(session) = &self.session else {
             return;
         };
@@ -892,6 +909,13 @@ impl RepoView {
     }
 
     fn sync_after_snapshot(&mut self, cx: &mut Context<Self>) {
+        if self.is_ssh() {
+            // History, diffs and the tree are the reads a remote tab can do.
+            // The other refreshes ask for operations the helper does not serve.
+            self.sync_selection(cx);
+            self.note_remote_history();
+            return;
+        }
         self.sync_selection(cx);
         self.settle_edit_selection(cx);
         self.sync_worktree(cx);
@@ -997,6 +1021,9 @@ impl RepoView {
 
     #[cfg(feature = "terminal")]
     pub(crate) fn terminal_working_dir(&self) -> Option<PathBuf> {
+        if self.is_ssh() {
+            return None;
+        }
         self.work_dir().or_else(|| {
             self.session
                 .as_ref()
@@ -1006,6 +1033,9 @@ impl RepoView {
 
     #[cfg(feature = "terminal")]
     pub(crate) fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.refuse_if_ssh(cx) {
+            return;
+        }
         if self.terminal_open {
             self.close_terminal_with_reason(
                 crate::terminal_panel::TerminalCloseReason::Hide,
@@ -1195,6 +1225,9 @@ impl RepoView {
                 self.search_ready(ticket, generation, &rows, cx);
             }
             SessionEvent::QueryFailed { ticket, error } => {
+                if self.swallow_unsupported(&error) {
+                    return;
+                }
                 // A failed re-read only leaves the previous lists in place; the
                 // next snapshot asks again.
                 if self.extra_lists.fail(ticket) {
@@ -1278,6 +1311,10 @@ impl RepoView {
                 }
             }
             SessionEvent::LoadFailed { error } => {
+                if self.note_connection_lost(&error) {
+                    self.notify_if_active(cx);
+                    return;
+                }
                 if self.debug_launch.is_some()
                     && self
                         .session
@@ -1341,6 +1378,12 @@ impl RepoView {
                 if let Some(error) = error {
                     // A refused or failed edit left the selection where it was.
                     self.edit_selection = None;
+                    // A remote tab never issues these; swallowing keeps a stray
+                    // unsupported answer out of the status bar.
+                    if self.swallow_unsupported(&error) {
+                        self.notify_tab_state(cx);
+                        return;
+                    }
                     self.status_error = Some(match label {
                         Some(label) => format!("{label}: {}", one_line(&error)),
                         None => one_line(&error),
@@ -1479,6 +1522,9 @@ impl RepoView {
     /// The request it replaces is cancelled: its answer would describe a
     /// repository state the sidebar no longer shows.
     fn refresh_extra_lists(&mut self) {
+        if self.is_ssh() {
+            return;
+        }
         let Some(session) = self.session.as_ref() else {
             return;
         };
@@ -1502,6 +1548,9 @@ impl RepoView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<OperationId> {
+        if self.refuse_if_ssh(cx) {
+            return None;
+        }
         if self.session.is_none() || self.is_busy() {
             return None;
         }
@@ -2178,6 +2227,9 @@ impl RepoView {
     /// Shows the install hint once when the repository tracks LFS files but
     /// the `git-lfs` command is missing.
     fn check_lfs_notice(&mut self, cx: &mut Context<Self>) {
+        if self.is_ssh() {
+            return;
+        }
         let Some(session) = &self.session else {
             return;
         };
