@@ -84,6 +84,14 @@ pub(crate) enum Command {
     Push,
 }
 
+/// Who asked for a remote command. An automatic fetch runs on a timer, so it
+/// stays quiet on success and never waits on a person for credentials.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Trigger {
+    Manual,
+    Automatic,
+}
+
 /// The operation a running command is; it names the progress line and the
 /// notification.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -311,6 +319,44 @@ fn failure_message(failure: Failure, line: &str) -> String {
     }
 }
 
+/// The detail line for a failed operation. An automatic fetch cannot ask for
+/// credentials, so its authentication failure says what to do instead of
+/// leaving the user without a next step.
+fn failure_detail(trigger: Trigger, failure: Failure, line: &str) -> String {
+    let detail = failure_message(failure, line);
+    if trigger == Trigger::Automatic && failure == Failure::Auth {
+        format!("{detail} {}", t!("remote.auto_fetch_hint"))
+    } else {
+        detail
+    }
+}
+
+/// Whether an automatic failure has already been announced.
+///
+/// One notification per failing streak; the next successful fetch, manual or
+/// automatic, starts a new streak. Manual commands always announce, because a
+/// person just asked for one and is waiting on its outcome.
+#[derive(Default)]
+struct FailureStreak {
+    failing: bool,
+}
+
+impl FailureStreak {
+    fn announces(&mut self, trigger: Trigger, kind: Kind, failed: bool) -> bool {
+        // The streak is about fetch failures only; a pull or push says nothing
+        // about whether the automatic fetch can reach the remote.
+        if kind != Kind::Fetch {
+            return trigger == Trigger::Manual;
+        }
+        if !failed {
+            self.failing = false;
+            return trigger == Trigger::Manual;
+        }
+        let first = !std::mem::replace(&mut self.failing, true);
+        trigger == Trigger::Manual || first
+    }
+}
+
 /// The retry that turns a rejected push into a force push with lease.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct ForceOffer {
@@ -323,6 +369,8 @@ struct ForceOffer {
 struct Running {
     id: OperationId,
     kind: Kind,
+    /// Whether a person asked for it or the timer did.
+    trigger: Trigger,
     /// What a success notification says.
     success: String,
     /// The push to retry with `--force-with-lease`, when one is possible.
@@ -338,6 +386,8 @@ struct Running {
 #[derive(Default)]
 pub(crate) struct Remote {
     running: Option<Running>,
+    /// Automatic failures are announced once per streak, not on every tick.
+    streak: FailureStreak,
 }
 
 /// Palette subset the remote controls paint with, taken from the window
@@ -360,6 +410,15 @@ impl Colors {
 impl Remote {
     pub(crate) fn is_running(&self) -> bool {
         self.running.is_some()
+    }
+
+    /// True when `id` is the automatic fetch, which must never open a
+    /// credential prompt. The askpass path asks this before it touches a
+    /// window, so the timer cannot stop on a modal nobody is looking at.
+    pub(crate) fn cancels_prompt(&self, id: OperationId) -> bool {
+        self.running
+            .as_ref()
+            .is_some_and(|running| running.id == id && running.trigger == Trigger::Automatic)
     }
 
     /// An operation of this module started; nothing else to record, the
@@ -420,9 +479,19 @@ impl Remote {
         // A fetch or push changes the upstreams and pull requests the badges
         // describe. A failed one leaves them as they were.
         let refresh = failure.is_none() && matches!(running.kind, Kind::Fetch | Kind::Push);
+        // Recorded before the notification decision so a failure that cannot
+        // be shown still counts as announced, and the streak is judged the same
+        // way whether or not a window is left.
+        let announces = self
+            .streak
+            .announces(running.trigger, running.kind, failure.is_some());
         let note = match &failure {
             Some((failure, line)) => {
-                Notification::error(failure_message(*failure, line)).title(running.kind.failed())
+                let title = match running.trigger {
+                    Trigger::Automatic => t!("remote.failed.fetch_auto").to_string(),
+                    Trigger::Manual => running.kind.failed(),
+                };
+                Notification::error(failure_detail(running.trigger, *failure, line)).title(title)
             }
             None => Notification::success(running.success.clone()).title(running.kind.label()),
         };
@@ -449,6 +518,11 @@ impl Remote {
         let Some(window) = window_handle(cx) else {
             return refresh;
         };
+        // An automatic fetch stays quiet while it works and after it succeeds;
+        // only the first failure of a streak is worth interrupting for.
+        if !announces {
+            return refresh;
+        }
         let _ = window.update(cx, |_, window, cx| {
             window.push_notification(note, cx);
             if active && let Some(offer) = offer {
@@ -625,7 +699,9 @@ impl RepoView {
                 .disabled(!enabled)
                 .tooltip(tooltip)
                 .on_click(move |_, window, cx| {
-                    entity.update(cx, |view, cx| view.remote_command(command, window, cx));
+                    entity.update(cx, |view, cx| {
+                        view.remote_command(command, Trigger::Manual, window, cx);
+                    });
                 })
                 .child(content)
         };
@@ -711,6 +787,7 @@ impl RepoView {
     pub(crate) fn remote_command(
         &mut self,
         command: Command,
+        trigger: Trigger,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -718,7 +795,7 @@ impl RepoView {
             return;
         }
         match command {
-            Command::Fetch => self.fetch_remotes(cx),
+            Command::Fetch => self.fetch_remotes(trigger, cx),
             Command::Pull => self.pull(cx),
             Command::Push => self.push(window, cx),
         }
@@ -730,7 +807,7 @@ impl RepoView {
     /// Fetching only the current branch's remote would leave every other
     /// remote's badges stale, and prune is what stops a branch deleted on the
     /// server from keeping its remote-tracking ref forever.
-    fn fetch_remotes(&mut self, cx: &mut Context<Self>) {
+    fn fetch_remotes(&mut self, trigger: Trigger, cx: &mut Context<Self>) {
         self.start_remote(
             Operation::Fetch {
                 remote: None,
@@ -740,6 +817,7 @@ impl RepoView {
             t!("remote.fetched_all").to_string(),
             None,
             None,
+            trigger,
             cx,
         );
     }
@@ -758,6 +836,7 @@ impl RepoView {
             t!("remote.fetched_full").to_string(),
             None,
             None,
+            Trigger::Manual,
             cx,
         );
     }
@@ -780,6 +859,7 @@ impl RepoView {
             pull_message(upstream),
             None,
             None,
+            Trigger::Manual,
             cx,
         );
     }
@@ -815,6 +895,7 @@ impl RepoView {
                     success,
                     retry,
                     pull_request_branch,
+                    Trigger::Manual,
                     cx,
                 );
             }
@@ -899,6 +980,7 @@ impl RepoView {
             success,
             retry,
             pull_request_branch,
+            Trigger::Manual,
             cx,
         );
     }
@@ -918,10 +1000,12 @@ impl RepoView {
             // A rejected lease is reported, not offered again.
             None,
             None,
+            Trigger::Manual,
             cx,
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn start_remote(
         &mut self,
         operation: Operation,
@@ -929,6 +1013,7 @@ impl RepoView {
         success: String,
         retry: Option<ForceOffer>,
         pull_request_branch: Option<String>,
+        trigger: Trigger,
         cx: &mut Context<Self>,
     ) {
         let Some(session) = self.session.as_ref() else {
@@ -939,6 +1024,7 @@ impl RepoView {
         self.remote.running = Some(Running {
             id,
             kind,
+            trigger,
             success,
             retry,
             pull_request_branch,
@@ -1339,6 +1425,110 @@ mod tests {
         assert!(
             fetch_tooltip(None).contains(&shortcut('F')),
             "an enabled button names its key"
+        );
+    }
+
+    fn running(id: u64, trigger: Trigger) -> Running {
+        Running {
+            id: OperationId(id),
+            kind: Kind::Fetch,
+            trigger,
+            success: String::new(),
+            retry: None,
+            pull_request_branch: None,
+            text: None,
+            percent: None,
+        }
+    }
+
+    #[test]
+    fn an_automatic_fetch_notifies_once_per_failing_streak() {
+        let mut streak = FailureStreak::default();
+        assert!(
+            !streak.announces(Trigger::Automatic, Kind::Fetch, false),
+            "a fetch on a timer stays quiet when it works"
+        );
+        assert!(streak.announces(Trigger::Automatic, Kind::Fetch, true));
+        assert!(
+            !streak.announces(Trigger::Automatic, Kind::Fetch, true),
+            "later failures in the same streak are not announced"
+        );
+
+        // A successful fetch, automatic here, ends the streak.
+        assert!(!streak.announces(Trigger::Automatic, Kind::Fetch, false));
+        assert!(
+            streak.announces(Trigger::Automatic, Kind::Fetch, true),
+            "the first failure after a success is announced again"
+        );
+        assert!(!streak.announces(Trigger::Automatic, Kind::Fetch, true));
+    }
+
+    #[test]
+    fn a_manual_command_always_reports_its_outcome() {
+        let mut streak = FailureStreak::default();
+        assert!(streak.announces(Trigger::Manual, Kind::Fetch, false));
+        assert!(streak.announces(Trigger::Manual, Kind::Fetch, true));
+        assert!(streak.announces(Trigger::Manual, Kind::Fetch, true));
+        assert!(
+            !streak.announces(Trigger::Automatic, Kind::Fetch, true),
+            "a manual failure already announced this streak"
+        );
+    }
+
+    #[test]
+    fn a_successful_pull_does_not_reset_the_fetch_streak() {
+        let mut streak = FailureStreak::default();
+        assert!(streak.announces(Trigger::Automatic, Kind::Fetch, true));
+        assert!(streak.announces(Trigger::Manual, Kind::Pull, false));
+        assert!(
+            !streak.announces(Trigger::Automatic, Kind::Fetch, true),
+            "only a successful fetch says the remote is reachable again"
+        );
+    }
+
+    #[test]
+    fn an_automatic_fetch_never_opens_a_credential_prompt() {
+        let automatic = Remote {
+            running: Some(running(1, Trigger::Automatic)),
+            ..Remote::default()
+        };
+        assert!(automatic.cancels_prompt(OperationId(1)));
+        assert!(
+            !automatic.cancels_prompt(OperationId(2)),
+            "another operation's prompt is still the user's to answer"
+        );
+
+        let manual = Remote {
+            running: Some(running(1, Trigger::Manual)),
+            ..Remote::default()
+        };
+        assert!(
+            !manual.cancels_prompt(OperationId(1)),
+            "a manual Fetch keeps prompting as before"
+        );
+    }
+
+    #[test]
+    fn an_automatic_auth_failure_says_to_fetch_manually() {
+        let line = "fatal: could not read Username: terminal prompts disabled";
+        let automatic = failure_detail(Trigger::Automatic, Failure::Auth, line);
+        assert!(
+            automatic.starts_with(line),
+            "git's own line is kept: {automatic}"
+        );
+        assert!(
+            automatic.contains("Run Fetch manually"),
+            "the automatic failure points at the manual command: {automatic}"
+        );
+        assert_eq!(
+            failure_detail(Trigger::Manual, Failure::Auth, line),
+            failure_message(Failure::Auth, line),
+            "a manual failure keeps its existing hint"
+        );
+        assert_eq!(
+            failure_detail(Trigger::Automatic, Failure::Other, line),
+            line,
+            "only a credential failure needs the manual hint"
         );
     }
 }

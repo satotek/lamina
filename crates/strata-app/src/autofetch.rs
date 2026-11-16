@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{AnyWindowHandle, Context, Task};
 
-use crate::remote::Command;
+use crate::remote::{Command, Trigger};
 use crate::repo_view::RepoView;
 use crate::settings::Settings;
 
@@ -64,7 +64,7 @@ pub(crate) fn start(
                     if busy {
                         return false;
                     }
-                    view.remote_command(Command::Fetch, window, cx);
+                    view.remote_command(Command::Fetch, Trigger::Automatic, window, cx);
                     true
                 })
                 .unwrap_or(false)

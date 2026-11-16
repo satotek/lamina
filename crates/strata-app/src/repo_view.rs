@@ -1438,6 +1438,14 @@ impl RepoView {
         let Some(session) = self.session.as_ref() else {
             return;
         };
+        // An automatic fetch must never wait on a person: cancelling the prompt
+        // makes git fail with its own authentication message, and the failure
+        // notification points at a manual Fetch. Asking here would leave a
+        // modal nobody asked for.
+        if self.remote.cancels_prompt(id) {
+            session.answer_askpass(id, None);
+            return;
+        }
         let Some(window) = self.window_handle else {
             session.answer_askpass(id, None);
             return;

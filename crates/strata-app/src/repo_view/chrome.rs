@@ -31,7 +31,7 @@ use crate::branches::CreateBranchFromHead;
 use crate::commands::RunCustomCommand;
 use crate::data::Source;
 use crate::pull_requests::{CheckoutPullRequest, RefreshPullRequests};
-use crate::remote::{Command, FetchRemotes, PullBranch, PushBranch};
+use crate::remote::{Command, FetchRemotes, PullBranch, PushBranch, Trigger};
 use crate::search::{FocusSearch, SearchDismiss, SearchNext, SearchPrevious, SearchSubmit};
 use crate::settings::Settings;
 use crate::style::{self, Design};
@@ -142,13 +142,13 @@ impl Render for RepoView {
                 this.open_branch_switcher(window, cx)
             }))
             .on_action(cx.listener(|this, _: &FetchRemotes, window, cx| {
-                this.remote_command(Command::Fetch, window, cx)
+                this.remote_command(Command::Fetch, Trigger::Manual, window, cx)
             }))
             .on_action(cx.listener(|this, _: &PullBranch, window, cx| {
-                this.remote_command(Command::Pull, window, cx)
+                this.remote_command(Command::Pull, Trigger::Manual, window, cx)
             }))
             .on_action(cx.listener(|this, _: &PushBranch, window, cx| {
-                this.remote_command(Command::Push, window, cx)
+                this.remote_command(Command::Push, Trigger::Manual, window, cx)
             }))
             .on_action(cx.listener(|this, _: &RefreshPullRequests, _, cx| {
                 this.refresh_pull_requests_command(cx)
