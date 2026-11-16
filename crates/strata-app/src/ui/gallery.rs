@@ -23,13 +23,17 @@ use crate::style::{self, Design};
 
 pub struct Gallery {
     focus: FocusHandle,
+    tab_strip_scroll: gpui::ScrollHandle,
 }
 
 impl Gallery {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        Self { focus }
+        Self {
+            focus,
+            tab_strip_scroll: gpui::ScrollHandle::default(),
+        }
     }
 }
 
@@ -381,7 +385,7 @@ impl Render for Gallery {
         column = column.child(section(
             "Tabs",
             &design,
-            tab_strip("gallery-tab-strip", &design)
+            tab_strip("gallery-tab-strip", &design, &self.tab_strip_scroll)
                 .border_1()
                 .rounded(design.px(6.0))
                 .child(

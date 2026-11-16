@@ -17,8 +17,8 @@ use std::path::{Path, PathBuf};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, BorrowAppContext as _, Bounds, Context, Entity, Global,
-    InteractiveElement as _, IntoElement, ParentElement, Render, Styled, Subscription, Window,
-    WindowBounds, WindowDecorations, WindowId, WindowOptions, div, px, size,
+    InteractiveElement as _, IntoElement, ParentElement, Render, ScrollHandle, Styled,
+    Subscription, Window, WindowBounds, WindowDecorations, WindowId, WindowOptions, div, px, size,
 };
 use gpui_component::dialog::DialogFooter;
 use gpui_component::{Root, TitleBar, WindowExt as _};
@@ -258,6 +258,16 @@ pub struct Workspace {
     /// welcome screen has no view of its own to do that, so the workspace
     /// keeps the subscription while it is showing one.
     _appearance: Option<Subscription>,
+    /// The appearance last applied to the theme. A settings change that only
+    /// touched something else must not reload the palette and refresh every
+    /// window again.
+    appearance: crate::settings::Appearance,
+    /// Repaints the workspace (and, through the theme, its window) when the
+    /// appearance changes in another window, such as the settings window.
+    _settings: Option<Subscription>,
+    /// Horizontal offset of the repository tab strip, so the active tab can be
+    /// revealed after a change even when the strip scrolled it out of view.
+    tab_strip_scroll: ScrollHandle,
     /// Overrides the recent-list and session directory in tests so test runs
     /// never mutate the user's real config files or depend on global env vars.
     #[cfg(test)]
@@ -362,11 +372,23 @@ impl Workspace {
 
         let window_id = window.window_handle().window_id();
         track_window_release(&cx.entity(), cx);
+        let appearance = Settings::get(cx).appearance.clone();
+        let settings = cx.observe_global::<Settings>(|this, cx| {
+            let next = Settings::get(cx).appearance.clone();
+            if next != this.appearance {
+                this.appearance = next;
+                crate::settings::apply_theme(None, cx);
+            }
+            cx.notify();
+        });
 
         let workspace = Self {
             content: Content::Tabs(deck),
             // Repository views manage window appearance subscriptions on their own.
             _appearance: None,
+            appearance,
+            _settings: Some(settings),
+            tab_strip_scroll: ScrollHandle::default(),
             window_id,
             closed_tabs: ClosedTabStack::default(),
             #[cfg(test)]
@@ -410,6 +432,15 @@ impl Workspace {
             .observe_window_appearance(|window, cx| crate::settings::apply_theme(Some(window), cx));
         let window_id = window.window_handle().window_id();
         track_window_release(&cx.entity(), cx);
+        let current_appearance = Settings::get(cx).appearance.clone();
+        let settings = cx.observe_global::<Settings>(|this, cx| {
+            let next = Settings::get(cx).appearance.clone();
+            if next != this.appearance {
+                this.appearance = next;
+                crate::settings::apply_theme(None, cx);
+            }
+            cx.notify();
+        });
 
         Self {
             content: Content::Tabs(TabDeck::from_items(
@@ -419,6 +450,9 @@ impl Workspace {
             window_id,
             closed_tabs: ClosedTabStack::default(),
             _appearance: Some(appearance),
+            appearance: current_appearance,
+            _settings: Some(settings),
+            tab_strip_scroll: ScrollHandle::default(),
             #[cfg(test)]
             recent_dir: None,
             #[cfg(test)]
@@ -434,11 +468,23 @@ impl Workspace {
         window.set_window_title(&t!("app.name"));
         let window_id = window.window_handle().window_id();
         track_window_release(&cx.entity(), cx);
+        let current_appearance = Settings::get(cx).appearance.clone();
+        let settings = cx.observe_global::<Settings>(|this, cx| {
+            let next = Settings::get(cx).appearance.clone();
+            if next != this.appearance {
+                this.appearance = next;
+                crate::settings::apply_theme(None, cx);
+            }
+            cx.notify();
+        });
         Self {
             content: Content::Welcome(view),
             window_id,
             closed_tabs: ClosedTabStack::default(),
             _appearance: Some(appearance),
+            appearance: current_appearance,
+            _settings: Some(settings),
+            tab_strip_scroll: ScrollHandle::default(),
             #[cfg(test)]
             recent_dir: None,
             #[cfg(test)]
@@ -649,6 +695,9 @@ impl Workspace {
                     parents: NavigationStack::default(),
                 }));
             }
+            if let Content::Tabs(deck) = &self.content {
+                self.reveal_tab(deck.active_index());
+            }
             window.set_window_title(&title);
             if let Some(path) = &slot_path {
                 self.record_recent(path);
@@ -712,6 +761,7 @@ impl Workspace {
             }
             options.push(RevisionOption {
                 spec: reference.short_name.clone(),
+                display: reference.short_name.clone(),
                 label: format!(
                     "{} ({})",
                     reference.short_name,
@@ -726,17 +776,20 @@ impl Workspace {
             };
             options.push(RevisionOption {
                 spec: commit.id.to_string(),
+                display: format!("{} {}", crate::data::short_oid(commit.id), commit.summary),
                 label: format!("{} {}", crate::data::short_oid(commit.id), commit.summary),
                 side: strata_core::compare::RepoCompareSide::Commit(commit.id),
             });
         }
         options.push(RevisionOption {
             spec: t!("compare.staged").to_string(),
+            display: t!("compare.staged").to_string(),
             label: t!("compare.staged").to_string(),
             side: strata_core::compare::RepoCompareSide::Index,
         });
         options.push(RevisionOption {
             spec: t!("compare.working_tree").to_string(),
+            display: t!("compare.working_tree").to_string(),
             label: t!("compare.working_tree").to_string(),
             side: strata_core::compare::RepoCompareSide::Worktree,
         });
@@ -876,6 +929,9 @@ impl Workspace {
                 }
                 deck.open(slot);
             }
+        }
+        if let Content::Tabs(deck) = &self.content {
+            self.reveal_tab(deck.active_index());
         }
         window.set_window_title(&title);
         self.persist_session(cx);
@@ -1047,6 +1103,9 @@ impl Workspace {
 
         // A new view syncs the title only when it differs from the one it
         // was built with, so the swap has to set the window title itself.
+        if let Content::Tabs(deck) = &self.content {
+            self.reveal_tab(deck.active_index());
+        }
         window.set_window_title(&title);
         if let Some(path) = &path {
             self.record_recent(path);
@@ -1135,6 +1194,14 @@ impl Workspace {
             let title = new_slot.window_title(cx);
             window.set_window_title(&title);
         }
+        self.reveal_tab(new_active);
+    }
+
+    /// Scrolls the strip so the tab at `index` is visible. The strip keeps its
+    /// own offset, so a tab opened or activated from a shortcut can be reached
+    /// even after the user scrolled the strip.
+    fn reveal_tab(&self, index: usize) {
+        crate::ui::reveal_tab(&self.tab_strip_scroll, index);
     }
 
     pub(crate) fn reorder_tab(
@@ -1187,6 +1254,7 @@ impl Workspace {
                     let focus = new_slot.view_focus(cx);
                     window.defer(cx, move |window, cx| focus.focus(window, cx));
                 }
+                self.reveal_tab(new_active);
                 self.persist_session(cx);
                 self.refresh_tab_strip(cx);
             }
@@ -1242,6 +1310,7 @@ impl Workspace {
             if let Some(path) = &path {
                 self.record_recent(path);
             }
+            self.reveal_tab(inserted);
             self.persist_session(cx);
             self.refresh_tab_strip(cx);
             if let Content::Tabs(deck) = &self.content
@@ -1327,7 +1396,7 @@ impl Workspace {
             .collect::<Vec<_>>();
 
         Some(
-            crate::ui::tab_strip("repo-tab-strip", design)
+            crate::ui::tab_strip("repo-tab-strip", design, &ws.tab_strip_scroll)
                 .children(tabs)
                 .into_any_element(),
         )
@@ -3023,6 +3092,10 @@ mod tests {
         visual_cx.update(|window, cx| {
             window.draw(cx).clear(cx);
         });
+        assert!(
+            visual_cx.debug_bounds("shared-hscrollbar").is_some(),
+            "wide lines get a shared horizontal scrollbar under the panes"
+        );
 
         let pane = visual_cx
             .debug_bounds("compare-3way-left")

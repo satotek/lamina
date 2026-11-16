@@ -15,7 +15,8 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, ClickEvent, Context, Div, ElementId, FontWeight, Hsla,
     InteractiveElement as _, IntoElement, MouseButton, ParentElement as _, Render, RenderOnce,
-    SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Window, div, px,
+    ScrollHandle, SharedString, Stateful, StatefulInteractiveElement as _, Styled as _, Window,
+    div, px,
 };
 use gpui_component::ActiveTheme as _;
 use gpui_component::tooltip::Tooltip;
@@ -56,18 +57,32 @@ impl Render for DraggedTab {
 }
 
 /// The horizontal container sitting directly below the title bar when
-/// multiple repository tabs are open.
-pub fn tab_strip(id: impl Into<ElementId>, design: &Design) -> Stateful<Div> {
-    tab_strip_sized(id, TAB_STRIP_HEIGHT, design).px_2()
+/// multiple repository tabs are open. `scroll` lets the caller reveal the
+/// active tab and survives re-renders, so the strip keeps its offset.
+pub fn tab_strip(
+    id: impl Into<ElementId>,
+    design: &Design,
+    scroll: &ScrollHandle,
+) -> Stateful<Div> {
+    tab_strip_sized(id, TAB_STRIP_HEIGHT, design, scroll).px_2()
 }
 
 /// A slimmer horizontal tab strip for panel headers such as the terminal panel.
 #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
-pub fn compact_tab_strip(id: impl Into<ElementId>, design: &Design) -> Stateful<Div> {
-    tab_strip_sized(id, COMPACT_TAB_STRIP_HEIGHT, design).px_1()
+pub fn compact_tab_strip(
+    id: impl Into<ElementId>,
+    design: &Design,
+    scroll: &ScrollHandle,
+) -> Stateful<Div> {
+    tab_strip_sized(id, COMPACT_TAB_STRIP_HEIGHT, design, scroll).px_1()
 }
 
-fn tab_strip_sized(id: impl Into<ElementId>, height: f32, design: &Design) -> Stateful<Div> {
+fn tab_strip_sized(
+    id: impl Into<ElementId>,
+    height: f32,
+    design: &Design,
+    scroll: &ScrollHandle,
+) -> Stateful<Div> {
     div()
         .id(id)
         .relative()
@@ -77,6 +92,7 @@ fn tab_strip_sized(id: impl Into<ElementId>, height: f32, design: &Design) -> St
         .h(design.px(height))
         .w_full()
         .overflow_x_scroll()
+        .track_scroll(scroll)
         .bg(design.chrome)
         // Drawn before the tabs, so an opaque tab fill hides the rule under
         // itself while the transparent inactive ones show it through.
@@ -89,6 +105,15 @@ fn tab_strip_sized(id: impl Into<ElementId>, height: f32, design: &Design) -> St
                 .h(px(1.0))
                 .bg(design.border),
         )
+}
+
+/// Scrolls the tab at `index` into view.
+///
+/// [`tab_strip`] paints its bottom rule as the first child of the scroll
+/// container, so a tab's index in the handle's child list is one past its
+/// deck index.
+pub fn reveal_tab(scroll: &ScrollHandle, index: usize) {
+    scroll.scroll_to_item(index + 1);
 }
 
 #[derive(Clone, Copy)]
@@ -254,27 +279,35 @@ impl RenderOnce for UiTab {
         let group: SharedString = format!("{scope}-group-{index}").into();
         let label = self.label.clone();
 
+        // A tab shrinks before the strip scrolls, down to a width that still
+        // shows a few characters and the close button; the label ellipsizes
+        // in between. `flex_none` made eight tabs wider than the minimum
+        // window, so the last ones were unreachable.
         let (height, min_w, max_w, gap, font_size, close_box) = if self.compact {
             (
                 COMPACT_TAB_STRIP_HEIGHT,
-                72.0,
+                64.0,
                 180.0,
                 4.0,
                 colors.font_size - 0.5 * colors.zoom,
                 16.0,
             )
         } else {
-            (TAB_STRIP_HEIGHT, 96.0, 220.0, 6.0, colors.font_size, 18.0)
+            (TAB_STRIP_HEIGHT, 80.0, 220.0, 6.0, colors.font_size, 18.0)
         };
 
         // The transparent top border reserves the accent line's 2 px so the
         // label does not move when the tab becomes active.
         let mut tab = div()
             .id(self.id)
+            .debug_selector({
+                let name = format!("{scope}-tab-{index}");
+                move || name.clone()
+            })
             .group(group.clone())
             .relative()
             .flex()
-            .flex_none()
+            .flex_shrink(1.0)
             .items_center()
             .gap(colors.px(gap))
             .h(colors.px(height))
@@ -395,6 +428,10 @@ impl RenderOnce for UiTab {
         if let Some(on_close) = self.on_close {
             let close = div()
                 .id((SharedString::from(format!("{scope}-close")), index))
+                .debug_selector({
+                    let name = format!("{scope}-close-{index}");
+                    move || name.clone()
+                })
                 .flex()
                 .flex_none()
                 .items_center()
@@ -510,6 +547,113 @@ mod tests {
             path_hint_in(path, Some(home)),
             "~/nine/strata",
             "a hint that already fits is not cut"
+        );
+    }
+
+    struct StripHarness {
+        scroll: ScrollHandle,
+        design: Design,
+        tabs: usize,
+        active: usize,
+    }
+
+    impl Render for StripHarness {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            let tabs = (0..self.tabs)
+                .map(|index| {
+                    tab(
+                        ("harness-tab", index),
+                        index,
+                        format!("repository with a long name {index}"),
+                        index == self.active,
+                        &self.design,
+                    )
+                    .always_show_close(true)
+                    .on_close(|_, _| {})
+                })
+                .collect::<Vec<_>>();
+            div()
+                .debug_selector(|| "harness-root".to_string())
+                .size_full()
+                .child(tab_strip("harness-strip", &self.design, &self.scroll).children(tabs))
+        }
+    }
+
+    #[gpui::test]
+    fn the_strip_shrinks_tabs_and_reveals_the_active_one(cx: &mut gpui::TestAppContext) {
+        use gpui::{Bounds, WindowBounds, WindowOptions, point, size};
+
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            gpui_component::init(cx);
+            cx.set_global(Settings::default());
+        });
+
+        let harness_init = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let harness_in_window = harness_init.clone();
+        let window = cx
+            .update(|cx| {
+                cx.open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                            point(px(0.0), px(0.0)),
+                            size(px(480.0), px(200.0)),
+                        ))),
+                        ..Default::default()
+                    },
+                    move |_window, cx| {
+                        let design = Design::new(cx.theme(), Settings::get(cx));
+                        let entity = cx.new(|_| StripHarness {
+                            scroll: ScrollHandle::default(),
+                            design,
+                            tabs: 16,
+                            active: 15,
+                        });
+                        *harness_in_window.borrow_mut() = Some(entity.clone());
+                        entity
+                    },
+                )
+            })
+            .expect("open window");
+        let mut visual_cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual_cx.run_until_parked();
+        // The first frame lays the strip out; revealing afterwards is the same
+        // path a tab switch or a newly opened tab takes.
+        visual_cx.update(|_, cx| {
+            let harness = harness_init.borrow().clone().expect("harness");
+            let handle = harness.read(cx).scroll.clone();
+            reveal_tab(&handle, 15);
+        });
+        visual_cx.run_until_parked();
+        visual_cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+
+        let tab_bounds = visual_cx
+            .debug_bounds("ui-tab-tab-15")
+            .expect("the active tab is painted");
+        assert!(
+            tab_bounds.size.width.as_f32() >= 80.0,
+            "a tab stops at its minimum width before the strip scrolls: {tab_bounds:?}"
+        );
+        let close = visual_cx
+            .debug_bounds("ui-tab-close-15")
+            .expect("the active tab's close button is painted");
+        let root = visual_cx
+            .debug_bounds("harness-root")
+            .expect("the harness root is painted");
+        let scroll_state = visual_cx.update(|_, cx| {
+            let harness = harness_init.borrow().clone().expect("harness");
+            let handle = &harness.read(cx).scroll;
+            (
+                f32::from(handle.offset().x),
+                f32::from(handle.max_offset().x),
+                handle.children_count(),
+            )
+        });
+        assert!(
+            close.right() <= root.right() && close.left() >= root.left(),
+            "the active tab's close button has to stay inside the strip: {close:?} in {root:?}, scroll {scroll_state:?}"
         );
     }
 }

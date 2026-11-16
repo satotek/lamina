@@ -19,8 +19,8 @@ use gpui::{
     AnyElement, App, Bounds, ClipboardItem, Context, EntityInputHandler, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, Keystroke, Modifiers,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, NavigationDirection, NoAction,
-    ParentElement as _, Pixels, Point, Render, ScrollDelta, ScrollEvent, SharedString, Size,
-    Styled as _, Subscription, Task, UTF16Selection, Window, div, px,
+    ParentElement as _, Pixels, Point, Render, ScrollDelta, ScrollEvent, ScrollHandle,
+    SharedString, Size, Styled as _, Subscription, Task, UTF16Selection, Window, div, px,
 };
 use gpui_component::ActiveTheme as _;
 use gpui_kit_assets::IconName;
@@ -219,6 +219,9 @@ pub struct TerminalPanel {
     /// Whether a new shell waits until the panel has been laid out before it
     /// starts, so it spawns at the real grid size rather than the placeholder.
     spawn_awaits_bounds: bool,
+    /// Horizontal offset of the tab strip, so the active tab stays reachable
+    /// once the tabs no longer fit the panel width.
+    tab_strip_scroll: ScrollHandle,
     _subscriptions: Vec<Subscription>,
     #[cfg(test)]
     quiet: bool,
@@ -359,6 +362,7 @@ impl TerminalPanel {
             last_bounds: None,
             last_theme: Some(theme.clone()),
             spawn_awaits_bounds,
+            tab_strip_scroll: ScrollHandle::default(),
             _subscriptions: vec![in_sub, out_sub, appearance_sub, settings_sub],
             #[cfg(test)]
             quiet,
@@ -547,7 +551,12 @@ impl TerminalPanel {
 
         let tab = TerminalTab::new(id, number, self.cols, self.rows);
         self.tabs.open(tab);
+        self.reveal_tab(self.tabs.active_index());
         self.spawn_session_for_tab(id, theme, focused, cx);
+    }
+
+    fn reveal_tab(&self, index: usize) {
+        ui::reveal_tab(&self.tab_strip_scroll, index);
     }
 
     /// Switches to the terminal tab at `index` and returns keyboard focus to the PTY.
@@ -573,6 +582,7 @@ impl TerminalPanel {
                 }
             }
         }
+        self.reveal_tab(self.tabs.active_index());
         window.focus(&self.focus_handle, cx);
         cx.notify();
     }
@@ -599,6 +609,7 @@ impl TerminalPanel {
                     session.focus_changed(true);
                 }
             }
+            self.reveal_tab(self.tabs.active_index());
             cx.notify();
         }
         window.focus(&self.focus_handle, cx);
@@ -626,6 +637,7 @@ impl TerminalPanel {
                         session.focus_changed(true);
                     }
                 }
+                self.reveal_tab(self.tabs.active_index());
                 window.focus(&self.focus_handle, cx);
                 cx.notify();
             }
@@ -1322,7 +1334,7 @@ impl TerminalPanel {
             // out of the panel; here it only takes what its tabs need and
             // shrinks (scrolling) when they do not fit.
             .child(
-                ui::compact_tab_strip("terminal-tab-strip", design)
+                ui::compact_tab_strip("terminal-tab-strip", design, &self.tab_strip_scroll)
                     .w_auto()
                     .flex_shrink(1.0)
                     .min_w_0()
