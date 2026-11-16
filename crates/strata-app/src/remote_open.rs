@@ -132,6 +132,37 @@ pub(crate) fn tab_title(host: &str, path: &str) -> String {
     format!("{host}:{repo}")
 }
 
+/// The embedded terminal's tab title. The local tab strip has room for the
+/// whole path, and the path is what tells two terminals on one host apart.
+#[cfg(feature = "terminal")]
+pub(crate) fn terminal_tab_title(spec: &RemoteSpec) -> String {
+    format!("{}:{}", spec.host, spec.path)
+}
+
+/// The `ssh` a tab dials with. The terminal runs the same one, so a test that
+/// points the session at a script reaches the terminal too.
+pub(crate) fn ssh_program(ssh: Option<&SshOverride>) -> PathBuf {
+    match ssh {
+        Some(ssh) => ssh.program.clone(),
+        None => PathBuf::from("ssh"),
+    }
+}
+
+/// The program and arguments the embedded terminal runs for a remote tab: the
+/// session's own `ssh` invocation, with a tty and a remote command that enters
+/// the repository and becomes the host's login shell.
+#[cfg(feature = "terminal")]
+pub(crate) fn terminal_command(
+    spec: &RemoteSpec,
+    ssh: Option<&SshOverride>,
+) -> (String, Vec<String>) {
+    let program = ssh_program(ssh);
+    let argv = strata_remote_client::terminal_argv(&program, spec.port, &spec.host, &spec.path);
+    let mut parts = argv.iter().map(|part| part.to_string_lossy().into_owned());
+    let program = parts.next().unwrap_or_default();
+    (program, parts.collect())
+}
+
 pub(crate) fn is_stored_remote(path: &Path) -> bool {
     path.to_string_lossy().starts_with("ssh://")
 }
@@ -223,10 +254,11 @@ pub(crate) fn spawn_connect(
 
 fn connect_worker(spec: RemoteSpec, ssh: Option<SshOverride>, sender: UnboundedSender<ConnectMsg>) {
     let _ = sender.unbounded_send(ConnectMsg::Phase(ConnectPhase::Connecting));
-    let (program, helper_dir) = match ssh {
-        Some(ssh) => (ssh.program, ssh.helper_dir),
+    let program = ssh_program(ssh.as_ref());
+    let helper_dir = match ssh.as_ref() {
+        Some(ssh) => ssh.helper_dir.clone(),
         None => match resolve_helper_dir() {
-            Ok(dir) => (PathBuf::from("ssh"), dir),
+            Ok(dir) => dir,
             Err(error) => {
                 let _ = sender.unbounded_send(ConnectMsg::Failed(error));
                 return;
@@ -600,5 +632,39 @@ mod tests {
             "git@example.com:repo"
         );
         assert_eq!(tab_title("alias", "~/repo"), "alias:repo");
+    }
+
+    #[cfg(feature = "terminal")]
+    #[test]
+    fn the_terminal_runs_the_sessions_ssh_with_a_login_shell() {
+        let target = spec("git@example.com", Some(2222), "/srv/my repo");
+        let ssh = SshOverride {
+            program: PathBuf::from("/opt/fake-ssh"),
+            helper_dir: PathBuf::from("/tmp/helpers"),
+        };
+        let (program, args) = terminal_command(&target, Some(&ssh));
+        assert_eq!(
+            program, "/opt/fake-ssh",
+            "a test override has to reach the terminal as well"
+        );
+        assert_eq!(args[0], "-t");
+        assert!(args.contains(&"2222".to_owned()));
+        assert!(args.contains(&"git@example.com".to_owned()));
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some("cd '/srv/my repo' && exec \"$SHELL\" -l")
+        );
+
+        assert_eq!(terminal_command(&target, None).0, "ssh");
+        assert_eq!(ssh_program(None), PathBuf::from("ssh"));
+    }
+
+    #[cfg(feature = "terminal")]
+    #[test]
+    fn the_terminal_tab_title_names_the_host_and_the_whole_path() {
+        assert_eq!(
+            terminal_tab_title(&spec("git@example.com", None, "/srv/my repo")),
+            "git@example.com:/srv/my repo"
+        );
     }
 }

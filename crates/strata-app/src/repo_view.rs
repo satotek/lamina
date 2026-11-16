@@ -28,6 +28,8 @@ mod rebase_dialog;
 pub(crate) mod rebase_onto;
 mod rebase_plan;
 mod reflog;
+#[cfg(all(test, unix))]
+mod remote_fixture;
 mod remote_tab;
 mod selection_diff;
 mod sidebar;
@@ -1078,7 +1080,10 @@ impl RepoView {
     #[cfg(feature = "terminal")]
     pub(crate) fn terminal_working_dir(&self) -> Option<PathBuf> {
         if self.is_ssh() {
-            return None;
+            // The `ssh` process runs on this machine, so the panel needs a
+            // local directory; the remote command is what enters the
+            // repository. No command means no connection to run it against.
+            return self.remote_terminal_command().map(|_| std::env::temp_dir());
         }
         self.work_dir().or_else(|| {
             self.session
@@ -1089,9 +1094,6 @@ impl RepoView {
 
     #[cfg(feature = "terminal")]
     pub(crate) fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.refuse_if_ssh(cx) {
-            return;
-        }
         if self.terminal_open {
             self.close_terminal_with_reason(
                 crate::terminal_panel::TerminalCloseReason::Hide,
@@ -1100,6 +1102,12 @@ impl RepoView {
             );
             return;
         }
+        self.open_terminal_panel(window, cx);
+    }
+
+    /// Shows the terminal panel, creating it when this tab has none yet.
+    #[cfg(feature = "terminal")]
+    pub(crate) fn open_terminal_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.error.is_some() {
             return;
         }
@@ -1112,8 +1120,13 @@ impl RepoView {
         }
         if self.terminal.is_none() {
             let Some(dir) = self.terminal_working_dir() else {
+                if self.is_ssh() {
+                    self.status_note = Some(t!("title_bar.not_connected").to_string());
+                    self.notify_if_active(cx);
+                }
                 return;
             };
+            let command = self.remote_terminal_command();
             let parent_focus = self.focus.clone();
             let weak = self.entity.clone();
             let on_close: crate::terminal_panel::CloseHandler =
@@ -1135,13 +1148,23 @@ impl RepoView {
                         cx,
                     );
                 }
-                crate::terminal_panel::TerminalPanel::new(
-                    dir,
-                    parent_focus,
-                    Some(on_close),
-                    window,
-                    cx,
-                )
+                match command {
+                    Some(command) => crate::terminal_panel::TerminalPanel::new_with_command(
+                        dir,
+                        command,
+                        parent_focus,
+                        Some(on_close),
+                        window,
+                        cx,
+                    ),
+                    None => crate::terminal_panel::TerminalPanel::new(
+                        dir,
+                        parent_focus,
+                        Some(on_close),
+                        window,
+                        cx,
+                    ),
+                }
             });
             self.terminal = Some(panel);
         }
