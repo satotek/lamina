@@ -1,6 +1,10 @@
 //! The status bar: what runs now, the last git command and the last error.
 
-use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, div, px};
+use gpui::{
+    AnyElement, Context, InteractiveElement as _, IntoElement, ParentElement,
+    StatefulInteractiveElement as _, Styled, div, px,
+};
+use gpui_component::tooltip::Tooltip;
 
 use std::time::{Duration, Instant};
 
@@ -198,6 +202,23 @@ impl RepoView {
         // command log and last-error slots.
         if let Some(operation) = operation {
             bar = bar.child(operation);
+        }
+        if let Some(quality) = self.connection_quality() {
+            let slow = quality.slow;
+            let mut chip = div()
+                .id("status-rtt")
+                .flex_none()
+                .text_color(if slow {
+                    design.remove_text
+                } else {
+                    design.remote_text
+                })
+                .child(quality.label);
+            if slow {
+                let tip = t!("status.ssh_slow_tooltip").to_string();
+                chip = chip.tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx));
+            }
+            bar = bar.child(chip);
         }
         bar.child(
             div()

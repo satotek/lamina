@@ -7,6 +7,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::compare::{RepoCompareFile, RepoCompareSide, ThreeWayTreeCompare};
 use crate::git_cli::{CommandLog, Git};
@@ -344,6 +345,14 @@ pub trait RepositorySession: Send {
     fn history_scope(&self) -> HistoryScope;
     fn set_hidden_refs(&self, refs: Vec<String>);
     fn hidden_refs(&self) -> Vec<String>;
+
+    /// Idle round trip of a remote connection, once a probe has been answered.
+    ///
+    /// A local session has nothing to time. A lost connection returns `None`
+    /// so the last sample is not shown beside the reconnect banner.
+    fn connection_rtt(&self) -> Option<Duration> {
+        None
+    }
 }
 
 impl RepositorySession for Session {

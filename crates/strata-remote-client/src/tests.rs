@@ -3,6 +3,7 @@
 
 use std::io::{Read, Write};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -506,6 +507,10 @@ fn missed_pings_report_a_lost_connection_and_keep_the_snapshot() {
         session.snapshot().commits.complete,
         "the last snapshot stays readable"
     );
+    assert!(
+        session.connection_rtt().is_none(),
+        "a lost connection keeps no round trip"
+    );
 
     let started = Instant::now();
     let error = session.reader().head().expect_err("request after loss");
@@ -515,6 +520,87 @@ fn missed_pings_report_a_lost_connection_and_keep_the_snapshot() {
     );
     assert!(error.to_string().contains(CONNECTION_LOST), "{error}");
     drop(hold_tx);
+    peer.join().expect("peer");
+}
+
+#[test]
+fn an_answered_ping_records_the_round_trip_until_the_link_drops() {
+    let (client_read, client_write, mut peer_read, mut peer_write) = pipe();
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_peer = Arc::clone(&stop);
+    let peer = thread::spawn(move || {
+        hello(&mut peer_read, &mut peer_write);
+        accept_subscribe(&mut peer_read, &mut peer_write);
+        let (_, id) = oid_pair(8);
+        send_chunk(&mut peer_write, id, true);
+        while !stop_peer.load(Ordering::SeqCst) {
+            let Some((stream, message)) = read_msg(&mut peer_read) else {
+                return;
+            };
+            if let Message::Request(Request::Ping { nonce }) = message {
+                write_msg(
+                    &mut peer_write,
+                    stream,
+                    &Message::Response(Response::Pong { nonce }),
+                );
+            }
+        }
+    });
+
+    let (tx, rx) = mpsc::channel();
+    let session = RemoteSession::connect_with(
+        client_read,
+        client_write,
+        RemoteTarget::new("scripted"),
+        move |event| {
+            let _ = tx.send(event);
+        },
+        ClientConfig {
+            ping_interval: Duration::from_millis(40),
+            missed_pings: 3,
+            first_chunk_timeout: Duration::from_secs(5),
+        },
+    )
+    .expect("connect");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut sample = None;
+    while sample.is_none() {
+        if let Some(rtt) = session.connection_rtt() {
+            sample = Some(rtt);
+            break;
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let sample = sample.expect("an answered ping should record a round trip");
+    assert!(
+        sample < Duration::from_secs(2),
+        "round trip was not an idle probe: {sample:?}"
+    );
+
+    stop.store(true, Ordering::SeqCst);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut lost = false;
+    while Instant::now() < deadline {
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(SessionEvent::LoadFailed { error }) => {
+                assert!(error.contains(CONNECTION_LOST), "{error}");
+                lost = true;
+                break;
+            }
+            Ok(_) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(error) => panic!("connection was not reported lost: {error}"),
+        }
+    }
+    assert!(lost, "closing the helper should report the connection lost");
+    assert!(
+        session.connection_rtt().is_none(),
+        "the sample from before the drop should be gone"
+    );
     peer.join().expect("peer");
 }
 
