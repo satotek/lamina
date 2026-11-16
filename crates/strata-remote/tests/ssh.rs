@@ -81,8 +81,16 @@ fn layout(scratch: &Scratch, fake: &Fake) -> LaidOut {
 
     let lie = match fake.lie {
         Lie::Never => String::new(),
-        Lie::Once => "if [ ! -f \"$MARK\" ]; then\n  printf '%s\\n' 'protocol: 1' 'build: not-this-build'\n  touch \"$MARK\"\n  exit 0\nfi\n".to_owned(),
-        Lie::Always => "printf '%s\\n' 'protocol: 1' 'build: not-this-build'\nexit 0\n".to_owned(),
+        // The lie is a stale build of the current protocol. A protocol mismatch
+        // is a different failure and would hide the build-id check these tests cover.
+        Lie::Once => format!(
+            "if [ ! -f \"$MARK\" ]; then\n  printf '%s\\n' 'protocol: {}' 'build: not-this-build'\n  touch \"$MARK\"\n  exit 0\nfi\n",
+            strata_remote_protocol::PROTOCOL_VERSION
+        ),
+        Lie::Always => format!(
+            "printf '%s\\n' 'protocol: {}' 'build: not-this-build'\nexit 0\n",
+            strata_remote_protocol::PROTOCOL_VERSION
+        ),
     };
     let override_line = match &fake.override_path {
         Some(path) => format!(

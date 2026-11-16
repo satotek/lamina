@@ -5,7 +5,7 @@
 //! [`SessionEvent`]s. Callers wait on their own channel, so a diff that has not
 //! finished does not stop a `commit_message` or a `CancelDiff` write.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
@@ -30,7 +30,7 @@ use strata_core::{
 };
 use strata_remote_protocol::{
     self as proto, DiffOptionsDto, DiffRequestDto, ErrorKind, Event, Message, ObjectId,
-    RemoteError, Request, Response, rows_from_dto,
+    OperationDto, RemoteError, Request, Response, rows_from_dto,
 };
 
 /// Returned by every operation this slice does not carry over the wire.
@@ -120,12 +120,24 @@ pub struct RemoteSession {
     retain: Option<Box<dyn Send>>,
 }
 
+struct OpRejected {
+    error: Error,
+    /// The connection loss already emitted `OperationFinished` for this id.
+    reported: bool,
+}
+
 struct Inner {
     writer: Mutex<Option<Box<dyn Write + Send>>>,
     pending: Mutex<HashMap<u16, Sender<Response>>>,
     /// Diff requests do not wait. The stream id is how an `Error` response
     /// finds the ticket to fail.
     diff_streams: Mutex<HashMap<u16, DiffTicket>>,
+    /// `Run` does not wait. An `Error` response fails the operation; `Ok`
+    /// means later events carry the outcome.
+    operation_streams: Mutex<HashMap<u16, OperationId>>,
+    /// Operations whose `OperationFinished` has not arrived. A lost connection
+    /// finishes each of them so the UI does not stay busy.
+    inflight: Mutex<HashSet<OperationId>>,
     next_stream: AtomicU16,
     snapshot: RwLock<Arc<RepoSnapshot>>,
     /// Bumped under `park` so a waiter cannot miss the wakeup for a chunk.
@@ -219,6 +231,8 @@ impl RemoteSession {
             writer: Mutex::new(Some(Box::new(writer))),
             pending: Mutex::new(HashMap::new()),
             diff_streams: Mutex::new(HashMap::new()),
+            operation_streams: Mutex::new(HashMap::new()),
+            inflight: Mutex::new(HashSet::new()),
             next_stream: AtomicU16::new(2),
             snapshot: RwLock::new(Arc::new(empty_snapshot())),
             snapshot_note: AtomicU64::new(0),
@@ -305,6 +319,16 @@ impl RemoteSession {
             error: UNSUPPORTED.to_owned(),
         });
         QueryTicket(0)
+    }
+
+    /// Stop a mutation that was started with [`RepositorySession::run`].
+    ///
+    /// The helper kills the git child, or skips the job if it has not started.
+    /// The outcome still arrives as [`SessionEvent::OperationFinished`].
+    pub fn cancel_operation(&self, id: OperationId) {
+        let _ = self
+            .inner
+            .send_detached(Request::CancelOperation { id: id.0 });
     }
 }
 
@@ -485,6 +509,8 @@ impl Inner {
         let pending = std::mem::take(&mut *lock(&self.pending));
         drop(pending);
         let diffs = std::mem::take(&mut *lock(&self.diff_streams));
+        let _operations = std::mem::take(&mut *lock(&self.operation_streams));
+        let inflight = std::mem::take(&mut *lock(&self.inflight));
         {
             let _park = lock(&self.park);
             self.wake.notify_all();
@@ -501,6 +527,12 @@ impl Inner {
             (self.events)(SessionEvent::DiffFailed {
                 ticket,
                 error: message.clone(),
+            });
+        }
+        for id in inflight {
+            (self.events)(SessionEvent::OperationFinished {
+                id,
+                error: Some(message.clone()),
             });
         }
     }
@@ -522,7 +554,8 @@ impl Inner {
             // Separate statements so the two maps are never locked together.
             let pending = lock(&self.pending).contains_key(&id);
             let diff = lock(&self.diff_streams).contains_key(&id);
-            if !pending && !diff {
+            let operation = lock(&self.operation_streams).contains_key(&id);
+            if !pending && !diff && !operation {
                 return Ok(id);
             }
         }
@@ -568,6 +601,53 @@ impl Inner {
         }
     }
 
+    /// `Run` returns before the git command does. The stream stays registered
+    /// until the helper accepts or rejects it, so an `Error` still finds the id.
+    ///
+    /// `reported` is true when a broken write already finished the operation
+    /// through [`Inner::fail`]. The caller must not emit a second time.
+    fn send_operation(&self, id: OperationId, operation: OperationDto) -> Result<(), OpRejected> {
+        if let Err(error) = self.ensure_open() {
+            return Err(OpRejected {
+                error,
+                reported: false,
+            });
+        }
+        let stream = match self.alloc_stream() {
+            Ok(stream) => stream,
+            Err(error) => {
+                return Err(OpRejected {
+                    error,
+                    reported: false,
+                });
+            }
+        };
+        lock(&self.operation_streams).insert(stream, id);
+        lock(&self.inflight).insert(id);
+        if let Err(error) = self.write_message(
+            stream,
+            &Message::Request(Request::Run {
+                id: id.0,
+                operation,
+            }),
+        ) {
+            lock(&self.operation_streams).remove(&stream);
+            // `fail` takes the whole set and emits. If the id is still here,
+            // that did not happen and the caller has to finish it.
+            let reported = !lock(&self.inflight).remove(&id);
+            return Err(OpRejected { error, reported });
+        }
+        Ok(())
+    }
+
+    /// Emit `OperationFinished` once. The helper event and a lost connection
+    /// can both try; the second one finds the id already gone.
+    fn finish_operation(&self, id: OperationId, error: Option<String>) {
+        if lock(&self.inflight).remove(&id) {
+            (self.events)(SessionEvent::OperationFinished { id, error });
+        }
+    }
+
     /// Writes a frame and does not wait. Cancellation and diff requests use
     /// this so they return while another call is still outstanding.
     fn send_detached(&self, request: Request) -> Result<u16> {
@@ -593,6 +673,14 @@ impl Inner {
                         ticket,
                         error: error.message,
                     });
+                    return;
+                }
+                // `Ok` means later events carry the outcome. An `Error` is the
+                // outcome: the helper rejected the operation before it started.
+                if let Some(id) = lock(&self.operation_streams).remove(&frame.stream)
+                    && let Response::Error(error) = response
+                {
+                    self.finish_operation(id, Some(error.message));
                 }
             }
             Message::Event(event) => self.apply_event(event),
@@ -677,6 +765,28 @@ impl Inner {
                 error,
             }),
             Event::LoadFailed { error } => (self.events)(SessionEvent::LoadFailed { error }),
+            Event::OperationStarted { id } => {
+                (self.events)(SessionEvent::OperationStarted {
+                    id: OperationId(id),
+                });
+            }
+            Event::OperationProgress { id, text, percent } => {
+                (self.events)(SessionEvent::OperationProgress {
+                    id: OperationId(id),
+                    text,
+                    percent,
+                });
+            }
+            Event::OperationFinished { id, error } => {
+                self.finish_operation(OperationId(id), error);
+            }
+            Event::AskpassPrompt { id, prompt, secret } => {
+                (self.events)(SessionEvent::AskpassPrompt {
+                    id: OperationId(id),
+                    prompt,
+                    secret,
+                });
+            }
         }
     }
 
@@ -779,17 +889,32 @@ impl RepositorySession for RemoteSession {
         Arc::clone(&read(&self.inner.snapshot))
     }
 
-    fn run(&self, _op: Operation) -> OperationId {
+    fn run(&self, op: Operation) -> OperationId {
         let id = OperationId(self.inner.next_operation.fetch_add(1, Ordering::SeqCst) + 1);
-        self.emit(SessionEvent::OperationFinished {
-            id,
-            error: Some(UNSUPPORTED.to_owned()),
-        });
+        let Ok(operation) = OperationDto::try_from(&op) else {
+            self.emit(SessionEvent::OperationFinished {
+                id,
+                error: Some(UNSUPPORTED.to_owned()),
+            });
+            return id;
+        };
+        if let Err(rejected) = self.inner.send_operation(id, operation)
+            && !rejected.reported
+        {
+            self.emit(SessionEvent::OperationFinished {
+                id,
+                error: Some(rejected.error.to_string()),
+            });
+        }
         id
     }
 
-    fn answer_askpass(&self, _id: OperationId, _answer: Option<String>) -> bool {
-        false
+    fn answer_askpass(&self, id: OperationId, answer: Option<String>) -> bool {
+        // True when the answer was written. The helper drops it if the prompt
+        // is already gone; the modal does not retry.
+        self.inner
+            .send_detached(Request::AnswerAskpass { id: id.0, answer })
+            .is_ok()
     }
 
     fn request_diff(&self, request: DiffRequest) -> DiffTicket {
@@ -1008,12 +1133,29 @@ impl RepoReader for RemoteReader {
         }
     }
 
-    fn commits_between(&self, _base: Oid, _tip: Oid) -> Result<Vec<Oid>> {
-        Err(Error::other(UNSUPPORTED))
+    fn commits_between(&self, base: Oid, tip: Oid) -> Result<Vec<Oid>> {
+        match self.call(Request::CommitsBetween {
+            base: object_id(base),
+            tip: object_id(tip),
+        })? {
+            Response::CommitsBetween { commits } => commits
+                .into_iter()
+                .map(|commit| {
+                    Oid::try_from(commit).map_err(|error| Error::other(error.to_string()))
+                })
+                .collect(),
+            other => Err(unexpected(other)),
+        }
     }
 
-    fn is_ancestor(&self, _ancestor: Oid, _descendant: Oid) -> Result<bool> {
-        Err(Error::other(UNSUPPORTED))
+    fn is_ancestor(&self, ancestor: Oid, descendant: Oid) -> Result<bool> {
+        match self.call(Request::IsAncestor {
+            ancestor: object_id(ancestor),
+            descendant: object_id(descendant),
+        })? {
+            Response::IsAncestor { yes } => Ok(yes),
+            other => Err(unexpected(other)),
+        }
     }
 
     fn commit_message(&self, commit: Oid) -> Result<String> {
@@ -1026,7 +1168,10 @@ impl RepoReader for RemoteReader {
     }
 
     fn merge_message(&self) -> Result<Option<String>> {
-        Err(Error::other(UNSUPPORTED))
+        match self.call(Request::MergeMessage)? {
+            Response::MergeMessage { message } => Ok(message),
+            other => Err(unexpected(other)),
+        }
     }
 
     fn conflict_sides(&self, _path: &str) -> Result<ConflictSides> {
