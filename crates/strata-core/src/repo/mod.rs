@@ -61,7 +61,7 @@ pub use signature::{
     CommitSignature, SignatureConfigHints, SignatureFormat, SignatureValidity,
     classify_signature_armor,
 };
-pub use status::MAX_INCREMENTAL_PATHS;
+pub use status::{MAX_INCREMENTAL_PATHS, QuickStatus, quick_status};
 pub use submodules::{SubmoduleInfo, SubmoduleStatus};
 pub use upstream::UpstreamTarget;
 pub use worktrees::WorktreeInfo;

@@ -3,6 +3,9 @@
 use std::collections::BTreeSet;
 use std::io::{ErrorKind, Read};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use gix::bstr::{BStr, BString, ByteSlice};
 use gix::object::tree::EntryMode;
@@ -10,13 +13,53 @@ use gix::status::plumbing::index_as_worktree::{Change, EntryStatus};
 use gix::status::tree_index::TrackRenames;
 
 use super::Repo;
-use crate::{ChangeKind, Error, FileChange, Oid, Result, WorktreeStatus};
+use crate::{ChangeKind, Error, FileChange, HeadInfo, Oid, RepoState, Result, WorktreeStatus};
 
 /// Maximum number of changed paths (or affected index entries under a
 /// changed directory) handled incrementally before falling back to a full scan.
 pub const MAX_INCREMENTAL_PATHS: usize = 1000;
 
+/// Skip the dirty check above this index size so huge monorepos stay instant
+/// in the repository picker.
+const QUICK_STATUS_MAX_INDEX_ENTRIES: usize = 50_000;
+/// Cap how long a single picker row can spend scanning the worktree.
+const QUICK_STATUS_BUDGET: Duration = Duration::from_millis(150);
+
+/// Cheap repository summary shown on repository picker rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuickStatus {
+    pub head: Option<HeadInfo>,
+    pub dirty: bool,
+    pub state: RepoState,
+}
+
+/// Opens `path` and reads its [`QuickStatus`] without running any git CLI
+/// processes.
+pub fn quick_status(path: impl AsRef<Path>) -> Result<QuickStatus> {
+    Repo::open(path)?.quick_status()
+}
+
 impl Repo {
+    /// Cheap summary of HEAD, uncommitted changes, and any in-progress git
+    /// operation for the repository picker.
+    ///
+    /// Returns on the first detected change; skips the worktree scan (reporting
+    /// `dirty: false`) for bare repositories, indices larger than
+    /// `QUICK_STATUS_MAX_INDEX_ENTRIES`, or scans exceeding the time budget.
+    pub fn quick_status(&self) -> Result<QuickStatus> {
+        let head = self.head().ok();
+        let state = self.state()?;
+        let repo = self.local();
+        let index = repo.index_or_empty().map_err(Error::gix)?;
+        let dirty = if self.workdir().is_some()
+            && index.entries().len() <= QUICK_STATUS_MAX_INDEX_ENTRIES
+        {
+            quick_is_dirty(&repo, QUICK_STATUS_BUDGET)?
+        } else {
+            false
+        };
+        Ok(QuickStatus { head, dirty, state })
+    }
     /// Compare `HEAD` to the index and the index to the working tree.
     ///
     /// Conflicts live in `unstaged`: an unmerged path is not something that can be
@@ -618,10 +661,48 @@ fn matches_any_target(path: &str, targets: &[String]) -> bool {
     })
 }
 
+fn quick_is_dirty(repo: &gix::Repository, budget: Duration) -> Result<bool> {
+    let should_interrupt = Arc::new(AtomicBool::new(false));
+    let deadline = Instant::now() + budget;
+    let iter = repo
+        .status(gix::progress::Discard)
+        .map_err(Error::gix)?
+        .untracked_files(gix::status::UntrackedFiles::Collapsed)
+        .tree_index_track_renames(TrackRenames::Disabled)
+        .index_worktree_rewrites(None)
+        .index_worktree_submodules(None)
+        .should_interrupt_owned(Arc::clone(&should_interrupt))
+        .into_iter(Vec::new())
+        .map_err(Error::gix)?;
+
+    for item in iter {
+        if Instant::now() >= deadline {
+            should_interrupt.store(true, Ordering::Relaxed);
+            return Ok(false);
+        }
+        match item.map_err(Error::gix)? {
+            gix::status::Item::TreeIndex(change) => {
+                if staged_change(change).is_some() {
+                    should_interrupt.store(true, Ordering::Relaxed);
+                    return Ok(true);
+                }
+            }
+            gix::status::Item::IndexWorktree(item) => {
+                if unstaged_change(item).is_some() {
+                    should_interrupt.store(true, Ordering::Relaxed);
+                    return Ok(true);
+                }
+            }
+        }
+    }
+    Ok(false)
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::ChangeKind;
-    use crate::test_support::shallow_clone_fixture;
+    use super::quick_status;
+    use crate::test_support::{TestRepo, shallow_clone_fixture};
+    use crate::{ChangeKind, HeadInfo, RepoState};
 
     #[test]
     fn status_of_a_shallow_clone_reads_head_and_the_index() {
@@ -639,5 +720,66 @@ mod tests {
         assert_eq!(status.unstaged.len(), 1);
         assert_eq!(status.unstaged[0].path, "dir/new.txt");
         assert_eq!(status.unstaged[0].kind, ChangeKind::Modified);
+    }
+
+    #[test]
+    fn quick_status_reports_branch_dirty_detached_and_in_progress_state() {
+        let repo = TestRepo::new();
+        repo.write("tracked.txt", "base\n");
+        let initial = repo.commit("initial");
+
+        let clean = quick_status(repo.path()).expect("clean quick status");
+        assert_eq!(
+            clean.head,
+            Some(HeadInfo::Branch {
+                short_name: "main".to_owned(),
+                target: Some(initial),
+            })
+        );
+        assert!(!clean.dirty);
+        assert_eq!(clean.state, RepoState::Normal);
+
+        // Untracked file makes the working tree dirty.
+        repo.write("untracked.txt", "new\n");
+        assert!(quick_status(repo.path()).expect("untracked").dirty);
+        std::fs::remove_file(repo.path().join("untracked.txt")).unwrap();
+
+        // Staged addition makes the index dirty.
+        repo.write("staged.txt", "staged\n");
+        repo.git(&["add", "staged.txt"]);
+        assert!(quick_status(repo.path()).expect("staged").dirty);
+        repo.commit("add staged");
+
+        // Unstaged modification makes the working tree dirty.
+        repo.write("tracked.txt", "modified\n");
+        assert!(quick_status(repo.path()).expect("modified").dirty);
+        repo.git(&["checkout", "--", "tracked.txt"]);
+
+        // Detached HEAD reports the checked-out commit.
+        repo.git(&["checkout", "--detach", "-q", &initial.to_string()]);
+        let detached = quick_status(repo.path()).expect("detached");
+        assert_eq!(detached.head, Some(HeadInfo::Detached { target: initial }));
+        assert!(!detached.dirty);
+
+        // An unfinished merge reports RepoState::Merging.
+        repo.git(&["checkout", "-q", "main"]);
+        repo.git(&["checkout", "-q", "-b", "side", &initial.to_string()]);
+        repo.write("tracked.txt", "side\n");
+        repo.commit("side change");
+        repo.git(&["checkout", "-q", "main"]);
+        repo.write("tracked.txt", "main\n");
+        repo.commit("main change");
+        let merge = repo.git_output(&["merge", "side"]);
+        assert!(!merge.status.success(), "conflicting merge stops");
+
+        let merging = quick_status(repo.path()).expect("merging");
+        assert_eq!(merging.state, RepoState::Merging);
+        assert!(merging.dirty);
+    }
+
+    #[test]
+    fn quick_status_rejects_a_non_repository_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(quick_status(dir.path()).is_err());
     }
 }
