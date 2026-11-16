@@ -4,10 +4,12 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use crate::Result;
 use crate::diff::{DiffOptions, diff_bytes};
 use crate::encoding::decode_for_display;
-use crate::error::Error;
+use crate::error::{Error, OPERATION_CANCELLED};
 use crate::git_cli::{ApplyMode, CommitOptions};
 use crate::patch::{BytePatchFile, LineEnding, LineSelection, PatchMode, build_patch_bytes};
 use crate::session::history::LoadCommand;
@@ -107,11 +109,24 @@ fn run_one(
     status: &Sender<RefreshStatus>,
     load: &Sender<LoadCommand>,
 ) {
+    let cancel_flag = shared.arm_operation(job.id);
     shared.set_operation_running(true);
     shared.publish(|snapshot| snapshot.busy = Some(job.id));
     shared.emit(SessionEvent::OperationStarted { id: job.id });
 
-    let result = execute(shared, job.id, &job.operation);
+    let result = if cancel_flag.load(Ordering::SeqCst) || shared.is_shutdown() {
+        Err(Error::other(OPERATION_CANCELLED))
+    } else {
+        execute(shared, job.id, &job.operation, &cancel_flag)
+    };
+    // A kill can surface as git's own "killed" message. The cancel is what
+    // the user asked for, so that is the message that reaches them.
+    let result = if cancel_flag.load(Ordering::SeqCst) || shared.is_shutdown() {
+        Err(Error::other(OPERATION_CANCELLED))
+    } else {
+        result
+    };
+    shared.disarm_operation(job.id);
     // A prompt answered as the command ended must not leave a waiter for the
     // next command that reuses the id.
     shared.forget_prompt(job.id);
@@ -217,13 +232,23 @@ fn changes_refs(operation: &Operation) -> bool {
     )
 }
 
-fn execute(shared: &Arc<Shared>, id: OperationId, operation: &Operation) -> Result<()> {
+fn execute(
+    shared: &Arc<Shared>,
+    id: OperationId,
+    operation: &Operation,
+    cancel_flag: &Arc<AtomicBool>,
+) -> Result<()> {
     // Credential prompts from git travel to the window and back through the
     // session. The handler blocks the command's thread until the user answers,
     // which is what git expects from an askpass program.
     let git = shared.git.clone().with_askpass({
         let shared = Arc::clone(shared);
         move |prompt| shared.request_answer(id, prompt)
+    });
+    let git = git.with_cancel({
+        let shared = Arc::clone(shared);
+        let cancel_flag = Arc::clone(cancel_flag);
+        move || cancel_flag.load(Ordering::SeqCst) || shared.is_shutdown()
     });
     let git = &git;
     match operation {
@@ -400,12 +425,16 @@ fn execute(shared: &Arc<Shared>, id: OperationId, operation: &Operation) -> Resu
         Operation::LfsPull { path } => git.lfs_pull(path),
         Operation::WriteCommitGraph => {
             let mut progress = ProgressReporter::new(shared, id);
-            let cancelled = || shared.is_shutdown();
+            let cancelled = || cancel_flag.load(Ordering::SeqCst) || shared.is_shutdown();
             let result = git.write_commit_graph_with_progress(&cancelled, |text, percent| {
                 progress.line(text, percent)
             });
             progress.finish();
-            result.map(|_| ())
+            match result {
+                Ok(true) => Ok(()),
+                Ok(false) => Err(Error::other(OPERATION_CANCELLED)),
+                Err(error) => Err(error),
+            }
         }
     }
 }

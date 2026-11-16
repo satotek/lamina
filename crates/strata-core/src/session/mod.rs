@@ -958,10 +958,25 @@ impl Session {
     /// Queues a mutation. The session refreshes affected state afterwards.
     pub fn run(&self, op: Operation) -> OperationId {
         let id = self.shared.next_operation_id();
+        self.run_as(id, op);
+        id
+    }
+
+    /// Queue `op` under an id the caller already chose.
+    ///
+    /// The remote helper uses the client's id, so progress, prompts and
+    /// `snapshot.busy` name the same operation on both sides.
+    pub fn run_as(&self, id: OperationId, op: Operation) {
         if let Some(senders) = &self.senders {
             let _ = senders.operations.send(OperationJob { id, operation: op });
         }
-        id
+    }
+
+    /// Stop `id` if it is queued or running. A running git child is killed;
+    /// a credential prompt is cancelled. Unknown ids are remembered until the
+    /// worker reaches them, so a cancel that wins the race is not lost.
+    pub fn cancel_operation(&self, id: OperationId) {
+        self.shared.cancel_operation(id);
     }
 
     /// Answers the pending [`SessionEvent::AskpassPrompt`] of `id`.
