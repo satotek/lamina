@@ -8,7 +8,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::compare::ThreeWayTreeCompare;
+use crate::compare::{RepoCompareFile, RepoCompareSide, ThreeWayTreeCompare};
 use crate::git_cli::{CommandLog, Git};
 use crate::lfs::{LfsInfo, LfsLock, LfsPointer, read_object};
 use crate::merge::ConflictStyle;
@@ -121,6 +121,12 @@ pub trait RepoReader: Send + Sync {
     /// The default roles for a three-commit comparison: the base in the
     /// middle, the older remaining commit on the left.
     fn three_way_roles(&self, commits: [Oid; 3]) -> Result<ThreeWayRoles>;
+    /// Every file one comparison side holds, with a content identity.
+    fn compare_side_files(&self, side: RepoCompareSide) -> Result<Vec<RepoCompareFile>>;
+    /// One file from one comparison side, read under `path`.
+    fn compare_side_blob(&self, side: RepoCompareSide, path: &str) -> Result<Option<Vec<u8>>>;
+    /// Compares any mix of commits, the index and the working tree.
+    fn three_way_side_tree(&self, sides: [RepoCompareSide; 3]) -> Result<ThreeWayTreeCompare>;
 }
 
 impl RepoReader for Repo {
@@ -249,6 +255,18 @@ impl RepoReader for Repo {
 
     fn three_way_roles(&self, commits: [Oid; 3]) -> Result<ThreeWayRoles> {
         Repo::three_way_roles(self, commits)
+    }
+
+    fn compare_side_files(&self, side: RepoCompareSide) -> Result<Vec<RepoCompareFile>> {
+        Repo::compare_side_files(self, side)
+    }
+
+    fn compare_side_blob(&self, side: RepoCompareSide, path: &str) -> Result<Option<Vec<u8>>> {
+        Repo::compare_side_blob(self, side, path)
+    }
+
+    fn three_way_side_tree(&self, sides: [RepoCompareSide; 3]) -> Result<ThreeWayTreeCompare> {
+        Repo::three_way_side_tree(self, sides)
     }
 }
 

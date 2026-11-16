@@ -14,7 +14,7 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock};
 use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
-use strata_core::compare::ThreeWayTreeCompare;
+use strata_core::compare::{RepoCompareFile, RepoCompareSide, ThreeWayTreeCompare};
 use strata_core::diff::DiffOptions;
 use strata_core::git_cli::CommandLog;
 use strata_core::lfs::{LfsInfo, LfsLock, LfsPointer};
@@ -1076,6 +1076,18 @@ impl RepoReader for RemoteReader {
     }
 
     fn three_way_roles(&self, _commits: [Oid; 3]) -> Result<ThreeWayRoles> {
+        Err(Error::other(UNSUPPORTED))
+    }
+
+    fn compare_side_files(&self, _side: RepoCompareSide) -> Result<Vec<RepoCompareFile>> {
+        Err(Error::other(UNSUPPORTED))
+    }
+
+    fn compare_side_blob(&self, _side: RepoCompareSide, _path: &str) -> Result<Option<Vec<u8>>> {
+        Err(Error::other(UNSUPPORTED))
+    }
+
+    fn three_way_side_tree(&self, _sides: [RepoCompareSide; 3]) -> Result<ThreeWayTreeCompare> {
         Err(Error::other(UNSUPPORTED))
     }
 }

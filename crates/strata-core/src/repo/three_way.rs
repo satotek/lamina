@@ -7,19 +7,28 @@
 //! Renames are treated as a delete plus an add, so a renamed path appears under
 //! both names rather than being paired.
 //!
-//! When git is new enough, `git merge-tree --write-tree` marks the paths that
-//! would really conflict in a merge of the two sides; it writes objects but
-//! never touches a ref, the index or the working tree.
+//! A side can be a commit, the index or the working tree. Every side is first
+//! listed as [`RepoCompareFile`]s carrying a content identity, so the same
+//! comparison works for any mix of the three and the decision is plain data.
+//!
+//! When every side is a commit and git is new enough, `git merge-tree
+//! --write-tree` marks the paths that would really conflict in a merge of the
+//! two sides; it writes objects but never touches a ref, the index or the
+//! working tree.
 
 use std::collections::BTreeSet;
+use std::fs::File;
+use std::path::Path;
 
+use gix::bstr::ByteSlice;
+use gix::index::entry::Stage;
 use gix::object::tree::EntryKind;
+use gix::objs::TreeRefIter;
 
 use super::Repo;
-use super::stat::tree_changes;
 use crate::compare::{
-    FolderCompareCounts, FolderEntryKind, FolderEntryStatus, FolderSideInfo, ThreeWayTreeChange,
-    ThreeWayTreeCompare, ThreeWayTreeEntry,
+    FolderEntryKind, RepoCompareFile, RepoCompareSide, ThreeWayTreeChange, ThreeWayTreeCompare,
+    compare_three_repo_sides,
 };
 use crate::git_cli::Git;
 use crate::{Error, Oid, Result};
@@ -33,14 +42,6 @@ pub struct ThreeWayRoles {
     pub right: Oid,
 }
 
-/// One tree entry as the three sides hold it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SideState {
-    mode: u16,
-    oid: Oid,
-    kind: FolderEntryKind,
-}
-
 impl Repo {
     /// Compares the trees of `left`, `base` and `right`.
     ///
@@ -48,90 +49,14 @@ impl Repo {
     /// `base`; untouched files are left out, like a comparison of two commits
     /// leaves out the files they agree on.
     pub fn three_way_tree(&self, left: Oid, base: Oid, right: Oid) -> Result<ThreeWayTreeCompare> {
-        let repo = self.local();
-        let left_tree = commit_tree(&repo, left)?;
-        let base_tree = commit_tree(&repo, base)?;
-        let right_tree = commit_tree(&repo, right)?;
+        let mut compare = self.three_way_side_tree([
+            RepoCompareSide::Commit(left),
+            RepoCompareSide::Commit(base),
+            RepoCompareSide::Commit(right),
+        ])?;
 
-        let mut paths = BTreeSet::new();
-        for change in tree_changes(&repo, &base_tree, &left_tree)? {
-            if let Some(file) = super::stat::changed_file(&change) {
-                paths.insert(file.path);
-            }
-        }
-        for change in tree_changes(&repo, &base_tree, &right_tree)? {
-            if let Some(file) = super::stat::changed_file(&change) {
-                paths.insert(file.path);
-            }
-        }
-
-        let mut entries = Vec::with_capacity(paths.len());
-        for path in paths {
-            let left_state = entry_state(&left_tree, &path)?;
-            let base_state = entry_state(&base_tree, &path)?;
-            let right_state = entry_state(&right_tree, &path)?;
-
-            let left_differs = left_state != base_state;
-            let right_differs = right_state != base_state;
-            let change = match (left_differs, right_differs) {
-                (true, false) => ThreeWayTreeChange::LeftChanged,
-                (false, true) => ThreeWayTreeChange::RightChanged,
-                (true, true) if left_state == right_state => ThreeWayTreeChange::BothAgree,
-                (true, true) => ThreeWayTreeChange::BothDisagree,
-                // A path in the union always differs on at least one side.
-                (false, false) => continue,
-            };
-
-            let states = [left_state, base_state, right_state];
-            let present: Vec<usize> = states
-                .iter()
-                .enumerate()
-                .filter_map(|(index, state)| state.is_some().then_some(index))
-                .collect();
-            let primary = states
-                .iter()
-                .flatten()
-                .next()
-                .map(|state| state.kind)
-                .unwrap_or(FolderEntryKind::Other);
-            let kinds_match = states.iter().flatten().all(|state| state.kind == primary);
-
-            let status = if !kinds_match {
-                FolderEntryStatus::TypeMismatch
-            } else if present.len() == 1 {
-                match present[0] {
-                    0 => FolderEntryStatus::OnlyLeft,
-                    1 => FolderEntryStatus::OnlyMiddle,
-                    _ => FolderEntryStatus::OnlyRight,
-                }
-            } else if states.windows(2).all(|pair| pair[0] == pair[1]) {
-                FolderEntryStatus::Identical
-            } else {
-                FolderEntryStatus::Different
-            };
-
-            let sides = states
-                .iter()
-                .map(|state| {
-                    state.map(|state| FolderSideInfo {
-                        kind: state.kind,
-                        size: blob_size(&repo, state),
-                    })
-                })
-                .collect();
-
-            entries.push(ThreeWayTreeEntry {
-                relative_path: path,
-                kind: primary,
-                status,
-                change,
-                conflicting: false,
-                sides,
-            });
-        }
-
-        let mut merge_tree_checked = false;
-        if entries
+        if compare
+            .entries
             .iter()
             .any(|entry| entry.change == ThreeWayTreeChange::BothDisagree)
         {
@@ -139,26 +64,30 @@ impl Repo {
             // tree-diff classification in place without the real-conflict
             // marking; a comparison must not fail because of it.
             if let Ok(Some(conflicts)) = self.merge_tree_conflicts(left, right) {
-                merge_tree_checked = true;
-                for entry in &mut entries {
+                compare.merge_tree_checked = true;
+                for entry in &mut compare.entries {
                     entry.conflicting = conflicts.contains(&entry.relative_path);
                 }
             }
         }
 
-        let mut counts = FolderCompareCounts::default();
-        for entry in &entries {
-            counts.record(entry.status);
-        }
+        Ok(compare)
+    }
 
-        Ok(ThreeWayTreeCompare {
+    /// Compares any mix of commits, the index and the working tree.
+    pub fn three_way_side_tree(&self, sides: [RepoCompareSide; 3]) -> Result<ThreeWayTreeCompare> {
+        let [left, middle, right] = sides;
+        let left_files = self.compare_side_files(left)?;
+        let middle_files = self.compare_side_files(middle)?;
+        let right_files = self.compare_side_files(right)?;
+        Ok(compare_three_repo_sides(
             left,
-            base,
+            &left_files,
+            middle,
+            &middle_files,
             right,
-            entries,
-            counts,
-            merge_tree_checked,
-        })
+            &right_files,
+        ))
     }
 
     /// The blob contents of `path` in the three commits, with `None` where the
@@ -175,6 +104,143 @@ impl Repo {
             self.file_at_commit(base, path)?,
             self.file_at_commit(right, path)?,
         ])
+    }
+
+    /// The same file from three sides, each side reading it under its own
+    /// path when a history walk followed renames.
+    pub fn three_way_side_blobs(
+        &self,
+        sides: [RepoCompareSide; 3],
+        paths: [&str; 3],
+    ) -> Result<[Option<Vec<u8>>; 3]> {
+        Ok([
+            self.compare_side_blob(sides[0], paths[0])?,
+            self.compare_side_blob(sides[1], paths[1])?,
+            self.compare_side_blob(sides[2], paths[2])?,
+        ])
+    }
+
+    /// One file of a comparison side.
+    pub fn compare_side_blob(&self, side: RepoCompareSide, path: &str) -> Result<Option<Vec<u8>>> {
+        match side {
+            RepoCompareSide::Commit(commit) => self.file_at_commit(commit, path),
+            RepoCompareSide::Index => self.file_in_index(path),
+            RepoCompareSide::Worktree => self.file_in_worktree(path),
+        }
+    }
+
+    /// Every file one side holds, with a content identity.
+    ///
+    /// The working-tree side is the tracked files on disk plus the untracked
+    /// files git does not ignore; files deleted from the working tree are
+    /// absent from it.
+    pub fn compare_side_files(&self, side: RepoCompareSide) -> Result<Vec<RepoCompareFile>> {
+        match side {
+            RepoCompareSide::Commit(commit) => self.commit_side_files(commit),
+            RepoCompareSide::Index => self.index_side_files(),
+            RepoCompareSide::Worktree => self.worktree_side_files(),
+        }
+    }
+
+    fn commit_side_files(&self, commit: Oid) -> Result<Vec<RepoCompareFile>> {
+        let repo = self.local();
+        let tree = repo
+            .find_commit(commit)
+            .map_err(Error::gix)?
+            .tree()
+            .map_err(Error::gix)?;
+        let mut files = Vec::new();
+        collect_tree_files(&repo, &tree, "", &mut files)?;
+        Ok(files)
+    }
+
+    fn index_side_files(&self) -> Result<Vec<RepoCompareFile>> {
+        let repo = self.local();
+        let index = repo.index_or_empty().map_err(Error::gix)?;
+        let mut files = Vec::new();
+        for entry in index.entries() {
+            if entry.stage() != Stage::Unconflicted
+                || entry.mode.is_submodule()
+                || entry.mode.is_sparse()
+            {
+                continue;
+            }
+            let path = entry.path(&index).to_str_lossy().into_owned();
+            let kind = match entry.mode.to_tree_entry_mode().map(|mode| mode.kind()) {
+                Some(EntryKind::Link) => FolderEntryKind::Symlink,
+                Some(EntryKind::Tree | EntryKind::Commit) | None => continue,
+                Some(EntryKind::Blob | EntryKind::BlobExecutable) => FolderEntryKind::File,
+            };
+            files.push(RepoCompareFile {
+                path,
+                kind,
+                size: blob_size(&repo, entry.id),
+                identity: entry.id.to_string(),
+            });
+        }
+        Ok(files)
+    }
+
+    fn worktree_side_files(&self) -> Result<Vec<RepoCompareFile>> {
+        let Some(workdir) = self.workdir() else {
+            return Ok(Vec::new());
+        };
+        let repo = self.local();
+        let index = repo.index_or_empty().map_err(Error::gix)?;
+        let mut paths: BTreeSet<String> = index
+            .entries()
+            .iter()
+            .filter(|entry| {
+                entry.stage() == Stage::Unconflicted
+                    && !entry.mode.is_submodule()
+                    && !entry.mode.is_sparse()
+                    && matches!(
+                        entry.mode.to_tree_entry_mode().map(|mode| mode.kind()),
+                        Some(EntryKind::Blob | EntryKind::BlobExecutable | EntryKind::Link)
+                    )
+            })
+            .map(|entry| entry.path(&index).to_str_lossy().into_owned())
+            .collect();
+
+        // Untracked files belong to the working-tree side alone. `status` is
+        // the one walk that knows the ignore rules, and it also sees files
+        // staged for deletion that are still on disk.
+        if let Ok(status) = self.status() {
+            for change in status.unstaged.iter().chain(status.staged.iter()) {
+                paths.insert(change.path.clone());
+            }
+        }
+
+        let mut files = Vec::with_capacity(paths.len());
+        for path in paths {
+            let absolute = workdir.join(path.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let Ok(metadata) = std::fs::symlink_metadata(&absolute) else {
+                // Deleted in the working tree, so this side does not hold it.
+                continue;
+            };
+            if metadata.file_type().is_symlink() {
+                let target = std::fs::read_link(&absolute)?;
+                let bytes = target.to_string_lossy().into_owned().into_bytes();
+                files.push(RepoCompareFile {
+                    kind: FolderEntryKind::Symlink,
+                    size: Some(bytes.len() as u64),
+                    identity: blob_identity(&repo, &bytes)?,
+                    path,
+                });
+                continue;
+            }
+            if !metadata.is_file() {
+                continue;
+            }
+            let size = metadata.len();
+            files.push(RepoCompareFile {
+                kind: FolderEntryKind::File,
+                size: Some(size),
+                identity: worktree_identity(&repo, &absolute, size)?,
+                path,
+            });
+        }
+        Ok(files)
     }
 
     /// The paths `git merge-tree --write-tree` reports as conflicts for a
@@ -243,50 +309,91 @@ impl Repo {
     }
 }
 
-fn commit_tree<'repo>(repo: &'repo gix::Repository, commit: Oid) -> Result<gix::Tree<'repo>> {
-    repo.find_commit(commit)
-        .map_err(Error::gix)?
-        .tree()
-        .map_err(Error::gix)
-}
-
-fn entry_state(tree: &gix::Tree<'_>, path: &str) -> Result<Option<SideState>> {
-    let Some(entry) = tree.lookup_entry_by_path(path).map_err(Error::gix)? else {
-        return Ok(None);
-    };
-    let mode = entry.mode();
-    Ok(Some(SideState {
-        mode: mode.value(),
-        oid: entry.object_id(),
-        kind: entry_kind(mode.kind()),
-    }))
-}
-
-fn entry_kind(kind: EntryKind) -> FolderEntryKind {
-    match kind {
-        EntryKind::Tree => FolderEntryKind::Directory,
-        EntryKind::Link => FolderEntryKind::Symlink,
-        EntryKind::Blob | EntryKind::BlobExecutable => FolderEntryKind::File,
-        // A submodule is a commit pointer, which has no file content to
-        // compare; the folder vocabulary has no submodule kind.
-        EntryKind::Commit => FolderEntryKind::Other,
+/// Walks a commit tree recursively, collecting every blob and symlink.
+fn collect_tree_files(
+    repo: &gix::Repository,
+    tree: &gix::Tree<'_>,
+    prefix: &str,
+    out: &mut Vec<RepoCompareFile>,
+) -> Result<()> {
+    for entry in TreeRefIter::from_bytes(&tree.data, tree.id.kind()) {
+        let entry = entry.map_err(Error::gix)?;
+        let name = entry.filename.to_str_lossy();
+        let path = if prefix.is_empty() {
+            name.into_owned()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let mode = entry.mode;
+        match mode.kind() {
+            EntryKind::Tree => {
+                let child = repo.find_tree(entry.oid).map_err(Error::gix)?;
+                collect_tree_files(repo, &child, &path, out)?;
+            }
+            EntryKind::Blob | EntryKind::BlobExecutable | EntryKind::Link => {
+                let kind = if mode.kind() == EntryKind::Link {
+                    FolderEntryKind::Symlink
+                } else {
+                    FolderEntryKind::File
+                };
+                out.push(RepoCompareFile {
+                    path,
+                    kind,
+                    size: blob_size(repo, entry.oid.to_owned()),
+                    identity: entry.oid.to_string(),
+                });
+            }
+            // A submodule is a commit pointer, not file content.
+            EntryKind::Commit => {}
+        }
     }
+    Ok(())
 }
 
-fn blob_size(repo: &gix::Repository, state: SideState) -> Option<u64> {
-    if state.kind == FolderEntryKind::Directory {
-        return None;
-    }
-    match repo.try_find_header(state.oid) {
+/// Blob size from the object header, which avoids inflating the content.
+fn blob_size(repo: &gix::Repository, id: Oid) -> Option<u64> {
+    match repo.try_find_header(id) {
         Ok(Some(header)) if header.kind() == gix::objs::Kind::Blob => Some(header.size()),
         _ => None,
     }
 }
 
+/// The object id of an in-memory blob, for a symlink target or other small
+/// content whose bytes are already known.
+fn blob_identity(repo: &gix::Repository, bytes: &[u8]) -> Result<String> {
+    let id = gix::objs::compute_hash(repo.object_hash(), gix::objs::Kind::Blob, bytes)
+        .map_err(Error::gix)?;
+    Ok(id.to_string())
+}
+
+/// A working-tree file's identity in the same vocabulary a commit and the
+/// index use: the object id git would give the blob.
+///
+/// Hashing the file is what makes a raw worktree byte equal to the blob it
+/// matches, without keeping every compared file in memory.
+fn worktree_identity(repo: &gix::Repository, path: &Path, size: u64) -> Result<String> {
+    let mut file = File::open(path)?;
+    let interrupt = std::sync::atomic::AtomicBool::new(false);
+    let id = gix::objs::compute_stream_hash(
+        repo.object_hash(),
+        gix::objs::Kind::Blob,
+        &mut file,
+        size,
+        &mut gix::progress::Discard,
+        &interrupt,
+    )
+    .map_err(Error::gix)?;
+    Ok(id.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compare::{FolderEntryStatus, ThreeWayTreeChange, compare_three_sides};
+    use crate::compare::{
+        FolderEntryStatus, RepoCompareSide, ThreeWayDiffKind, ThreeWayPeerStatus,
+        ThreeWayTreeChange, ThreeWayTreeEntry, compare_three_sides,
+    };
+
     use crate::test_support::TestRepo;
 
     /// A base with one file per classification, plus files each side adds and
@@ -383,6 +490,41 @@ mod tests {
     }
 
     #[test]
+    fn peer_status_is_computed_for_every_tree_entry() {
+        let (repo, left, base, right) = diverged_fixture();
+        let compare = repo
+            .open()
+            .three_way_tree(left, base, right)
+            .expect("three-way tree");
+
+        assert_eq!(
+            entry(&compare, "left-only.txt").peer,
+            ThreeWayPeerStatus::LeftMiddleDiffer
+        );
+        assert_eq!(
+            entry(&compare, "right-only.txt").peer,
+            ThreeWayPeerStatus::MiddleRightDiffer
+        );
+        assert_eq!(
+            entry(&compare, "both-same.txt").peer,
+            ThreeWayPeerStatus::AllDifferent,
+            "the middle differs from both outer sides, which agree with each other"
+        );
+        assert_eq!(
+            entry(&compare, "conflict.txt").peer,
+            ThreeWayPeerStatus::AllDifferent
+        );
+        assert_eq!(
+            entry(&compare, "left-added.txt").peer,
+            ThreeWayPeerStatus::MissingSomeSide
+        );
+        assert_eq!(
+            entry(&compare, "removed-both.txt").peer,
+            ThreeWayPeerStatus::MissingSomeSide
+        );
+    }
+
+    #[test]
     fn merge_tree_marks_real_conflicts_when_git_supports_it() {
         let (repo, left, base, right) = diverged_fixture();
         let compare = repo
@@ -432,8 +574,158 @@ mod tests {
                 .change_regions()
                 .map(|region| region.kind)
                 .collect::<Vec<_>>(),
-            vec![crate::compare::ThreeWayDiffKind::BothDisagree]
+            vec![ThreeWayDiffKind::BothDisagree]
         );
+    }
+
+    #[test]
+    fn the_index_and_working_tree_are_comparison_sides() {
+        let repo = TestRepo::new();
+        repo.write("modified.txt", "base\n");
+        repo.write("staged.txt", "base\n");
+        repo.write("committed.txt", "base\n");
+        let base = repo.commit("base");
+
+        repo.write("modified.txt", "changed on disk\n");
+        repo.write("staged.txt", "changed in the index\n");
+        repo.git(&["add", "staged.txt"]);
+        repo.write("untracked.txt", "new file\n");
+
+        let opened = repo.open();
+        let index = opened
+            .compare_side_files(RepoCompareSide::Index)
+            .expect("index files");
+        let worktree = opened
+            .compare_side_files(RepoCompareSide::Worktree)
+            .expect("worktree files");
+        let index_paths: Vec<&str> = index.iter().map(|file| file.path.as_str()).collect();
+        let worktree_paths: Vec<&str> = worktree.iter().map(|file| file.path.as_str()).collect();
+        assert!(index_paths.contains(&"staged.txt"));
+        assert!(
+            !index_paths.contains(&"untracked.txt"),
+            "an untracked file is not in the index"
+        );
+        assert!(
+            worktree_paths.contains(&"untracked.txt"),
+            "the working tree holds the untracked file"
+        );
+
+        let compare = opened
+            .three_way_side_tree([
+                RepoCompareSide::Commit(base),
+                RepoCompareSide::Index,
+                RepoCompareSide::Worktree,
+            ])
+            .expect("three-way side tree");
+
+        assert_eq!(
+            entry(&compare, "staged.txt").peer,
+            ThreeWayPeerStatus::LeftMiddleDiffer,
+            "the index staged the change, so commit and working tree differ from it"
+        );
+        assert_eq!(
+            entry(&compare, "modified.txt").peer,
+            ThreeWayPeerStatus::MiddleRightDiffer,
+            "only the working tree changed since the index"
+        );
+        assert_eq!(
+            entry(&compare, "untracked.txt").status,
+            FolderEntryStatus::OnlyRight
+        );
+        assert_eq!(
+            entry(&compare, "untracked.txt").peer,
+            ThreeWayPeerStatus::MissingSomeSide
+        );
+
+        let blob = opened
+            .compare_side_blob(RepoCompareSide::Index, "staged.txt")
+            .expect("index blob");
+        assert_eq!(blob.as_deref(), Some(b"changed in the index\n".as_slice()));
+        let blob = opened
+            .compare_side_blob(RepoCompareSide::Worktree, "modified.txt")
+            .expect("worktree blob");
+        assert_eq!(blob.as_deref(), Some(b"changed on disk\n".as_slice()));
+    }
+
+    #[test]
+    fn two_repo_sides_classify_each_file() {
+        let (repo, left, _base, right) = diverged_fixture();
+        let opened = repo.open();
+        let left_files = opened
+            .compare_side_files(RepoCompareSide::Commit(left))
+            .expect("left files");
+        let right_files = opened
+            .compare_side_files(RepoCompareSide::Commit(right))
+            .expect("right files");
+        let compare = crate::compare::compare_two_repo_sides(
+            RepoCompareSide::Commit(left),
+            &left_files,
+            RepoCompareSide::Commit(right),
+            &right_files,
+        );
+        let status = |path: &str| {
+            compare
+                .entries
+                .iter()
+                .find(|entry| entry.relative_path == path)
+                .map(|entry| entry.status)
+        };
+        assert_eq!(status("left-only.txt"), Some(FolderEntryStatus::Different));
+        assert_eq!(status("left-added.txt"), Some(FolderEntryStatus::OnlyLeft));
+        assert_eq!(
+            status("right-added.txt"),
+            Some(FolderEntryStatus::OnlyRight)
+        );
+        assert_eq!(
+            status("removed-left.txt"),
+            Some(FolderEntryStatus::OnlyRight),
+            "the left deleted it, so only the right holds it"
+        );
+        assert!(
+            status("removed-both.txt").is_none(),
+            "both deleted it, so no side holds it"
+        );
+    }
+
+    #[test]
+    fn file_history_paths_feed_three_versions_across_a_rename() {
+        let repo = TestRepo::new();
+        repo.write("old.txt", "one\n");
+        let first = repo.commit("Add old.txt");
+        repo.git(&["mv", "old.txt", "new.txt"]);
+        let second = repo.commit("Rename to new.txt");
+        repo.write("new.txt", "three\n");
+        let third = repo.commit("Edit new.txt");
+
+        let opened = repo.open();
+        let entries: Vec<(Oid, String)> = opened
+            .path_history_entries("new.txt")
+            .expect("path history")
+            .map(|entry| {
+                let entry = entry.expect("walk entry");
+                (entry.commit, entry.path)
+            })
+            .collect();
+        assert_eq!(
+            entries,
+            vec![
+                (third, "new.txt".to_owned()),
+                (second, "new.txt".to_owned()),
+                (first, "old.txt".to_owned()),
+            ],
+            "the walk follows the rename and reports the old name"
+        );
+
+        let sides = [
+            RepoCompareSide::Commit(first),
+            RepoCompareSide::Commit(second),
+            RepoCompareSide::Commit(third),
+        ];
+        let paths = ["old.txt", "new.txt", "new.txt"];
+        let blobs = opened.three_way_side_blobs(sides, paths).expect("blobs");
+        assert_eq!(blobs[0].as_deref(), Some(b"one\n".as_slice()));
+        assert_eq!(blobs[1].as_deref(), Some(b"one\n".as_slice()));
+        assert_eq!(blobs[2].as_deref(), Some(b"three\n".as_slice()));
     }
 
     #[test]

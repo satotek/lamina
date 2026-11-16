@@ -10,7 +10,8 @@
 //! files by size before streaming their content hash, and cancelling promptly
 //! via an [`AtomicBool`] flag.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::fmt;
 use std::fs::{self, File};
 use std::io::Read;
 use std::ops::Range;
@@ -362,6 +363,65 @@ impl ThreeWayCounts {
     }
 }
 
+/// How a three-way comparison treats its middle side.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum ThreeWayCompareMode {
+    /// The middle side is the base both others are read against, as a merge
+    /// preview does.
+    #[default]
+    MiddleBase,
+    /// The three sides are peers: each adjacency is compared on its own, with
+    /// no side claiming to be the common ancestor.
+    NoBase,
+}
+
+/// Relation of one path or region across three peer sides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ThreeWayPeerStatus {
+    /// All three sides hold the same content.
+    Same,
+    /// The left differs from the middle; the middle matches the right.
+    LeftMiddleDiffer,
+    /// The middle differs from the right; the left matches the middle.
+    MiddleRightDiffer,
+    /// Both adjacencies differ: the middle differs from each outer side.
+    AllDifferent,
+    /// At least one side lacks the path.
+    MissingSomeSide,
+}
+
+impl ThreeWayDiffKind {
+    /// How this base-relative region reads when the three sides are peers.
+    ///
+    /// A region both outer sides changed is one where the middle differs from
+    /// each neighbour, whether or not the outer sides agree with each other.
+    pub fn peer_status(self) -> ThreeWayPeerStatus {
+        match self {
+            ThreeWayDiffKind::Unchanged => ThreeWayPeerStatus::Same,
+            ThreeWayDiffKind::LeftChanged => ThreeWayPeerStatus::LeftMiddleDiffer,
+            ThreeWayDiffKind::RightChanged => ThreeWayPeerStatus::MiddleRightDiffer,
+            ThreeWayDiffKind::BothAgree | ThreeWayDiffKind::BothDisagree => {
+                ThreeWayPeerStatus::AllDifferent
+            }
+        }
+    }
+}
+
+/// Counts of peer differences: one per adjacency, plus the regions where both
+/// adjacencies differ.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ThreeWayPeerCounts {
+    pub left_middle: usize,
+    pub middle_right: usize,
+    pub all_different: usize,
+}
+
+impl ThreeWayPeerCounts {
+    pub fn total_changes(&self) -> usize {
+        self.left_middle + self.middle_right - self.all_different
+    }
+}
+
 /// Three sides of a picture for a three-way image comparison.
 #[derive(Debug, Clone)]
 pub struct ThreeWayImageCompare {
@@ -413,6 +473,26 @@ impl ThreeWayFileCompare {
                 ThreeWayDiffKind::RightChanged => counts.right_changed += 1,
                 ThreeWayDiffKind::BothAgree => counts.both_agree += 1,
                 ThreeWayDiffKind::BothDisagree => counts.both_disagree += 1,
+            }
+        }
+        counts
+    }
+
+    /// Counts of changed regions when the three sides are peers: how many
+    /// regions differ across each pair of neighbours.
+    pub fn peer_counts(&self) -> ThreeWayPeerCounts {
+        let mut counts = ThreeWayPeerCounts::default();
+        for region in &self.regions {
+            match region.kind.peer_status() {
+                ThreeWayPeerStatus::Same => {}
+                ThreeWayPeerStatus::LeftMiddleDiffer => counts.left_middle += 1,
+                ThreeWayPeerStatus::MiddleRightDiffer => counts.middle_right += 1,
+                ThreeWayPeerStatus::AllDifferent => {
+                    counts.left_middle += 1;
+                    counts.middle_right += 1;
+                    counts.all_different += 1;
+                }
+                ThreeWayPeerStatus::MissingSomeSide => {}
             }
         }
         counts
@@ -886,6 +966,10 @@ pub struct FolderCompareEntry {
     /// [`FolderEntryStatus::TypeMismatch`].
     pub kind: FolderEntryKind,
     pub status: FolderEntryStatus,
+    /// Relation across `[left, middle, right]` when the sides are peers; a
+    /// two-way comparison reports [`ThreeWayPeerStatus::Same`], which nothing
+    /// reads.
+    pub peer: ThreeWayPeerStatus,
     /// Metadata for `[left, right]` (2-way) or `[left, middle, right]` (3-way).
     pub sides: Vec<Option<FolderSideInfo>>,
 }
@@ -928,6 +1012,78 @@ pub struct FolderCompareResult {
 // Repository revision three-way compare
 // ---------------------------------------------------------------------------
 
+/// One side of a repository comparison: a commit's tree, the index, or the
+/// files on disk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RepoCompareSide {
+    Commit(Oid),
+    /// The staged content: the index tree.
+    Index,
+    /// The tracked files on disk, plus untracked files git does not ignore.
+    Worktree,
+}
+
+impl RepoCompareSide {
+    /// The commit this side reads, when it is one.
+    pub fn oid(self) -> Option<Oid> {
+        match self {
+            RepoCompareSide::Commit(oid) => Some(oid),
+            RepoCompareSide::Index | RepoCompareSide::Worktree => None,
+        }
+    }
+
+    pub fn is_worktree(self) -> bool {
+        self == RepoCompareSide::Worktree
+    }
+
+    pub fn is_index(self) -> bool {
+        self == RepoCompareSide::Index
+    }
+
+    /// A stable identity for labels, diagnostics and tests.
+    pub fn identity(self) -> String {
+        match self {
+            RepoCompareSide::Commit(oid) => format!("commit:{oid}"),
+            RepoCompareSide::Index => "index".to_owned(),
+            RepoCompareSide::Worktree => "worktree".to_owned(),
+        }
+    }
+}
+
+impl fmt::Display for RepoCompareSide {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RepoCompareSide::Commit(oid) => write!(f, "{oid}"),
+            RepoCompareSide::Index => f.write_str("index"),
+            RepoCompareSide::Worktree => f.write_str("working tree"),
+        }
+    }
+}
+
+/// One file a comparison side holds.
+///
+/// `identity` is equal exactly when two sides hold the same content and mode;
+/// for a commit or the index it is the object id, and for the working tree a
+/// digest of the file on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepoCompareFile {
+    /// Forward-slash separated path relative to the repository root.
+    pub path: String,
+    pub kind: FolderEntryKind,
+    pub size: Option<u64>,
+    pub identity: String,
+}
+
+/// A two-way comparison of two repository sides, with the folder compare's
+/// entry vocabulary so either list can render it.
+#[derive(Debug, Clone)]
+pub struct RepoCompareTree {
+    pub left: RepoCompareSide,
+    pub right: RepoCompareSide,
+    pub entries: Vec<FolderCompareEntry>,
+    pub counts: FolderCompareCounts,
+}
+
 /// How a path changed relative to the base tree when both sides are compared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ThreeWayTreeChange {
@@ -952,6 +1108,8 @@ pub struct ThreeWayTreeEntry {
     pub status: FolderEntryStatus,
     /// How the path changed relative to the base.
     pub change: ThreeWayTreeChange,
+    /// The same path read with the middle as a peer instead of a base.
+    pub peer: ThreeWayPeerStatus,
     /// `git merge-tree` reports a real merge conflict for this path.
     pub conflicting: bool,
     /// Metadata for `[left, base, right]`.
@@ -961,15 +1119,196 @@ pub struct ThreeWayTreeEntry {
 /// Output of comparing three repository trees.
 #[derive(Debug, Clone)]
 pub struct ThreeWayTreeCompare {
-    pub left: Oid,
-    pub base: Oid,
-    pub right: Oid,
+    pub left: RepoCompareSide,
+    pub base: RepoCompareSide,
+    pub right: RepoCompareSide,
     pub entries: Vec<ThreeWayTreeEntry>,
     pub counts: FolderCompareCounts,
     /// `git merge-tree` was available and reported conflicts. When it is too
-    /// old the entries still carry the tree-diff classification, but no entry
-    /// is marked [`ThreeWayTreeEntry::conflicting`].
+    /// old, or a side is not a commit, the entries still carry the tree-diff
+    /// classification, but no entry is marked
+    /// [`ThreeWayTreeEntry::conflicting`].
     pub merge_tree_checked: bool,
+}
+
+/// Compares two listings of repository sides, path by path.
+pub fn compare_two_repo_sides(
+    left: RepoCompareSide,
+    left_files: &[RepoCompareFile],
+    right: RepoCompareSide,
+    right_files: &[RepoCompareFile],
+) -> RepoCompareTree {
+    let left_map = file_map(left_files);
+    let right_map = file_map(right_files);
+    let paths: BTreeSet<&str> = left_map.keys().chain(right_map.keys()).copied().collect();
+
+    let mut entries = Vec::with_capacity(paths.len());
+    let mut counts = FolderCompareCounts::default();
+    for path in paths {
+        let left_file = left_map.get(path).copied();
+        let right_file = right_map.get(path).copied();
+        let (kind, status) = two_side_status(left_file, right_file);
+        counts.record(status);
+        entries.push(FolderCompareEntry {
+            relative_path: path.to_owned(),
+            depth: 0,
+            kind,
+            status,
+            peer: ThreeWayPeerStatus::Same,
+            sides: vec![side_info(left_file), side_info(right_file)],
+        });
+    }
+
+    RepoCompareTree {
+        left,
+        right,
+        entries,
+        counts,
+    }
+}
+
+/// Compares three listings of repository sides. Paths all three hold the same
+/// content and mode for are left out, like a commit comparison leaves out the
+/// files the trees agree on.
+pub fn compare_three_repo_sides(
+    left: RepoCompareSide,
+    left_files: &[RepoCompareFile],
+    middle: RepoCompareSide,
+    middle_files: &[RepoCompareFile],
+    right: RepoCompareSide,
+    right_files: &[RepoCompareFile],
+) -> ThreeWayTreeCompare {
+    let left_map = file_map(left_files);
+    let middle_map = file_map(middle_files);
+    let right_map = file_map(right_files);
+    let paths: BTreeSet<&str> = left_map
+        .keys()
+        .chain(middle_map.keys())
+        .chain(right_map.keys())
+        .copied()
+        .collect();
+
+    let mut entries = Vec::new();
+    let mut counts = FolderCompareCounts::default();
+    for path in paths {
+        let left_file = left_map.get(path).copied();
+        let middle_file = middle_map.get(path).copied();
+        let right_file = right_map.get(path).copied();
+
+        let peer = peer_status(left_file, middle_file, right_file);
+        if peer == ThreeWayPeerStatus::Same {
+            continue;
+        }
+
+        let left_differs = left_file != middle_file;
+        let right_differs = right_file != middle_file;
+        let change = match (left_differs, right_differs) {
+            (true, false) => ThreeWayTreeChange::LeftChanged,
+            (false, true) => ThreeWayTreeChange::RightChanged,
+            (true, true) if left_file == right_file => ThreeWayTreeChange::BothAgree,
+            _ => ThreeWayTreeChange::BothDisagree,
+        };
+
+        let states = [left_file, middle_file, right_file];
+        let present: Vec<usize> = states
+            .iter()
+            .enumerate()
+            .filter_map(|(index, file)| file.is_some().then_some(index))
+            .collect();
+        let primary = states
+            .iter()
+            .flatten()
+            .next()
+            .map(|file| file.kind)
+            .unwrap_or(FolderEntryKind::Other);
+        let kinds_match = states.iter().flatten().all(|file| file.kind == primary);
+
+        let status = if !kinds_match {
+            FolderEntryStatus::TypeMismatch
+        } else if present.len() == 1 {
+            match present[0] {
+                0 => FolderEntryStatus::OnlyLeft,
+                1 => FolderEntryStatus::OnlyMiddle,
+                _ => FolderEntryStatus::OnlyRight,
+            }
+        } else if left_file == middle_file && middle_file == right_file {
+            FolderEntryStatus::Identical
+        } else {
+            FolderEntryStatus::Different
+        };
+        counts.record(status);
+
+        entries.push(ThreeWayTreeEntry {
+            relative_path: path.to_owned(),
+            kind: primary,
+            status,
+            change,
+            peer,
+            conflicting: false,
+            sides: states.iter().map(|file| side_info(*file)).collect(),
+        });
+    }
+
+    ThreeWayTreeCompare {
+        left,
+        base: middle,
+        right,
+        entries,
+        counts,
+        merge_tree_checked: false,
+    }
+}
+
+fn file_map(files: &[RepoCompareFile]) -> BTreeMap<&str, &RepoCompareFile> {
+    files
+        .iter()
+        .map(|file| (file.path.as_str(), file))
+        .collect()
+}
+
+fn side_info(file: Option<&RepoCompareFile>) -> Option<FolderSideInfo> {
+    file.map(|file| FolderSideInfo {
+        kind: file.kind,
+        size: file.size,
+    })
+}
+
+fn two_side_status(
+    left: Option<&RepoCompareFile>,
+    right: Option<&RepoCompareFile>,
+) -> (FolderEntryKind, FolderEntryStatus) {
+    match (left, right) {
+        (Some(left), Some(right)) => {
+            if left.kind != right.kind {
+                (left.kind, FolderEntryStatus::TypeMismatch)
+            } else if left.identity == right.identity {
+                (left.kind, FolderEntryStatus::Identical)
+            } else {
+                (left.kind, FolderEntryStatus::Different)
+            }
+        }
+        (Some(left), None) => (left.kind, FolderEntryStatus::OnlyLeft),
+        (None, Some(right)) => (right.kind, FolderEntryStatus::OnlyRight),
+        (None, None) => (FolderEntryKind::Other, FolderEntryStatus::Identical),
+    }
+}
+
+fn peer_status(
+    left: Option<&RepoCompareFile>,
+    middle: Option<&RepoCompareFile>,
+    right: Option<&RepoCompareFile>,
+) -> ThreeWayPeerStatus {
+    if left.is_none() || middle.is_none() || right.is_none() {
+        return ThreeWayPeerStatus::MissingSomeSide;
+    }
+    let left_middle_same = left == middle;
+    let middle_right_same = middle == right;
+    match (left_middle_same, middle_right_same) {
+        (true, true) => ThreeWayPeerStatus::Same,
+        (false, true) => ThreeWayPeerStatus::LeftMiddleDiffer,
+        (true, false) => ThreeWayPeerStatus::MiddleRightDiffer,
+        (false, false) => ThreeWayPeerStatus::AllDifferent,
+    }
 }
 
 /// Compares 2 or 3 directories recursively. Returns `Ok(None)` when cancelled.
@@ -1233,6 +1572,11 @@ fn walk_folder_level_inner(
                 depth,
                 kind: primary_kind,
                 status: FolderEntryStatus::TypeMismatch,
+                peer: if side_count == 3 {
+                    ThreeWayPeerStatus::AllDifferent
+                } else {
+                    ThreeWayPeerStatus::Same
+                },
                 sides,
             });
             continue;
@@ -1251,6 +1595,7 @@ fn walk_folder_level_inner(
                 depth,
                 kind: FolderEntryKind::Directory,
                 status: initial_status,
+                peer: ThreeWayPeerStatus::Same,
                 sides,
             });
 
@@ -1279,13 +1624,16 @@ fn walk_folder_level_inner(
                 FolderEntryStatus::Different
             };
             out[entry_index].status = status;
+            if side_count == 3 {
+                out[entry_index].peer = directory_peer(&out[(entry_index + 1)..], present_count);
+            }
             continue;
         }
 
-        let status = if let Some(only) = single_side_status(&children) {
-            only
-        } else if present_count < side_count {
-            FolderEntryStatus::Different
+        // A three-way walk reads each file once per side and derives both the
+        // all-sides status and the neighbour relation from the same hashes.
+        let (equal, peer) = if side_count == 3 {
+            three_side_relation(&children, primary_kind, cancel)?
         } else {
             let equal = match primary_kind {
                 FolderEntryKind::File => files_equal(&children, cancel)?,
@@ -1293,21 +1641,24 @@ fn walk_folder_level_inner(
                 FolderEntryKind::Other => true,
                 FolderEntryKind::Directory => unreachable!(),
             };
-            if is_cancelled(cancel) {
-                return Ok(false);
-            }
-            if equal {
-                FolderEntryStatus::Identical
-            } else {
-                FolderEntryStatus::Different
-            }
+            (equal, ThreeWayPeerStatus::Same)
         };
-
+        if is_cancelled(cancel) {
+            return Ok(false);
+        }
+        let status = if let Some(only) = single_side_status(&children) {
+            only
+        } else if present_count < side_count || !equal {
+            FolderEntryStatus::Different
+        } else {
+            FolderEntryStatus::Identical
+        };
         out.push(FolderCompareEntry {
             relative_path: rel_path,
             depth,
             kind: primary_kind,
             status,
+            peer,
             sides,
         });
     }
@@ -1351,6 +1702,98 @@ fn single_side_status(children: &[Option<&DiscoveredChild>]) -> Option<FolderEnt
             2 => Some(FolderEntryStatus::OnlyRight),
             _ => None,
         }
+    }
+}
+
+/// Whether all three sides hold the same content for one entry, and how the
+/// neighbours relate, from one pass over each side.
+fn three_side_relation(
+    children: &[Option<&DiscoveredChild>],
+    kind: FolderEntryKind,
+    cancel: &AtomicBool,
+) -> Result<(bool, ThreeWayPeerStatus)> {
+    let (left, middle, right) = match (children.first(), children.get(1), children.get(2)) {
+        (Some(Some(left)), Some(Some(middle)), Some(Some(right))) => (*left, *middle, *right),
+        _ => return Ok((false, ThreeWayPeerStatus::MissingSomeSide)),
+    };
+    if left.kind != middle.kind || middle.kind != right.kind {
+        return Ok((false, ThreeWayPeerStatus::AllDifferent));
+    }
+    // Equal sizes are not enough for a file, but a size difference already
+    // decides the one adjacency it belongs to, without reading either file.
+    let side_token = |child: &DiscoveredChild| -> Result<Option<String>> {
+        Ok(match kind {
+            FolderEntryKind::File => {
+                if child.size == Some(0) {
+                    Some("empty".to_owned())
+                } else {
+                    stream_file_hash(&child.full_path, cancel)?
+                        .map(|hash| format!("{}:{hash:032x}", child.size.unwrap_or_default()))
+                }
+            }
+            FolderEntryKind::Symlink => {
+                let target = fs::read_link(&child.full_path)?;
+                Some(format!("symlink:{}", target.display()))
+            }
+            // A socket or device has no content to compare.
+            FolderEntryKind::Other => Some("other".to_owned()),
+            FolderEntryKind::Directory => None,
+        })
+    };
+    let left_token = side_token(left)?;
+    if is_cancelled(cancel) {
+        return Ok((false, ThreeWayPeerStatus::Same));
+    }
+    let middle_token = side_token(middle)?;
+    if is_cancelled(cancel) {
+        return Ok((false, ThreeWayPeerStatus::Same));
+    }
+    let right_token = side_token(right)?;
+    let (Some(left_token), Some(middle_token), Some(right_token)) =
+        (left_token, middle_token, right_token)
+    else {
+        return Ok((false, ThreeWayPeerStatus::AllDifferent));
+    };
+    let left_middle = left_token == middle_token;
+    let middle_right = middle_token == right_token;
+    let peer = match (left_middle, middle_right) {
+        (true, true) => ThreeWayPeerStatus::Same,
+        (false, true) => ThreeWayPeerStatus::LeftMiddleDiffer,
+        (true, false) => ThreeWayPeerStatus::MiddleRightDiffer,
+        (false, false) => ThreeWayPeerStatus::AllDifferent,
+    };
+    Ok((left_middle && middle_right, peer))
+}
+
+/// Peer relation of a directory, folded from the rows below it. A directory
+/// that is missing on a side cannot be equal there, and any child difference
+/// makes the directory differ on that adjacency too.
+fn directory_peer(descendants: &[FolderCompareEntry], present_count: usize) -> ThreeWayPeerStatus {
+    if present_count < 3
+        || descendants
+            .iter()
+            .any(|entry| entry.peer == ThreeWayPeerStatus::MissingSomeSide)
+    {
+        return ThreeWayPeerStatus::MissingSomeSide;
+    }
+    let mut left_middle = false;
+    let mut middle_right = false;
+    for entry in descendants {
+        match entry.peer {
+            ThreeWayPeerStatus::Same | ThreeWayPeerStatus::MissingSomeSide => {}
+            ThreeWayPeerStatus::LeftMiddleDiffer => left_middle = true,
+            ThreeWayPeerStatus::MiddleRightDiffer => middle_right = true,
+            ThreeWayPeerStatus::AllDifferent => {
+                left_middle = true;
+                middle_right = true;
+            }
+        }
+    }
+    match (left_middle, middle_right) {
+        (false, false) => ThreeWayPeerStatus::Same,
+        (true, false) => ThreeWayPeerStatus::LeftMiddleDiffer,
+        (false, true) => ThreeWayPeerStatus::MiddleRightDiffer,
+        (true, true) => ThreeWayPeerStatus::AllDifferent,
     }
 }
 
@@ -1714,6 +2157,126 @@ mod tests {
         assert_eq!(counts.both_agree, 1);
         assert_eq!(counts.both_disagree, 1);
         assert_eq!(res.rows.len(), 8);
+    }
+
+    #[test]
+    fn three_way_peer_status_classifies_each_status() {
+        let cancel = AtomicBool::new(false);
+        let middle = b"s0\nL\ns1\nR\ns2\nmiddle-agree\ns3\nconflict-b\ns4\n";
+        let left = b"s0\nL-left\ns1\nR\ns2\nouter-agree\ns3\nconflict-left\ns4\n";
+        let right = b"s0\nL\ns1\nR-right\ns2\nouter-agree\ns3\nconflict-right\ns4\n";
+
+        let res = compare_three_bytes(
+            Path::new("left.txt"),
+            Some(left),
+            Path::new("mid.txt"),
+            Some(middle),
+            Path::new("right.txt"),
+            Some(right),
+            &cancel,
+        )
+        .expect("not cancelled");
+
+        let peer: Vec<ThreeWayPeerStatus> = res
+            .regions
+            .iter()
+            .map(|region| region.kind.peer_status())
+            .collect();
+        assert_eq!(
+            peer,
+            vec![
+                ThreeWayPeerStatus::Same,
+                ThreeWayPeerStatus::LeftMiddleDiffer,
+                ThreeWayPeerStatus::Same,
+                ThreeWayPeerStatus::MiddleRightDiffer,
+                ThreeWayPeerStatus::Same,
+                ThreeWayPeerStatus::AllDifferent,
+                ThreeWayPeerStatus::Same,
+                ThreeWayPeerStatus::AllDifferent,
+                ThreeWayPeerStatus::Same,
+            ]
+        );
+
+        let counts = res.peer_counts();
+        assert_eq!(counts.left_middle, 3, "left differs in three regions");
+        assert_eq!(counts.middle_right, 3, "right differs in three regions");
+        assert_eq!(counts.all_different, 2);
+        assert_eq!(
+            counts.total_changes(),
+            4,
+            "the two agreed changes are one region each"
+        );
+    }
+
+    #[test]
+    fn three_way_peer_status_marks_every_tree_relation() {
+        let file = |path: &str, identity: &str| RepoCompareFile {
+            path: path.to_owned(),
+            kind: FolderEntryKind::File,
+            size: Some(1),
+            identity: identity.to_owned(),
+        };
+        let left = vec![
+            file("same.txt", "a"),
+            file("left.txt", "b"),
+            file("right.txt", "c"),
+            file("both.txt", "d"),
+            file("only-left.txt", "e"),
+        ];
+        let middle = vec![
+            file("same.txt", "a"),
+            file("left.txt", "a"),
+            file("right.txt", "c"),
+            file("both.txt", "e"),
+        ];
+        let right = vec![
+            file("same.txt", "a"),
+            file("left.txt", "a"),
+            file("right.txt", "d"),
+            file("both.txt", "f"),
+        ];
+
+        let compare = compare_three_repo_sides(
+            RepoCompareSide::Commit(Oid::from([0u8; 20])),
+            &left,
+            RepoCompareSide::Index,
+            &middle,
+            RepoCompareSide::Worktree,
+            &right,
+        );
+        let peer = |path: &str| {
+            compare
+                .entries
+                .iter()
+                .find(|entry| entry.relative_path == path)
+                .map(|entry| entry.peer)
+        };
+        assert_eq!(
+            peer("same.txt"),
+            None,
+            "a path all three sides agree on is left out"
+        );
+        assert_eq!(peer("left.txt"), Some(ThreeWayPeerStatus::LeftMiddleDiffer));
+        assert_eq!(
+            peer("right.txt"),
+            Some(ThreeWayPeerStatus::MiddleRightDiffer)
+        );
+        assert_eq!(
+            peer("both.txt"),
+            Some(ThreeWayPeerStatus::AllDifferent),
+            "the middle differs from both outer sides"
+        );
+        assert_eq!(
+            peer("only-left.txt"),
+            Some(ThreeWayPeerStatus::MissingSomeSide)
+        );
+        assert_eq!(compare.left, RepoCompareSide::Commit(Oid::from([0u8; 20])));
+        assert_eq!(compare.base, RepoCompareSide::Index);
+        assert_eq!(compare.right, RepoCompareSide::Worktree);
+        assert!(
+            !compare.merge_tree_checked,
+            "a non-commit side has no merge tree to check"
+        );
     }
 
     #[test]
