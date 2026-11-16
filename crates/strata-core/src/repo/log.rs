@@ -56,7 +56,8 @@ pub(crate) type CancelCheck = Arc<dyn Fn() -> bool + Send + Sync>;
 /// order (children before parents), newest first among independent commits.
 ///
 /// This is `git log --date-order HEAD --branches --remotes --tags refs/stash`
-/// (`refs/stash` only when a stash exists). Private namespaces that tools create
+/// plus every older stash in the `refs/stash` reflog (`refs/stash` only when a
+/// stash exists). Private namespaces that tools create
 /// (`refs/notes/`, `refs/original/`, `refs/prefetch/`, `refs/bisect/`, ...) are
 /// deliberately left out: their commits would add lanes that no user asked to
 /// see.
@@ -572,6 +573,29 @@ fn walk_tips(
             && seen.insert(commit)
         {
             tips.push(commit);
+        }
+    }
+
+    // `refs/stash` names only the newest stash; older ones live in its reflog.
+    // They are tips too, or picking `stash@{1}` in the sidebar would have no
+    // row in the list to land on.
+    if !hidden_refs.iter().any(|hidden| hidden == "refs/stash")
+        && let Some(reference) = repo.try_find_reference("refs/stash").map_err(Error::gix)?
+    {
+        let mut platform = reference.log_iter();
+        if let Some(lines) = platform.rev().map_err(Error::gix)? {
+            for line in lines {
+                let Ok(line) = line else {
+                    continue;
+                };
+                let id = line.new_oid;
+                if seen.contains(&id) || !checked.insert(id) {
+                    continue;
+                }
+                if is_commit(repo, graph, id)? && seen.insert(id) {
+                    tips.push(id);
+                }
+            }
         }
     }
 

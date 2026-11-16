@@ -159,9 +159,13 @@ impl Fixture {
             "--remotes",
             "--tags",
         ];
-        if self.ref_exists("refs/stash") {
-            args.push("refs/stash");
-        }
+        // Every stash in the reflog, not only the newest one `refs/stash` names.
+        let stashes = if self.ref_exists("refs/stash") {
+            self.git(&["log", "-g", "--format=%H", "refs/stash"])
+        } else {
+            String::new()
+        };
+        args.extend(stashes.lines());
         self.git(&args).lines().map(str::to_string).collect()
     }
 }
@@ -592,6 +596,27 @@ fn stash_is_walked() {
     assert!(
         walked.contains(&stash),
         "the stash tip must be part of the history"
+    );
+    assert_eq!(walked, fixture.git_log_date_order());
+}
+
+#[test]
+fn older_stashes_are_walked_too() {
+    let fixture = Fixture::new();
+    fixture.commit("file.txt", "base\n", BASE_TIME + 100, "base");
+    for (date, content, message) in [(200, "one\n", "first"), (300, "two\n", "second")] {
+        std::fs::write(fixture.path().join("file.txt"), content).expect("write");
+        fixture.git_dated(
+            BASE_TIME + date,
+            &["stash", "push", "--quiet", "-m", message],
+        );
+    }
+    let older = fixture.git(&["rev-parse", "stash@{1}"]);
+
+    let walked = fixture.walk_ids();
+    assert!(
+        walked.contains(&older),
+        "stash@{{1}} needs a row, or selecting it in the sidebar shows nothing"
     );
     assert_eq!(walked, fixture.git_log_date_order());
 }
