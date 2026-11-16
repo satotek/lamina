@@ -61,23 +61,32 @@ impl RepoView {
         })
     }
 
-    /// Commands that need this machine: the config file, a local terminal, or
-    /// an editor. Their handlers already return without doing anything on a
-    /// remote tab; the palette has to say why, or the row looks enabled.
+    /// Commands that need this machine: the config file, a terminal, or an
+    /// editor. A remote tab can run the last two against the host through
+    /// `ssh`, but only while the connection is up.
     fn block_local_machine_commands(&self, map: &mut AvailabilityMap) {
         if !self.is_ssh() {
             return;
         }
-        let reason = Some(crate::remote_open::unavailable_reason());
-        for action in [
+        map.block(
             "lamina::OpenGitConfig",
-            "lamina::OpenTerminalHere",
-            "lamina::OpenInEditor",
-        ] {
-            map.block(action, reason.clone());
-        }
+            Some(crate::remote_open::unavailable_reason()),
+        );
+        let disconnected = if self.remote_connected() {
+            None
+        } else {
+            Some(t!("title_bar.not_connected").to_string())
+        };
+        map.block("lamina::OpenInEditor", disconnected.clone());
+        // Without the embedded terminal nothing can run `ssh` for the user, so
+        // the external terminal stays closed on a remote tab in that build.
         #[cfg(feature = "terminal")]
-        map.block("lamina::ToggleTerminal", reason);
+        let terminal = disconnected;
+        #[cfg(not(feature = "terminal"))]
+        let terminal = Some(t!("remote_repo.no_terminal").to_string());
+        map.block("lamina::OpenTerminalHere", terminal.clone());
+        #[cfg(feature = "terminal")]
+        map.block("lamina::ToggleTerminal", terminal);
     }
 
     /// The selected rows' real commits, oldest first. The synthetic benchmark
@@ -408,21 +417,22 @@ mod tests {
         let view = window.root(cx).expect("the window's root view");
         let mut vcx = VisualTestContext::from_window(window.into(), cx);
         let reason = crate::remote_open::unavailable_reason();
-        for action in [
-            "lamina::OpenGitConfig",
-            "lamina::OpenTerminalHere",
-            "lamina::OpenInEditor",
-        ] {
+        assert_eq!(
+            blocked_reason(&view, &mut vcx, "lamina::OpenGitConfig").as_deref(),
+            Some(reason.as_str()),
+            "the config file lives on the host"
+        );
+        for action in ["lamina::OpenTerminalHere", "lamina::OpenInEditor"] {
             assert_eq!(
                 blocked_reason(&view, &mut vcx, action).as_deref(),
-                Some(reason.as_str()),
+                Some(t!("title_bar.not_connected").as_ref()),
                 "{action}"
             );
         }
         #[cfg(feature = "terminal")]
         assert_eq!(
             blocked_reason(&view, &mut vcx, "lamina::ToggleTerminal").as_deref(),
-            Some(reason.as_str())
+            Some(t!("title_bar.not_connected").as_ref())
         );
         assert_eq!(
             blocked_reason(&view, &mut vcx, "lamina::CancelRunningOperation").as_deref(),
@@ -444,5 +454,81 @@ mod tests {
             Some(t!("compare.select_branch").as_ref()),
             "a disconnected tab has no revealed branch"
         );
+    }
+
+    /// A connected remote tab runs the editor and the terminal against the
+    /// host, so those rows must lose their reason once the session is up.
+    #[cfg(unix)]
+    #[gpui::test]
+    fn a_connected_remote_tab_can_run_commands_that_follow_it_to_the_host(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::remote_open::{RemoteLaunch, RemoteSpec, SshOverride};
+        use crate::repo_view::remote_fixture::{install_host_helper, layout_fake_ssh, scratch_dir};
+
+        cx.update(prepare);
+        let repo = TestRepo::new();
+        repo.write("README.md", "alpha\n");
+        repo.commit("alpha");
+        // The helper's reader thread delivers events.
+        cx.dispatcher.allow_parking();
+
+        let scratch = scratch_dir("lamina-app-availability");
+        let laid = layout_fake_ssh(&scratch);
+        let helper = crate::repo_view::remote_fixture::wait_for_helper();
+        install_host_helper(&helper, &laid.helpers);
+
+        let window = cx.add_window(|window, cx| {
+            RepoView::new(
+                Launch::Remote(RemoteLaunch {
+                    spec: RemoteSpec {
+                        host: "git.example.com".into(),
+                        port: None,
+                        path: repo.path().to_string_lossy().into_owned(),
+                    },
+                    auto_connect: true,
+                    ssh: Some(SshOverride {
+                        program: laid.ssh.clone(),
+                        helper_dir: laid.helpers.clone(),
+                    }),
+                }),
+                window,
+                cx,
+            )
+        });
+        let view = window.root(cx).expect("the window's root view");
+        let mut vcx = VisualTestContext::from_window(window.into(), cx);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
+        while vcx.read(|cx| view.read(cx).commit_count()) == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the remote history did not load"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            vcx.run_until_parked();
+        }
+
+        assert_eq!(
+            blocked_reason(&view, &mut vcx, "lamina::OpenTerminalHere"),
+            None,
+            "a connected tab can open a terminal on the host"
+        );
+        assert_eq!(
+            blocked_reason(&view, &mut vcx, "lamina::OpenInEditor"),
+            None,
+            "a connected tab can fetch the file for the editor"
+        );
+        #[cfg(feature = "terminal")]
+        assert_eq!(
+            blocked_reason(&view, &mut vcx, "lamina::ToggleTerminal"),
+            None
+        );
+        assert_eq!(
+            blocked_reason(&view, &mut vcx, "lamina::OpenGitConfig").as_deref(),
+            Some(crate::remote_open::unavailable_reason().as_str()),
+            "the config file is still only on the host"
+        );
+
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 }

@@ -131,7 +131,9 @@ impl Render for RepoView {
                     this.redo_last_action(window, cx)
                 }),
             )
-            .on_action(cx.listener(|this, _: &OpenTerminalHere, _, cx| this.open_terminal_here(cx)))
+            .on_action(cx.listener(|this, _: &OpenTerminalHere, window, cx| {
+                this.open_terminal_here(window, cx)
+            }))
             .on_action(
                 cx.listener(|this, _: &OpenInEditor, _, cx| this.open_selected_file_in_editor(cx)),
             )

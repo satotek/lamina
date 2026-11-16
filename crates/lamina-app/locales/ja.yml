@@ -1793,6 +1793,7 @@ remote_repo.reconnect: "再接続"
 remote_repo.placeholder: "接続"
 remote_repo.placeholder_detail: "このリモートのリポジトリにはまだ接続していません。"
 remote_repo.badge: "リモート"
+remote_repo.no_terminal: "このビルドには組み込みターミナルが含まれていません"
 
 # アプリのアップデート
 action.check_for_updates: "アップデートを確認…"
@@ -1816,4 +1817,3 @@ updater.error_title: "アップデートエラー"
 updater.placeholder_key: "このビルドにはアップデート署名用の公開鍵が設定されていません。"
 updater.check_failed: "アップデートを確認できませんでした: %{error}"
 updater.install_failed: "アップデートをインストールできませんでした: %{error}"
-
