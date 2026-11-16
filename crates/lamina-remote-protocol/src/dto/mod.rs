@@ -7,6 +7,7 @@
 mod diff;
 mod graph;
 mod operation;
+mod query;
 mod repo;
 
 pub use diff::{
@@ -20,6 +21,14 @@ pub use graph::{
 pub use operation::{
     ConflictSideDto, OperationDto, RemoteBranchDto, ResetModeDto, UnsupportedOperation,
     is_supported_operation,
+};
+pub use query::{
+    BlameCommitDto, BlameDto, BlameHunkDto, CommitQueryDto, CommitSignatureDto, CommitStatDto,
+    CompareFileDto, CompareModeDto, ComparisonDto, ContentSearchEntryDto, ContentSearchModeDto,
+    ContentSearchQueryDto, FileStatDto, InProgressCommitDto, InProgressDetailsDto,
+    PathHistoryCommitDto, QueryEvent, QueryRequest, RebaseOntoDto, ReflogEntryDto, ReflogKindDto,
+    SignatureFormatDto, SignatureValidityDto, SubmoduleInfoDto, SubmoduleStatusDto,
+    WorktreeInfoDto, query_from_session,
 };
 pub use repo::{
     ChangeKindDto, CommitDto, ConflictEntryDto, ConflictKindDto, FileChangeDto, HeadDto, ObjectId,

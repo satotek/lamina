@@ -416,6 +416,11 @@ mod tests {
                 descendant: oid,
             },
             Request::MergeMessage,
+            Request::Query {
+                ticket: 4,
+                query: crate::dto::QueryRequest::InProgressDetails,
+            },
+            Request::CancelQuery { ticket: 4 },
         ];
         for request in requests {
             let mut bytes = Vec::new();
@@ -509,6 +514,11 @@ mod tests {
                 prompt: "Password: ".into(),
                 secret: true,
             },
+            Event::Query {
+                ticket: 4,
+                event: crate::dto::QueryEvent::PathHistoryDone,
+            },
+            Event::SignaturesInvalidated,
         ];
         for event in events {
             let mut bytes = Vec::new();
@@ -530,6 +540,6 @@ mod tests {
     fn the_handshake_version_requires_a_current_helper() {
         // Deploy replaces a helper whose `--self-check` reports a different
         // protocol. Keeping the number here makes an accidental revert fail.
-        assert_eq!(crate::PROTOCOL_VERSION, 3);
+        assert_eq!(crate::PROTOCOL_VERSION, 4);
     }
 }
