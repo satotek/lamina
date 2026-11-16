@@ -10,8 +10,10 @@
 //!   `aarch64-unknown-linux-musl`, with the same `STRATA_BUILD_ID` as the app
 //!   (the id is `version+STRATA_BUILD_ID`, or `version+dev` when it is unset).
 //!   musl is what lets the helper start without the build machine's libc.
-//! - Files named `strata-remote-<target>` in one directory, and
-//!   [`HELPER_DIR_ENV`] set to that directory when the app starts.
+//! - Files named `strata-remote-<target>` in one directory. The app looks in
+//!   `remote-helpers/` next to its own executable when [`HELPER_DIR_ENV`] is
+//!   unset (that is where a release build places them; packaging the binaries
+//!   is a separate step) and otherwise uses the directory the variable names.
 //! - No other operating system or architecture: the client reports an error
 //!   instead of compiling on the host.
 //!
