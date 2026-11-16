@@ -600,6 +600,9 @@ mod tests {
                     break;
                 }
                 Ok(TerminalEvent::SnapshotChanged) => {}
+                Ok(TerminalEvent::ResizeFailed(error)) => {
+                    panic!("unexpected resize failure: {error}")
+                }
                 Err(_) => {}
             }
         }
@@ -684,6 +687,40 @@ mod tests {
                 "round {round}: output printed at startup was lost"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resize_sent_right_after_spawn_survives_console_startup() {
+        // ConPTY drops a resize issued while the console client is still
+        // starting and reports success anyway, so the actor re-sends the size
+        // once the first output arrives. The shell must end up reporting the
+        // grid from after the resize, not the one it was spawned with.
+        let options = sh_options(80, 16, "sleep 0.3; stty size");
+        let (session, events) = TerminalSession::spawn(options).expect("spawn sleeping shell");
+
+        // Sent immediately, while the shell is still starting.
+        session.resize(100, 30, 8, 16);
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(
+                !remaining.is_zero(),
+                "timed out waiting for the shell to exit"
+            );
+            match events.recv_timeout(remaining) {
+                Ok(TerminalEvent::ChildExited(_)) => break,
+                Ok(_) => {}
+                Err(err) => panic!("terminal events stopped before the shell exited: {err}"),
+            }
+        }
+
+        let text = session.snapshot().text();
+        assert!(
+            text.contains("30 100"),
+            "shell must see the resized grid, got: {text:?}"
+        );
     }
 
     #[cfg(unix)]

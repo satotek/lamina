@@ -131,6 +131,9 @@ pub enum TerminalEvent {
     Bell,
     /// The child process exited and was reaped.
     ChildExited(Option<ExitStatus>),
+    /// The PTY layer rejected a window-size change. Resizing keeps the terminal
+    /// model correct, so this is informational and hosts only need to log it.
+    ResizeFailed(String),
 }
 
 /// Callback invoked from the terminal actor thread for each [`TerminalEvent`].
@@ -2463,6 +2466,12 @@ struct ActorState<'a> {
     child_exited_pending: bool,
     current_cols: u16,
     current_rows: u16,
+    current_cell_width_px: u32,
+    current_cell_height_px: u32,
+    /// Whether the PTY still has to be told its size again once the shell is up.
+    size_reassert_pending: bool,
+    /// Last PTY resize failure, reported on the event channel by the actor loop.
+    resize_error: Option<String>,
 }
 
 impl ActorState<'_> {
@@ -2473,11 +2482,52 @@ impl ActorState<'_> {
         }
     }
 
+    fn apply_pty_size(&mut self, cols: u16, rows: u16, cell_width_px: u32, cell_height_px: u32) {
+        self.current_cols = cols;
+        self.current_rows = rows;
+        self.current_cell_width_px = cell_width_px;
+        self.current_cell_height_px = cell_height_px;
+        if let Err(err) = self.master.resize(PtySize {
+            rows,
+            cols,
+            pixel_width: cols.saturating_mul(cell_width_px as u16),
+            pixel_height: rows.saturating_mul(cell_height_px as u16),
+        }) {
+            self.resize_error = Some(err.to_string());
+        }
+    }
+
+    /// Sends the current size to the PTY on the first chunk of shell output.
+    ///
+    /// ConPTY drops a resize issued while the console client is still starting,
+    /// yet the call reports success and the terminal model above already holds
+    /// the new size, so nothing ever retries and the shell keeps wrapping at the
+    /// size it attached with. The first output means the client is alive, which
+    /// makes this the cheapest point to re-assert the size. It is unconditional
+    /// (even when the size did not change) because the platform may have
+    /// discarded the earlier request silently, and it runs on every platform: on
+    /// Unix the kernel already keeps the size, so the extra call costs one ioctl
+    /// and leaves both platforms on the same code path.
+    fn reassert_pty_size_after_output(&mut self) {
+        if !std::mem::take(&mut self.size_reassert_pending) {
+            return;
+        }
+        let (cols, rows) = (self.current_cols, self.current_rows);
+        let (cell_width_px, cell_height_px) =
+            (self.current_cell_width_px, self.current_cell_height_px);
+        self.apply_pty_size(cols, rows, cell_width_px, cell_height_px);
+    }
+
+    fn take_resize_error(&mut self) -> Option<String> {
+        self.resize_error.take()
+    }
+
     fn handle_cmd(&mut self, cmd: ActorCmd) -> (bool, bool) {
         match cmd {
             ActorCmd::PtyBytes(bytes) => {
                 let replies = self.core.feed_bytes(&bytes);
                 self.write_pty(&replies);
+                self.reassert_pty_size_after_output();
                 (true, false)
             }
             ActorCmd::PtyEof => {
@@ -2524,16 +2574,11 @@ impl ActorState<'_> {
                 cell_width_px,
                 cell_height_px,
             } => {
-                let _ = self.core.resize(cols, rows, cell_width_px, cell_height_px);
+                if let Err(err) = self.core.resize(cols, rows, cell_width_px, cell_height_px) {
+                    self.resize_error = Some(err.to_string());
+                }
                 if cols != self.current_cols || rows != self.current_rows {
-                    self.current_cols = cols;
-                    self.current_rows = rows;
-                    let _ = self.master.resize(PtySize {
-                        rows,
-                        cols,
-                        pixel_width: cols.saturating_mul(cell_width_px as u16),
-                        pixel_height: rows.saturating_mul(cell_height_px as u16),
-                    });
+                    self.apply_pty_size(cols, rows, cell_width_px, cell_height_px);
                 }
                 (true, false)
             }
@@ -2622,6 +2667,10 @@ fn actor_loop(
         child_exited_pending: false,
         current_cols: options.cols.max(1),
         current_rows: options.rows.max(1),
+        current_cell_width_px: options.cell_width_px.max(1),
+        current_cell_height_px: options.cell_height_px.max(1),
+        size_reassert_pending: true,
+        resize_error: None,
     };
 
     while let Ok(first) = cmd_rx.recv() {
@@ -2652,6 +2701,11 @@ fn actor_loop(
         }
         if let Some(title) = state.core.take_title_changed() {
             on_event(TerminalEvent::TitleChanged(title));
+        }
+        if let Some(error) = state.take_resize_error() {
+            // The terminal model keeps the requested size even when the platform
+            // refused it, so this never needs to undo anything; the host logs it.
+            on_event(TerminalEvent::ResizeFailed(error));
         }
         if visual_pending
             && let Ok(Some(snap)) = state
