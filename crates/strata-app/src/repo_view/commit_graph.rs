@@ -24,7 +24,7 @@ pub(super) fn repository_key(repo: &Repo) -> PathBuf {
         .workdir()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| repo.git_dir().to_path_buf());
-    std::fs::canonicalize(&path).unwrap_or(path)
+    strata_core::fs_path::canonicalize(&path)
 }
 
 impl RepoView {

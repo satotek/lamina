@@ -10,6 +10,7 @@ pub mod encoding;
 pub mod env_path;
 pub mod error;
 pub mod forge;
+pub mod fs_path;
 pub mod git_cli;
 pub mod graph;
 pub mod highlight;

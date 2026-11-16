@@ -198,7 +198,7 @@ fn repo_name(session: &Session) -> String {
         .map(Path::to_path_buf)
         .unwrap_or_else(|| repo.git_dir().to_path_buf());
     // Opening `.` yields a relative workdir with no file name of its own.
-    let path = std::fs::canonicalize(&path).unwrap_or(path);
+    let path = strata_core::fs_path::canonicalize(&path);
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| display_path(&path))

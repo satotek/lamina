@@ -653,7 +653,7 @@ impl RepoView {
     /// error screen, which have no directory to open.
     pub(super) fn work_dir(&self) -> Option<PathBuf> {
         let path = self.session.as_ref()?.repo().workdir()?.to_path_buf();
-        Some(std::fs::canonicalize(&path).unwrap_or(path))
+        Some(strata_core::fs_path::canonicalize(&path))
     }
 
     /// Opens a terminal in the repository's working tree.

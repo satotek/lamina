@@ -173,6 +173,9 @@ impl TerminalPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        // A verbatim `\\?\` directory would leave cmd.exe (and so every batch
+        // file run from the shell) in the Windows directory instead.
+        let working_dir = strata_core::fs_path::strip_verbatim(working_dir);
         let focus_handle = cx.focus_handle();
         let settings = Settings::get(cx);
         let design = Design::new(cx.theme(), settings);

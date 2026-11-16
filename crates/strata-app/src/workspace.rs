@@ -1354,7 +1354,7 @@ fn worktree_root(session: &Session) -> PathBuf {
 }
 
 fn canonical(path: PathBuf) -> PathBuf {
-    std::fs::canonicalize(&path).unwrap_or(path)
+    strata_core::fs_path::canonicalize(&path)
 }
 
 fn is_current(current: Option<&Path>, root: &Path) -> bool {

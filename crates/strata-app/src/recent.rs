@@ -174,26 +174,7 @@ pub fn now_seconds() -> u64 {
 /// spelled path otherwise, because a removed directory still deserves a row the
 /// user can see and delete.
 fn normalize(path: &Path) -> PathBuf {
-    match std::fs::canonicalize(path) {
-        Ok(canonical) => strip_verbatim(canonical),
-        Err(_) => path.to_path_buf(),
-    }
-}
-
-/// `canonicalize` on Windows returns `\\?\C:\...`; the list is read by a human
-/// and handed back to git, both of which prefer the plain form.
-#[cfg(target_os = "windows")]
-fn strip_verbatim(path: PathBuf) -> PathBuf {
-    let text = path.to_string_lossy();
-    match text.strip_prefix(r"\\?\") {
-        Some(rest) => PathBuf::from(rest),
-        None => path,
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-fn strip_verbatim(path: PathBuf) -> PathBuf {
-    path
+    strata_core::fs_path::canonicalize(path)
 }
 
 /// The directory name shown in the list, with the full path as a fallback.
