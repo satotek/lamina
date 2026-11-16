@@ -732,6 +732,13 @@ impl CompareView {
         f32::from(self.three_way_h_scroll.offset().x)
     }
 
+    /// Vertical offset of the three-way row list. Tests use this to tell a
+    /// horizontal pan apart from the rows moving.
+    #[cfg(test)]
+    pub(crate) fn vertical_scroll_offset(&self) -> f32 {
+        f32::from(self.three_way_scroll.0.borrow().base_handle.offset().y)
+    }
+
     pub(crate) fn cancel(&mut self) {
         if let Some(flag) = self.cancel_flag.take() {
             flag.store(true, Ordering::Relaxed);
@@ -1401,7 +1408,13 @@ impl CompareView {
             let h_scroll = self.three_way_h_scroll.clone();
             let count = rows.len();
 
-            uniform_list(
+            // A scroller with only vertical overflow copies a pure horizontal
+            // wheel delta onto Y. The panes already consume that delta, and
+            // they do not stop it, so the rows would walk unless this list
+            // refuses the other axis. The helper that sets this lives on
+            // stateful elements; a uniform list is not one, but the flag is
+            // the same style field.
+            let mut list = uniform_list(
                 "compare-three-way-list",
                 count,
                 move |range: std::ops::Range<usize>, _window, _cx| {
@@ -1426,11 +1439,12 @@ impl CompareView {
                         .collect::<Vec<_>>()
                 },
             )
-            .track_scroll(&self.three_way_scroll)
-            .with_scrollbar(&self.three_way_scroll)
-            .flex_1()
-            .min_h_0()
-            .into_any_element()
+            .track_scroll(&self.three_way_scroll);
+            list.style().restrict_scroll_to_axis = Some(true);
+            list.with_scrollbar(&self.three_way_scroll)
+                .flex_1()
+                .min_h_0()
+                .into_any_element()
         };
 
         div()

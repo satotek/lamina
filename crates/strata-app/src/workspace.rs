@@ -2445,6 +2445,164 @@ mod tests {
         );
     }
 
+    #[gpui::test]
+    fn three_way_compare_scrolls_each_axis_on_its_own(cx: &mut gpui::TestAppContext) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let long = "x".repeat(400);
+        // Tall enough that a vertical wheel can leave the top, and wide enough
+        // that a horizontal wheel can leave column zero. One wide line sets
+        // the shared content width; the short lines fill the list.
+        let mut left = String::new();
+        let mut base = String::new();
+        let mut right = String::new();
+        for n in 0..100 {
+            left.push_str(&format!("left {n}\n"));
+            base.push_str(&format!("base {n}\n"));
+            right.push_str(&format!("right {n}\n"));
+        }
+        left.push_str(&long);
+        left.push('\n');
+        base.push_str("base-end\n");
+        right.push_str(&long);
+        right.push_str("tail\n");
+        let left_path = temp.path().join("left.txt");
+        let base_path = temp.path().join("base.txt");
+        let right_path = temp.path().join("right.txt");
+        std::fs::write(&left_path, left).unwrap();
+        std::fs::write(&base_path, base).unwrap();
+        std::fs::write(&right_path, right).unwrap();
+
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            gpui_component::init(cx);
+            cx.set_global(Settings::default());
+            crate::actions::bind(cx);
+        });
+
+        let workspace_cell: std::rc::Rc<std::cell::RefCell<Option<Entity<Workspace>>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
+        let workspace_cell_init = workspace_cell.clone();
+        let target = CompareTarget::ThreeWayFiles {
+            left: left_path,
+            middle: base_path,
+            right: right_path,
+        };
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), move |window, cx| {
+                    let workspace = cx.new(|cx| Workspace::new_with_compare(target, window, cx));
+                    *workspace_cell_init.borrow_mut() = Some(workspace.clone());
+                    cx.new(|cx| Root::new(workspace, window, cx))
+                })
+            })
+            .expect("open window");
+        let mut visual_cx = VisualTestContext::from_window(window.into(), cx);
+        visual_cx.run_until_parked();
+
+        let workspace = workspace_cell.borrow().clone().expect("workspace created");
+        let compare = visual_cx.update(|_, cx| {
+            let ws = workspace.read(cx);
+            let Content::Tabs(deck) = &ws.content else {
+                panic!("expected compare tab");
+            };
+            let TabSlot::Compare(slot) = deck.active().expect("active slot") else {
+                panic!("expected compare slot");
+            };
+            assert!(!slot.view.read(cx).is_loading());
+            slot.view.clone()
+        });
+        visual_cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+
+        let pane = visual_cx
+            .debug_bounds("compare-3way-left")
+            .expect("the left text pane records its bounds");
+        // The selector is recorded once per visible row, so the stored bounds
+        // are the last row, which sits on the bottom edge. Aim at the same
+        // code column higher up, where a row is fully inside the window.
+        let over_code = gpui::point(pane.center().x, pane.origin.y - px(200.0));
+
+        let offsets = |visual_cx: &mut VisualTestContext| {
+            visual_cx.update(|_, cx| {
+                let view = compare.read(cx);
+                (
+                    view.horizontal_scroll_offset(),
+                    view.vertical_scroll_offset(),
+                )
+            })
+        };
+        let scroll = |visual_cx: &mut VisualTestContext, delta: gpui::ScrollDelta| {
+            visual_cx.simulate_event(gpui::ScrollEvent {
+                position: over_code,
+                delta,
+                modifiers: Default::default(),
+                touch_phase: gpui::TouchPhase::Started,
+                source: gpui::ScrollSource::Pointer,
+            });
+        };
+
+        let (h_before, v_before) = offsets(&mut visual_cx);
+        // Wheel notches, including a shift-wheel that the platform already
+        // reported on X, and a trackpad pan that arrives in pixels.
+        scroll(
+            &mut visual_cx,
+            gpui::ScrollDelta::Lines(gpui::point(-3.0, 0.0)),
+        );
+        let (h_lines, v_lines) = offsets(&mut visual_cx);
+        assert!(
+            h_lines < h_before,
+            "a horizontal wheel has to pan the shared offset"
+        );
+        assert_eq!(
+            v_lines, v_before,
+            "a horizontal wheel must not move the row list"
+        );
+
+        scroll(
+            &mut visual_cx,
+            gpui::ScrollDelta::Pixels(gpui::point(px(-80.0), px(0.0))),
+        );
+        let (h_pixels, v_pixels) = offsets(&mut visual_cx);
+        assert!(
+            h_pixels < h_lines,
+            "a horizontal trackpad pan has to pan the shared offset"
+        );
+        assert_eq!(
+            v_pixels, v_lines,
+            "a horizontal trackpad pan must not move the row list"
+        );
+
+        scroll(
+            &mut visual_cx,
+            gpui::ScrollDelta::Lines(gpui::point(0.0, -3.0)),
+        );
+        let (h_down, v_down) = offsets(&mut visual_cx);
+        assert!(
+            v_down < v_pixels,
+            "a vertical wheel has to scroll the row list"
+        );
+        assert_eq!(
+            h_down, h_pixels,
+            "a vertical wheel must not pan the text panes"
+        );
+
+        scroll(
+            &mut visual_cx,
+            gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-80.0))),
+        );
+        let (h_pan, v_pan) = offsets(&mut visual_cx);
+        assert!(
+            v_pan < v_down,
+            "a vertical trackpad pan has to scroll the row list"
+        );
+        assert_eq!(
+            h_pan, h_down,
+            "a vertical trackpad pan must not pan the text panes"
+        );
+    }
+
     #[cfg(all(not(windows), feature = "terminal"))]
     #[gpui::test]
     fn workspace_tabs_preserve_terminal_sessions_on_switch_and_kill_on_close(
