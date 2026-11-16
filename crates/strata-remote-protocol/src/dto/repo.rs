@@ -525,6 +525,35 @@ impl From<ConflictKindDto> for strata_core::ConflictKind {
     }
 }
 
+/// `merge.conflictStyle`. Unknown values are not representable: the helper
+/// maps them to git's default before they are encoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConflictStyleDto {
+    Merge,
+    Diff3,
+    ZealousDiff3,
+}
+
+impl From<strata_core::merge::ConflictStyle> for ConflictStyleDto {
+    fn from(style: strata_core::merge::ConflictStyle) -> Self {
+        match style {
+            strata_core::merge::ConflictStyle::Merge => Self::Merge,
+            strata_core::merge::ConflictStyle::Diff3 => Self::Diff3,
+            strata_core::merge::ConflictStyle::ZealousDiff3 => Self::ZealousDiff3,
+        }
+    }
+}
+
+impl From<ConflictStyleDto> for strata_core::merge::ConflictStyle {
+    fn from(style: ConflictStyleDto) -> Self {
+        match style {
+            ConflictStyleDto::Merge => Self::Merge,
+            ConflictStyleDto::Diff3 => Self::Diff3,
+            ConflictStyleDto::ZealousDiff3 => Self::ZealousDiff3,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConflictEntryDto {
     pub path: String,

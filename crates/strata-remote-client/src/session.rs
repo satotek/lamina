@@ -1229,8 +1229,13 @@ impl RepoReader for RemoteReader {
         }
     }
 
-    fn file_in_worktree(&self, _path: &str) -> Result<Option<Vec<u8>>> {
-        Err(Error::other(UNSUPPORTED))
+    fn file_in_worktree(&self, path: &str) -> Result<Option<Vec<u8>>> {
+        match self.call(Request::FileInWorktree {
+            path: path.to_owned(),
+        })? {
+            Response::FileInWorktree { data } => Ok(data),
+            other => Err(unexpected(other)),
+        }
     }
 
     fn working_tree_encoding(&self, _path: &str) -> Option<String> {
@@ -1312,12 +1317,24 @@ impl RepoReader for RemoteReader {
         }
     }
 
-    fn conflict_sides(&self, _path: &str) -> Result<ConflictSides> {
-        Err(Error::other(UNSUPPORTED))
+    fn conflict_sides(&self, path: &str) -> Result<ConflictSides> {
+        match self.call(Request::ConflictSides {
+            path: path.to_owned(),
+        })? {
+            Response::ConflictSides { base, ours, theirs } => {
+                Ok(ConflictSides { base, ours, theirs })
+            }
+            other => Err(unexpected(other)),
+        }
     }
 
     fn conflict_style(&self) -> ConflictStyle {
-        ConflictStyle::default()
+        // The trait cannot report a failure. Merge is git's own default, so a
+        // dropped connection still shows the two sides without a base column.
+        match self.call(Request::ConflictStyle) {
+            Ok(Response::ConflictStyle { style }) => style.into(),
+            _ => ConflictStyle::default(),
+        }
     }
 
     fn merge_tool(&self) -> Option<MergeTool> {

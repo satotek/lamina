@@ -7,7 +7,10 @@ use std::time::{Duration, Instant};
 
 use strata_core::HeadInfo;
 use strata_core::error::OPERATION_CANCELLED;
-use strata_core::session::{Operation, OperationId, RepositorySession, SessionEvent};
+use strata_core::merge::{ConflictStyle, ContentHash};
+use strata_core::session::{
+    ConflictSide, Operation, OperationId, RepositorySession, Session, SessionEvent,
+};
 use strata_core::test_support::TestRepo;
 use strata_remote_client::{RemoteSession, RemoteTarget, UNSUPPORTED};
 
@@ -332,6 +335,298 @@ fn cancelling_a_commit_kills_the_git_child() {
 
     drop(remote);
     server.join().expect("server thread");
+}
+
+fn conflict_repo() -> TestRepo {
+    let repo = TestRepo::new();
+    identity(&repo);
+    repo.write("conflict.txt", "base\n");
+    repo.commit("base");
+    repo.git(&["checkout", "-q", "-b", "side"]);
+    repo.write("conflict.txt", "theirs\n");
+    repo.commit("theirs");
+    repo.git(&["checkout", "-q", "main"]);
+    repo.write("conflict.txt", "ours\n");
+    repo.commit("ours");
+    let merge = repo.git_output(&["merge", "--no-edit", "side"]);
+    assert!(
+        !merge.status.success(),
+        "the fixture merge should stop on conflict.txt: {}",
+        String::from_utf8_lossy(&merge.stderr)
+    );
+    repo
+}
+
+/// Index, status and worktree bytes, so a remote resolution can be compared
+/// with the same resolution run by a local session.
+fn checkout_state(repo: &TestRepo) -> String {
+    let file = std::fs::read(repo.path().join("conflict.txt")).unwrap_or_default();
+    format!(
+        "index:\n{}\nunmerged:\n{}\nstatus:\n{}\nfile:{file:?}",
+        repo.git(&["ls-files", "-s"]),
+        repo.git(&["ls-files", "-u"]),
+        repo.git(&["status", "--porcelain"]),
+    )
+}
+
+fn run_local(repo: &TestRepo, operation: Operation) -> Option<String> {
+    let (tx, rx) = mpsc::channel();
+    let session = Session::open(repo.path(), move |event| {
+        let _ = tx.send(event);
+    })
+    .expect("local session");
+    let id = session.run(operation);
+    let (error, _) = wait_finished(&rx, id);
+    drop(session);
+    error
+}
+
+fn run_remote(repo: &TestRepo, operation: Operation) -> Option<String> {
+    let (remote, events, server) = serve(repo);
+    let id = remote.run(operation);
+    let (error, _) = wait_finished(&events, id);
+    drop(remote);
+    server.join().expect("server thread");
+    error
+}
+
+fn resolved(content: &str) -> Operation {
+    Operation::ResolveWithContent {
+        path: "conflict.txt".into(),
+        content: content.as_bytes().to_vec(),
+        expected: None,
+    }
+}
+
+#[test]
+fn resolving_a_conflict_matches_a_local_session() {
+    let local_repo = conflict_repo();
+    let remote_repo = conflict_repo();
+    assert_eq!(run_local(&local_repo, resolved("resolved\n")), None);
+    assert_eq!(run_remote(&remote_repo, resolved("resolved\n")), None);
+    assert_eq!(
+        checkout_state(&local_repo),
+        checkout_state(&remote_repo),
+        "the resolved index and worktree must match"
+    );
+}
+
+#[test]
+fn taking_ours_or_theirs_matches_a_local_session() {
+    for side in [ConflictSide::Ours, ConflictSide::Theirs] {
+        let operation = Operation::ResolveConflict {
+            path: "conflict.txt".into(),
+            side,
+        };
+        let local_repo = conflict_repo();
+        let remote_repo = conflict_repo();
+        assert_eq!(run_local(&local_repo, operation.clone()), None, "{side:?}");
+        assert_eq!(
+            run_remote(&remote_repo, operation),
+            None,
+            "{side:?} over the helper"
+        );
+        assert_eq!(
+            checkout_state(&local_repo),
+            checkout_state(&remote_repo),
+            "{side:?}"
+        );
+    }
+}
+
+#[test]
+fn conflict_reads_match_a_local_repository() {
+    let repo = conflict_repo();
+    repo.git(&["config", "merge.conflictStyle", "diff3"]);
+    let local = repo.open();
+    let (remote, _events, server) = serve(&repo);
+    let reader = remote.reader();
+    assert_eq!(
+        local.conflict_sides("conflict.txt").expect("local sides"),
+        reader.conflict_sides("conflict.txt").expect("remote sides"),
+    );
+    assert_eq!(reader.conflict_style(), ConflictStyle::Diff3);
+    assert_eq!(local.conflict_style(), reader.conflict_style());
+    assert_eq!(
+        local
+            .file_in_worktree("conflict.txt")
+            .expect("local worktree"),
+        reader
+            .file_in_worktree("conflict.txt")
+            .expect("remote worktree"),
+    );
+    let escaped = reader
+        .file_in_worktree("../outside.txt")
+        .expect_err("a worktree read must not leave the repository");
+    assert!(
+        escaped.to_string().contains("worktree"),
+        "unexpected error: {escaped}"
+    );
+    drop(reader);
+    drop(remote);
+    server.join().expect("server thread");
+}
+
+#[test]
+fn resolve_with_content_refuses_a_file_that_changed() {
+    let repo = conflict_repo();
+    let path = repo.path().join("conflict.txt");
+    let loaded = std::fs::read(&path).expect("conflicted file");
+    let expected = ContentHash::of(&loaded);
+    std::fs::write(&path, b"sneaky\n").expect("change the file underneath");
+
+    let (remote, events, server) = serve(&repo);
+    let id = remote.run(Operation::ResolveWithContent {
+        path: "conflict.txt".into(),
+        content: b"resolved\n".to_vec(),
+        expected: Some(expected),
+    });
+    let (error, _) = wait_finished(&events, id);
+    let error = error.expect("a changed file must be refused");
+    assert!(
+        error.contains("changed on disk"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(std::fs::read(&path).expect("file"), b"sneaky\n");
+    assert!(
+        !repo.git(&["ls-files", "-u"]).trim().is_empty(),
+        "the path must stay unmerged"
+    );
+    drop(remote);
+    server.join().expect("server thread");
+}
+
+#[test]
+fn resolve_with_content_rejects_paths_that_leave_the_worktree() {
+    let repo = conflict_repo();
+    let git_config = std::fs::read(repo.path().join(".git/config")).expect("config");
+    let parent_escape = repo
+        .path()
+        .parent()
+        .expect("worktree parent")
+        .join("strata-resolve-escape.txt");
+    let absolute = repo.path().join("strata-resolve-absolute.txt");
+    let (remote, events, server) = serve(&repo);
+    for path in [
+        "../strata-resolve-escape.txt".to_owned(),
+        absolute.to_string_lossy().into_owned(),
+        ".git/config".to_owned(),
+    ] {
+        let id = remote.run(Operation::ResolveWithContent {
+            path: path.clone(),
+            content: b"x\n".to_vec(),
+            expected: None,
+        });
+        let (error, _) = wait_finished(&events, id);
+        let error = error.unwrap_or_else(|| panic!("{path} must be rejected"));
+        assert!(
+            error.contains("worktree") || error.contains(".git"),
+            "unexpected error for {path}: {error}"
+        );
+    }
+    drop(remote);
+    server.join().expect("server thread");
+    assert!(!parent_escape.exists(), "a `..` path must not escape");
+    assert!(!absolute.exists(), "an absolute path must not be written");
+    assert_eq!(
+        std::fs::read(repo.path().join(".git/config")).expect("config"),
+        git_config
+    );
+    assert!(
+        !repo.git(&["ls-files", "-u"]).trim().is_empty(),
+        "a rejected write must not stage the conflict"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn resolve_with_content_rejects_a_symlink_that_leaves_the_worktree() {
+    use std::os::unix::fs::symlink;
+
+    let repo = conflict_repo();
+    let outside = repo
+        .path()
+        .parent()
+        .expect("worktree parent")
+        .join("strata-symlink-outside.txt");
+    std::fs::write(&outside, b"secret\n").expect("outside file");
+    symlink(&outside, repo.path().join("linked.txt")).expect("symlink");
+
+    let outside_dir = repo
+        .path()
+        .parent()
+        .expect("worktree parent")
+        .join("strata-symlink-dir");
+    std::fs::create_dir(&outside_dir).expect("outside dir");
+    symlink(&outside_dir, repo.path().join("escape-dir")).expect("dir symlink");
+
+    let (remote, events, server) = serve(&repo);
+    let link = remote.run(Operation::ResolveWithContent {
+        path: "linked.txt".into(),
+        content: b"pwned\n".to_vec(),
+        expected: None,
+    });
+    let (error, _) = wait_finished(&events, link);
+    let error = error.expect("a symlink must not be written through");
+    assert!(error.contains("symlink"), "unexpected error: {error}");
+    assert_eq!(std::fs::read(&outside).expect("outside"), b"secret\n");
+
+    let through_dir = remote.run(Operation::ResolveWithContent {
+        path: "escape-dir/file.txt".into(),
+        content: b"pwned\n".to_vec(),
+        expected: None,
+    });
+    let (error, _) = wait_finished(&events, through_dir);
+    let error = error.expect("a directory symlink must not carry the write out");
+    assert!(
+        error.contains("worktree") || error.contains("symlink"),
+        "unexpected error: {error}"
+    );
+    assert!(!outside_dir.join("file.txt").exists());
+    drop(remote);
+    server.join().expect("server thread");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_stdio_helper_resolves_a_conflict_like_a_local_session() {
+    let local_repo = conflict_repo();
+    let remote_repo = conflict_repo();
+    assert_eq!(run_local(&local_repo, resolved("resolved\n")), None);
+    let (remote, events, mut child) = spawn_helper(&remote_repo);
+    let id = remote.run(resolved("resolved\n"));
+    let (error, _) = wait_finished(&events, id);
+    assert!(error.is_none(), "{error:?}");
+    drop(remote);
+    let status = child.wait().expect("wait for helper");
+    assert!(status.success(), "helper exited with {status}");
+    assert_eq!(checkout_state(&local_repo), checkout_state(&remote_repo));
+}
+
+#[cfg(unix)]
+fn spawn_helper(repo: &TestRepo) -> (RemoteSession, Receiver<SessionEvent>, std::process::Child) {
+    use std::process::{Command, Stdio};
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_strata-remote"))
+        .arg("--stdio")
+        .arg("--root")
+        .arg(repo.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn strata-remote");
+    let stdin = child.stdin.take().expect("helper stdin");
+    let stdout = child.stdout.take().expect("helper stdout");
+    let (tx, rx) = mpsc::channel();
+    let remote = RemoteSession::connect(stdout, stdin, RemoteTarget::new("stdio"), move |event| {
+        let _ = tx.send(event);
+    })
+    .expect("connect to the spawned helper");
+    let _ = wait_until(&remote, &rx, |snapshot| {
+        snapshot.commits.complete && snapshot.head.is_some()
+    });
+    (remote, rx, child)
 }
 
 #[cfg(unix)]

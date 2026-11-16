@@ -35,4 +35,9 @@ pub use message::{ErrorKind, Event, Message, RemoteError, Request, Response};
 /// signatures and the rest of the session's background reads). A cancel and a
 /// dropped helper use the same ticket route as diffs: late results are
 /// ignored, and an outstanding ticket expires with an error.
-pub const PROTOCOL_VERSION: u32 = 4;
+///
+/// Version 5 adds the reads a conflict editor needs: the three index stages,
+/// the worktree bytes and `merge.conflictStyle`. The writes were already
+/// operations. An older helper fails the handshake, which is what makes the
+/// app replace it.
+pub const PROTOCOL_VERSION: u32 = 5;

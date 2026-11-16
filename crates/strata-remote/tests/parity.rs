@@ -258,11 +258,21 @@ fn assert_parity(repo: &TestRepo, remote: &RemoteSession, remote_events: &Receiv
         },
     );
 
-    // Nothing in this slice writes over the wire.
-    let reader = remote.reader();
-    assert!(
-        reader.file_in_worktree("README.md").is_err(),
-        "worktree reads are not supported remotely yet"
+    assert_eq!(
+        local
+            .reader()
+            .file_in_worktree("README.md")
+            .expect("local worktree"),
+        remote
+            .reader()
+            .file_in_worktree("README.md")
+            .expect("remote worktree"),
+        "worktree file"
+    );
+    assert_eq!(
+        local.reader().conflict_style(),
+        remote.reader().conflict_style(),
+        "conflict style"
     );
 }
 
