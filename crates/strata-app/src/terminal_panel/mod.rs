@@ -54,9 +54,16 @@ const BELL_FLASH_DURATION: Duration = Duration::from_millis(180);
 /// PTY rather than invoking `RepoView` actions.
 pub fn bind(cx: &mut App) {
     #[allow(unused_mut)]
+    // `gpui_component::Root` binds `tab` and `shift-tab` to `Tab` / `TabPrev`
+    // focus traversal in context `"Root"`. Binding them to `NoAction` here
+    // cancels traversal while the terminal owns focus and lets `on_key_down`
+    // forward `\t` and CSI Z to the PTY; `ctrl-tab` / `ctrl-shift-tab` have
+    // different modifiers and continue reaching `Workspace`.
     let mut keys = vec![
         "escape",
         "enter",
+        "tab",
+        "shift-tab",
         "up",
         "down",
         "shift-up",
@@ -1356,5 +1363,166 @@ mod tests {
             assert!(panel.osc_title.is_none());
             assert!(panel.has_session());
         });
+    }
+
+    #[cfg(not(windows))]
+    #[gpui::test]
+    fn tab_and_shift_tab_stay_in_terminal_and_reach_pty(cx: &mut gpui::TestAppContext) {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        use std::time::{Duration, Instant};
+
+        use gpui::{
+            AppContext as _, Entity, InteractiveElement as _, ParentElement as _, Styled as _, div,
+        };
+        use gpui_component::Root;
+
+        use crate::actions::{NextTab, PreviousTab, WORKSPACE};
+
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            gpui_component::init(cx);
+            crate::actions::bind(cx);
+            super::bind(cx);
+
+            let mut settings = Settings::default();
+            settings.tools.embedded_shell = Some(
+                "/bin/sh -c \"stty raw -echo; printf 'READY\\n'; dd bs=1 count=4 2>/dev/null | tr '\\t\\033' 'TE'; printf '\\n'; sleep 2\""
+                    .to_owned(),
+            );
+            cx.set_global(settings);
+        });
+
+        struct TabProbe {
+            workspace_focus: FocusHandle,
+            sibling_focus: FocusHandle,
+            panel: Entity<TerminalPanel>,
+            tab_switches: Rc<Cell<isize>>,
+        }
+
+        impl Render for TabProbe {
+            fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .track_focus(&self.workspace_focus)
+                    .key_context(WORKSPACE)
+                    .on_action(cx.listener(|this, _: &NextTab, _, _| {
+                        this.tab_switches.set(this.tab_switches.get() + 1);
+                    }))
+                    .on_action(cx.listener(|this, _: &PreviousTab, _, _| {
+                        this.tab_switches.set(this.tab_switches.get() - 1);
+                    }))
+                    .child(
+                        div()
+                            .id("sibling-tab-stop")
+                            .track_focus(&self.sibling_focus)
+                            .tab_stop(true)
+                            .h(px(20.0)),
+                    )
+                    .child(div().flex_1().child(self.panel.clone()))
+            }
+        }
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let workdir = dir.path().to_path_buf();
+        let tab_switches = Rc::new(Cell::new(0isize));
+        let tab_switches_clone = tab_switches.clone();
+
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |window, cx| {
+                let probe = cx.new(|cx| {
+                    let workspace_focus = cx.focus_handle();
+                    let sibling_focus = cx.focus_handle();
+                    let parent = workspace_focus.clone();
+                    let panel =
+                        cx.new(|cx| TerminalPanel::new_quiet(workdir, parent, None, window, cx));
+                    TabProbe {
+                        workspace_focus,
+                        sibling_focus,
+                        panel,
+                        tab_switches: tab_switches_clone,
+                    }
+                });
+                cx.new(|cx| Root::new(probe, window, cx))
+            })
+            .expect("open root window")
+        });
+
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        let (panel, sibling_focus) = vcx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            let root = window.root::<Root>().flatten().expect("Root view");
+            let probe = root
+                .read(cx)
+                .view()
+                .clone()
+                .downcast::<TabProbe>()
+                .expect("TabProbe");
+            let panel = probe.read(cx).panel.clone();
+            let sibling_focus = probe.read(cx).sibling_focus.clone();
+            let panel_focus = panel.read(cx).focus_handle(cx);
+            window.focus(&panel_focus, cx);
+            window.draw(cx).clear(cx);
+            assert!(panel_focus.is_focused(window));
+            (panel, sibling_focus)
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut ready = false;
+        while Instant::now() < deadline {
+            panel.update(&mut vcx, |panel, cx| {
+                panel.flush_quiet_events(cx);
+                ready = panel.snapshot().text().contains("READY");
+            });
+            if ready {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        assert!(ready, "timed out waiting for shell probe READY");
+
+        // Send Tab and Shift-Tab while TerminalPanel has focus inside Root.
+        vcx.simulate_keystrokes("tab shift-tab");
+        vcx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            let panel_focus = panel.read(cx).focus_handle(cx);
+            assert!(
+                panel_focus.is_focused(window),
+                "Tab and Shift-Tab must keep keyboard focus in the terminal"
+            );
+            assert!(
+                !sibling_focus.is_focused(window),
+                "Tab must not traverse focus to sibling tab stop"
+            );
+        });
+
+        let mut saw_bytes = false;
+        while Instant::now() < deadline {
+            panel.update(&mut vcx, |panel, cx| {
+                panel.flush_quiet_events(cx);
+                saw_bytes = panel.snapshot().text().contains("TE[Z");
+            });
+            if saw_bytes {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        assert!(
+            saw_bytes,
+            "expected \\t (T) and \\x1b[Z (E[Z) echoed by PTY, got: {:?}",
+            panel.read_with(&vcx, |p, _| p.snapshot().text())
+        );
+
+        // Ctrl-Tab and Ctrl-Shift-Tab must still switch repository tabs in Workspace.
+        vcx.simulate_keystrokes("ctrl-tab");
+        assert_eq!(tab_switches.get(), 1, "ctrl-tab must trigger NextTab");
+        vcx.simulate_keystrokes("ctrl-shift-tab");
+        assert_eq!(
+            tab_switches.get(),
+            0,
+            "ctrl-shift-tab must trigger PreviousTab"
+        );
     }
 }

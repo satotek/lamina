@@ -230,6 +230,28 @@ mod tests {
             ..TermKeyEvent::default()
         };
         assert_eq!(core.encode_key(&ctrl_c).expect("encode ctrl+c"), b"\x03");
+
+        let tab = TermKeyEvent {
+            action: TermKeyAction::Press,
+            key: TermKey::Tab,
+            text: Some("\t".to_string()),
+            ..TermKeyEvent::default()
+        };
+        assert_eq!(core.encode_key(&tab).expect("encode tab"), b"\t");
+
+        let shift_tab = TermKeyEvent {
+            action: TermKeyAction::Press,
+            key: TermKey::Tab,
+            modifiers: TermModifiers {
+                shift: true,
+                ..TermModifiers::default()
+            },
+            ..TermKeyEvent::default()
+        };
+        assert_eq!(
+            core.encode_key(&shift_tab).expect("encode shift+tab"),
+            b"\x1b[Z"
+        );
     }
 
     #[test]
