@@ -1302,7 +1302,7 @@ impl CompareView {
                 true,
             ))
             .child(three_way_pane_header(
-                t!("compare.side.middle").to_string(),
+                t!("compare.side.middle_base").to_string(),
                 &res.middle_path,
                 design,
                 true,
@@ -1792,7 +1792,7 @@ fn render_three_way_images(
         .child(div().flex_none().w(px(1.0)).h_full().bg(design.border))
         .child(side_view(
             images.middle.as_ref(),
-            t!("compare.side.middle").to_string(),
+            t!("compare.side.middle_base").to_string(),
         ))
         .child(div().flex_none().w(px(1.0)).h_full().bg(design.border))
         .child(side_view(

@@ -491,6 +491,7 @@ pub(crate) fn help_text() -> String {
          Without PATH, Strata reopens the last repository when restoring is enabled\n\
          and shows the welcome screen otherwise.\n\
          --compare opens a standalone two-way or three-way comparison of files or folders.\n\
+         With three paths, <B> is the base and <A> and <C> are compared against it.\n\
          --fake renders N synthetic commits (default {}) for the render benchmark.\n\
          --gallery shows every shared UI part, and needs no repository.\n\n\
          Debug launch options (applied once the first snapshot loads):\n\
@@ -787,6 +788,16 @@ mod tests {
         assert_eq!(conflict.start, StartMode::Gallery);
         assert_eq!(conflict.errors.len(), 1);
         assert!(conflict.errors[0].contains("--compare conflicts"));
+    }
+
+    #[test]
+    fn help_text_explains_the_three_way_base() {
+        let help = help_text();
+        assert!(help.contains("strata --compare <A> <B> [<C>]"));
+        assert!(
+            help.contains("<B> is the base"),
+            "the three-way usage has to name the middle path as the base:\n{help}"
+        );
     }
 
     #[test]
