@@ -185,10 +185,37 @@ fn inherit_login_shell_path() {
     unsafe { std::env::set_var("PATH", path) };
 }
 
+fn requested_window_size(debug: &DebugLaunch) -> (f32, f32) {
+    if let Some(requested) = debug.window_size {
+        eprintln!(
+            "debug-launch: applied --window-size {}x{}",
+            requested.width, requested.height
+        );
+        (requested.width as f32, requested.height as f32)
+    } else {
+        (1360.0, 860.0)
+    }
+}
+
 fn open_start(start: StartMode, debug: DebugLaunch, cx: &mut App) {
     match start {
         StartMode::Gallery => open_window(None, true, debug, cx),
         StartMode::Path(path) => open_window(Some(Launch::open(&path)), false, debug, cx),
+        StartMode::Compare(paths) => {
+            let window_size = requested_window_size(&debug);
+            match compare::validate_ordered_paths(&paths) {
+                Ok(target) => {
+                    workspace::open_compare_window(target, window_size, cx);
+                }
+                Err(error) => {
+                    let message = error
+                        .message()
+                        .unwrap_or_else(|| "invalid paths for --compare".to_owned());
+                    eprintln!("strata: --compare: {message}");
+                    open_window(None, false, debug, cx);
+                }
+            }
+        }
         StartMode::Fake(count) => open_window(Some(Launch::fake(count)), false, debug, cx),
         StartMode::Welcome => {
             let restored = workspace::restored_windows(cx);
@@ -196,15 +223,7 @@ fn open_start(start: StartMode, debug: DebugLaunch, cx: &mut App) {
                 open_window(None, false, debug, cx);
                 return;
             }
-            let window_size = if let Some(requested) = debug.window_size {
-                eprintln!(
-                    "debug-launch: applied --window-size {}x{}",
-                    requested.width, requested.height
-                );
-                (requested.width as f32, requested.height as f32)
-            } else {
-                (1360.0, 860.0)
-            };
+            let window_size = requested_window_size(&debug);
             let mut first_debug = Some(debug);
             for window in restored {
                 let win_debug = first_debug.take().unwrap_or_default();

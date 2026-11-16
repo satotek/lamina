@@ -149,6 +149,7 @@ pub static PLACEMENTS: &[Placement] = &[
     item("OpenRepository", MenuKind::File, 1),
     item("CloneRepository", MenuKind::File, 1),
     item("NewRepository", MenuKind::File, 1),
+    item("OpenCompare", MenuKind::File, 1),
     // The reopened tab is offered by the tab module when it gains the action.
     optional("ReopenClosedTab", MenuKind::File, 2),
     item("CloseTab", MenuKind::File, 2),

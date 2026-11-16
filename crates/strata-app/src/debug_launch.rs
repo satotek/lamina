@@ -148,6 +148,8 @@ impl DebugLaunch {
 pub(crate) enum StartMode {
     /// `strata [PATH]`: a repository, or the error screen for a bad path.
     Path(PathBuf),
+    /// `strata --compare A B [C]`: compare two or three files or folders.
+    Compare(Vec<PathBuf>),
     /// `strata --fake [N]`: the synthetic render benchmark.
     Fake(usize),
     /// `strata --gallery`: every shared UI part, with no repository.
@@ -217,6 +219,36 @@ where
                 Some(StartMode::Gallery) => {}
                 Some(_) => {
                     errors.push("--gallery conflicts with an earlier target (ignored)".into())
+                }
+            }
+            continue;
+        }
+
+        if arg == "--compare" {
+            let mut paths = Vec::with_capacity(3);
+            while paths.len() < 3 {
+                let Some(next) = raw.get(index) else {
+                    break;
+                };
+                if !after_double_dash && next == "--" {
+                    after_double_dash = true;
+                    index += 1;
+                    continue;
+                }
+                if !after_double_dash && next.starts_with('-') && next != "-" {
+                    break;
+                }
+                paths.push(PathBuf::from(next));
+                index += 1;
+            }
+            if paths.len() < 2 {
+                errors.push("--compare requires 2 or 3 paths (ignored)".into());
+            } else {
+                match &start {
+                    None | Some(StartMode::Compare(_)) => start = Some(StartMode::Compare(paths)),
+                    Some(_) => {
+                        errors.push("--compare conflicts with an earlier target (ignored)".into())
+                    }
                 }
             }
             continue;
@@ -453,10 +485,12 @@ fn parse_window_size(value: &str) -> Result<WindowSize, String> {
 pub(crate) fn help_text() -> String {
     format!(
         "usage: strata [PATH] [OPTIONS]\n\
+         \x20      strata --compare <A> <B> [<C>] [OPTIONS]\n\
          \x20      strata --fake [N] [OPTIONS]\n\
          \x20      strata --gallery [OPTIONS]\n\n\
          Without PATH, Strata reopens the last repository when restoring is enabled\n\
          and shows the welcome screen otherwise.\n\
+         --compare opens a standalone two-way or three-way comparison of files or folders.\n\
          --fake renders N synthetic commits (default {}) for the render benchmark.\n\
          --gallery shows every shared UI part, and needs no repository.\n\n\
          Debug launch options (applied once the first snapshot loads):\n\
@@ -671,6 +705,88 @@ mod tests {
         let gallery = parse(&["--gallery"]);
         assert_eq!(gallery.start, StartMode::Gallery);
         assert!(gallery.errors.is_empty());
+    }
+
+    #[test]
+    fn compare_flag_parses_two_or_three_paths_and_reports_errors() {
+        let two = parse(&["--compare", "left.txt", "right.txt"]);
+        assert_eq!(
+            two.start,
+            StartMode::Compare(vec![PathBuf::from("left.txt"), PathBuf::from("right.txt")])
+        );
+        assert!(two.errors.is_empty());
+
+        let three = parse(&[
+            "--compare",
+            "left.txt",
+            "base.txt",
+            "right.txt",
+            "--window-size",
+            "1200x800",
+        ]);
+        assert_eq!(
+            three.start,
+            StartMode::Compare(vec![
+                PathBuf::from("left.txt"),
+                PathBuf::from("base.txt"),
+                PathBuf::from("right.txt"),
+            ])
+        );
+        assert_eq!(
+            three.debug.window_size,
+            Some(WindowSize {
+                width: 1200,
+                height: 800,
+            })
+        );
+        assert!(three.errors.is_empty());
+
+        let two_before_flag = parse(&["--compare", "a", "b", "--window-size=900x700"]);
+        assert_eq!(
+            two_before_flag.start,
+            StartMode::Compare(vec![PathBuf::from("a"), PathBuf::from("b")])
+        );
+        assert_eq!(
+            two_before_flag.debug.window_size,
+            Some(WindowSize {
+                width: 900,
+                height: 700,
+            })
+        );
+        assert!(two_before_flag.errors.is_empty());
+
+        let dash_paths = parse(&["--compare", "--", "-a", "-b"]);
+        assert_eq!(
+            dash_paths.start,
+            StartMode::Compare(vec![PathBuf::from("-a"), PathBuf::from("-b")])
+        );
+        assert!(dash_paths.errors.is_empty());
+
+        let too_few = parse(&["--compare", "only_one.txt"]);
+        assert_eq!(too_few.start, StartMode::Welcome);
+        assert_eq!(too_few.errors.len(), 1);
+        assert!(too_few.errors[0].contains("2 or 3"));
+
+        let missing = parse(&["--compare"]);
+        assert_eq!(missing.start, StartMode::Welcome);
+        assert_eq!(missing.errors.len(), 1);
+
+        let too_many = parse(&["--compare", "a", "b", "c", "d"]);
+        assert_eq!(
+            too_many.start,
+            StartMode::Compare(vec![
+                PathBuf::from("a"),
+                PathBuf::from("b"),
+                PathBuf::from("c"),
+            ])
+        );
+        assert_eq!(too_many.errors.len(), 1);
+        assert!(too_many.errors[0].contains("unexpected extra argument 'd'"));
+
+        let conflict = parse(&["--gallery", "--compare", "a", "b"]);
+        assert_eq!(conflict.start, StartMode::Gallery);
+        assert_eq!(conflict.errors.len(), 1);
+        assert!(conflict.errors[0].contains("--compare conflicts"));
     }
 
     #[test]

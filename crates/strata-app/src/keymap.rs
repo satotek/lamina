@@ -167,12 +167,13 @@ macro_rules! action {
 use crate::actions::{
     ApplyPatch, CloneRepository, CloseCompare, CloseTab, ExtendSelectionNext,
     ExtendSelectionPrevious, GoToChild, GoToHead, GoToParent, GoToSecondParent, NavigateBack,
-    NavigateForward, NewRepository, NewTab, NextTab, OpenGitConfig, OpenInEditor, OpenRepository,
-    OpenSettings, OpenTerminalHere, PreviousTab, Quit, REPO_VIEW, REPO_VIEW_LIST, RedoLastAction,
-    ReopenClosedTab, SelectFirst, SelectLast, SelectNext, SelectPageDown, SelectPageUp,
-    SelectPrevious, SelectTab1, SelectTab2, SelectTab3, SelectTab4, SelectTab5, SelectTab6,
-    SelectTab7, SelectTab8, SelectTab9, StashChanges, SwitchBranch, ToggleDetailsMaximized,
-    ToggleFrameStats, TogglePalette, ToggleSidebar, ToggleWholeFile, UndoLastAction, WORKSPACE,
+    NavigateForward, NewRepository, NewTab, NextTab, OpenCompare, OpenGitConfig, OpenInEditor,
+    OpenRepository, OpenSettings, OpenTerminalHere, PreviousTab, Quit, REPO_VIEW, REPO_VIEW_LIST,
+    RedoLastAction, ReopenClosedTab, SelectFirst, SelectLast, SelectNext, SelectPageDown,
+    SelectPageUp, SelectPrevious, SelectTab1, SelectTab2, SelectTab3, SelectTab4, SelectTab5,
+    SelectTab6, SelectTab7, SelectTab8, SelectTab9, StashChanges, SwitchBranch,
+    ToggleDetailsMaximized, ToggleFrameStats, TogglePalette, ToggleSidebar, ToggleWholeFile,
+    UndoLastAction, WORKSPACE,
 };
 #[cfg(feature = "terminal")]
 use crate::actions::{
@@ -677,6 +678,16 @@ pub static ACTIONS: &[ActionSpec] = &[
         NewRepository,
         [],
         3,
+        false
+    ),
+    action!(
+        "strata::OpenCompare",
+        "Compare Files or Folders…",
+        Actions,
+        Some(WORKSPACE),
+        OpenCompare,
+        [],
+        51,
         false
     ),
     action!(
@@ -2329,7 +2340,7 @@ mod tests {
             }
         }
         // Every built-in palette entry has a registry row.
-        let expected_count = if cfg!(feature = "terminal") { 49 } else { 48 };
+        let expected_count = if cfg!(feature = "terminal") { 50 } else { 49 };
         assert_eq!(orders.len(), expected_count);
     }
 

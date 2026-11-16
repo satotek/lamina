@@ -54,6 +54,9 @@ actions!(
         /// Opens the init dialog to create an empty repository. Handled by the
         /// workspace.
         NewRepository,
+        /// Opens the dialog to compare arbitrary files or folders. Handled by
+        /// the workspace.
+        OpenCompare,
         /// Opens the repository picker to add a new tab. Handled by `Workspace`.
         NewTab,
         /// Closes the active tab, or the window when it is the last tab.

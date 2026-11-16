@@ -603,6 +603,13 @@ impl Picker {
         });
     }
 
+    /// Opens the standalone Compare setup dialog on the picker's workspace.
+    pub(crate) fn open_compare(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_creator(window, cx, |workspace, _, window, cx| {
+            crate::compare::open_compare_dialog(workspace, window, cx);
+        });
+    }
+
     fn open_creator(
         &mut self,
         window: &mut Window,
@@ -952,7 +959,7 @@ impl Picker {
 
         div()
             .w_full()
-            .when(self.mode == Mode::Page, |body| body.max_w(design.px(560.0)))
+            .when(self.mode == Mode::Page, |body| body.max_w(design.px(620.0)))
             .flex()
             .flex_col()
             .min_h_0()
@@ -1016,6 +1023,7 @@ impl Picker {
         let open_entity = self.entity.clone();
         let clone_entity = self.entity.clone();
         let init_entity = self.entity.clone();
+        let compare_entity = self.entity.clone();
         let path_entity = self.entity.clone();
 
         div()
@@ -1056,6 +1064,17 @@ impl Picker {
                 )
                 .on_click(move |_, window, cx| {
                     init_entity.update(cx, |picker, cx| picker.open_init(window, cx));
+                }),
+            )
+            .child(
+                ui::action_tile(
+                    format!("picker-tile-compare-{:?}", self.mode),
+                    IconName::Replace,
+                    t!("picker.tile.compare").to_string(),
+                    design,
+                )
+                .on_click(move |_, window, cx| {
+                    compare_entity.update(cx, |picker, cx| picker.open_compare(window, cx));
                 }),
             )
             .child(

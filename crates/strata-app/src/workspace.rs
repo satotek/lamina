@@ -24,9 +24,9 @@ use gpui_component::dialog::DialogFooter;
 use gpui_component::{Root, TitleBar, WindowExt as _};
 
 use crate::actions::{
-    CloneRepository, CloseTab, NewRepository, NewTab, NextTab, OpenRepository, PreviousTab,
-    ReopenClosedTab, SelectTab1, SelectTab2, SelectTab3, SelectTab4, SelectTab5, SelectTab6,
-    SelectTab7, SelectTab8, SelectTab9, WORKSPACE,
+    CloneRepository, CloseTab, NewRepository, NewTab, NextTab, OpenCompare, OpenRepository,
+    PreviousTab, ReopenClosedTab, SelectTab1, SelectTab2, SelectTab3, SelectTab4, SelectTab5,
+    SelectTab6, SelectTab7, SelectTab8, SelectTab9, WORKSPACE,
 };
 use crate::compare::{CompareTarget, CompareView};
 use crate::debug_launch::{self, DebugDialog, DebugLaunch};
@@ -390,7 +390,6 @@ impl Workspace {
     }
 
     /// Creates a workspace showing a single standalone Compare tab.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn new_with_compare(
         target: CompareTarget,
         window: &mut Window,
@@ -1264,6 +1263,9 @@ impl Render for Workspace {
             .on_action(cx.listener(|_, _: &NewRepository, window, cx| {
                 crate::clone_dialog::open_init(cx.entity(), OpenTarget::Current, window, cx);
             }))
+            .on_action(cx.listener(|this, _: &OpenCompare, window, cx| {
+                this.open_compare_dialog(window, cx);
+            }))
             .on_action(cx.listener(|this, _: &NewTab, window, cx| {
                 this.open_picker_for(OpenTarget::NewTab, window, cx);
             }))
@@ -1473,7 +1475,6 @@ pub(crate) fn open_tabs_window(
 }
 
 /// Opens a standalone Compare window for `target`.
-#[allow(dead_code)]
 pub(crate) fn open_compare_window(target: CompareTarget, window_size: (f32, f32), cx: &mut App) {
     let title = format!("{} — {}", t!("compare.tab.prefix"), target.title());
     let bounds = Bounds::centered(None, size(px(window_size.0), px(window_size.1)), cx);
@@ -2237,6 +2238,41 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(compare_weak.upgrade().is_none());
+    }
+
+    #[gpui::test]
+    fn open_compare_action_opens_compare_dialog(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(Settings::default());
+            crate::actions::bind(cx);
+        });
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), move |window, cx| {
+                    let workspace = cx.new(|cx| Workspace::new(None, window, cx));
+                    cx.new(|cx| Root::new(workspace, window, cx))
+                })
+            })
+            .expect("open window");
+        let mut visual_cx = VisualTestContext::from_window(window.into(), cx);
+        visual_cx.run_until_parked();
+
+        visual_cx.update(|window, cx| {
+            assert!(!window.has_active_dialog(cx));
+            window.draw(cx).clear(cx);
+            window.dispatch_action(Box::new(OpenCompare), cx);
+        });
+        visual_cx.run_until_parked();
+
+        visual_cx.update(|window, cx| {
+            assert!(
+                window.has_active_dialog(cx),
+                "OpenCompare action should open the Compare dialog"
+            );
+            window.close_dialog(cx);
+        });
     }
 
     #[cfg(all(not(windows), feature = "terminal"))]
