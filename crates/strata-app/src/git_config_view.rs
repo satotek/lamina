@@ -21,7 +21,7 @@ use gpui::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, Entity, FocusHandle, Focusable as _,
     FontWeight, Global, InteractiveElement as _, IntoElement, ParentElement as _, Render, Stateful,
     StatefulInteractiveElement as _, Styled, Subscription, WeakEntity, Window, WindowBounds,
-    WindowDecorations, WindowOptions, actions, div, px, size,
+    WindowDecorations, WindowOptions, actions, div, px,
 };
 use gpui_component::WindowExt as _;
 use gpui_component::dialog::DialogFooter;
@@ -130,7 +130,7 @@ fn open(cx: &mut App) {
         return;
     }
 
-    let bounds = Bounds::centered(None, size(px(WIDTH), px(HEIGHT)), cx);
+    let bounds = Bounds::centered(None, crate::zoom::window_size(WIDTH, HEIGHT, cx), cx);
     let view_slot: Rc<RefCell<Option<Entity<GitConfigView>>>> = Rc::new(RefCell::new(None));
     let slot = view_slot.clone();
     let opened = cx.open_window(
@@ -140,7 +140,7 @@ fn open(cx: &mut App) {
                 t!("git_config.window_title").to_string(),
             )),
             window_decorations: Some(WindowDecorations::Client),
-            window_min_size: Some(size(px(MIN_WIDTH), px(MIN_HEIGHT))),
+            window_min_size: Some(crate::zoom::window_size(MIN_WIDTH, MIN_HEIGHT, cx)),
             focus: true,
             ..TitleBar::window_options()
         },

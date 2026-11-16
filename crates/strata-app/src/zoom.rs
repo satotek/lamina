@@ -117,6 +117,25 @@ pub fn apply(cx: &mut App) {
     });
 }
 
+/// The size a secondary window opens at: its 100% size grown with the zoom,
+/// because its contents scale and would otherwise be clipped or squeezed. It
+/// never exceeds the primary display, where a zoomed window could not be
+/// moved fully into view.
+pub fn window_size(width: f32, height: f32, cx: &App) -> gpui::Size<gpui::Pixels> {
+    let zoom = Settings::get(cx).appearance.zoom();
+    let wanted = gpui::size(px(width * zoom), px(height * zoom));
+    match cx.primary_display() {
+        Some(display) => {
+            let screen = display.bounds().size;
+            gpui::size(
+                wanted.width.min(screen.width),
+                wanted.height.min(screen.height),
+            )
+        }
+        None => wanted,
+    }
+}
+
 /// Tells the user which size is on screen now. A zoom change is otherwise only
 /// visible as a redraw, which is easy to miss while a list is scrolled.
 fn report(cx: &mut App) {

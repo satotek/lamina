@@ -19,7 +19,7 @@ use std::path::Path;
 use gpui::{
     AnyWindowHandle, App, AppContext as _, Bounds, Context, FocusHandle, FontWeight, Global,
     InteractiveElement as _, IntoElement, ParentElement, Render, StyleRefinement, Styled,
-    Subscription, Window, WindowBounds, WindowDecorations, WindowOptions, actions, div, px, size,
+    Subscription, Window, WindowBounds, WindowDecorations, WindowOptions, actions, div, px,
 };
 use gpui_component::group_box::GroupBoxVariant;
 use gpui_component::setting::Settings as SettingsPages;
@@ -75,7 +75,7 @@ fn open(cx: &mut App) {
     crate::tools::redetect(cx);
     crate::style::theme::reload(cx);
 
-    let bounds = Bounds::centered(None, size(px(WIDTH), px(HEIGHT)), cx);
+    let bounds = Bounds::centered(None, crate::zoom::window_size(WIDTH, HEIGHT, cx), cx);
     let opened = cx.open_window(
         WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -85,7 +85,7 @@ fn open(cx: &mut App) {
                 t!("app.settings_title").to_string(),
             )),
             window_decorations: Some(WindowDecorations::Client),
-            window_min_size: Some(size(px(MIN_WIDTH), px(MIN_HEIGHT))),
+            window_min_size: Some(crate::zoom::window_size(MIN_WIDTH, MIN_HEIGHT, cx)),
             focus: true,
             ..TitleBar::window_options()
         },
