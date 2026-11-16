@@ -46,7 +46,15 @@ impl RepoView {
             None => source
                 .as_ref()
                 .and_then(|source| source.sidebar().head_branch)
-                .unwrap_or_else(|| t!("title_bar.loading").to_string()),
+                .unwrap_or_else(|| {
+                    // A remote tab waiting for Connect, or one whose connection
+                    // failed, is not going to finish loading by itself.
+                    if self.remote_not_connected() {
+                        t!("title_bar.not_connected").to_string()
+                    } else {
+                        t!("title_bar.loading").to_string()
+                    }
+                }),
         };
         let upstream = match &source {
             Some(Source::Repo(snapshot)) => head
