@@ -242,6 +242,16 @@ enum DialogField {
     Middle,
 }
 
+/// The dialog's dismiss button. Cancel is never the action the dialog wants
+/// the user to take, so it stays the ordinary kind even when Compare is
+/// disabled and the primary button is not available.
+fn dialog_cancel_button() -> ui::UiButton {
+    ui::button("compare-dialog-cancel", t!("common.cancel").to_string())
+        .kind(ButtonKind::Normal)
+        .size(ButtonSize::Medium)
+        .on_click(|_, window, cx| window.close_dialog(cx))
+}
+
 /// Opens the modal Compare setup dialog over the workspace window.
 pub(crate) fn open_compare_dialog(workspace: Entity<Workspace>, window: &mut Window, cx: &mut App) {
     if window.has_active_dialog(cx) {
@@ -262,23 +272,17 @@ pub(crate) fn open_compare_dialog(workspace: Entity<Workspace>, window: &mut Win
             .w(px(640.0 * zoom))
             .content(move |body, _, _| body.child(content.clone()))
             .footer(
-                DialogFooter::new()
-                    .child(
-                        ui::button("compare-dialog-cancel", t!("common.cancel").to_string())
-                            .size(ButtonSize::Medium)
-                            .on_click(|_, window, cx| window.close_dialog(cx)),
+                DialogFooter::new().child(dialog_cancel_button()).child(
+                    ui::button(
+                        "compare-dialog-submit",
+                        t!("compare.dialog.compare").to_string(),
                     )
-                    .child(
-                        ui::button(
-                            "compare-dialog-submit",
-                            t!("compare.dialog.compare").to_string(),
-                        )
-                        .size(ButtonSize::Medium)
-                        .disabled(!can_submit)
-                        .on_click(move |_, window, cx| {
-                            submit_dialog.update(cx, |dialog, cx| dialog.submit(window, cx));
-                        }),
-                    ),
+                    .size(ButtonSize::Medium)
+                    .disabled(!can_submit)
+                    .on_click(move |_, window, cx| {
+                        submit_dialog.update(cx, |dialog, cx| dialog.submit(window, cx));
+                    }),
+                ),
             )
             .on_ok(move |_, window, cx| {
                 ok_dialog.update(cx, |dialog, cx| dialog.submit(window, cx));
@@ -2124,6 +2128,11 @@ mod tests {
             ),
             Err(CompareValidationError::MixedTypes)
         );
+    }
+
+    #[test]
+    fn dialog_cancel_is_a_secondary_button() {
+        assert_eq!(dialog_cancel_button().button_kind(), ButtonKind::Normal);
     }
 
     #[test]

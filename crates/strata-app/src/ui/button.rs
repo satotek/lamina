@@ -207,6 +207,13 @@ impl UiButton {
         self.children.push(child.into_any_element());
         self
     }
+
+    /// The role the button was built with, for tests that guard a dialog's
+    /// action hierarchy.
+    #[cfg(test)]
+    pub(crate) fn button_kind(&self) -> ButtonKind {
+        self.kind
+    }
 }
 
 impl Styled for UiButton {
