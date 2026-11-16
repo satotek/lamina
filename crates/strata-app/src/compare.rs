@@ -116,6 +116,30 @@ impl CompareTarget {
     }
 }
 
+/// Width the compare toolbar's fixed ends always keep: the mode choice, the
+/// change count with its two arrows, and the row's own padding.
+const COMPARE_TOOLBAR_FIXED_WIDTH: f32 = 360.0;
+
+/// The two "use … as base" buttons beside the mode choice, shown when a
+/// revision comparison reads the middle as the base.
+const COMPARE_BASE_ACTIONS_WIDTH: f32 = 240.0;
+
+/// One status badge, at the widest label the locales use.
+const COMPARE_BADGE_WIDTH: f32 = 132.0;
+
+/// How many of `total` badges fit beside the toolbar's fixed ends.
+///
+/// Badges are the first thing to go when the toolbar narrows: the mode choice
+/// and the change count are controls, while a badge repeats a count the panes
+/// already show.
+fn visible_badges(total: usize, width: f32, zoom: f32, reserved: f32) -> usize {
+    let usable = width / zoom - reserved;
+    if usable <= 0.0 {
+        return 0;
+    }
+    ((usable / COMPARE_BADGE_WIDTH).floor() as usize).min(total)
+}
+
 fn path_label(path: &Path) -> String {
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -1991,44 +2015,6 @@ impl CompareView {
             .occlude()
             .debug_selector(|| "compare-header-controls".to_string());
 
-        if self.mode == ThreeWayCompareMode::MiddleBase
-            && let Some(source) = self.root.revisions()
-        {
-            let base_is_left = source.middle.side == source.left.side;
-            let base_is_right = source.middle.side == source.right.side;
-            controls = controls
-                .child(
-                    ui::button(
-                        "compare-use-left-base",
-                        t!("compare.three_way.use_left_as_base").to_string(),
-                    )
-                    .ghost()
-                    .size(ButtonSize::Tiny)
-                    .icon(IconName::Replace)
-                    .disabled(base_is_left)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.use_side_as_base(BaseChoice::Left, window, cx);
-                    })),
-                )
-                .child(
-                    ui::button(
-                        "compare-use-right-base",
-                        t!("compare.three_way.use_right_as_base").to_string(),
-                    )
-                    .ghost()
-                    .size(ButtonSize::Tiny)
-                    .icon(IconName::Replace)
-                    .disabled(base_is_right)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.use_side_as_base(BaseChoice::Right, window, cx);
-                    })),
-                );
-        }
-
-        if self.root.is_three_way() {
-            controls = controls.child(self.mode_toggle(design, cx));
-        }
-
         controls = controls
             .child(
                 ui::icon_button("compare-refresh", IconName::RefreshCw)
@@ -2103,6 +2089,56 @@ impl CompareView {
             )
             .tooltip(t!("compare.three_way.mode_middle_base_tooltip").to_string())
             .into_any_element()
+    }
+
+    /// The mode choice with the two swap-in-a-base actions beside it.
+    ///
+    /// It leads the row under the tab strip: the panes below follow this
+    /// control, so it belongs next to them rather than up in the title bar
+    /// where the window's own actions live.
+    fn mode_choice(&self, design: &Design, cx: &mut Context<Self>) -> AnyElement {
+        let mut group = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(design.px(4.0))
+            .child(self.mode_toggle(design, cx));
+
+        if self.mode == ThreeWayCompareMode::MiddleBase
+            && let Some(source) = self.root.revisions()
+        {
+            let base_is_left = source.middle.side == source.left.side;
+            let base_is_right = source.middle.side == source.right.side;
+            group = group
+                .child(
+                    ui::button(
+                        "compare-use-left-base",
+                        t!("compare.three_way.use_left_as_base").to_string(),
+                    )
+                    .ghost()
+                    .size(ButtonSize::Tiny)
+                    .icon(IconName::Replace)
+                    .disabled(base_is_left)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.use_side_as_base(BaseChoice::Left, window, cx);
+                    })),
+                )
+                .child(
+                    ui::button(
+                        "compare-use-right-base",
+                        t!("compare.three_way.use_right_as_base").to_string(),
+                    )
+                    .ghost()
+                    .size(ButtonSize::Tiny)
+                    .icon(IconName::Replace)
+                    .disabled(base_is_right)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.use_side_as_base(BaseChoice::Right, window, cx);
+                    })),
+                );
+        }
+
+        group.into_any_element()
     }
 
     fn render_two_way(
@@ -2287,6 +2323,27 @@ impl CompareView {
             .as_ref()
             .is_some_and(|img| img.kind == ImageKind::Svg);
 
+        // The mode choice leads, then the badges, and the change count with
+        // its arrows ends the row. Badges are the first to go when the row
+        // narrows: they repeat counts the panes already show, while the two
+        // ends are controls.
+        let mut badges: Vec<(String, BadgeTone)> = three_way_badges(res, mode);
+        if let Some(label) = encoding_badge {
+            badges.push((label.to_owned(), BadgeTone::Neutral));
+        }
+        let reserved = COMPARE_TOOLBAR_FIXED_WIDTH
+            + if self.mode == ThreeWayCompareMode::MiddleBase && self.root.revisions().is_some() {
+                COMPARE_BASE_ACTIONS_WIDTH
+            } else {
+                0.0
+            };
+        let shown = visible_badges(
+            badges.len(),
+            f32::from(window.viewport_size().width),
+            design.zoom,
+            reserved,
+        );
+
         let subheader = div()
             .flex()
             .items_center()
@@ -2298,15 +2355,25 @@ impl CompareView {
             .border_b_1()
             .border_color(design.border)
             .text_size(design.px(12.0))
-            .children(
-                three_way_badges(res, mode)
-                    .into_iter()
-                    .map(|(label, tone)| ui::status_badge(label, tone, design)),
-            )
-            .when_some(encoding_badge, |bar, label| {
-                bar.child(ui::status_badge(label, BadgeTone::Neutral, design))
+            .debug_selector(|| "compare-toolbar".to_string())
+            .when(self.root.is_three_way(), |bar| {
+                bar.child(self.mode_choice(design, cx))
             })
-            .child(div().flex_1())
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .items_center()
+                    .gap_1p5()
+                    .overflow_hidden()
+                    .children(
+                        badges
+                            .into_iter()
+                            .take(shown)
+                            .map(|(label, tone)| ui::status_badge(label, tone, design)),
+                    ),
+            )
             .when(is_svg, |bar| {
                 bar.child(
                     ui::button("compare-3way-svg", t!("image_diff.rendered").to_string())
@@ -2332,6 +2399,7 @@ impl CompareView {
                     });
                 bar.child(
                     div()
+                        .flex_none()
                         .text_size(design.px(11.0))
                         .text_color(design.muted)
                         .child(current_label),
@@ -2492,6 +2560,15 @@ impl CompareView {
             .bg(design.background)
             .border_b_1()
             .border_color(design.border);
+        if is_three_way {
+            filter_bar = filter_bar.child(self.mode_choice(design, cx)).child(
+                div()
+                    .flex_none()
+                    .w(px(1.0))
+                    .h(design.px(16.0))
+                    .bg(design.border),
+            );
+        }
         for (id, filter, label, count) in self.folder_filter_specs(res) {
             filter_bar = filter_bar.child(self.filter_chip(id, filter, label, count, design, cx));
         }
