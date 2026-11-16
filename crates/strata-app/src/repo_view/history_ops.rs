@@ -68,7 +68,8 @@ pub(crate) struct MenuState {
     head: Option<Oid>,
     /// Tracked staged or worktree changes. Core refuses a rebase with them.
     dirty: bool,
-    /// The repository is on another machine, so every write is refused.
+    /// The repository is on another machine. Supported writes ignore this;
+    /// tags, rewrites and other helper gaps still read it.
     ssh: bool,
 }
 
@@ -133,9 +134,6 @@ impl MenuState {
     /// A running operation is reported before a half-finished one: it is the
     /// state that will change on its own.
     pub(crate) fn shared_reason(&self) -> Option<String> {
-        if self.ssh {
-            return Some(crate::remote_open::unavailable_reason());
-        }
         if self.busy {
             Some(t!("branch.reason.busy").to_string())
         } else if self.pending {
@@ -160,7 +158,9 @@ impl MenuState {
     /// A tag can be created or deleted while another operation is in progress
     /// (it only writes a ref), but not while git is busy with one.
     pub(crate) fn blocked(&self, action: HistoryAction) -> Option<String> {
-        if self.ssh {
+        // Tags stay off the wire. The remote reason wins over busy, the same
+        // way a missing helper used to win over every other state.
+        if self.ssh && matches!(action, HistoryAction::CreateTag | HistoryAction::DeleteTag) {
             return Some(crate::remote_open::unavailable_reason());
         }
         if self.busy {
@@ -182,7 +182,7 @@ impl MenuState {
     /// [`Self::blocked`] plus the commit-specific rule: picking or reverting
     /// HEAD itself has nothing to apply.
     pub(crate) fn blocked_for(&self, action: HistoryAction, commit: Oid) -> Option<String> {
-        if self.ssh {
+        if self.ssh && matches!(action, HistoryAction::CreateTag | HistoryAction::DeleteTag) {
             return Some(crate::remote_open::unavailable_reason());
         }
         if matches!(action, HistoryAction::CherryPick | HistoryAction::Revert)
@@ -595,6 +595,12 @@ fn edit_blocked_on_line(
     distance: Option<usize>,
     action: EditAction,
 ) -> Option<String> {
+    // Interactive rebase is not a remote operation. This check has to stay
+    // ahead of the shared busy/pending reasons, or stopping the blanket remote
+    // block would turn the rewrite entries on.
+    if state.ssh {
+        return Some(crate::remote_open::unavailable_reason());
+    }
     if state.busy {
         return Some(t!("branch.reason.busy").to_string());
     }
@@ -831,6 +837,8 @@ fn branch_actions_menu(
     let busy = state.busy();
     let shared = state.shared_reason();
     let history_locked = busy || state.pending();
+    // Same gap as the sidebar: the helper walk is not refiltered.
+    let scope_reason = state.ssh.then(crate::remote_open::unavailable_reason);
     let is_current = branch.kind == RefKind::LocalBranch && branch.name == current;
     let hidden = entity.read(cx).is_ref_hidden(branch.kind, &branch.name);
     let any_hidden = entity.read(cx).hidden_ref_count() > 0;
@@ -845,9 +853,9 @@ fn branch_actions_menu(
             busy
         };
         let item = match action {
-            BranchAction::Solo => solo_history_item(kind, &name, entity),
-            BranchAction::Hide => hide_history_item(kind, &name, entity),
-            BranchAction::ShowAll => show_all_history_item(entity),
+            BranchAction::Solo => solo_history_item(kind, &name, entity, scope_reason.as_deref()),
+            BranchAction::Hide => hide_history_item(kind, &name, entity, scope_reason.as_deref()),
+            BranchAction::ShowAll => show_all_history_item(entity, scope_reason.as_deref()),
             BranchAction::Rebase => {
                 let Some((_, target)) = entity.read(cx).branch_rebase_target(kind, &name) else {
                     continue;
@@ -917,45 +925,70 @@ pub(crate) fn history_filter_menu(
     entity: &Entity<RepoView>,
     cx: &App,
 ) -> PopupMenu {
+    // The helper publishes one unfiltered walk. Hiding a ref here would only
+    // change the local copy of the scope, so the graph would keep the commits.
+    let reason = entity
+        .read(cx)
+        .is_ssh()
+        .then(crate::remote_open::unavailable_reason);
     let hidden = entity.read(cx).is_ref_hidden(kind, name);
     let any_hidden = entity.read(cx).hidden_ref_count() > 0;
     if !is_current && !hidden {
-        menu = menu.item(hide_history_item(kind, name, entity));
+        menu = menu.item(hide_history_item(kind, name, entity, reason.as_deref()));
     }
-    menu = menu.item(solo_history_item(kind, name, entity));
+    menu = menu.item(solo_history_item(kind, name, entity, reason.as_deref()));
     if any_hidden {
-        menu = menu.item(show_all_history_item(entity));
+        menu = menu.item(show_all_history_item(entity, reason.as_deref()));
     }
     menu
 }
 
-fn hide_history_item(kind: RefKind, name: &str, entity: &Entity<RepoView>) -> PopupMenuItem {
+fn hide_history_item(
+    kind: RefKind,
+    name: &str,
+    entity: &Entity<RepoView>,
+    reason: Option<&str>,
+) -> PopupMenuItem {
     let entity = entity.clone();
     let name = name.to_owned();
-    PopupMenuItem::new(t!("branch.menu.hide_in_history").to_string()).on_click(
-        move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
-            entity.update(cx, |view, cx| view.hide_ref_in_history(kind, &name, cx));
-        },
-    )
+    PopupMenuItem::new(crate::ui::menu_label(
+        t!("branch.menu.hide_in_history").to_string(),
+        reason,
+    ))
+    .disabled(reason.is_some())
+    .on_click(move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
+        entity.update(cx, |view, cx| view.hide_ref_in_history(kind, &name, cx));
+    })
 }
 
-fn solo_history_item(kind: RefKind, name: &str, entity: &Entity<RepoView>) -> PopupMenuItem {
+fn solo_history_item(
+    kind: RefKind,
+    name: &str,
+    entity: &Entity<RepoView>,
+    reason: Option<&str>,
+) -> PopupMenuItem {
     let entity = entity.clone();
     let name = name.to_owned();
-    PopupMenuItem::new(t!("branch.menu.show_only").to_string()).on_click(
-        move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
-            entity.update(cx, |view, cx| view.show_only_ref(kind, &name, cx));
-        },
-    )
+    PopupMenuItem::new(crate::ui::menu_label(
+        t!("branch.menu.show_only").to_string(),
+        reason,
+    ))
+    .disabled(reason.is_some())
+    .on_click(move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
+        entity.update(cx, |view, cx| view.show_only_ref(kind, &name, cx));
+    })
 }
 
-fn show_all_history_item(entity: &Entity<RepoView>) -> PopupMenuItem {
+fn show_all_history_item(entity: &Entity<RepoView>, reason: Option<&str>) -> PopupMenuItem {
     let entity = entity.clone();
-    PopupMenuItem::new(t!("branch.menu.show_all_hidden").to_string()).on_click(
-        move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
-            entity.update(cx, |view, cx| view.show_hidden_refs(cx));
-        },
-    )
+    PopupMenuItem::new(crate::ui::menu_label(
+        t!("branch.menu.show_all_hidden").to_string(),
+        reason,
+    ))
+    .disabled(reason.is_some())
+    .on_click(move |_: &ClickEvent, _window: &mut Window, cx: &mut App| {
+        entity.update(cx, |view, cx| view.show_hidden_refs(cx));
+    })
 }
 
 /// The context menu for one commit row.
@@ -982,7 +1015,13 @@ pub(crate) fn commit_menu(
     // While several rows are selected, the single-commit entries have no one
     // row to act on, so the menu offers the multi-pick instead.
     if let Some(multi) = multi {
-        return multi_commit_menu(menu, &multi, shared.as_deref(), entity);
+        return multi_commit_menu(
+            menu,
+            &multi,
+            shared.as_deref(),
+            state.as_ref().is_some_and(|state| state.ssh),
+            entity,
+        );
     }
     // The branches pointing at this commit act on the branch, not the commit,
     // so they lead the menu: that is what a right-click on a tagged tip is
@@ -1183,8 +1222,13 @@ pub(crate) fn commit_menu(
     // One grouped entry rather than a submenu, so the compare view is one
     // click away from the commit it starts at.
     menu = menu.separator();
+    // Compare, worktrees and patch files are not on the helper. The remote
+    // reason wins over a merely busy repository, matching the tag entries.
+    let remote_reason = state.ssh.then(crate::remote_open::unavailable_reason);
     // A menu only opens with a session, so the repository is there.
-    let compare_blocked = super::compare::with_head_blocked(true, Some(commit), state.head);
+    let compare_blocked = remote_reason
+        .clone()
+        .or_else(|| super::compare::with_head_blocked(true, Some(commit), state.head));
     menu = menu.item(
         PopupMenuItem::new(blocked_label(
             t!("history_ops.menu.compare_head").to_string(),
@@ -1201,7 +1245,9 @@ pub(crate) fn commit_menu(
             }
         }),
     );
-    let worktree_compare_blocked = super::compare::with_worktree_blocked(true, Some(commit));
+    let worktree_compare_blocked = remote_reason
+        .clone()
+        .or_else(|| super::compare::with_worktree_blocked(true, Some(commit)));
     menu = menu.item(
         PopupMenuItem::new(blocked_label(
             t!("history_ops.menu.compare_worktree").to_string(),
@@ -1220,15 +1266,16 @@ pub(crate) fn commit_menu(
     );
 
     let busy_reason = state.busy().then(|| t!("branch.reason.busy").to_string());
+    let worktree_reason = remote_reason.or(busy_reason);
     let worktree_short = short.clone();
     let create_worktree = {
         let entity = entity.clone();
         PopupMenuItem::new(blocked_label(
             t!("history_ops.menu.create_worktree").to_string(),
-            busy_reason.as_deref(),
+            worktree_reason.as_deref(),
             shared.as_deref(),
         ))
-        .disabled(busy_reason.is_some())
+        .disabled(worktree_reason.is_some())
         .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
             entity.update(cx, |view, cx| {
                 view.open_worktree_from_commit(commit, worktree_short.clone(), window, cx)
@@ -1240,10 +1287,10 @@ pub(crate) fn commit_menu(
         let short = short.clone();
         PopupMenuItem::new(blocked_label(
             t!("history_ops.menu.save_patch").to_string(),
-            busy_reason.as_deref(),
+            worktree_reason.as_deref(),
             shared.as_deref(),
         ))
-        .disabled(busy_reason.is_some())
+        .disabled(worktree_reason.is_some())
         .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
             let short = short.clone();
             entity.update(cx, |view, cx| {
@@ -1274,6 +1321,7 @@ fn multi_commit_menu(
     mut menu: PopupMenu,
     multi: &MultiPickContext,
     shared: Option<&str>,
+    ssh: bool,
     entity: Entity<RepoView>,
 ) -> PopupMenu {
     let copy = multi.copy.clone();
@@ -1291,7 +1339,12 @@ fn multi_commit_menu(
     // them all against, which the entry does not offer.
     if let [a, b] = multi.commits.as_slice() {
         // A menu only opens with a session, so the repository is there.
-        let blocked = super::compare::two_commit_blocked(true, &multi.commits);
+        // Compare queries are not on the helper.
+        let blocked = if ssh {
+            Some(crate::remote_open::unavailable_reason())
+        } else {
+            super::compare::two_commit_blocked(true, &multi.commits)
+        };
         let (a, b) = (*a, *b);
         menu = menu
             .item(
@@ -1316,13 +1369,15 @@ fn multi_commit_menu(
         && multi.uncommitted
     {
         let commits = vec![*a, *b];
+        let blocked = ssh.then(crate::remote_open::unavailable_reason);
         menu = menu
             .item(
                 PopupMenuItem::new(blocked_label(
                     t!("history_ops.menu.compare_three_way").to_string(),
-                    None,
+                    blocked.as_deref(),
                     shared,
                 ))
+                .disabled(blocked.is_some())
                 .on_click({
                     let entity = entity.clone();
                     move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
@@ -1338,7 +1393,11 @@ fn multi_commit_menu(
     // Three commits are a three-way comparison with one of them as the base,
     // which the compare tab lets the user change.
     if let [a, b, c] = multi.commits.as_slice() {
-        let blocked = super::compare::three_commit_blocked(true, &multi.commits);
+        let blocked = if ssh {
+            Some(crate::remote_open::unavailable_reason())
+        } else {
+            super::compare::three_commit_blocked(true, &multi.commits)
+        };
         let commits = vec![*a, *b, *c];
         menu = menu
             .item(
@@ -1532,7 +1591,7 @@ pub(crate) fn validate_tag_name(name: &str, existing: &[String]) -> Result<(), S
 impl RepoView {
     /// What the commit list's menu may offer, or `None` without a session
     /// (`--fake` has nothing to act on).
-    pub(super) fn history_menu_state(&self) -> Option<MenuState> {
+    pub(crate) fn history_menu_state(&self) -> Option<MenuState> {
         let snapshot = self.session.as_ref()?.snapshot();
         Some(
             MenuState::read(snapshot.head.as_ref(), snapshot.state, self.is_busy())
@@ -2425,29 +2484,40 @@ mod tests {
     }
 
     #[test]
-    fn a_remote_repository_blocks_every_history_action() {
+    fn a_remote_repository_keeps_tags_and_rewrites_unavailable() {
         let head = branch("main", oid(2));
         let reason = crate::remote_open::unavailable_reason();
         let state = MenuState::read(Some(&head), RepoState::Normal, false).with_ssh(true);
-        assert_eq!(state.shared_reason().as_deref(), Some(reason.as_str()));
+        assert_eq!(state.shared_reason(), None);
+        assert_eq!(state.blocked(HistoryAction::Reset), None);
+        assert_eq!(state.blocked(HistoryAction::CreateBranch), None);
         assert_eq!(
-            state.blocked(HistoryAction::Reset).as_deref(),
+            state.blocked(HistoryAction::CreateTag).as_deref(),
             Some(reason.as_str())
         );
-        // The remote reason wins over "that commit is HEAD" and over a busy
-        // or half-finished repository.
         assert_eq!(
-            state
-                .blocked_for(HistoryAction::CherryPick, oid(2))
-                .as_deref(),
+            state.blocked(HistoryAction::DeleteTag).as_deref(),
             Some(reason.as_str())
         );
+        // Picking HEAD is the same rule as a local repository.
+        assert_eq!(
+            state.blocked_for(HistoryAction::CherryPick, oid(2)),
+            Some(t!("history_ops.reason.is_head").to_string())
+        );
+        assert_eq!(
+            edit_blocked_on_line(&state, &[], None, EditAction::Reword).as_deref(),
+            Some(reason.as_str())
+        );
+        // The remote reason still wins over busy for a tag.
         let busy = MenuState::read(Some(&head), RepoState::Merging, true).with_ssh(true);
         assert_eq!(
             busy.blocked(HistoryAction::CreateTag).as_deref(),
             Some(reason.as_str())
         );
-        assert_eq!(busy.shared_reason().as_deref(), Some(reason.as_str()));
+        assert_eq!(
+            busy.shared_reason(),
+            Some(t!("branch.reason.busy").to_string())
+        );
     }
 
     #[test]

@@ -377,21 +377,26 @@ impl RepoView {
         let mut card = ui::lfs_card(summary, design);
         if missing && let Some(path) = self.selected_file_path() {
             let entity = self.entity();
-            card = card.action(
-                ui::button("lfs-download", t!("worktree.download").to_string())
-                    .size(ButtonSize::Tiny)
-                    .on_click(move |_, window, cx| {
-                        let path = path.clone();
-                        entity.update(cx, |this, cx| {
-                            this.run_operation(
-                                Operation::LfsPull { path },
-                                t!("worktree.download_lfs").to_string(),
-                                window,
-                                cx,
-                            );
-                        });
-                    }),
-            );
+            let ssh = self.is_ssh();
+            // LFS pulls are not on the helper yet, so the button stays
+            // visible but cannot start a download.
+            let mut download = ui::button("lfs-download", t!("worktree.download").to_string())
+                .size(ButtonSize::Tiny)
+                .disabled(ssh);
+            if ssh {
+                download = download.tooltip(crate::remote_open::unavailable_reason());
+            }
+            card = card.action(download.on_click(move |_, window, cx| {
+                let path = path.clone();
+                entity.update(cx, |this, cx| {
+                    this.run_operation(
+                        Operation::LfsPull { path },
+                        t!("worktree.download_lfs").to_string(),
+                        window,
+                        cx,
+                    );
+                });
+            }));
         }
         let body = if !self.diff_rows.is_empty() {
             self.diff_rows_list(Rc::clone(&self.diff_rows), Some(view), design, cx)

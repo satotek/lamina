@@ -265,25 +265,30 @@ impl WorktreePanel {
                     let mut card = crate::ui::lfs_card(summary, &colors.design);
                     if missing && let Some(selected) = &selected {
                         let path = selected.path.clone();
+                        let ssh = entity.read(cx).is_ssh();
                         let entity = entity.clone();
-                        card = card.action(
-                            crate::ui::button(
-                                "worktree-lfs-download",
-                                t!("worktree.download").to_string(),
-                            )
-                            .size(crate::ui::ButtonSize::Tiny)
-                            .on_click(move |_, window, cx| {
-                                let path = path.clone();
-                                entity.update(cx, |this, cx| {
-                                    this.run_operation(
-                                        Operation::LfsPull { path },
-                                        t!("worktree.download_lfs").to_string(),
-                                        window,
-                                        cx,
-                                    );
-                                });
-                            }),
-                        );
+                        // LFS pulls are not on the helper yet, so the button
+                        // stays visible but cannot start a download.
+                        let mut download = crate::ui::button(
+                            "worktree-lfs-download",
+                            t!("worktree.download").to_string(),
+                        )
+                        .size(crate::ui::ButtonSize::Tiny)
+                        .disabled(ssh);
+                        if ssh {
+                            download = download.tooltip(crate::remote_open::unavailable_reason());
+                        }
+                        card = card.action(download.on_click(move |_, window, cx| {
+                            let path = path.clone();
+                            entity.update(cx, |this, cx| {
+                                this.run_operation(
+                                    Operation::LfsPull { path },
+                                    t!("worktree.download_lfs").to_string(),
+                                    window,
+                                    cx,
+                                );
+                            });
+                        }));
                     }
                     let body = if !self.rows.is_empty() {
                         self.diff_list(entity.clone(), view, colors)

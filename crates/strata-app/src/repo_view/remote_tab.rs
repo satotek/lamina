@@ -318,6 +318,18 @@ impl RepoView {
         true
     }
 
+    /// Refuses `operation` only when this tab is remote and the helper cannot
+    /// run it. Supported writes go through the same session path as a local tab.
+    pub(crate) fn refuse_unsupported(
+        &mut self,
+        operation: &strata_core::session::Operation,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        self.is_ssh()
+            && !strata_remote_client::is_supported_operation(operation)
+            && self.refuse_if_ssh(cx)
+    }
+
     pub(super) fn connect_page_visible(&self) -> bool {
         let Some(tab) = &self.remote_tab else {
             return false;
@@ -700,8 +712,13 @@ mod tests {
         let reason = unavailable_reason();
         cx.read(|cx| {
             let view = view.read(cx);
+            assert_eq!(view.history_reset_blocked(), None);
             assert_eq!(
-                view.history_reset_blocked().as_deref(),
+                view.history_menu_state()
+                    .and_then(|state| {
+                        state.blocked(super::super::history_ops::HistoryAction::CreateTag)
+                    })
+                    .as_deref(),
                 Some(reason.as_str())
             );
             assert!(view.commit_count() > 0);

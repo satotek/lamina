@@ -346,7 +346,7 @@ impl RepoView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.session.is_none() || self.is_busy() {
+        if self.refuse_if_ssh(cx) || self.session.is_none() || self.is_busy() {
             return;
         }
         let root = self.add_worktree_root();

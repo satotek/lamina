@@ -28,7 +28,11 @@ impl RepoView {
         let selected = self.palette_selected_commits();
         map.block(
             "strata::CompareCommitsThreeWay",
-            compare::three_commit_blocked(repo_open, &selected),
+            if self.is_ssh() {
+                Some(crate::remote_open::unavailable_reason())
+            } else {
+                compare::three_commit_blocked(repo_open, &selected)
+            },
         );
         map.block(
             "strata::CompareBranchThreeWay",
@@ -59,6 +63,11 @@ impl RepoView {
     /// command has nothing to open, which is why the branch row's menu is the
     /// only other way in.
     fn three_way_branch_blocked(&self) -> Option<String> {
+        // The merge-base read is not on the helper, so the palette must not
+        // report a missing merge base for a remote repository.
+        if self.is_ssh() {
+            return Some(crate::remote_open::unavailable_reason());
+        }
         let Some(branch) = self.branches.revealed_local_branch() else {
             return Some(t!("compare.select_branch").to_string());
         };
@@ -136,6 +145,9 @@ impl RepoView {
     }
 
     fn patch_blocked(&self) -> Option<String> {
+        if self.is_ssh() {
+            return Some(crate::remote_open::unavailable_reason());
+        }
         self.session
             .is_none()
             .then(|| t!("remote.no_session").to_string())
@@ -172,6 +184,9 @@ impl RepoView {
     /// reflog is not one: running the command loads the rows first, and the
     /// handler says what happened once they arrive.
     fn undo_blocked(&self) -> Option<String> {
+        if self.is_ssh() {
+            return Some(crate::remote_open::unavailable_reason());
+        }
         if self.session.is_none() {
             return Some(t!("remote.no_session").to_string());
         }

@@ -531,6 +531,10 @@ impl RepoView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Merge-base and three-way role reads are not on the helper.
+        if self.refuse_if_ssh(cx) {
+            return;
+        }
         let Some(workspace) = self
             .workspace
             .as_ref()

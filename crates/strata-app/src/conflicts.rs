@@ -1073,13 +1073,16 @@ impl RepoView {
         side: ConflictSide,
         cx: &mut Context<Self>,
     ) {
-        if self.refuse_if_ssh(cx) || self.worktree.conflicts.pending.is_some() {
+        if self.worktree.conflicts.pending.is_some() {
+            return;
+        }
+        let operation = Operation::ResolveConflict { path, side };
+        if self.refuse_unsupported(&operation, cx) {
             return;
         }
         let Some(session) = self.session.as_ref() else {
             return;
         };
-        let operation = Operation::ResolveConflict { path, side };
         let activity = ActivityKind::of(&operation);
         let id = session.run(operation);
         self.activity.begin(id, activity, cx);
@@ -1403,13 +1406,7 @@ impl RepoView {
 
     /// Runs `MarkResolved` for the selected conflict, warning or not.
     pub(crate) fn stage_resolved_conflict(&mut self, cx: &mut Context<Self>) {
-        if self.refuse_if_ssh(cx) {
-            return;
-        }
         let Some(path) = self.worktree.selected_conflict().map(str::to_owned) else {
-            return;
-        };
-        let Some(session) = self.session.as_ref() else {
             return;
         };
         // With the editor loaded, the result in it is what gets staged; the
@@ -1427,6 +1424,12 @@ impl RepoView {
                     .and_then(|loaded| loaded.data.worktree_hash),
             },
             None => Operation::MarkResolved(vec![path]),
+        };
+        if self.refuse_unsupported(&operation, cx) {
+            return;
+        }
+        let Some(session) = self.session.as_ref() else {
+            return;
         };
         let activity = ActivityKind::of(&operation);
         let id = session.run(operation);
