@@ -363,7 +363,7 @@ pub struct RepoView {
     error: Option<(String, String)>,
     name: Option<String>,
     /// The workspace hosting this view, weak so swapping the view releases it.
-    workspace: Option<WeakEntity<crate::workspace::Workspace>>,
+    pub(crate) workspace: Option<WeakEntity<crate::workspace::Workspace>>,
     /// Name of the parent repository on the navigation stack, if this view was
     /// opened from a superproject or sibling worktree.
     parent_name: Option<String>,
@@ -1756,7 +1756,7 @@ impl RepoView {
         if !self.has_uncommitted_row(cx) {
             return;
         }
-        if self.uncommitted_selected {
+        if self.uncommitted_selected && !self.selection.is_multi() {
             return;
         }
         self.branches.clear_revealed();
@@ -1780,9 +1780,61 @@ impl RepoView {
         self.notify_if_active(cx);
     }
 
+    /// Cmd/Ctrl-click on the uncommitted row: adds it to or removes it from the
+    /// selection without collapsing the commits already picked, so two commits
+    /// and the working tree can be compared together.
+    pub(crate) fn toggle_uncommitted_selection(&mut self, cx: &mut Context<Self>) {
+        if !self.has_uncommitted_row(cx) {
+            return;
+        }
+        self.branches.clear_revealed();
+        self.branches.clear_selected_extra();
+        self.selection.toggle_uncommitted();
+        if !self.selection.includes_uncommitted() {
+            self.uncommitted_selected = false;
+            self.uncommitted_diff.cancel_all(self.session.as_deref());
+            match self.selection.len() {
+                0 => {
+                    self.selected = None;
+                    self.selection_commit = None;
+                    self.drop_selection_diff();
+                }
+                1 => {
+                    let index = self.selection.rows().next();
+                    self.select(index, cx);
+                    return;
+                }
+                _ => {
+                    self.selected = self.selection.focused();
+                    self.selection_commit = self
+                        .selected
+                        .and_then(|index| self.source().and_then(|source| source.commit_id(index)));
+                    self.sync_selection_diff(cx);
+                }
+            }
+            self.notify_if_active(cx);
+            return;
+        }
+        if self.selection.is_multi() {
+            // The range summary owns the details pane, so the stacked
+            // uncommitted diff gives way to it.
+            self.uncommitted_selected = false;
+            self.uncommitted_diff.cancel_all(self.session.as_deref());
+            self.sync_selection_diff(cx);
+        } else {
+            self.uncommitted_selected = false;
+            self.select_uncommitted(cx);
+            return;
+        }
+        self.notify_if_active(cx);
+    }
+
     /// Keeps the selection valid as commits arrive or the history is replaced.
     fn sync_selection(&mut self, cx: &mut Context<Self>) {
         let has_uncommitted = self.has_uncommitted_row(cx);
+        if !has_uncommitted && self.selection.includes_uncommitted() {
+            self.selection.remove_uncommitted();
+        }
         if self.uncommitted_selected {
             if has_uncommitted {
                 return;

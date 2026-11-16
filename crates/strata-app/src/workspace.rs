@@ -22,13 +22,17 @@ use gpui::{
 };
 use gpui_component::dialog::DialogFooter;
 use gpui_component::{Root, TitleBar, WindowExt as _};
+use strata_core::compare::ThreeWayCompareMode;
 
 use crate::actions::{
     CloneRepository, CloseTab, NewRepository, NewTab, NextTab, OpenCompare, OpenRepository,
     PreviousTab, ReopenClosedTab, SelectTab1, SelectTab2, SelectTab3, SelectTab4, SelectTab5,
     SelectTab6, SelectTab7, SelectTab8, SelectTab9, WORKSPACE,
 };
-use crate::compare::{CompareTarget, CompareView, RepoThreeWaySource};
+use crate::compare::{
+    CompareRevision, CompareTarget, CompareView, DialogRevision, RepoThreeWayFileSource,
+    RepoThreeWaySource, RepoTwoWaySource, RevisionOption, RevisionOptions,
+};
 use crate::debug_launch::{self, DebugDialog, DebugLaunch};
 use crate::picker::{Mode, OpenTarget, Picker};
 use crate::recent::{self, RecentRepositories};
@@ -648,7 +652,142 @@ impl Workspace {
 
     /// Opens the standalone Compare setup dialog over the workspace window.
     pub(crate) fn open_compare_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        crate::compare::open_compare_dialog(cx.entity(), window, cx);
+        let options = self.revision_options(cx);
+        crate::compare::open_compare_dialog(cx.entity(), options, window, cx);
+    }
+
+    /// The active compare tab, for tests that follow its state.
+    #[cfg(test)]
+    pub(crate) fn active_compare_view(&self) -> Option<Entity<CompareView>> {
+        let Content::Tabs(deck) = &self.content else {
+            return None;
+        };
+        match deck.active()? {
+            TabSlot::Compare(slot) => Some(slot.view.clone()),
+            TabSlot::Repo(_) => None,
+        }
+    }
+
+    /// The active repository tab, for tests that drive its views.
+    #[cfg(test)]
+    pub(crate) fn active_repo_view(&self) -> Option<Entity<crate::repo_view::RepoView>> {
+        self.active_repo_slot().map(|slot| slot.view.clone())
+    }
+
+    /// The active repository tab's Compare revisions mode: the refs, recent
+    /// commits and revisionless sides the picker offers, with the reader that
+    /// resolves typed specs.
+    pub(crate) fn revision_options(&self, cx: &App) -> RevisionOptions {
+        let Some(slot) = self.active_repo_slot() else {
+            return RevisionOptions::default();
+        };
+        let view = slot.view.read(cx);
+        let Some(session) = view.session.as_ref() else {
+            return RevisionOptions::default();
+        };
+        let snapshot = session.snapshot();
+        let mut options = Vec::new();
+        for reference in snapshot.refs.iter() {
+            if !matches!(
+                reference.kind,
+                strata_core::RefKind::LocalBranch
+                    | strata_core::RefKind::RemoteBranch
+                    | strata_core::RefKind::Tag
+            ) {
+                continue;
+            }
+            options.push(RevisionOption {
+                spec: reference.short_name.clone(),
+                label: format!(
+                    "{} ({})",
+                    reference.short_name,
+                    crate::data::short_oid(reference.target)
+                ),
+                side: strata_core::compare::RepoCompareSide::Commit(reference.target),
+            });
+        }
+        for index in 0..snapshot.commits.len().min(20) {
+            let Some((commit, _)) = snapshot.commits.get(index) else {
+                break;
+            };
+            options.push(RevisionOption {
+                spec: commit.id.to_string(),
+                label: format!("{} {}", crate::data::short_oid(commit.id), commit.summary),
+                side: strata_core::compare::RepoCompareSide::Commit(commit.id),
+            });
+        }
+        options.push(RevisionOption {
+            spec: t!("compare.staged").to_string(),
+            label: t!("compare.staged").to_string(),
+            side: strata_core::compare::RepoCompareSide::Index,
+        });
+        options.push(RevisionOption {
+            spec: t!("compare.working_tree").to_string(),
+            label: t!("compare.working_tree").to_string(),
+            side: strata_core::compare::RepoCompareSide::Worktree,
+        });
+        RevisionOptions {
+            reader: Some(session.reader()),
+            options,
+        }
+    }
+
+    fn active_repo_slot(&self) -> Option<&RepoSlot> {
+        let Content::Tabs(deck) = &self.content else {
+            return None;
+        };
+        deck.active()?.as_repo()
+    }
+
+    /// Opens a repository comparison the Compare dialog resolved: three sides
+    /// as peers, or two sides.
+    pub(crate) fn open_compare_revisions(
+        &mut self,
+        revisions: Vec<DialogRevision>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(slot) = self.active_repo_slot() else {
+            return;
+        };
+        let view = slot.view.clone();
+        let (reader, root, snapshot) = {
+            let view = view.read(cx);
+            let Some(session) = view.session.as_ref() else {
+                return;
+            };
+            (session.reader(), view.repository_root(), session.snapshot())
+        };
+        let revision = |dialog: &DialogRevision| -> CompareRevision {
+            let label = if dialog.label.is_empty() {
+                crate::compare::label_at_revision(&snapshot.refs, dialog.side.oid())
+            } else {
+                dialog.label.clone()
+            };
+            CompareRevision::named(label, dialog.side)
+        };
+        match revisions.as_slice() {
+            [left, middle, right] => {
+                let source = RepoThreeWaySource {
+                    reader,
+                    root: root.clone(),
+                    left: revision(left),
+                    middle: revision(middle),
+                    right: revision(right),
+                };
+                self.open_compare_three_way(source, ThreeWayCompareMode::NoBase, window, cx);
+            }
+            [left, right] => {
+                let source = RepoTwoWaySource {
+                    reader,
+                    root,
+                    left: revision(left),
+                    right: revision(right),
+                };
+                self.open_compare_revision_pair(source, window, cx);
+            }
+            _ => {}
+        }
     }
 
     /// Opens a standalone file or folder comparison in a new workspace tab.
@@ -663,15 +802,41 @@ impl Workspace {
         self.open_compare_view(view, window, cx);
     }
 
-    /// Opens a comparison of three repository commits in a new workspace tab.
+    /// Opens a comparison of three repository sides in a new workspace tab.
     pub(crate) fn open_compare_three_way(
         &mut self,
         source: RepoThreeWaySource,
+        mode: ThreeWayCompareMode,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let workspace = cx.weak_entity();
-        let view = cx.new(|cx| CompareView::new_revisions(source, workspace, cx));
+        let view = cx.new(|cx| CompareView::new_revisions(source, mode, workspace, cx));
+        self.open_compare_view(view, window, cx);
+    }
+
+    /// Opens a comparison of two repository sides in a new workspace tab.
+    pub(crate) fn open_compare_revision_pair(
+        &mut self,
+        source: RepoTwoWaySource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace = cx.weak_entity();
+        let view = cx.new(|cx| CompareView::new_revision_pair(source, workspace, cx));
+        self.open_compare_view(view, window, cx);
+    }
+
+    /// Opens one file of three repository sides in a new workspace tab, with
+    /// each side reading the path the history gave it.
+    pub(crate) fn open_compare_revision_file(
+        &mut self,
+        source: RepoThreeWayFileSource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace = cx.weak_entity();
+        let view = cx.new(|cx| CompareView::new_revision_file(source, workspace, cx));
         self.open_compare_view(view, window, cx);
     }
 
@@ -2275,6 +2440,326 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(compare_weak.upgrade().is_none());
+    }
+
+    /// Waits for the repository's first snapshot and history walk to land.
+    fn wait_for_session(visual_cx: &mut VisualTestContext) {
+        for _ in 0..40 {
+            visual_cx.run_until_parked();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        visual_cx.run_until_parked();
+    }
+
+    #[gpui::test]
+    fn uncommitted_row_and_two_commits_compare_with_the_working_tree(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let repo = TestRepo::new();
+        repo.write("shared.txt", "one\n");
+        repo.commit("one");
+        repo.write("shared.txt", "two\n");
+        repo.commit("two");
+        repo.write("shared.txt", "worktree\n");
+
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            gpui_component::init(cx);
+            cx.set_global(Settings::default());
+            crate::actions::bind(cx);
+        });
+        let workspace_cell: std::rc::Rc<std::cell::RefCell<Option<Entity<Workspace>>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
+        let workspace_cell_init = workspace_cell.clone();
+        let launch = Launch::open_quiet(repo.path(), None);
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), move |window, cx| {
+                    let workspace = cx.new(|cx| Workspace::new(Some(launch), window, cx));
+                    *workspace_cell_init.borrow_mut() = Some(workspace.clone());
+                    cx.new(|cx| Root::new(workspace, window, cx))
+                })
+            })
+            .expect("open window");
+        let mut visual_cx = VisualTestContext::from_window(window.into(), cx);
+        wait_for_session(&mut visual_cx);
+
+        let workspace = workspace_cell.borrow().clone().expect("workspace created");
+        let repo_view = visual_cx
+            .update(|_, cx| workspace.read(cx).active_repo_view())
+            .expect("a repository tab");
+        visual_cx.update(|window, cx| {
+            repo_view.update(cx, |view, cx| {
+                view.select(Some(0), cx);
+                view.click_commit(1, 2, false, true, &[0, 1], cx);
+                view.toggle_uncommitted_selection(cx);
+                view.three_way_selection_command(window, cx);
+            });
+        });
+        visual_cx.run_until_parked();
+
+        visual_cx.update(|_, cx| {
+            let view = workspace
+                .read(cx)
+                .active_compare_view()
+                .expect("the comparison opens as a new tab");
+            let view = view.read(cx);
+            assert!(!view.is_loading(), "the background read has finished");
+            assert_eq!(
+                view.mode(),
+                ThreeWayCompareMode::NoBase,
+                "two commits and the working tree are peers"
+            );
+            let labels = view.pane_labels().expect("three revision sides");
+            assert_eq!(
+                labels.last().map(String::as_str),
+                Some(t!("compare.working_tree").as_ref()),
+                "the uncommitted row becomes the working-tree side: {labels:?}"
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn file_history_entry_opens_the_picked_versions_as_one_file(cx: &mut gpui::TestAppContext) {
+        let repo = TestRepo::new();
+        repo.write("old.txt", "one\n");
+        let first = repo.commit("Add old.txt");
+        repo.git(&["mv", "old.txt", "new.txt"]);
+        let second = repo.commit("Rename to new.txt");
+        repo.write("new.txt", "three\n");
+        let third = repo.commit("Edit new.txt");
+
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            gpui_component::init(cx);
+            cx.set_global(Settings::default());
+            crate::actions::bind(cx);
+        });
+        let workspace_cell: std::rc::Rc<std::cell::RefCell<Option<Entity<Workspace>>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
+        let workspace_cell_init = workspace_cell.clone();
+        let launch = Launch::open_quiet(repo.path(), None);
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), move |window, cx| {
+                    let workspace = cx.new(|cx| Workspace::new(Some(launch), window, cx));
+                    *workspace_cell_init.borrow_mut() = Some(workspace.clone());
+                    cx.new(|cx| Root::new(workspace, window, cx))
+                })
+            })
+            .expect("open window");
+        let mut visual_cx = VisualTestContext::from_window(window.into(), cx);
+        wait_for_session(&mut visual_cx);
+        let workspace = workspace_cell.borrow().clone().expect("workspace created");
+        let repo_view = visual_cx
+            .update(|_, cx| workspace.read(cx).active_repo_view())
+            .expect("a repository tab");
+
+        let rows = [third, second, first]
+            .into_iter()
+            .zip(["new.txt", "new.txt", "old.txt"])
+            .zip(["edit", "rename", "add"])
+            .map(
+                |((id, path), summary)| strata_core::session::PathHistoryCommit {
+                    commit: strata_core::CommitInfo {
+                        id,
+                        parents: Vec::new(),
+                        summary: summary.to_owned(),
+                        author_name: "Test".to_owned(),
+                        author_email: "test@example.invalid".to_owned(),
+                        author_time: 0,
+                        committer_time: 0,
+                        shallow_boundary: false,
+                    },
+                    path: path.to_owned(),
+                },
+            )
+            .collect::<Vec<_>>();
+        visual_cx.update(|window, cx| {
+            repo_view.update(cx, |view, cx| {
+                view.inject_file_history_rows("new.txt".to_owned(), rows);
+                for id in [first, second, third] {
+                    view.toggle_history_pick(id, cx);
+                }
+                view.open_file_history_three_way(window, cx);
+            });
+        });
+        visual_cx.run_until_parked();
+
+        visual_cx.update(|_, cx| {
+            let view = workspace
+                .read(cx)
+                .active_compare_view()
+                .expect("the history comparison opens as a new tab");
+            let view = view.read(cx);
+            assert!(!view.is_loading(), "the blob read has finished");
+            assert!(view.is_three_way_file_view());
+            assert_eq!(view.mode(), ThreeWayCompareMode::NoBase);
+            assert!(
+                view.tab_title().contains("new.txt"),
+                "the tab names the compared file: {}",
+                view.tab_title()
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn revision_file_opens_directly_in_the_three_way_file_view(cx: &mut gpui::TestAppContext) {
+        let repo = TestRepo::new();
+        repo.write("old.txt", "one\n");
+        let first = repo.commit("Add old.txt");
+        repo.git(&["mv", "old.txt", "new.txt"]);
+        let second = repo.commit("Rename to new.txt");
+        repo.write("new.txt", "three\n");
+        let third = repo.commit("Edit new.txt");
+
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            gpui_component::init(cx);
+            cx.set_global(Settings::default());
+            crate::actions::bind(cx);
+        });
+        let workspace_cell: std::rc::Rc<std::cell::RefCell<Option<Entity<Workspace>>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
+        let workspace_cell_init = workspace_cell.clone();
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), move |window, cx| {
+                    let workspace = cx.new(|cx| Workspace::new(None, window, cx));
+                    *workspace_cell_init.borrow_mut() = Some(workspace.clone());
+                    cx.new(|cx| Root::new(workspace, window, cx))
+                })
+            })
+            .expect("open window");
+        let mut visual_cx = VisualTestContext::from_window(window.into(), cx);
+        visual_cx.run_until_parked();
+        let workspace = workspace_cell.borrow().clone().expect("workspace created");
+
+        let reader: std::sync::Arc<dyn strata_core::session::RepoReader> =
+            std::sync::Arc::new(repo.open());
+        let source = RepoThreeWayFileSource {
+            source: RepoThreeWaySource {
+                reader,
+                root: repo.path().to_path_buf(),
+                left: CompareRevision::commit("one", first),
+                middle: CompareRevision::commit("rename", second),
+                right: CompareRevision::commit("edit", third),
+            },
+            paths: [
+                "old.txt".to_owned(),
+                "new.txt".to_owned(),
+                "new.txt".to_owned(),
+            ],
+        };
+        visual_cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.open_compare_revision_file(source, window, cx);
+            });
+        });
+        visual_cx.run_until_parked();
+
+        visual_cx.update(|_, cx| {
+            let view = workspace
+                .read(cx)
+                .active_compare_view()
+                .expect("the file comparison opens as a new tab");
+            let view = view.read(cx);
+            assert!(!view.is_loading(), "the blob read has finished");
+            assert!(
+                view.is_three_way_file_view(),
+                "a history comparison skips the tree list"
+            );
+            assert_eq!(view.mode(), ThreeWayCompareMode::NoBase);
+            assert!(
+                view.tab_title().contains("new.txt"),
+                "the tab names the compared file: {}",
+                view.tab_title()
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn compare_dialog_revision_options_open_repository_sides(cx: &mut gpui::TestAppContext) {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "one\n");
+        repo.commit("one");
+        repo.write("a.txt", "two\n");
+        let head = repo.commit("two");
+        repo.write("a.txt", "worktree\n");
+
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            gpui_component::init(cx);
+            cx.set_global(Settings::default());
+            crate::actions::bind(cx);
+        });
+        let workspace_cell: std::rc::Rc<std::cell::RefCell<Option<Entity<Workspace>>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
+        let workspace_cell_init = workspace_cell.clone();
+        let launch = Launch::open_quiet(repo.path(), None);
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), move |window, cx| {
+                    let workspace = cx.new(|cx| Workspace::new(Some(launch), window, cx));
+                    *workspace_cell_init.borrow_mut() = Some(workspace.clone());
+                    cx.new(|cx| Root::new(workspace, window, cx))
+                })
+            })
+            .expect("open window");
+        let mut visual_cx = VisualTestContext::from_window(window.into(), cx);
+        wait_for_session(&mut visual_cx);
+
+        let workspace = workspace_cell.borrow().clone().expect("workspace created");
+        let options = visual_cx.update(|_, cx| workspace.read(cx).revision_options(cx));
+        assert!(options.has_repository(), "a repository tab is active");
+        assert!(
+            options
+                .options
+                .iter()
+                .any(|option| { option.side == strata_core::compare::RepoCompareSide::Worktree }),
+            "the picker offers the working tree"
+        );
+        assert!(
+            options
+                .options
+                .iter()
+                .any(|option| option.side == strata_core::compare::RepoCompareSide::Index),
+            "the picker offers the staged side"
+        );
+        assert!(
+            options.options.iter().any(|option| {
+                option.side == strata_core::compare::RepoCompareSide::Commit(head)
+            }),
+            "the picker offers HEAD"
+        );
+
+        let sides = crate::compare::validate_revision_inputs(
+            "main",
+            t!("compare.working_tree").as_ref(),
+            t!("compare.working_tree").as_ref(),
+            &options,
+        )
+        .expect("three revisions validate");
+        assert_eq!(sides.len(), 3);
+
+        visual_cx.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.open_compare_revisions(sides, window, cx);
+            });
+        });
+        visual_cx.run_until_parked();
+
+        visual_cx.update(|_, cx| {
+            let view = workspace
+                .read(cx)
+                .active_compare_view()
+                .expect("the revision comparison opens as a new tab");
+            let view = view.read(cx);
+            assert!(!view.is_loading(), "the background read has finished");
+            assert_eq!(view.mode(), ThreeWayCompareMode::NoBase);
+            let labels = view.pane_labels().expect("three revision sides");
+            assert_eq!(labels.len(), 3);
+        });
     }
 
     #[gpui::test]

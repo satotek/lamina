@@ -16,7 +16,9 @@ use gpui::{
     AnyElement, App, Context, Entity, FontWeight, Hsla, IntoElement, ParentElement, SharedString,
     Styled, UniformListScrollHandle, Window, div, px, uniform_list,
 };
-use gpui_component::{ActiveTheme as _, Selectable as _, Theme, spinner::Spinner};
+use gpui_component::{
+    ActiveTheme as _, Disableable as _, Selectable as _, Theme, spinner::Spinner,
+};
 use strata_core::session::{
     DiffRequest, DiffTicket, DiffView, PathHistoryCommit, QueryTicket, RepoSnapshot,
 };
@@ -84,7 +86,13 @@ pub(crate) struct FileHistory {
     diff_error: Option<String>,
 
     error: Option<String>,
+    /// Commits picked for a three-version comparison, in the order the user
+    /// picked them.
+    picked: Vec<Oid>,
 }
+
+/// The most versions a single-file comparison can take.
+const MAX_PICKED_VERSIONS: usize = 3;
 
 impl FileHistory {
     fn new(path: String) -> Self {
@@ -101,6 +109,7 @@ impl FileHistory {
             context: DiffContext::default(),
             diff_error: None,
             error: None,
+            picked: Vec::new(),
         }
     }
 
@@ -130,6 +139,44 @@ impl FileHistory {
             .selected
             .or_else(|| self.rows().first().map(|entry| entry.commit.id))?;
         Some((commit, self.path_for(commit)))
+    }
+
+    fn is_picked(&self, commit: Oid) -> bool {
+        self.picked.contains(&commit)
+    }
+
+    /// The picked versions, oldest first, with the path each commit knew the
+    /// file under. `None` until exactly three are picked.
+    fn picked_versions(&self) -> Option<[(Oid, String, String); 3]> {
+        if self.picked.len() != MAX_PICKED_VERSIONS {
+            return None;
+        }
+        let mut picked: Vec<(usize, Oid, String, String)> = Vec::with_capacity(MAX_PICKED_VERSIONS);
+        for (position, entry) in self.rows().iter().enumerate() {
+            if self.is_picked(entry.commit.id) {
+                picked.push((
+                    position,
+                    entry.commit.id,
+                    entry.path.clone(),
+                    entry.commit.summary.clone(),
+                ));
+            }
+        }
+        // History rows are newest first; the comparison reads oldest first.
+        picked.sort_by_key(|entry| std::cmp::Reverse(entry.0));
+        let [
+            (_, a, a_path, a_summary),
+            (_, b, b_path, b_summary),
+            (_, c, c_path, c_summary),
+        ] = picked.as_slice()
+        else {
+            return None;
+        };
+        Some([
+            (*a, a_path.clone(), a_summary.clone()),
+            (*b, b_path.clone(), b_summary.clone()),
+            (*c, c_path.clone(), c_summary.clone()),
+        ])
     }
 }
 
@@ -244,6 +291,7 @@ impl RepoView {
         if let Some(previous) = history.walk.begin(ticket) {
             session.cancel_query(previous);
         }
+        history.picked.clear();
         history.heads = snapshot
             .head
             .is_some()
@@ -442,6 +490,82 @@ impl RepoView {
         }
     }
 
+    /// Adds or removes a version from the three-version comparison. A fourth
+    /// pick is refused: the comparison has exactly three sides.
+    pub(crate) fn toggle_history_pick(&mut self, commit: Oid, cx: &mut Context<Self>) {
+        let Some(history) = self.file_history.as_mut() else {
+            return;
+        };
+        if let Some(index) = history.picked.iter().position(|picked| *picked == commit) {
+            history.picked.remove(index);
+        } else if history.picked.len() < MAX_PICKED_VERSIONS {
+            history.picked.push(commit);
+        } else {
+            return;
+        }
+        self.notify_if_active(cx);
+    }
+
+    /// Fills the file-history list without running the streaming walk, for
+    /// tests that exercise the view's actions on a deterministic list.
+    #[cfg(test)]
+    pub(crate) fn inject_file_history_rows(&mut self, path: String, rows: Vec<PathHistoryCommit>) {
+        self.cancel_file_history();
+        let mut history = FileHistory::new(path);
+        history.selected = rows.first().map(|entry| entry.commit.id);
+        history.walk.rows = Arc::new(rows);
+        self.file_history = Some(history);
+    }
+
+    /// Opens a three-way compare of the picked file versions, oldest on the
+    /// left and each read under the path its commit knew.
+    pub(crate) fn open_file_history_three_way(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(reader) = self.session.as_ref().map(|session| session.reader()) else {
+            return;
+        };
+        let Some(
+            [
+                (left, left_path, left_summary),
+                (middle, middle_path, middle_summary),
+                (right, right_path, right_summary),
+            ],
+        ) = self
+            .file_history
+            .as_ref()
+            .and_then(|history| history.picked_versions())
+        else {
+            return;
+        };
+        let revision =
+            |summary: String, oid: Oid| crate::compare::CompareRevision::commit(summary, oid);
+        let file_source = crate::compare::RepoThreeWayFileSource {
+            source: crate::compare::RepoThreeWaySource {
+                reader,
+                root: self.repository_root(),
+                left: revision(left_summary, left),
+                middle: revision(middle_summary, middle),
+                right: revision(right_summary, right),
+            },
+            paths: [left_path, middle_path, right_path],
+        };
+        let Some(workspace) = self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.upgrade())
+        else {
+            return;
+        };
+        window.defer(cx, move |window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.open_compare_revision_file(file_source, window, cx);
+            });
+        });
+    }
+
     /// Selects a commit and asks for that commit's diff of the path.
     pub(crate) fn select_history_commit(&mut self, commit: Oid, cx: &mut Context<Self>) {
         if self.file_history.as_ref().and_then(|it| it.selected) == Some(commit) {
@@ -583,6 +707,28 @@ impl RepoView {
                     });
                 })
         };
+        let compare_three = {
+            let entity = entity.clone();
+            let picked = history.picked.len();
+            crate::ui::button(
+                "file-history-compare-three",
+                t!(
+                    "file_history.three_way",
+                    count = picked,
+                    total = MAX_PICKED_VERSIONS
+                )
+                .to_string(),
+            )
+            .size(crate::ui::ButtonSize::Tiny)
+            .ghost()
+            .icon(gpui_kit_assets::IconName::Replace)
+            .disabled(picked != MAX_PICKED_VERSIONS)
+            .on_click(move |_, window, cx| {
+                entity.update(cx, |this, cx| {
+                    this.open_file_history_three_way(window, cx);
+                });
+            })
+        };
         let blame = {
             let entity = entity.clone();
             crate::ui::button("file-history-blame", t!("blame.title").to_string())
@@ -635,6 +781,7 @@ impl RepoView {
                     .text_color(colors.accent)
                     .child(history.path.clone()),
             )
+            .child(compare_three)
             .child(blame)
             .child(
                 div()
@@ -705,6 +852,7 @@ impl RepoView {
         }
 
         let selected = history.selected;
+        let picked = history.picked.clone();
         let list_colors = colors.clone();
         let rows = history.rows_shared();
         let requested = history.path.clone();
@@ -724,6 +872,9 @@ impl RepoView {
                         list_colors.design.date_format,
                     );
                     let rename = rename_label(&requested, Some(entry.path.as_str()));
+                    let pick_entity = entity.clone();
+                    let picked_here = picked.contains(&commit_id);
+                    let pick_disabled = picked.len() >= MAX_PICKED_VERSIONS && !picked_here;
                     let element = crate::ui::list_row(
                         ("file-history-row", position),
                         crate::ui::RowState::NORMAL.selected(selected == Some(commit_id)),
@@ -739,6 +890,15 @@ impl RepoView {
                     .w_full()
                     .px_3()
                     .text_size(px(list_colors.design.small()))
+                    .child(
+                        crate::ui::checkbox(("file-history-pick", position), picked_here)
+                            .disabled(pick_disabled)
+                            .on_click(move |_, _, cx| {
+                                pick_entity.update(cx, |this, cx| {
+                                    this.toggle_history_pick(commit_id, cx);
+                                });
+                            }),
+                    )
                     .child(
                         div()
                             .flex_1()
@@ -1077,6 +1237,45 @@ mod tests {
             conflicts: Arc::new(Vec::new()),
             busy: None,
         }
+    }
+
+    fn picked_entry(n: u8, path: &str) -> PathHistoryCommit {
+        let mut entry = entry(n);
+        entry.path = path.to_owned();
+        entry
+    }
+
+    fn history_with_rows(rows: Vec<PathHistoryCommit>) -> FileHistory {
+        let mut history = FileHistory::new("new.txt".to_owned());
+        history.walk.rows = Arc::new(rows);
+        history
+    }
+
+    #[test]
+    fn picked_versions_are_oldest_first_and_keep_each_old_path() {
+        let mut history = history_with_rows(vec![
+            picked_entry(3, "new.txt"),
+            picked_entry(2, "new.txt"),
+            picked_entry(1, "old.txt"),
+            picked_entry(4, "new.txt"),
+        ]);
+        history.picked = vec![oid(1), oid(4), oid(3)];
+        let picked = history.picked_versions().expect("three versions");
+        assert_eq!(
+            picked,
+            [
+                (oid(4), "new.txt".to_owned(), "commit 4".to_owned()),
+                (oid(1), "old.txt".to_owned(), "commit 1".to_owned()),
+                (oid(3), "new.txt".to_owned(), "commit 3".to_owned()),
+            ],
+            "rows are ordered by history, not click order, and keep their names"
+        );
+
+        history.picked.truncate(2);
+        assert!(
+            history.picked_versions().is_none(),
+            "three sides are needed"
+        );
     }
 
     #[test]

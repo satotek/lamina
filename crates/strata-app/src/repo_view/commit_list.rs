@@ -169,7 +169,8 @@ impl RepoView {
             return empty_pane(&t!("history.empty.no_commits"), design);
         }
 
-        let uncommitted_selected = has_uncommitted && self.uncommitted_selected;
+        let uncommitted_selected =
+            has_uncommitted && (self.uncommitted_selected || self.selection.includes_uncommitted());
         let uncommitted_summary = has_uncommitted
             .then(|| self.uncommitted_summary())
             .flatten();
@@ -266,10 +267,14 @@ impl RepoView {
                             })
                             .on_click(move |event, window, cx| {
                                 let open = event.click_count() >= 2;
+                                let secondary = event.modifiers().secondary(cx);
                                 let focus = focus.clone();
                                 click_entity.update(cx, |this, cx| {
                                     if open {
                                         this.open_worktree(window, cx);
+                                    } else if secondary {
+                                        this.toggle_uncommitted_selection(cx);
+                                        window.focus(&focus, cx);
                                     } else {
                                         this.select_uncommitted(cx);
                                         window.focus(&focus, cx);

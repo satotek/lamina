@@ -9,29 +9,32 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable, Hsla,
-    InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions, Render,
+    Anchor, AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable,
+    Hsla, InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions, Render,
     ScrollHandle, ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled,
     Subscription, UniformListScrollHandle, WeakEntity, Window, div, px, uniform_list,
 };
 use gpui_component::Selectable as _;
 use gpui_component::dialog::DialogFooter;
 use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::popover::Popover;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{ActiveTheme as _, Icon, TitleBar, WindowExt as _};
 use gpui_kit_assets::IconName;
-use strata_core::Oid;
 use strata_core::compare::{
     FolderCompareEntry, FolderCompareOptions, FolderCompareResult, FolderEntryKind,
-    FolderEntryStatus, ThreeWayDiffKind, ThreeWayFileCompare, ThreeWayImageCompare, ThreeWaySide,
+    FolderEntryStatus, RepoCompareSide, RepoCompareTree, ThreeWayCompareMode, ThreeWayDiffKind,
+    ThreeWayFileCompare, ThreeWayImageCompare, ThreeWayPeerStatus, ThreeWaySide,
     ThreeWayTreeChange, ThreeWayTreeCompare, TwoWayFileCompare, compare_folders,
-    compare_three_optional_files, compare_three_sides, compare_two_optional_files,
+    compare_three_optional_files, compare_three_sides, compare_two_bytes,
+    compare_two_optional_files, compare_two_repo_sides,
 };
 use strata_core::diff::{DiffOptions, GapAction};
 use strata_core::image::ImageKind;
 use strata_core::lfs::format_size;
 use strata_core::session::RepoReader;
 use strata_core::text::display_width_with_tabs;
+use strata_core::{Oid, RefInfo, RefKind};
 
 use crate::data;
 use crate::diff_view::{self, DiffColors, DiffContext, DiffHighlights, DiffStyle, Row as DiffRow};
@@ -120,26 +123,63 @@ fn path_label(path: &Path) -> String {
 // Repository revision comparison
 // ---------------------------------------------------------------------------
 
-/// One side of a repository revision comparison.
+/// The branch, tag or remote branch pointing at a revision, local branches
+/// first, or an empty label when none does.
+pub(crate) fn label_at_revision(refs: &[RefInfo], oid: Option<Oid>) -> String {
+    let Some(oid) = oid else {
+        return String::new();
+    };
+    for kind in [RefKind::LocalBranch, RefKind::Tag, RefKind::RemoteBranch] {
+        if let Some(reference) = refs
+            .iter()
+            .find(|reference| reference.kind == kind && reference.target == oid)
+        {
+            return reference.short_name.clone();
+        }
+    }
+    String::new()
+}
+
+/// One side of a repository revision comparison: a commit, the index or the
+/// working tree, named the way the entry point that opened it named it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CompareRevision {
-    pub oid: Oid,
-    /// Branch name, or empty when the commit has none. The short id is always
-    /// shown beside it.
+    pub side: RepoCompareSide,
+    /// Branch or tag name, or a descriptive label for the index and the
+    /// working tree. A commit's short id is always shown beside it.
     pub label: String,
 }
 
 impl CompareRevision {
-    pub(crate) fn named(label: impl Into<String>, oid: Oid) -> Self {
+    pub(crate) fn commit(label: impl Into<String>, oid: Oid) -> Self {
         Self {
-            oid,
+            side: RepoCompareSide::Commit(oid),
             label: label.into(),
         }
     }
 
+    /// A named side for either a commit or one of the revisionless sides.
+    pub(crate) fn named(label: impl Into<String>, side: RepoCompareSide) -> Self {
+        Self {
+            side,
+            label: label.into(),
+        }
+    }
+
+    pub(crate) fn worktree() -> Self {
+        Self::named(
+            t!("compare.working_tree").to_string(),
+            RepoCompareSide::Worktree,
+        )
+    }
+
     /// `main (a1b2c3d)`, or just the short id when there is no branch name.
+    /// The index and the working tree have no id to show.
     pub(crate) fn display(&self) -> String {
-        let short = data::short_oid(self.oid);
+        let RepoCompareSide::Commit(oid) = self.side else {
+            return self.label.clone();
+        };
+        let short = data::short_oid(oid);
         if self.label.is_empty() || self.label == short {
             short
         } else {
@@ -148,7 +188,7 @@ impl CompareRevision {
     }
 }
 
-/// The three commits of a repository comparison and the reader they are read
+/// The three sides of a repository comparison and the reader they are read
 /// through, so the work runs on a background executor.
 #[derive(Clone)]
 pub(crate) struct RepoThreeWaySource {
@@ -156,7 +196,7 @@ pub(crate) struct RepoThreeWaySource {
     /// Repository root, for the tab's hint path.
     pub root: PathBuf,
     pub left: CompareRevision,
-    pub base: CompareRevision,
+    pub middle: CompareRevision,
     pub right: CompareRevision,
 }
 
@@ -165,7 +205,7 @@ impl RepoThreeWaySource {
         format!(
             "{} ↔ {} ↔ {}",
             self.left.display(),
-            self.base.display(),
+            self.middle.display(),
             self.right.display()
         )
     }
@@ -174,16 +214,61 @@ impl RepoThreeWaySource {
     fn pane_labels(&self) -> [String; 3] {
         [
             self.left.display(),
-            self.base.display(),
+            self.middle.display(),
             self.right.display(),
         ]
     }
+
+    fn sides(&self) -> [RepoCompareSide; 3] {
+        [self.left.side, self.middle.side, self.right.side]
+    }
 }
 
-/// What the compare view shows: arbitrary paths, or three repository commits.
+/// Two sides of a repository comparison.
+#[derive(Clone)]
+pub(crate) struct RepoTwoWaySource {
+    pub reader: Arc<dyn RepoReader>,
+    pub root: PathBuf,
+    pub left: CompareRevision,
+    pub right: CompareRevision,
+}
+
+impl RepoTwoWaySource {
+    fn title(&self) -> String {
+        format!("{} ↔ {}", self.left.display(), self.right.display())
+    }
+
+    fn pane_labels(&self) -> [String; 2] {
+        [self.left.display(), self.right.display()]
+    }
+}
+
+/// One file of a repository comparison where each side may know it under a
+/// different path, as a history walk follows renames.
+#[derive(Clone)]
+pub(crate) struct RepoThreeWayFileSource {
+    pub source: RepoThreeWaySource,
+    /// The path in `[left, middle, right]`.
+    pub paths: [String; 3],
+}
+
+impl RepoThreeWayFileSource {
+    fn title(&self) -> String {
+        format!(
+            "{} — {}",
+            path_label(Path::new(&self.paths[2])),
+            self.source.title()
+        )
+    }
+}
+
+/// What the compare view shows: arbitrary paths, two or three repository
+/// sides, or one file of three sides.
 enum CompareRoot {
     Paths(CompareTarget),
     Revisions(Box<RepoThreeWaySource>),
+    RevisionPair(Box<RepoTwoWaySource>),
+    RevisionFile(Box<RepoThreeWayFileSource>),
 }
 
 impl CompareRoot {
@@ -191,6 +276,8 @@ impl CompareRoot {
         match self {
             Self::Paths(target) => target.title(),
             Self::Revisions(source) => source.title(),
+            Self::RevisionPair(source) => source.title(),
+            Self::RevisionFile(source) => source.title(),
         }
     }
 
@@ -204,6 +291,12 @@ impl CompareRoot {
                 .collect::<Vec<_>>()
                 .join("  ↔  "),
             Self::Revisions(source) => source.root.display().to_string(),
+            Self::RevisionPair(source) => source.root.display().to_string(),
+            Self::RevisionFile(source) => format!(
+                "{} — {}",
+                source.source.root.display(),
+                source.paths.join("  ↔  ")
+            ),
         }
     }
 
@@ -216,13 +309,43 @@ impl CompareRoot {
                 | CompareTarget::ThreeWayFolders { left, .. } => Some(left.as_path()),
             },
             Self::Revisions(source) => Some(source.root.as_path()),
+            Self::RevisionPair(source) => Some(source.root.as_path()),
+            Self::RevisionFile(source) => Some(source.source.root.as_path()),
         }
     }
 
     fn revisions(&self) -> Option<&RepoThreeWaySource> {
         match self {
-            Self::Paths(_) => None,
             Self::Revisions(source) => Some(source),
+            Self::RevisionFile(source) => Some(&source.source),
+            Self::Paths(_) | Self::RevisionPair(_) => None,
+        }
+    }
+
+    fn pair(&self) -> Option<&RepoTwoWaySource> {
+        match self {
+            Self::RevisionPair(source) => Some(source),
+            _ => None,
+        }
+    }
+
+    /// True for a comparison with three sides, which the mode toggle governs.
+    fn is_three_way(&self) -> bool {
+        match self {
+            Self::Paths(CompareTarget::ThreeWayFiles { .. })
+            | Self::Paths(CompareTarget::ThreeWayFolders { .. }) => true,
+            Self::Revisions(_) | Self::RevisionFile(_) => true,
+            Self::Paths(_) | Self::RevisionPair(_) => false,
+        }
+    }
+
+    /// The mode a tab starts in: a merge preview reads the middle as the base,
+    /// while a compare picked by revision or history treats the sides as
+    /// peers.
+    fn default_mode(&self) -> ThreeWayCompareMode {
+        match self {
+            Self::Revisions(_) | Self::RevisionFile(_) => ThreeWayCompareMode::NoBase,
+            _ => ThreeWayCompareMode::MiddleBase,
         }
     }
 }
@@ -230,8 +353,44 @@ impl CompareRoot {
 /// Classification and real-conflict flag for one row of a revision tree.
 #[derive(Debug, Clone, Copy)]
 struct RepoTreeMark {
-    change: ThreeWayTreeChange,
+    /// How the path changed relative to the middle side when it is the base.
+    change: Option<ThreeWayTreeChange>,
+    /// How the path relates to its neighbours when the sides are peers.
+    peer: Option<ThreeWayPeerStatus>,
     conflicting: bool,
+}
+
+/// Counts the peer filter chips show for one revision tree.
+#[derive(Debug, Clone, Copy, Default)]
+struct PeerTreeCounts {
+    total: usize,
+    left_middle: usize,
+    middle_right: usize,
+    all_different: usize,
+    missing: usize,
+}
+
+impl PeerTreeCounts {
+    fn record(&mut self, peer: ThreeWayPeerStatus) {
+        self.total += 1;
+        match peer {
+            ThreeWayPeerStatus::Same => {}
+            ThreeWayPeerStatus::LeftMiddleDiffer => {
+                self.left_middle += 1;
+            }
+            ThreeWayPeerStatus::MiddleRightDiffer => {
+                self.middle_right += 1;
+            }
+            ThreeWayPeerStatus::AllDifferent => {
+                self.left_middle += 1;
+                self.middle_right += 1;
+                self.all_different += 1;
+            }
+            ThreeWayPeerStatus::MissingSomeSide => {
+                self.missing += 1;
+            }
+        }
+    }
 }
 
 /// Which side should become the base after a swap in the header.
@@ -248,6 +407,10 @@ pub(crate) enum CompareValidationError {
     PathNotFound(PathBuf),
     NotFileOrFolder(PathBuf),
     MixedTypes,
+    /// Repository revisions were requested with no repository tab active.
+    NoRepository,
+    /// A typed revision spec names nothing the repository can read.
+    UnknownRevision(String),
 }
 
 impl CompareValidationError {
@@ -274,7 +437,105 @@ impl CompareValidationError {
             CompareValidationError::MixedTypes => {
                 Some(t!("compare.validation.mixed_types").to_string())
             }
+            CompareValidationError::NoRepository => Some(t!("compare.no_repository").to_string()),
+            CompareValidationError::UnknownRevision(spec) => {
+                Some(t!("compare.validation.unknown_revision", spec = spec.clone()).to_string())
+            }
         }
+    }
+}
+
+/// One choice the revision picker offers.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RevisionOption {
+    /// What the field shows once the user picks it, and what validation reads
+    /// back: a branch or tag name, an object id, or a localized side name.
+    pub spec: String,
+    /// What the picker row reads, which for a commit adds its summary.
+    pub label: String,
+    pub side: RepoCompareSide,
+}
+
+/// The revisions a repository tab can offer the Compare dialog, and the reader
+/// that resolves typed specs against the same repository.
+#[derive(Clone, Default)]
+pub(crate) struct RevisionOptions {
+    pub reader: Option<Arc<dyn RepoReader>>,
+    pub options: Vec<RevisionOption>,
+}
+
+impl RevisionOptions {
+    pub(crate) fn has_repository(&self) -> bool {
+        self.reader.is_some()
+    }
+}
+
+/// A side the dialog resolved, ready for the workspace to build a source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct DialogRevision {
+    pub side: RepoCompareSide,
+    /// A branch, tag or side name the picker knew; empty for a typed object id.
+    pub label: String,
+}
+
+/// What the dialog wants to open.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CompareDialogRequest {
+    Paths(CompareTarget),
+    Revisions(Vec<DialogRevision>),
+}
+
+/// Validates the dialog's three revision fields (`left`, `middle`, optional
+/// `right` order is `left | middle | right`), resolving each to a side.
+pub(crate) fn validate_revision_inputs(
+    left: &str,
+    right: &str,
+    middle: &str,
+    options: &RevisionOptions,
+) -> Result<Vec<DialogRevision>, CompareValidationError> {
+    let left = left.trim();
+    let right = right.trim();
+    let middle = middle.trim();
+    if left.is_empty() || right.is_empty() {
+        return Err(CompareValidationError::MissingRequired);
+    }
+    if !options.has_repository() {
+        return Err(CompareValidationError::NoRepository);
+    }
+    let specs = if middle.is_empty() {
+        vec![left, right]
+    } else {
+        vec![left, middle, right]
+    };
+    specs
+        .into_iter()
+        .map(|spec| resolve_revision(spec, options))
+        .collect()
+}
+
+fn resolve_revision(
+    spec: &str,
+    options: &RevisionOptions,
+) -> Result<DialogRevision, CompareValidationError> {
+    if let Some(option) = options
+        .options
+        .iter()
+        .find(|option| option.spec == spec || option.label == spec)
+    {
+        return Ok(DialogRevision {
+            side: option.side,
+            label: option.label.clone(),
+        });
+    }
+    let Some(reader) = options.reader.as_ref() else {
+        return Err(CompareValidationError::NoRepository);
+    };
+    match reader.resolve_commit(spec) {
+        Ok(Some(oid)) => Ok(DialogRevision {
+            side: RepoCompareSide::Commit(oid),
+            label: String::new(),
+        }),
+        Ok(None) | Err(_) => Err(CompareValidationError::UnknownRevision(spec.to_owned())),
     }
 }
 
@@ -383,11 +644,16 @@ fn dialog_cancel_button() -> ui::UiButton {
 }
 
 /// Opens the modal Compare setup dialog over the workspace window.
-pub(crate) fn open_compare_dialog(workspace: Entity<Workspace>, window: &mut Window, cx: &mut App) {
+pub(crate) fn open_compare_dialog(
+    workspace: Entity<Workspace>,
+    options: RevisionOptions,
+    window: &mut Window,
+    cx: &mut App,
+) {
     if window.has_active_dialog(cx) {
         return;
     }
-    let dialog = cx.new(|cx| CompareDialog::new(workspace.downgrade(), window, cx));
+    let dialog = cx.new(|cx| CompareDialog::new(workspace.downgrade(), options, window, cx));
     let focus = dialog.read(cx).left_focus(cx);
     let content = dialog.clone();
     let submit_dialog = dialog.clone();
@@ -422,16 +688,33 @@ pub(crate) fn open_compare_dialog(workspace: Entity<Workspace>, window: &mut Win
     window.defer(cx, move |window, cx| focus.focus(window, cx));
 }
 
+/// Which kind of comparison the dialog is set up for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DialogMode {
+    Paths,
+    Revisions,
+}
+
 struct CompareDialog {
     workspace: WeakEntity<Workspace>,
+    mode: DialogMode,
     left: Entity<InputState>,
     right: Entity<InputState>,
     middle: Entity<InputState>,
+    rev_left: Entity<InputState>,
+    rev_right: Entity<InputState>,
+    rev_middle: Entity<InputState>,
+    options: RevisionOptions,
     _subscriptions: Vec<Subscription>,
 }
 
 impl CompareDialog {
-    fn new(workspace: WeakEntity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        workspace: WeakEntity<Workspace>,
+        options: RevisionOptions,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let left = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(t!("compare.dialog.left_placeholder").to_string())
@@ -444,9 +727,17 @@ impl CompareDialog {
             InputState::new(window, cx)
                 .placeholder(t!("compare.dialog.middle_placeholder").to_string())
         });
+        let revision_placeholder = t!("compare.dialog.revision_placeholder").to_string();
+        let rev_left =
+            cx.new(|cx| InputState::new(window, cx).placeholder(revision_placeholder.clone()));
+        let rev_right =
+            cx.new(|cx| InputState::new(window, cx).placeholder(revision_placeholder.clone()));
+        let rev_middle =
+            cx.new(|cx| InputState::new(window, cx).placeholder(revision_placeholder.clone()));
 
+        let mode = DialogMode::Paths;
         let mut subscriptions = Vec::new();
-        for input in [&left, &right, &middle] {
+        for input in [&left, &right, &middle, &rev_left, &rev_right, &rev_middle] {
             let sub =
                 cx.subscribe_in(
                     input,
@@ -462,9 +753,14 @@ impl CompareDialog {
 
         Self {
             workspace,
+            mode,
             left,
             right,
             middle,
+            rev_left,
+            rev_right,
+            rev_middle,
+            options,
             _subscriptions: subscriptions,
         }
     }
@@ -473,12 +769,37 @@ impl CompareDialog {
         self.left.focus_handle(cx)
     }
 
-    fn validated(&self, cx: &App) -> Result<CompareTarget, CompareValidationError> {
-        validate_dialog_inputs(
-            self.left.read(cx).value().as_ref(),
-            self.right.read(cx).value().as_ref(),
-            self.middle.read(cx).value().as_ref(),
-        )
+    fn current_inputs(&self) -> [&Entity<InputState>; 3] {
+        match self.mode {
+            DialogMode::Paths => [&self.left, &self.right, &self.middle],
+            DialogMode::Revisions => [&self.rev_left, &self.rev_right, &self.rev_middle],
+        }
+    }
+
+    fn validated(&self, cx: &App) -> Result<CompareDialogRequest, CompareValidationError> {
+        match self.mode {
+            DialogMode::Paths => validate_dialog_inputs(
+                self.left.read(cx).value().as_ref(),
+                self.right.read(cx).value().as_ref(),
+                self.middle.read(cx).value().as_ref(),
+            )
+            .map(CompareDialogRequest::Paths),
+            DialogMode::Revisions => validate_revision_inputs(
+                self.rev_left.read(cx).value().as_ref(),
+                self.rev_right.read(cx).value().as_ref(),
+                self.rev_middle.read(cx).value().as_ref(),
+                &self.options,
+            )
+            .map(CompareDialogRequest::Revisions),
+        }
+    }
+
+    fn set_mode(&mut self, mode: DialogMode, cx: &mut Context<Self>) {
+        if self.mode == mode {
+            return;
+        }
+        self.mode = mode;
+        cx.notify();
     }
 
     fn browse(&mut self, field: DialogField, window: &mut Window, cx: &mut Context<Self>) {
@@ -517,40 +838,43 @@ impl CompareDialog {
     }
 
     fn swap_left_right(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let a = self.left.read(cx).value().to_string();
-        let b = self.right.read(cx).value().to_string();
-        self.left
-            .update(cx, |state, cx| state.set_value(b, window, cx));
-        self.right
-            .update(cx, |state, cx| state.set_value(a, window, cx));
+        let [left, right, _] = self.current_inputs();
+        let a = left.read(cx).value().to_string();
+        let b = right.read(cx).value().to_string();
+        left.update(cx, |state, cx| state.set_value(b, window, cx));
+        right.update(cx, |state, cx| state.set_value(a, window, cx));
         cx.notify();
     }
 
     fn swap_right_middle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let b = self.right.read(cx).value().to_string();
-        let c = self.middle.read(cx).value().to_string();
-        self.right
-            .update(cx, |state, cx| state.set_value(c, window, cx));
-        self.middle
-            .update(cx, |state, cx| state.set_value(b, window, cx));
+        let [_, right, middle] = self.current_inputs();
+        let b = right.read(cx).value().to_string();
+        let c = middle.read(cx).value().to_string();
+        right.update(cx, |state, cx| state.set_value(c, window, cx));
+        middle.update(cx, |state, cx| state.set_value(b, window, cx));
         cx.notify();
     }
 
     fn clear_middle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.middle
-            .update(cx, |state, cx| state.set_value(String::new(), window, cx));
+        let [_, _, middle] = self.current_inputs();
+        middle.update(cx, |state, cx| state.set_value(String::new(), window, cx));
         cx.notify();
     }
 
     fn submit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Ok(target) = self.validated(cx) else {
+        let Ok(request) = self.validated(cx) else {
             return;
         };
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
-        workspace.update(cx, |workspace, cx| {
-            workspace.open_compare_target(target, window, cx);
+        workspace.update(cx, |workspace, cx| match request {
+            CompareDialogRequest::Paths(target) => {
+                workspace.open_compare_target(target, window, cx);
+            }
+            CompareDialogRequest::Revisions(revisions) => {
+                workspace.open_compare_revisions(revisions, window, cx);
+            }
         });
     }
 
@@ -615,6 +939,115 @@ impl CompareDialog {
             )
             .into_any_element()
     }
+
+    fn revision_row(
+        &self,
+        id: &'static str,
+        label: String,
+        input: &Entity<InputState>,
+        clearable: bool,
+        design: &Design,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let has_value = !input.read(cx).value().trim().is_empty();
+        let choices = self.options.options.clone();
+        let pick_input = input.clone();
+        let pick_entity = cx.weak_entity();
+        let picker_design = design.clone();
+        let tooltip = t!("compare.dialog.revision_picker").to_string();
+        let picker = Popover::new(format!("compare-revision-picker-{id}"))
+            .anchor(Anchor::TopRight)
+            .offset(px(4.0))
+            .trigger(
+                ui::icon_button(format!("{id}-pick"), IconName::ChevronDown)
+                    .size(ButtonSize::Small)
+                    .ghost()
+                    .tooltip(tooltip),
+            )
+            .content(move |_, _window, cx| {
+                let popover = cx.entity();
+                let mut list = div()
+                    .id(ElementId::Name(
+                        format!("compare-revision-list-{id}").into(),
+                    ))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .w(px(320.0))
+                    .max_h(px(300.0))
+                    .overflow_y_scroll();
+                for (index, choice) in choices.iter().enumerate() {
+                    let choice = choice.clone();
+                    let input = pick_input.clone();
+                    let entity = pick_entity.clone();
+                    let dismiss = popover.clone();
+                    list = list.child(
+                        ui::list_row(
+                            ElementId::Name(format!("compare-revision-{id}-{index}").into()),
+                            ui::RowState::NORMAL,
+                            &picker_design,
+                        )
+                        .h(px(26.0))
+                        .mx(px(0.0))
+                        .w_full()
+                        .cursor_pointer()
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .child(choice.label.clone()),
+                        )
+                        .on_click(move |_, window, cx| {
+                            dismiss.update(cx, |state, cx| state.dismiss(window, cx));
+                            input.update(cx, |state, cx| {
+                                state.set_value(choice.spec.clone(), window, cx);
+                            });
+                            let _ = entity.update(cx, |_, cx| cx.notify());
+                        }),
+                    );
+                }
+                list
+            });
+
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .w_full()
+            .child(
+                div()
+                    .text_size(px(design.tiny()))
+                    .text_color(design.muted)
+                    .child(label),
+            )
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1p5()
+                    .w_full()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(Input::new(input).w_full().bg(design.field)),
+                    )
+                    .when(clearable && has_value, |row| {
+                        row.child(
+                            ui::icon_button(format!("{id}-clear"), IconName::X)
+                                .ghost()
+                                .size(ButtonSize::Small)
+                                .tooltip(t!("compare.dialog.clear_middle").to_string())
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.clear_middle(window, cx);
+                                })),
+                        )
+                    })
+                    .child(picker),
+            )
+            .into_any_element()
+    }
 }
 
 impl Render for CompareDialog {
@@ -622,18 +1055,67 @@ impl Render for CompareDialog {
         let design = Design::new(cx.theme(), Settings::get(cx));
         let validation = self.validated(cx);
         let error_message = validation.err().and_then(|err| err.message());
+        let mode = self.mode;
+        let has_repository = self.options.has_repository();
 
-        div()
-            .flex()
-            .flex_col()
-            .gap_3()
-            .w_full()
-            .child(self.path_row(
-                "compare-left",
+        let mut column = div().flex().flex_col().gap_3().w_full();
+        if has_repository {
+            column = column.child(
+                ui::segmented_control("compare-dialog-mode", &design)
+                    .segment(
+                        "compare-dialog-mode-paths",
+                        t!("compare.dialog.mode_paths").to_string(),
+                        mode == DialogMode::Paths,
+                        cx.listener(|this, _, _, cx| this.set_mode(DialogMode::Paths, cx)),
+                    )
+                    .segment(
+                        "compare-dialog-mode-revisions",
+                        t!("compare.dialog.mode_revisions").to_string(),
+                        mode == DialogMode::Revisions,
+                        cx.listener(|this, _, _, cx| this.set_mode(DialogMode::Revisions, cx)),
+                    ),
+            );
+        }
+
+        let (left_label, right_label, middle_label) = match mode {
+            DialogMode::Paths => (
                 t!("compare.dialog.left_label").to_string(),
-                &self.left,
-                DialogField::Left,
+                t!("compare.dialog.right_label").to_string(),
+                t!("compare.dialog.middle_label").to_string(),
+            ),
+            DialogMode::Revisions => (
+                t!("compare.dialog.revision_left_label").to_string(),
+                t!("compare.dialog.revision_right_label").to_string(),
+                t!("compare.dialog.revision_middle_label").to_string(),
+            ),
+        };
+        let (left_input, right_input, middle_input) = match mode {
+            DialogMode::Paths => (&self.left, &self.right, &self.middle),
+            DialogMode::Revisions => (&self.rev_left, &self.rev_right, &self.rev_middle),
+        };
+
+        let row = |id: &'static str,
+                   label: String,
+                   input: &Entity<InputState>,
+                   field: DialogField,
+                   cx: &mut Context<Self>| match mode {
+            DialogMode::Paths => self.path_row(id, label, input, field, &design, cx),
+            DialogMode::Revisions => self.revision_row(
+                id,
+                label,
+                input,
+                matches!(field, DialogField::Middle),
                 &design,
+                cx,
+            ),
+        };
+
+        column
+            .child(row(
+                "compare-left",
+                left_label,
+                left_input,
+                DialogField::Left,
                 cx,
             ))
             .child(
@@ -650,12 +1132,11 @@ impl Render for CompareDialog {
                     })),
                 ),
             )
-            .child(self.path_row(
+            .child(row(
                 "compare-right",
-                t!("compare.dialog.right_label").to_string(),
-                &self.right,
+                right_label,
+                right_input,
                 DialogField::Right,
-                &design,
                 cx,
             ))
             .child(
@@ -672,14 +1153,21 @@ impl Render for CompareDialog {
                     })),
                 ),
             )
-            .child(self.path_row(
+            .child(row(
                 "compare-middle",
-                t!("compare.dialog.middle_label").to_string(),
-                &self.middle,
+                middle_label,
+                middle_input,
                 DialogField::Middle,
-                &design,
                 cx,
             ))
+            .when(mode == DialogMode::Revisions, |col| {
+                col.child(
+                    div()
+                        .text_size(px(design.tiny()))
+                        .text_color(design.muted)
+                        .child(t!("compare.dialog.revision_hint").to_string()),
+                )
+            })
             .when_some(error_message, |col, msg| {
                 col.child(ui::banner(ui::BannerKind::Danger, msg, &design))
             })
@@ -699,6 +1187,11 @@ enum FolderFilter {
     OnlyRight,
     Identical,
     TypeMismatch,
+    /// Peer-mode chips: which adjacency differs across three equal sides.
+    LeftMiddleDiffer,
+    MiddleRightDiffer,
+    AllDifferent,
+    MissingSomeSide,
 }
 
 impl FolderFilter {
@@ -711,6 +1204,32 @@ impl FolderFilter {
             FolderFilter::OnlyRight => status == FolderEntryStatus::OnlyRight,
             FolderFilter::Identical => status == FolderEntryStatus::Identical,
             FolderFilter::TypeMismatch => status == FolderEntryStatus::TypeMismatch,
+            FolderFilter::LeftMiddleDiffer
+            | FolderFilter::MiddleRightDiffer
+            | FolderFilter::AllDifferent
+            | FolderFilter::MissingSomeSide => false,
+        }
+    }
+
+    fn matches_peer(self, peer: ThreeWayPeerStatus) -> bool {
+        match self {
+            FolderFilter::All => true,
+            FolderFilter::LeftMiddleDiffer => matches!(
+                peer,
+                ThreeWayPeerStatus::LeftMiddleDiffer | ThreeWayPeerStatus::AllDifferent
+            ),
+            FolderFilter::MiddleRightDiffer => matches!(
+                peer,
+                ThreeWayPeerStatus::MiddleRightDiffer | ThreeWayPeerStatus::AllDifferent
+            ),
+            FolderFilter::AllDifferent => peer == ThreeWayPeerStatus::AllDifferent,
+            FolderFilter::MissingSomeSide => peer == ThreeWayPeerStatus::MissingSomeSide,
+            FolderFilter::Different
+            | FolderFilter::OnlyLeft
+            | FolderFilter::OnlyMiddle
+            | FolderFilter::OnlyRight
+            | FolderFilter::Identical
+            | FolderFilter::TypeMismatch => false,
         }
     }
 }
@@ -728,6 +1247,7 @@ enum BackgroundOutput {
     ThreeWayFile(Result<Option<ThreeWayFileCompare>, String>),
     Folder(Result<Option<FolderCompareResult>, String>),
     RepoTree(Result<Option<ThreeWayTreeCompare>, String>),
+    RepoPairTree(Result<Option<RepoCompareTree>, String>),
 }
 
 pub(crate) struct CompareView {
@@ -770,6 +1290,10 @@ pub(crate) struct CompareView {
     folder_filter: FolderFilter,
     filtered_indices: Vec<usize>,
     selected_folder_entry: Option<usize>,
+    /// Counts of the peer statuses of the current revision tree.
+    peer_counts: PeerTreeCounts,
+    /// How a three-way comparison reads its middle side, kept per tab.
+    mode: ThreeWayCompareMode,
 }
 
 impl Drop for CompareView {
@@ -784,21 +1308,58 @@ impl CompareView {
         workspace: WeakEntity<Workspace>,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new_with_root(CompareRoot::Paths(target), workspace, cx)
+        let mode = CompareRoot::Paths(target.clone()).default_mode();
+        Self::new_with_root(CompareRoot::Paths(target), mode, workspace, cx)
     }
 
-    /// A comparison of three repository commits. Reads go through the source's
+    /// A comparison of three repository sides. Reads go through the source's
     /// reader on the background executor, like a filesystem compare.
     pub(crate) fn new_revisions(
         source: RepoThreeWaySource,
+        mode: ThreeWayCompareMode,
         workspace: WeakEntity<Workspace>,
         cx: &mut Context<Self>,
     ) -> Self {
-        Self::new_with_root(CompareRoot::Revisions(Box::new(source)), workspace, cx)
+        Self::new_with_root(
+            CompareRoot::Revisions(Box::new(source)),
+            mode,
+            workspace,
+            cx,
+        )
+    }
+
+    /// A comparison of two repository sides.
+    pub(crate) fn new_revision_pair(
+        source: RepoTwoWaySource,
+        workspace: WeakEntity<Workspace>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_root(
+            CompareRoot::RevisionPair(Box::new(source)),
+            ThreeWayCompareMode::MiddleBase,
+            workspace,
+            cx,
+        )
+    }
+
+    /// One file of three repository sides, where each side may know the file
+    /// under a different path because a history walk followed renames.
+    pub(crate) fn new_revision_file(
+        source: RepoThreeWayFileSource,
+        workspace: WeakEntity<Workspace>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        Self::new_with_root(
+            CompareRoot::RevisionFile(Box::new(source)),
+            ThreeWayCompareMode::NoBase,
+            workspace,
+            cx,
+        )
     }
 
     fn new_with_root(
         root: CompareRoot,
+        mode: ThreeWayCompareMode,
         workspace: WeakEntity<Workspace>,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -829,6 +1390,8 @@ impl CompareView {
             folder_filter: FolderFilter::All,
             filtered_indices: Vec::new(),
             selected_folder_entry: None,
+            peer_counts: PeerTreeCounts::default(),
+            mode,
         };
         view.start_root(cx);
         view
@@ -904,8 +1467,42 @@ impl CompareView {
         let job = match &self.root {
             CompareRoot::Paths(target) => CompareJob::from_target(target, self.respect_gitignore),
             CompareRoot::Revisions(source) => CompareJob::RepoTree((**source).clone()),
+            CompareRoot::RevisionPair(source) => CompareJob::RepoPairTree((**source).clone()),
+            CompareRoot::RevisionFile(source) => CompareJob::RepoFileSides {
+                source: source.source.clone(),
+                paths: source.paths.clone(),
+            },
         };
         self.start_job(job, cx);
+    }
+
+    /// The mode the three-way panes currently use.
+    #[cfg(test)]
+    pub(crate) fn mode(&self) -> ThreeWayCompareMode {
+        self.mode
+    }
+
+    /// Whether the file panes show a three-way comparison, for tests that open
+    /// one directly from history.
+    #[cfg(test)]
+    pub(crate) fn is_three_way_file_view(&self) -> bool {
+        matches!(self.state, CompareState::ThreeWayFile(_))
+    }
+
+    /// Switches how a three-way comparison reads its middle side.
+    ///
+    /// No re-read is needed: the loaded rows and entries carry both the
+    /// base-relative and the peer classification, so only the presentation and
+    /// the filters change.
+    pub(crate) fn set_mode(&mut self, mode: ThreeWayCompareMode, cx: &mut Context<Self>) {
+        if self.mode == mode || !self.root.is_three_way() {
+            return;
+        }
+        self.mode = mode;
+        self.active_change = None;
+        self.folder_filter = FolderFilter::All;
+        self.rebuild_folder_filter();
+        cx.notify();
     }
 
     fn start_job(&mut self, job: CompareJob, cx: &mut Context<Self>) {
@@ -922,6 +1519,7 @@ impl CompareView {
         self.three_way_h_scroll = ScrollHandle::default();
         self.three_way_columns = 0;
         self.repo_marks = None;
+        self.peer_counts = PeerTreeCounts::default();
         self.refresh_workspace_tab_strip(cx);
         cx.notify();
 
@@ -972,6 +1570,7 @@ impl CompareView {
                 self.state = CompareState::ThreeWayFile(Box::new(res));
             }
             BackgroundOutput::Folder(Ok(Some(res))) => {
+                self.peer_counts = peer_counts_from_entries(&res.entries);
                 self.folder_cache = Some(res.clone());
                 self.state = CompareState::Folder(res);
                 self.rebuild_folder_filter();
@@ -979,16 +1578,21 @@ impl CompareView {
             BackgroundOutput::RepoTree(Ok(Some(tree))) => {
                 self.apply_repo_tree(tree);
             }
+            BackgroundOutput::RepoPairTree(Ok(Some(tree))) => {
+                self.apply_repo_pair_tree(tree);
+            }
             BackgroundOutput::TwoWayFile(Ok(None))
             | BackgroundOutput::ThreeWayFile(Ok(None))
             | BackgroundOutput::Folder(Ok(None))
-            | BackgroundOutput::RepoTree(Ok(None)) => {
+            | BackgroundOutput::RepoTree(Ok(None))
+            | BackgroundOutput::RepoPairTree(Ok(None)) => {
                 // Cancelled; keep existing or loading state superseded by the next job.
             }
             BackgroundOutput::TwoWayFile(Err(err))
             | BackgroundOutput::ThreeWayFile(Err(err))
             | BackgroundOutput::Folder(Err(err))
-            | BackgroundOutput::RepoTree(Err(err)) => {
+            | BackgroundOutput::RepoTree(Err(err))
+            | BackgroundOutput::RepoPairTree(Err(err)) => {
                 self.state = CompareState::Error(err);
             }
         }
@@ -1001,19 +1605,41 @@ impl CompareView {
             return;
         };
         let folder = folder_result_from_tree(&tree, &source);
-        self.repo_marks = Some(Rc::new(
-            tree.entries
-                .iter()
-                .map(|entry| RepoTreeMark {
-                    change: entry.change,
-                    conflicting: entry.conflicting,
-                })
-                .collect(),
-        ));
+        self.set_repo_marks(&tree);
         self.repo_tree = Some(Box::new(tree));
         self.folder_cache = Some(folder.clone());
         self.state = CompareState::Folder(folder);
         self.rebuild_folder_filter();
+    }
+
+    fn apply_repo_pair_tree(&mut self, tree: RepoCompareTree) {
+        let folder = folder_result_from_pair(&tree);
+        self.repo_tree = None;
+        self.repo_marks = None;
+        self.peer_counts = PeerTreeCounts::default();
+        self.folder_cache = Some(folder.clone());
+        self.state = CompareState::Folder(folder);
+        self.rebuild_folder_filter();
+    }
+
+    fn set_repo_marks(&mut self, tree: &ThreeWayTreeCompare) {
+        let marks: Vec<RepoTreeMark> = tree
+            .entries
+            .iter()
+            .map(|entry| RepoTreeMark {
+                change: Some(entry.change),
+                peer: Some(entry.peer),
+                conflicting: entry.conflicting,
+            })
+            .collect();
+        let mut counts = PeerTreeCounts::default();
+        for mark in &marks {
+            if let Some(peer) = mark.peer {
+                counts.record(peer);
+            }
+        }
+        self.peer_counts = counts;
+        self.repo_marks = Some(Rc::new(marks));
     }
 
     fn rebuild_folder_filter(&mut self) {
@@ -1021,11 +1647,25 @@ impl CompareView {
             self.filtered_indices.clear();
             return;
         };
+        let peer_mode = self.mode == ThreeWayCompareMode::NoBase && self.root.is_three_way();
+        let marks = self.repo_marks.clone();
         self.filtered_indices = res
             .entries
             .iter()
             .enumerate()
-            .filter_map(|(idx, entry)| self.folder_filter.matches(entry.status).then_some(idx))
+            .filter_map(|(idx, entry)| {
+                let matched = if peer_mode {
+                    let peer = marks
+                        .as_ref()
+                        .and_then(|marks| marks.get(idx))
+                        .and_then(|mark| mark.peer)
+                        .unwrap_or(entry.peer);
+                    self.folder_filter.matches_peer(peer)
+                } else {
+                    self.folder_filter.matches(entry.status)
+                };
+                matched.then_some(idx)
+            })
             .collect();
         self.selected_folder_entry = None;
     }
@@ -1051,6 +1691,13 @@ impl CompareView {
         if let Some(source) = self.root.revisions().cloned() {
             self.drilled_relative_path = Some(rel.clone());
             self.start_job(CompareJob::RepoFile { source, path: rel }, cx);
+            self.sync_window_title(window, cx);
+            return;
+        }
+
+        if let Some(source) = self.root.pair().cloned() {
+            self.drilled_relative_path = Some(rel.clone());
+            self.start_job(CompareJob::RepoPairFile { source, path: rel }, cx);
             self.sync_window_title(window, cx);
             return;
         }
@@ -1090,15 +1737,8 @@ impl CompareView {
         self.active_change = None;
         self.state = CompareState::Folder(cached);
         if let Some(tree) = &self.repo_tree {
-            self.repo_marks = Some(Rc::new(
-                tree.entries
-                    .iter()
-                    .map(|entry| RepoTreeMark {
-                        change: entry.change,
-                        conflicting: entry.conflicting,
-                    })
-                    .collect(),
-            ));
+            let tree = tree.clone();
+            self.set_repo_marks(&tree);
         }
         self.rebuild_folder_filter();
         self.refresh_workspace_tab_strip(cx);
@@ -1135,15 +1775,15 @@ impl CompareView {
                 return;
             };
             let already = match side {
-                BaseChoice::Left => source.base.oid == source.left.oid,
-                BaseChoice::Right => source.base.oid == source.right.oid,
+                BaseChoice::Left => source.middle.side == source.left.side,
+                BaseChoice::Right => source.middle.side == source.right.side,
             };
             if already {
                 return;
             }
             match side {
-                BaseChoice::Left => std::mem::swap(&mut source.left, &mut source.base),
-                BaseChoice::Right => std::mem::swap(&mut source.right, &mut source.base),
+                BaseChoice::Left => std::mem::swap(&mut source.left, &mut source.middle),
+                BaseChoice::Right => std::mem::swap(&mut source.right, &mut source.middle),
             }
         }
         self.folder_cache = None;
@@ -1294,39 +1934,41 @@ impl CompareView {
                             .text_size(px(design.ui))
                             .child(self.tab_title()),
                     )
-                    .when_some(self.root.revisions(), |bar, source| {
-                        let base_is_left = source.base.oid == source.left.oid;
-                        let base_is_right = source.base.oid == source.right.oid;
-                        bar.child(
-                            ui::button(
-                                "compare-use-left-base",
-                                t!("compare.three_way.use_left_as_base").to_string(),
+                    .when(self.mode == ThreeWayCompareMode::MiddleBase, |bar| {
+                        bar.when_some(self.root.revisions(), |bar, source| {
+                            let base_is_left = source.middle.side == source.left.side;
+                            let base_is_right = source.middle.side == source.right.side;
+                            bar.child(
+                                ui::button(
+                                    "compare-use-left-base",
+                                    t!("compare.three_way.use_left_as_base").to_string(),
+                                )
+                                .ghost()
+                                .size(ButtonSize::Tiny)
+                                .icon(IconName::Replace)
+                                .disabled(base_is_left)
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.use_side_as_base(BaseChoice::Left, window, cx);
+                                    },
+                                )),
                             )
-                            .ghost()
-                            .size(ButtonSize::Tiny)
-                            .icon(IconName::Replace)
-                            .disabled(base_is_left)
-                            .on_click(cx.listener(
-                                |this, _, window, cx| {
-                                    this.use_side_as_base(BaseChoice::Left, window, cx);
-                                },
-                            )),
-                        )
-                        .child(
-                            ui::button(
-                                "compare-use-right-base",
-                                t!("compare.three_way.use_right_as_base").to_string(),
+                            .child(
+                                ui::button(
+                                    "compare-use-right-base",
+                                    t!("compare.three_way.use_right_as_base").to_string(),
+                                )
+                                .ghost()
+                                .size(ButtonSize::Tiny)
+                                .icon(IconName::Replace)
+                                .disabled(base_is_right)
+                                .on_click(cx.listener(
+                                    |this, _, window, cx| {
+                                        this.use_side_as_base(BaseChoice::Right, window, cx);
+                                    },
+                                )),
                             )
-                            .ghost()
-                            .size(ButtonSize::Tiny)
-                            .icon(IconName::Replace)
-                            .disabled(base_is_right)
-                            .on_click(cx.listener(
-                                |this, _, window, cx| {
-                                    this.use_side_as_base(BaseChoice::Right, window, cx);
-                                },
-                            )),
-                        )
+                        })
                     }),
             )
             .child(
@@ -1346,6 +1988,9 @@ impl CompareView {
                     .gap_1()
                     .flex_none()
                     .occlude()
+                    .when(self.root.is_three_way(), |row| {
+                        row.child(self.mode_toggle(design, cx))
+                    })
                     .child(
                         ui::icon_button("compare-refresh", IconName::RefreshCw)
                             .ghost()
@@ -1368,9 +2013,35 @@ impl CompareView {
             .into_any_element()
     }
 
+    /// The "No base" / "Middle as base" choice every three-way view carries.
+    fn mode_toggle(&self, design: &Design, cx: &mut Context<Self>) -> AnyElement {
+        let mode = self.mode;
+        ui::segmented_control("compare-three-way-mode", design)
+            .segment(
+                "compare-mode-no-base",
+                t!("compare.three_way.mode_no_base").to_string(),
+                mode == ThreeWayCompareMode::NoBase,
+                cx.listener(|this, _, _, cx| {
+                    this.set_mode(ThreeWayCompareMode::NoBase, cx);
+                }),
+            )
+            .tooltip(t!("compare.three_way.mode_no_base_tooltip").to_string())
+            .segment(
+                "compare-mode-middle-base",
+                t!("compare.three_way.mode_middle_base").to_string(),
+                mode == ThreeWayCompareMode::MiddleBase,
+                cx.listener(|this, _, _, cx| {
+                    this.set_mode(ThreeWayCompareMode::MiddleBase, cx);
+                }),
+            )
+            .tooltip(t!("compare.three_way.mode_middle_base_tooltip").to_string())
+            .into_any_element()
+    }
+
     fn render_two_way(
         &self,
         res: &TwoWayFileCompare,
+        names: Option<[String; 2]>,
         design: &Design,
         cx: &mut Context<Self>,
     ) -> AnyElement {
@@ -1397,11 +2068,19 @@ impl CompareView {
                     .min_w_0()
                     .truncate()
                     .text_color(design.text)
-                    .child(format!(
-                        "{}  ↔  {}",
-                        display_or_missing(&res.left_path),
-                        display_or_missing(&res.right_path)
-                    )),
+                    .child(match names {
+                        Some([left, right]) => format!(
+                            "{}  ↔  {}  ·  {}",
+                            left,
+                            right,
+                            display_or_missing(&res.left_path)
+                        ),
+                        None => format!(
+                            "{}  ↔  {}",
+                            display_or_missing(&res.left_path),
+                            display_or_missing(&res.right_path)
+                        ),
+                    }),
             )
             .when_some(encoding, |bar, label| {
                 bar.child(ui::status_badge(label, BadgeTone::Neutral, design))
@@ -1501,8 +2180,11 @@ impl CompareView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let counts = res.counts();
-        let total_changes = counts.total_changes();
+        let mode = self.mode;
+        let total_changes = match mode {
+            ThreeWayCompareMode::MiddleBase => res.counts().total_changes(),
+            ThreeWayCompareMode::NoBase => res.peer_counts().total_changes(),
+        };
         let style = DiffStyle::from_settings(cx, &design.mono);
         let diff_colors = DiffColors::from_design(design);
         // Every pane reserves the width of the widest line in the comparison,
@@ -1534,38 +2216,11 @@ impl CompareView {
             .border_b_1()
             .border_color(design.border)
             .text_size(design.px(12.0))
-            .child(ui::status_badge(
-                t!("compare.three_way.left_count", count = counts.left_changed).to_string(),
-                BadgeTone::Accent,
-                design,
-            ))
-            .child(ui::status_badge(
-                t!(
-                    "compare.three_way.right_count",
-                    count = counts.right_changed
-                )
-                .to_string(),
-                BadgeTone::Accent,
-                design,
-            ))
-            .child(ui::status_badge(
-                t!("compare.three_way.agree_count", count = counts.both_agree).to_string(),
-                BadgeTone::Neutral,
-                design,
-            ))
-            .child(ui::status_badge(
-                t!(
-                    "compare.three_way.conflict_count",
-                    count = counts.both_disagree
-                )
-                .to_string(),
-                if counts.both_disagree > 0 {
-                    BadgeTone::Danger
-                } else {
-                    BadgeTone::Neutral
-                },
-                design,
-            ))
+            .children(
+                three_way_badges(res, mode)
+                    .into_iter()
+                    .map(|(label, tone)| ui::status_badge(label, tone, design)),
+            )
             .when_some(encoding_badge, |bar, label| {
                 bar.child(ui::status_badge(label, BadgeTone::Neutral, design))
             })
@@ -1630,7 +2285,10 @@ impl CompareView {
                 true,
             ))
             .child(three_way_pane_header(
-                t!("compare.side.middle_base").to_string(),
+                match mode {
+                    ThreeWayCompareMode::MiddleBase => t!("compare.side.middle_base").to_string(),
+                    ThreeWayCompareMode::NoBase => t!("compare.side.middle").to_string(),
+                },
                 &res.middle_name,
                 design,
                 true,
@@ -1682,6 +2340,7 @@ impl CompareView {
                             let row = rows[idx];
                             render_three_way_row(
                                 row,
+                                mode,
                                 &left_lines,
                                 &middle_lines,
                                 &right_lines,
@@ -1724,9 +2383,9 @@ impl CompareView {
         design: &Design,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let is_three_way = res.roots.len() == 3;
-        let revisions = self.root.revisions().is_some();
-        let counts = &res.counts;
+        let revisions = self.root.revisions().is_some() || self.root.pair().is_some();
+        let is_three_way = self.root.is_three_way();
+        let peer_mode = self.mode == ThreeWayCompareMode::NoBase && self.root.is_three_way();
         let mut filter_bar = div()
             .flex()
             .flex_wrap()
@@ -1737,76 +2396,17 @@ impl CompareView {
             .flex_none()
             .bg(design.background)
             .border_b_1()
-            .border_color(design.border)
-            .child(self.filter_chip(
-                "filter-all",
-                FolderFilter::All,
-                t!("compare.folder.filter_all").to_string(),
-                counts.total,
-                design,
-                cx,
-            ))
-            .child(self.filter_chip(
-                "filter-diff",
-                FolderFilter::Different,
-                t!("compare.folder.filter_different").to_string(),
-                counts.different,
-                design,
-                cx,
-            ))
-            .child(self.filter_chip(
-                "filter-left",
-                FolderFilter::OnlyLeft,
-                t!("compare.folder.filter_only_left").to_string(),
-                counts.only_left,
-                design,
-                cx,
-            ));
-        if is_three_way {
-            filter_bar = filter_bar.child(self.filter_chip(
-                "filter-middle",
-                FolderFilter::OnlyMiddle,
-                t!("compare.folder.filter_only_middle").to_string(),
-                counts.only_middle,
-                design,
-                cx,
-            ));
+            .border_color(design.border);
+        for (id, filter, label, count) in self.folder_filter_specs(res) {
+            filter_bar = filter_bar.child(self.filter_chip(id, filter, label, count, design, cx));
         }
-        filter_bar = filter_bar
-            .child(self.filter_chip(
-                "filter-right",
-                FolderFilter::OnlyRight,
-                t!("compare.folder.filter_only_right").to_string(),
-                counts.only_right,
-                design,
-                cx,
-            ))
-            .child(self.filter_chip(
-                "filter-identical",
-                FolderFilter::Identical,
-                t!("compare.folder.filter_identical").to_string(),
-                counts.identical,
-                design,
-                cx,
-            ))
-            .when(counts.type_mismatch > 0, |bar| {
-                bar.child(self.filter_chip(
-                    "filter-mismatch",
-                    FolderFilter::TypeMismatch,
-                    t!("compare.folder.filter_mismatch").to_string(),
-                    counts.type_mismatch,
-                    design,
-                    cx,
-                ))
-            })
-            .child(div().flex_1())
-            .when(!revisions, |bar| {
-                bar.child(
-                    ui::checkbox("compare-respect-gitignore", self.respect_gitignore)
-                        .label(t!("compare.folder.respect_gitignore").to_string())
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_gitignore(cx))),
-                )
-            });
+        filter_bar = filter_bar.child(div().flex_1()).when(!revisions, |bar| {
+            bar.child(
+                ui::checkbox("compare-respect-gitignore", self.respect_gitignore)
+                    .label(t!("compare.folder.respect_gitignore").to_string())
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_gitignore(cx))),
+            )
+        });
 
         let list: AnyElement = if self.filtered_indices.is_empty() {
             ui::empty_state(t!("compare.folder.empty").to_string(), design).into_any_element()
@@ -1837,6 +2437,7 @@ impl CompareView {
                                 entry_idx,
                                 entry,
                                 is_three_way,
+                                peer_mode,
                                 revisions,
                                 mark,
                                 is_selected,
@@ -1863,6 +2464,123 @@ impl CompareView {
             .child(filter_bar)
             .child(list)
             .into_any_element()
+    }
+
+    /// The chips above a folder or tree list, which follow the mode.
+    fn folder_filter_specs(
+        &self,
+        res: &FolderCompareResult,
+    ) -> Vec<(&'static str, FolderFilter, String, usize)> {
+        if self.root.is_three_way() && self.mode == ThreeWayCompareMode::NoBase {
+            let counts = self.peer_counts;
+            return vec![
+                (
+                    "filter-all",
+                    FolderFilter::All,
+                    t!("compare.folder.filter_all").to_string(),
+                    counts.total,
+                ),
+                (
+                    "filter-left-middle",
+                    FolderFilter::LeftMiddleDiffer,
+                    t!("compare.three_way.peer.left_middle").to_string(),
+                    counts.left_middle,
+                ),
+                (
+                    "filter-middle-right",
+                    FolderFilter::MiddleRightDiffer,
+                    t!("compare.three_way.peer.middle_right").to_string(),
+                    counts.middle_right,
+                ),
+                (
+                    "filter-all-different",
+                    FolderFilter::AllDifferent,
+                    t!("compare.three_way.peer.all_different").to_string(),
+                    counts.all_different,
+                ),
+                (
+                    "filter-missing",
+                    FolderFilter::MissingSomeSide,
+                    t!("compare.three_way.peer.missing").to_string(),
+                    counts.missing,
+                ),
+            ];
+        }
+
+        let counts = &res.counts;
+        let mut chips = vec![
+            (
+                "filter-all",
+                FolderFilter::All,
+                t!("compare.folder.filter_all").to_string(),
+                counts.total,
+            ),
+            (
+                "filter-diff",
+                FolderFilter::Different,
+                t!("compare.folder.filter_different").to_string(),
+                counts.different,
+            ),
+            (
+                "filter-left",
+                FolderFilter::OnlyLeft,
+                t!("compare.folder.filter_only_left").to_string(),
+                counts.only_left,
+            ),
+        ];
+        if self.root.is_three_way() {
+            chips.push((
+                "filter-middle",
+                FolderFilter::OnlyMiddle,
+                t!("compare.folder.filter_only_middle").to_string(),
+                counts.only_middle,
+            ));
+        }
+        chips.push((
+            "filter-right",
+            FolderFilter::OnlyRight,
+            t!("compare.folder.filter_only_right").to_string(),
+            counts.only_right,
+        ));
+        chips.push((
+            "filter-identical",
+            FolderFilter::Identical,
+            t!("compare.folder.filter_identical").to_string(),
+            counts.identical,
+        ));
+        if counts.type_mismatch > 0 {
+            chips.push((
+                "filter-mismatch",
+                FolderFilter::TypeMismatch,
+                t!("compare.folder.filter_mismatch").to_string(),
+                counts.type_mismatch,
+            ));
+        }
+        chips
+    }
+
+    /// The labels the current filter chips show, for tests that follow the mode.
+    #[cfg(test)]
+    pub(crate) fn folder_filter_labels(&self) -> Vec<String> {
+        let CompareState::Folder(res) = &self.state else {
+            return Vec::new();
+        };
+        self.folder_filter_specs(res)
+            .into_iter()
+            .map(|(_, _, label, count)| format!("{label} ({count})"))
+            .collect()
+    }
+
+    /// The labels of the three-way file badges, for tests that follow the mode.
+    #[cfg(test)]
+    pub(crate) fn three_way_badge_labels(&self) -> Vec<String> {
+        let CompareState::ThreeWayFile(res) = &self.state else {
+            return Vec::new();
+        };
+        three_way_badges(res, self.mode)
+            .into_iter()
+            .map(|(label, _)| label)
+            .collect()
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1930,7 +2648,10 @@ impl Render for CompareView {
                 .p_4()
                 .child(ui::banner(ui::BannerKind::Danger, error.clone(), &design))
                 .into_any_element(),
-            CompareState::TwoWayFile(res) => self.render_two_way(res, &design, cx),
+            CompareState::TwoWayFile(res) => {
+                let names = self.root.pair().map(|pair| pair.pane_labels());
+                self.render_two_way(res, names, &design, cx)
+            }
             CompareState::ThreeWayFile(res) => self.render_three_way(res, &design, window, cx),
             CompareState::Folder(res) => self.render_folder(res, &design, cx),
         };
@@ -1962,12 +2683,25 @@ enum CompareJob {
         roots: Vec<PathBuf>,
         options: FolderCompareOptions,
     },
-    /// The tree-level list of a repository commit comparison.
+    /// The tree-level list of a three-side repository comparison.
     RepoTree(RepoThreeWaySource),
-    /// One file of a repository commit comparison, read from the blobs at
-    /// `path` in each commit.
+    /// The tree-level list of a two-side repository comparison.
+    RepoPairTree(RepoTwoWaySource),
+    /// One file of a three-side repository comparison, read at the same path
+    /// in each side.
     RepoFile {
         source: RepoThreeWaySource,
+        path: String,
+    },
+    /// One file of a three-side comparison whose sides know it under different
+    /// paths, because a history walk followed renames.
+    RepoFileSides {
+        source: RepoThreeWaySource,
+        paths: [String; 3],
+    },
+    /// One file of a two-side repository comparison.
+    RepoPairFile {
+        source: RepoTwoWaySource,
         path: String,
     },
 }
@@ -2044,30 +2778,68 @@ impl CompareJob {
             Self::RepoTree(source) => BackgroundOutput::RepoTree(
                 source
                     .reader
-                    .three_way_tree(source.left.oid, source.base.oid, source.right.oid)
+                    .three_way_side_tree(source.sides())
                     .map(Some)
                     .map_err(|error| error.to_string()),
             ),
-            Self::RepoFile { source, path } => {
-                let blobs = source.reader.three_way_blobs(
-                    source.left.oid,
-                    source.base.oid,
-                    source.right.oid,
-                    &path,
-                );
-                match blobs {
-                    Ok([left, base, right]) => {
-                        let [left_name, base_name, right_name] = source.pane_labels();
-                        let hint = Some(path);
-                        BackgroundOutput::ThreeWayFile(Ok(compare_three_sides(
-                            ThreeWaySide::new(left_name, hint.clone(), left),
-                            ThreeWaySide::new(base_name, hint.clone(), base),
-                            ThreeWaySide::new(right_name, hint, right),
+            Self::RepoPairTree(source) => {
+                let sides = [source.left.side, source.right.side];
+                let left_files = source.reader.compare_side_files(sides[0]);
+                let right_files = source.reader.compare_side_files(sides[1]);
+                let output = match (left_files, right_files) {
+                    (Ok(left), Ok(right)) => Ok(Some(compare_two_repo_sides(
+                        sides[0], &left, sides[1], &right,
+                    ))),
+                    (Err(error), _) | (_, Err(error)) => Err(error.to_string()),
+                };
+                BackgroundOutput::RepoPairTree(output)
+            }
+            Self::RepoFile { source, path } => Self::RepoFileSides {
+                source,
+                paths: [path.clone(), path.clone(), path],
+            }
+            .run(cancel),
+            Self::RepoFileSides { source, paths } => {
+                let sides = source.sides();
+                let reads = [
+                    source.reader.compare_side_blob(sides[0], &paths[0]),
+                    source.reader.compare_side_blob(sides[1], &paths[1]),
+                    source.reader.compare_side_blob(sides[2], &paths[2]),
+                ];
+                let output = match reads {
+                    [Ok(left), Ok(middle), Ok(right)] => {
+                        let [left_name, middle_name, right_name] = source.pane_labels();
+                        Ok(compare_three_sides(
+                            ThreeWaySide::new(left_name, Some(paths[0].clone()), left),
+                            ThreeWaySide::new(middle_name, Some(paths[1].clone()), middle),
+                            ThreeWaySide::new(right_name, Some(paths[2].clone()), right),
                             cancel,
-                        )))
+                        ))
                     }
-                    Err(error) => BackgroundOutput::ThreeWayFile(Err(error.to_string())),
-                }
+                    [Err(error), ..] | [_, Err(error), _] | [_, _, Err(error)] => {
+                        Err(error.to_string())
+                    }
+                };
+                BackgroundOutput::ThreeWayFile(output)
+            }
+            Self::RepoPairFile { source, path } => {
+                let sides = [source.left.side, source.right.side];
+                let reads = [
+                    source.reader.compare_side_blob(sides[0], &path),
+                    source.reader.compare_side_blob(sides[1], &path),
+                ];
+                let output = match reads {
+                    [Ok(left), Ok(right)] => Ok(compare_two_bytes(
+                        Path::new(&path),
+                        left.as_deref(),
+                        Path::new(&path),
+                        right.as_deref(),
+                        &diff_opts,
+                        cancel,
+                    )),
+                    [Err(error), _] | [_, Err(error)] => Err(error.to_string()),
+                };
+                BackgroundOutput::TwoWayFile(output)
             }
         }
     }
@@ -2093,11 +2865,32 @@ fn folder_result_from_tree(
                 depth: 0,
                 kind: entry.kind,
                 status: entry.status,
+                peer: entry.peer,
                 sides: entry.sides.clone(),
             })
             .collect(),
         counts: tree.counts.clone(),
     }
+}
+
+/// Presents a two-side revision tree with the folder list's types.
+fn folder_result_from_pair(tree: &RepoCompareTree) -> FolderCompareResult {
+    FolderCompareResult {
+        roots: vec![
+            PathBuf::from(tree.left.identity()),
+            PathBuf::from(tree.right.identity()),
+        ],
+        entries: tree.entries.clone(),
+        counts: tree.counts.clone(),
+    }
+}
+
+fn peer_counts_from_entries(entries: &[FolderCompareEntry]) -> PeerTreeCounts {
+    let mut counts = PeerTreeCounts::default();
+    for entry in entries {
+        counts.record(entry.peer);
+    }
+    counts
 }
 
 fn display_or_missing(path: &Path) -> String {
@@ -2236,9 +3029,97 @@ fn three_way_max_columns(
         .unwrap_or(0)
 }
 
+/// The badges a three-way file view shows, which follow the mode: base-relative
+/// counts in the default mode, one count per neighbour boundary otherwise.
+fn three_way_badges(
+    res: &ThreeWayFileCompare,
+    mode: ThreeWayCompareMode,
+) -> Vec<(String, BadgeTone)> {
+    match mode {
+        ThreeWayCompareMode::MiddleBase => {
+            let counts = res.counts();
+            vec![
+                (
+                    t!("compare.three_way.left_count", count = counts.left_changed).to_string(),
+                    BadgeTone::Accent,
+                ),
+                (
+                    t!(
+                        "compare.three_way.right_count",
+                        count = counts.right_changed
+                    )
+                    .to_string(),
+                    BadgeTone::Accent,
+                ),
+                (
+                    t!("compare.three_way.agree_count", count = counts.both_agree).to_string(),
+                    BadgeTone::Neutral,
+                ),
+                (
+                    t!(
+                        "compare.three_way.conflict_count",
+                        count = counts.both_disagree
+                    )
+                    .to_string(),
+                    if counts.both_disagree > 0 {
+                        BadgeTone::Danger
+                    } else {
+                        BadgeTone::Neutral
+                    },
+                ),
+            ]
+        }
+        ThreeWayCompareMode::NoBase => {
+            let counts = res.peer_counts();
+            vec![
+                (
+                    t!(
+                        "compare.three_way.left_middle_count",
+                        count = counts.left_middle
+                    )
+                    .to_string(),
+                    BadgeTone::Accent,
+                ),
+                (
+                    t!(
+                        "compare.three_way.middle_right_count",
+                        count = counts.middle_right
+                    )
+                    .to_string(),
+                    BadgeTone::Accent,
+                ),
+                (
+                    t!(
+                        "compare.three_way.all_different_count",
+                        count = counts.all_different
+                    )
+                    .to_string(),
+                    if counts.all_different > 0 {
+                        BadgeTone::Danger
+                    } else {
+                        BadgeTone::Neutral
+                    },
+                ),
+            ]
+        }
+    }
+}
+
+/// The row's three tints and the marker colour on each pane boundary.
+struct ThreeWayTints {
+    left: Option<Hsla>,
+    middle: Option<Hsla>,
+    right: Option<Hsla>,
+    /// The boundary between the left and middle panes.
+    left_boundary: Option<Hsla>,
+    /// The boundary between the middle and right panes.
+    middle_boundary: Option<Hsla>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_three_way_row(
     row: strata_core::compare::ThreeWayRow,
+    mode: ThreeWayCompareMode,
     left_lines: &[String],
     middle_lines: &[String],
     right_lines: &[String],
@@ -2251,7 +3132,7 @@ fn render_three_way_row(
     content_width: gpui::Pixels,
     h_scroll: &ScrollHandle,
 ) -> AnyElement {
-    let (left_tint, middle_tint, right_tint) = three_way_tints(row.kind, design);
+    let tints = three_way_tints(row.kind, mode, design);
     div()
         .flex()
         .flex_row()
@@ -2265,7 +3146,8 @@ fn render_three_way_row(
             row.left,
             left_lines,
             left_hl,
-            left_tint,
+            tints.left,
+            tints.left_boundary,
             diff,
             style,
             design,
@@ -2277,7 +3159,8 @@ fn render_three_way_row(
             row.middle,
             middle_lines,
             middle_hl,
-            middle_tint,
+            tints.middle,
+            tints.middle_boundary,
             diff,
             style,
             design,
@@ -2289,7 +3172,8 @@ fn render_three_way_row(
             row.right,
             right_lines,
             right_hl,
-            right_tint,
+            tints.right,
+            None,
             diff,
             style,
             design,
@@ -2302,9 +3186,50 @@ fn render_three_way_row(
 
 fn three_way_tints(
     kind: ThreeWayDiffKind,
+    mode: ThreeWayCompareMode,
     design: &Design,
-) -> (Option<Hsla>, Option<Hsla>, Option<Hsla>) {
-    match kind {
+) -> ThreeWayTints {
+    if mode == ThreeWayCompareMode::NoBase {
+        return match kind.peer_status() {
+            ThreeWayPeerStatus::Same => ThreeWayTints {
+                left: None,
+                middle: None,
+                right: None,
+                left_boundary: None,
+                middle_boundary: None,
+            },
+            ThreeWayPeerStatus::LeftMiddleDiffer => ThreeWayTints {
+                left: Some(design.accent_soft),
+                middle: Some(design.accent_soft),
+                right: None,
+                left_boundary: Some(design.accent),
+                middle_boundary: None,
+            },
+            ThreeWayPeerStatus::MiddleRightDiffer => ThreeWayTints {
+                left: None,
+                middle: Some(design.accent_soft),
+                right: Some(design.accent_soft),
+                left_boundary: None,
+                middle_boundary: Some(design.accent),
+            },
+            ThreeWayPeerStatus::AllDifferent => ThreeWayTints {
+                left: Some(design.diff_removed_bg),
+                middle: Some(design.diff_hunk_header),
+                right: Some(design.diff_removed_bg),
+                left_boundary: Some(design.accent),
+                middle_boundary: Some(design.accent),
+            },
+            ThreeWayPeerStatus::MissingSomeSide => ThreeWayTints {
+                left: None,
+                middle: None,
+                right: None,
+                left_boundary: None,
+                middle_boundary: None,
+            },
+        };
+    }
+
+    let (left, middle, right) = match kind {
         ThreeWayDiffKind::Unchanged => (None, None, None),
         ThreeWayDiffKind::LeftChanged => (Some(design.diff_added_bg), None, None),
         ThreeWayDiffKind::RightChanged => (None, None, Some(design.diff_added_bg)),
@@ -2314,6 +3239,13 @@ fn three_way_tints(
             Some(design.diff_hunk_header),
             Some(design.diff_removed_bg),
         ),
+    };
+    ThreeWayTints {
+        left,
+        middle,
+        right,
+        left_boundary: None,
+        middle_boundary: None,
     }
 }
 
@@ -2323,6 +3255,7 @@ fn three_way_cell(
     lines: &[String],
     highlights: &[strata_core::highlight::LineHighlights],
     tint: Option<Hsla>,
+    boundary: Option<Hsla>,
     diff: &DiffColors,
     style: &DiffStyle,
     design: &Design,
@@ -2339,8 +3272,11 @@ fn three_way_cell(
         .h_full()
         .overflow_hidden()
         .when_some(tint, |cell, tint| cell.bg(tint))
-        .when(side < 2, |cell| {
-            cell.border_r_1().border_color(design.border)
+        .when(side < 2, |cell| match boundary {
+            // A marked boundary is the row-level cue that this pane differs
+            // from its neighbour.
+            Some(marker) => cell.border_r(px(2.0)).border_color(marker),
+            None => cell.border_r_1().border_color(design.border),
         });
 
     if let Some(number) = line {
@@ -2400,6 +3336,7 @@ fn render_folder_row(
     entry_idx: usize,
     entry: &FolderCompareEntry,
     is_three_way: bool,
+    peer_mode: bool,
     revisions: bool,
     mark: Option<RepoTreeMark>,
     selected: bool,
@@ -2419,31 +3356,39 @@ fn render_folder_row(
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| entry.relative_path.clone())
     };
-    let (status_label, status_tone) = match entry.status {
-        FolderEntryStatus::Identical => (
-            t!("compare.status.identical").to_string(),
-            BadgeTone::Neutral,
-        ),
-        FolderEntryStatus::Different => (
-            t!("compare.status.different").to_string(),
-            BadgeTone::Warning,
-        ),
-        FolderEntryStatus::OnlyLeft => (
-            t!("compare.status.only_left").to_string(),
-            BadgeTone::Accent,
-        ),
-        FolderEntryStatus::OnlyMiddle => (
-            t!("compare.status.only_middle").to_string(),
-            BadgeTone::Accent,
-        ),
-        FolderEntryStatus::OnlyRight => (
-            t!("compare.status.only_right").to_string(),
-            BadgeTone::Accent,
-        ),
-        FolderEntryStatus::TypeMismatch => (
-            t!("compare.status.type_mismatch").to_string(),
-            BadgeTone::Danger,
-        ),
+    let peer = if peer_mode {
+        Some(mark.and_then(|mark| mark.peer).unwrap_or(entry.peer))
+    } else {
+        None
+    };
+    let (status_label, status_tone) = match peer {
+        Some(peer) => peer_badge(peer),
+        None => match entry.status {
+            FolderEntryStatus::Identical => (
+                t!("compare.status.identical").to_string(),
+                BadgeTone::Neutral,
+            ),
+            FolderEntryStatus::Different => (
+                t!("compare.status.different").to_string(),
+                BadgeTone::Warning,
+            ),
+            FolderEntryStatus::OnlyLeft => (
+                t!("compare.status.only_left").to_string(),
+                BadgeTone::Accent,
+            ),
+            FolderEntryStatus::OnlyMiddle => (
+                t!("compare.status.only_middle").to_string(),
+                BadgeTone::Accent,
+            ),
+            FolderEntryStatus::OnlyRight => (
+                t!("compare.status.only_right").to_string(),
+                BadgeTone::Accent,
+            ),
+            FolderEntryStatus::TypeMismatch => (
+                t!("compare.status.type_mismatch").to_string(),
+                BadgeTone::Danger,
+            ),
+        },
     };
     let clickable = entry.kind == FolderEntryKind::File;
     let indent = entry.depth as f32 * 16.0;
@@ -2488,8 +3433,13 @@ fn render_folder_row(
     )
     .child(ui::status_badge(status_label, status_tone, design));
 
-    if let Some(mark) = mark {
-        let (change_label, change_tone) = match mark.change {
+    // In peer mode the status badge already names the difference between
+    // neighbours, so the base-relative change badge would repeat it.
+    if let Some(mark) = mark
+        && !peer_mode
+        && let Some(change) = mark.change
+    {
+        let (change_label, change_tone) = match change {
             ThreeWayTreeChange::LeftChanged => (
                 t!("compare.three_way.change.left").to_string(),
                 BadgeTone::Accent,
@@ -2524,6 +3474,31 @@ fn render_folder_row(
     }
 
     row.into_any_element()
+}
+
+fn peer_badge(peer: ThreeWayPeerStatus) -> (String, BadgeTone) {
+    match peer {
+        ThreeWayPeerStatus::Same => (
+            t!("compare.three_way.peer.same").to_string(),
+            BadgeTone::Neutral,
+        ),
+        ThreeWayPeerStatus::LeftMiddleDiffer => (
+            t!("compare.three_way.peer.left_middle").to_string(),
+            BadgeTone::Accent,
+        ),
+        ThreeWayPeerStatus::MiddleRightDiffer => (
+            t!("compare.three_way.peer.middle_right").to_string(),
+            BadgeTone::Accent,
+        ),
+        ThreeWayPeerStatus::AllDifferent => (
+            t!("compare.three_way.peer.all_different").to_string(),
+            BadgeTone::Warning,
+        ),
+        ThreeWayPeerStatus::MissingSomeSide => (
+            t!("compare.three_way.peer.missing").to_string(),
+            BadgeTone::Accent,
+        ),
+    }
 }
 
 fn format_entry_sizes(entry: &FolderCompareEntry, is_three_way: bool) -> String {
@@ -2637,6 +3612,235 @@ mod tests {
             ),
             Err(CompareValidationError::MixedTypes)
         );
+    }
+
+    fn repo_revision_options(repo: &strata_core::test_support::TestRepo) -> (RevisionOptions, Oid) {
+        let opened = repo.open();
+        let head = opened.head().expect("head");
+        let head_oid = match head {
+            strata_core::HeadInfo::Branch {
+                target: Some(target),
+                ..
+            } => target,
+            strata_core::HeadInfo::Detached { target } => target,
+            _ => panic!("the fixture is on a commit"),
+        };
+        let reader: Arc<dyn RepoReader> = Arc::new(opened);
+        let options = RevisionOptions {
+            reader: Some(reader),
+            options: vec![
+                RevisionOption {
+                    spec: "main".to_owned(),
+                    label: "main".to_owned(),
+                    side: RepoCompareSide::Commit(head_oid),
+                },
+                RevisionOption {
+                    spec: t!("compare.working_tree").to_string(),
+                    label: t!("compare.working_tree").to_string(),
+                    side: RepoCompareSide::Worktree,
+                },
+                RevisionOption {
+                    spec: t!("compare.staged").to_string(),
+                    label: t!("compare.staged").to_string(),
+                    side: RepoCompareSide::Index,
+                },
+            ],
+        };
+        (options, head_oid)
+    }
+
+    #[test]
+    fn revision_validation_resolves_picker_choices_and_typed_specs() {
+        let repo = strata_core::test_support::TestRepo::new();
+        repo.write("a.txt", "one\n");
+        let first = repo.commit("first");
+        repo.write("a.txt", "two\n");
+        repo.commit("second");
+        let (options, head) = repo_revision_options(&repo);
+
+        let sides = validate_revision_inputs("main", "Working tree", "", &options)
+            .expect("two sides resolve");
+        assert_eq!(sides.len(), 2);
+        assert_eq!(sides[0].side, RepoCompareSide::Commit(head));
+        assert_eq!(sides[0].label, "main");
+        assert_eq!(sides[1].side, RepoCompareSide::Worktree);
+
+        let typed = first.to_string();
+        let sides = validate_revision_inputs(&typed, "main", "Staged", &options)
+            .expect("a typed object id and three sides resolve");
+        assert_eq!(sides.len(), 3);
+        assert_eq!(sides[0].side, RepoCompareSide::Commit(first));
+        assert_eq!(sides[1].side, RepoCompareSide::Index);
+        assert_eq!(sides[2].side, RepoCompareSide::Commit(head));
+
+        assert_eq!(
+            validate_revision_inputs("no-such-revision", "main", "", &options),
+            Err(CompareValidationError::UnknownRevision(
+                "no-such-revision".to_owned()
+            ))
+        );
+        assert_eq!(
+            validate_revision_inputs("", "main", "", &options),
+            Err(CompareValidationError::MissingRequired)
+        );
+        assert_eq!(
+            validate_revision_inputs("main", "main", "", &RevisionOptions::default()),
+            Err(CompareValidationError::NoRepository)
+        );
+    }
+
+    #[gpui::test]
+    fn three_way_mode_toggle_switches_badges(cx: &mut gpui::TestAppContext) {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let left = tmp.path().join("left.txt");
+        let middle = tmp.path().join("middle.txt");
+        let right = tmp.path().join("right.txt");
+        fs::write(&left, "same\nleft\nend\n").unwrap();
+        fs::write(&middle, "same\nbase\nend\n").unwrap();
+        fs::write(&right, "same\nbase\nmid-right\n").unwrap();
+        let target = CompareTarget::ThreeWayFiles {
+            left,
+            middle,
+            right,
+        };
+
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            gpui_component::init(cx);
+            cx.set_global(Settings::default());
+            crate::actions::bind(cx);
+        });
+        let workspace_cell: std::rc::Rc<std::cell::RefCell<Option<Entity<Workspace>>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
+        let workspace_cell_init = workspace_cell.clone();
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), move |window, cx| {
+                    let workspace = cx.new(|cx| Workspace::new_with_compare(target, window, cx));
+                    *workspace_cell_init.borrow_mut() = Some(workspace.clone());
+                    cx.new(|cx| gpui_component::Root::new(workspace, window, cx))
+                })
+            })
+            .expect("open window");
+        let mut visual_cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual_cx.run_until_parked();
+
+        let workspace = workspace_cell.borrow().clone().expect("workspace");
+        let view = visual_cx.update(|_, cx| {
+            workspace
+                .read(cx)
+                .active_compare_view()
+                .expect("the compare tab")
+        });
+        visual_cx.update(|_, cx| {
+            let view = view.read(cx);
+            assert_eq!(view.mode(), ThreeWayCompareMode::MiddleBase);
+            let labels = view.three_way_badge_labels();
+            assert!(
+                labels.contains(&t!("compare.three_way.left_count", count = 1).to_string()),
+                "the default mode counts changes against the base: {labels:?}"
+            );
+            assert!(
+                labels.contains(&t!("compare.three_way.right_count", count = 1).to_string()),
+                "the right side differs from the base on its own line: {labels:?}"
+            );
+        });
+
+        view.update(&mut visual_cx, |view, cx| {
+            view.set_mode(ThreeWayCompareMode::NoBase, cx);
+        });
+        visual_cx.update(|_, cx| {
+            let view = view.read(cx);
+            assert_eq!(view.mode(), ThreeWayCompareMode::NoBase);
+            let labels = view.three_way_badge_labels();
+            assert_eq!(
+                labels[0],
+                t!("compare.three_way.left_middle_count", count = 1).to_string()
+            );
+            assert_eq!(
+                labels[1],
+                t!("compare.three_way.middle_right_count", count = 1).to_string()
+            );
+            assert_eq!(
+                labels[2],
+                t!("compare.three_way.all_different_count", count = 0).to_string()
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn three_way_folder_filter_follows_the_mode(cx: &mut gpui::TestAppContext) {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let left = tmp.path().join("left");
+        let middle = tmp.path().join("middle");
+        let right = tmp.path().join("right");
+        for dir in [&left, &middle, &right] {
+            fs::create_dir(dir).unwrap();
+        }
+        fs::write(left.join("changed.txt"), "left\n").unwrap();
+        fs::write(middle.join("changed.txt"), "base\n").unwrap();
+        fs::write(right.join("changed.txt"), "base\n").unwrap();
+        fs::write(left.join("outer.txt"), "same\n").unwrap();
+        fs::write(middle.join("outer.txt"), "middle\n").unwrap();
+        fs::write(right.join("outer.txt"), "same\n").unwrap();
+        let target = CompareTarget::ThreeWayFolders {
+            left,
+            middle,
+            right,
+        };
+
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            gpui_component::init(cx);
+            cx.set_global(Settings::default());
+            crate::actions::bind(cx);
+        });
+        let workspace_cell: std::rc::Rc<std::cell::RefCell<Option<Entity<Workspace>>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
+        let workspace_cell_init = workspace_cell.clone();
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), move |window, cx| {
+                    let workspace = cx.new(|cx| Workspace::new_with_compare(target, window, cx));
+                    *workspace_cell_init.borrow_mut() = Some(workspace.clone());
+                    cx.new(|cx| gpui_component::Root::new(workspace, window, cx))
+                })
+            })
+            .expect("open window");
+        let mut visual_cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual_cx.run_until_parked();
+        let workspace = workspace_cell.borrow().clone().expect("workspace");
+        let view = visual_cx.update(|_, cx| {
+            workspace
+                .read(cx)
+                .active_compare_view()
+                .expect("the compare tab")
+        });
+
+        visual_cx.update(|_, cx| {
+            let labels = view.read(cx).folder_filter_labels();
+            assert!(
+                labels.iter().any(|label| label.starts_with("Only Left (")),
+                "the default mode lists presence relative to the base: {labels:?}"
+            );
+        });
+        view.update(&mut visual_cx, |view, cx| {
+            view.set_mode(ThreeWayCompareMode::NoBase, cx);
+        });
+        visual_cx.update(|_, cx| {
+            let labels = view.read(cx).folder_filter_labels();
+            assert!(
+                labels.contains(&format!("{} (2)", t!("compare.three_way.peer.left_middle"))),
+                "peer mode counts the left/middle boundary: {labels:?}"
+            );
+            assert!(
+                labels.contains(&format!(
+                    "{} (1)",
+                    t!("compare.three_way.peer.all_different")
+                )),
+                "the middle differs from both agreeing outer sides: {labels:?}"
+            );
+        });
     }
 
     #[test]

@@ -24,6 +24,7 @@ use gpui::{
 use gpui_component::ActiveTheme as _;
 use gpui_component::Selectable as _;
 use gpui_kit_assets::IconName;
+use strata_core::compare::ThreeWayCompareMode;
 use strata_core::session::{
     CompareFile, CompareMode, Comparison, DiffRequest, DiffTicket, DiffView, QueryTicket,
 };
@@ -407,11 +408,11 @@ impl RepoView {
         let source = RepoThreeWaySource {
             reader,
             root: self.repository_root(),
-            left: CompareRevision::named(self.compare_head_label(), head),
-            base: CompareRevision::named(t!("compare.three_way.merge_base").to_string(), base),
-            right: CompareRevision::named(branch, tip),
+            left: CompareRevision::commit(self.compare_head_label(), head),
+            middle: CompareRevision::commit(t!("compare.three_way.merge_base").to_string(), base),
+            right: CompareRevision::commit(branch, tip),
         };
-        self.open_three_way_tab(source, window, cx);
+        self.open_three_way_tab(source, ThreeWayCompareMode::MiddleBase, window, cx);
     }
 
     /// "Three-way compare" for exactly three selected commits. The default
@@ -436,10 +437,53 @@ impl RepoView {
             reader,
             root: self.repository_root(),
             left: self.commit_revision(roles.left),
-            base: self.commit_revision(roles.base),
+            middle: self.commit_revision(roles.base),
             right: self.commit_revision(roles.right),
         };
-        self.open_three_way_tab(source, window, cx);
+        self.open_three_way_tab(source, ThreeWayCompareMode::NoBase, window, cx);
+    }
+
+    /// "Three-way compare" for two commits and the working tree, from the
+    /// uncommitted row plus two commits. History order puts the older commit
+    /// on the left and the working tree on the right.
+    pub(crate) fn open_three_way_working_tree(
+        &mut self,
+        commits: Vec<Oid>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let [older, newer] = commits.as_slice() else {
+            return;
+        };
+        let Some(reader) = self.session.as_ref().map(|session| session.reader()) else {
+            return;
+        };
+        let source = RepoThreeWaySource {
+            reader,
+            root: self.repository_root(),
+            left: self.commit_revision(*older),
+            middle: self.commit_revision(*newer),
+            right: crate::compare::CompareRevision::worktree(),
+        };
+        self.open_three_way_tab(source, ThreeWayCompareMode::NoBase, window, cx);
+    }
+
+    /// The palette's commit command applied to a selection that includes the
+    /// uncommitted row.
+    pub(crate) fn three_way_selection_command(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(multi) = self.multi_pick_context() else {
+            return;
+        };
+        let commits = multi.commits().to_vec();
+        if multi.uncommitted() && commits.len() == 2 {
+            self.open_three_way_working_tree(commits, window, cx);
+        } else {
+            self.open_three_way_commits(commits, window, cx);
+        }
     }
 
     /// A revision labelled with the local branch pointing at it, when one
@@ -459,7 +503,7 @@ impl RepoView {
                     .map(|info| info.short_name.clone())
             })
             .unwrap_or_default();
-        CompareRevision::named(label, oid)
+        CompareRevision::commit(label, oid)
     }
 
     /// The palette's branch command: the branch the sidebar revealed last.
@@ -470,21 +514,20 @@ impl RepoView {
         self.open_three_way_with_current_branch(&branch, window, cx);
     }
 
-    /// The palette's commit command: the current three-commit selection.
+    /// The palette's commit command: the current three-commit selection, or
+    /// two commits plus the uncommitted row.
     pub(crate) fn three_way_commits_command(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(multi) = self.multi_pick_context() else {
-            return;
-        };
-        self.open_three_way_commits(multi.commits().to_vec(), window, cx);
+        self.three_way_selection_command(window, cx);
     }
 
     fn open_three_way_tab(
         &mut self,
         source: RepoThreeWaySource,
+        mode: ThreeWayCompareMode,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -499,12 +542,12 @@ impl RepoView {
         // cannot happen while this view is the one being updated.
         window.defer(cx, move |window, cx| {
             workspace.update(cx, |workspace, cx| {
-                workspace.open_compare_three_way(source, window, cx);
+                workspace.open_compare_three_way(source, mode, window, cx);
             });
         });
     }
 
-    fn repository_root(&self) -> PathBuf {
+    pub(crate) fn repository_root(&self) -> PathBuf {
         self.session
             .as_ref()
             .and_then(|session| session.location().local_path().map(Path::to_path_buf))

@@ -20,17 +20,35 @@ pub(super) struct CommitSelection {
     anchor: Option<usize>,
     /// The row the details pane and the single commit actions follow.
     focused: Option<usize>,
+    /// The synthetic uncommitted row is part of the selection. It has no
+    /// commit row index, so it is tracked beside them.
+    uncommitted: bool,
 }
 
 impl CommitSelection {
     pub(super) fn len(&self) -> usize {
-        self.rows.len()
+        self.rows.len() + usize::from(self.uncommitted)
     }
 
     /// More than one row: the state that shows the summary pane and the
     /// multi-pick menu.
     pub(super) fn is_multi(&self) -> bool {
-        self.rows.len() > 1
+        self.len() > 1
+    }
+
+    pub(super) fn includes_uncommitted(&self) -> bool {
+        self.uncommitted
+    }
+
+    /// Adds or removes the uncommitted row. A plain click on a commit row
+    /// clears it; Cmd/Ctrl-click keeps it, so two commits and the working tree
+    /// can be selected together.
+    pub(super) fn toggle_uncommitted(&mut self) {
+        self.uncommitted = !self.uncommitted;
+    }
+
+    pub(super) fn remove_uncommitted(&mut self) {
+        self.uncommitted = false;
     }
 
     pub(super) fn contains(&self, index: usize) -> bool {
@@ -55,12 +73,14 @@ impl CommitSelection {
         self.rows = index.into_iter().collect();
         self.anchor = index;
         self.focused = index;
+        self.uncommitted = false;
     }
 
     /// A click on `index`; `order` is the list as displayed, so a filtered list
     /// ranges over its visible rows rather than the whole history.
     pub(super) fn click(&mut self, index: usize, shift: bool, secondary: bool, order: &[usize]) {
         if shift {
+            self.uncommitted = false;
             self.extend_to(index, order);
         } else if secondary {
             self.toggle(index);

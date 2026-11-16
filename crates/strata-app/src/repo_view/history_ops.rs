@@ -664,6 +664,8 @@ pub(crate) struct MultiPickContext {
     count: usize,
     branch: String,
     blocked: Option<String>,
+    /// The synthetic uncommitted row is part of the selection.
+    uncommitted: bool,
 }
 
 impl MultiPickContext {
@@ -671,6 +673,10 @@ impl MultiPickContext {
     /// rows are left out.
     pub(super) fn commits(&self) -> &[Oid] {
         &self.commits
+    }
+
+    pub(super) fn uncommitted(&self) -> bool {
+        self.uncommitted
     }
 }
 
@@ -1286,6 +1292,31 @@ fn multi_commit_menu(
             )
             .separator();
     }
+    // Two commits and the uncommitted row are three sides too: the working
+    // tree takes the place of the third commit.
+    if let [a, b] = multi.commits.as_slice()
+        && multi.uncommitted
+    {
+        let commits = vec![*a, *b];
+        menu = menu
+            .item(
+                PopupMenuItem::new(blocked_label(
+                    t!("history_ops.menu.compare_three_way").to_string(),
+                    None,
+                    shared,
+                ))
+                .on_click({
+                    let entity = entity.clone();
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        let commits = commits.clone();
+                        entity.update(cx, |view, cx| {
+                            view.open_three_way_working_tree(commits, window, cx)
+                        });
+                    }
+                }),
+            )
+            .separator();
+    }
     // Three commits are a three-way comparison with one of them as the base,
     // which the compare tab lets the user change.
     if let [a, b, c] = multi.commits.as_slice() {
@@ -1561,12 +1592,21 @@ impl RepoView {
             Some(_) => Some(t!("history_ops.no_commits_to_pick").to_string()),
             None => Some(t!("history_ops.no_repository").to_string()),
         };
+        let uncommitted = self.selection.includes_uncommitted();
+        // Replaying commits cannot include the working tree, which has no
+        // patch of its own to replay.
+        let blocked = if uncommitted {
+            Some(t!("commit_selection.uncommitted_selected").to_string())
+        } else {
+            blocked
+        };
         Some(MultiPickContext {
             commits,
             copy: copy.join("\n"),
-            count: self.selection.len(),
+            count: self.selection.rows().count(),
             branch,
             blocked,
+            uncommitted,
         })
     }
 
