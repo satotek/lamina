@@ -258,6 +258,9 @@ impl RepoView {
             super::drop_session_in_background(old);
         }
         self.watch_connection_rtt(cx);
+        // The fetch timer starts only once a session exists. A restored tab
+        // stays on the Connect page until then.
+        self.sync_autofetch(cx);
         if let Some(handle) = self.window_handle {
             let title = self.title.clone();
             let _ = handle.update(cx, |_, window, _| window.set_window_title(&title));
@@ -303,6 +306,19 @@ impl RepoView {
         }
     }
 
+    /// A live session that can take a fetch. A remote tab that is still
+    /// dialling, lost, or reconnecting is not: the fetch would fail or land
+    /// on a helper that is about to be replaced.
+    pub(crate) fn autofetch_ready(&self) -> bool {
+        if self.session.is_none() {
+            return false;
+        }
+        let Some(tab) = &self.remote_tab else {
+            return true;
+        };
+        !tab.lost && !tab.reconnecting && !tab.placeholder && tab.error.is_none()
+    }
+
     /// True for the whole life of a remote tab, before a session exists and
     /// after it does. A local tab stays false.
     /// A remote tab with no session that is not dialling: the restored
@@ -315,9 +331,9 @@ impl RepoView {
                 .is_some_and(|tab| tab.placeholder || tab.error.is_some())
     }
 
-    /// Asks for a fresh status. A remote tab has no watcher yet, so this is
-    /// the only way the working tree catches up with changes made elsewhere.
-    /// A local tab uses the same request; its watcher is not replaced.
+    /// Asks for a fresh status. A watched remote tab already hears outside
+    /// edits; this is how the user asks anyway, and how an unwatched helper
+    /// catches up. A local tab uses the same request; its watcher is not replaced.
     pub(crate) fn refresh_working_tree(&mut self, cx: &mut Context<Self>) {
         if self.session.is_none() {
             if self.is_ssh() {
@@ -347,12 +363,20 @@ impl RepoView {
     }
 
     /// Reloads a connected remote tab when the window is focused, at most
-    /// once per [`REMOTE_REFRESH_INTERVAL`]. Local tabs already watch the disk.
+    /// once per [`REMOTE_REFRESH_INTERVAL`], and only when the helper could
+    /// not watch the disk. A live watcher already pushes those edits.
     fn refresh_remote_on_focus(&mut self, cx: &mut Context<Self>) {
         if !self.is_ssh() || self.session.is_none() || self.remote_not_connected() {
             return;
         }
-        if !remote_refresh_due(self.last_remote_refresh, Instant::now()) {
+        let degraded = self
+            .session
+            .as_ref()
+            .is_some_and(|session| !session.watches_filesystem());
+        if !focus_refresh_applies(
+            degraded,
+            remote_refresh_due(self.last_remote_refresh, Instant::now()),
+        ) {
             return;
         }
         self.reload_working_tree(cx);
@@ -634,6 +658,13 @@ pub(super) fn remote_refresh_due(last: Option<Instant>, now: Instant) -> bool {
     last.is_none_or(|at| now.saturating_duration_since(at) >= REMOTE_REFRESH_INTERVAL)
 }
 
+/// Focus refresh is the stopgap for a helper that could not watch. A live
+/// watcher already pushes outside edits, so focusing the window must not
+/// ask for another status.
+pub(super) fn focus_refresh_applies(degraded: bool, due: bool) -> bool {
+    degraded && due
+}
+
 fn connect_actions(
     entity: gpui::WeakEntity<RepoView>,
     primary: String,
@@ -688,7 +719,7 @@ mod tests {
 
     use super::super::Launch;
     use super::super::RepoView;
-    use super::{connection_rtt_status, remote_refresh_due};
+    use super::{connection_rtt_status, focus_refresh_applies, remote_refresh_due};
     use crate::remote_open::{RemoteLaunch, RemoteSpec};
 
     #[test]
@@ -714,6 +745,17 @@ mod tests {
         assert!(!remote_refresh_due(Some(now), now));
         assert!(!remote_refresh_due(Some(now), now + Duration::from_secs(4)));
         assert!(remote_refresh_due(Some(now), now + Duration::from_secs(5)));
+    }
+
+    #[test]
+    fn focus_refresh_runs_only_when_the_watcher_is_down() {
+        let now = Instant::now();
+        assert!(!focus_refresh_applies(false, remote_refresh_due(None, now)));
+        assert!(focus_refresh_applies(true, remote_refresh_due(None, now)));
+        assert!(!focus_refresh_applies(
+            true,
+            remote_refresh_due(Some(now), now)
+        ));
     }
     #[cfg(unix)]
     use crate::remote_open::{SshOverride, unavailable_reason};
