@@ -184,6 +184,11 @@ pub(crate) struct GitConfigView {
     /// The command a write ran, for the window's own status line.
     last_written: Option<String>,
     focus: FocusHandle,
+    /// The appearance last applied, so unrelated setting changes do not reload
+    /// the palette.
+    appearance: crate::settings::Appearance,
+    /// Repaints this window when another one changes the theme.
+    _settings: Subscription,
     _appearance: Subscription,
     _input: Subscription,
 }
@@ -207,6 +212,15 @@ impl GitConfigView {
         });
         let appearance =
             window.observe_window_appearance(|window, cx| settings::apply_theme(Some(window), cx));
+        let current_appearance = Settings::get(cx).appearance.clone();
+        let settings = cx.observe_global::<Settings>(|this, cx| {
+            let next = Settings::get(cx).appearance.clone();
+            if next != this.appearance {
+                this.appearance = next;
+                settings::apply_theme(None, cx);
+            }
+            cx.notify();
+        });
         let mut view = Self {
             repository,
             command_log,
@@ -220,6 +234,8 @@ impl GitConfigView {
             selected: None,
             last_written: None,
             focus,
+            appearance: current_appearance,
+            _settings: settings,
             _appearance: appearance,
             _input: input_events,
         };

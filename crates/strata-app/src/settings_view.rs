@@ -26,7 +26,7 @@ use gpui_component::setting::Settings as SettingsPages;
 use gpui_component::{ActiveTheme as _, TitleBar, h_flex, v_flex};
 
 use crate::actions::OpenSettings;
-use crate::settings::{self, Settings};
+use crate::settings::{self, Appearance, Settings};
 use crate::style::{self, Design};
 
 /// Key context of the settings window, so its close shortcuts do not fire in
@@ -109,9 +109,16 @@ fn open(cx: &mut App) {
 
 struct SettingsView {
     focus: FocusHandle,
+    /// The appearance the theme was last applied for, so an unrelated settings
+    /// change does not reload the palette.
+    appearance: Appearance,
     /// `System` follows the OS; this window has no other reason to hear about
     /// an appearance change, so it keeps the subscription alive.
     _appearance: Subscription,
+    /// Another window can change the theme (this one included). Observing the
+    /// settings is what repaints this window against the new palette; the
+    /// global theme refresh alone left it light until the next settings change.
+    _settings: Subscription,
 }
 
 impl SettingsView {
@@ -120,9 +127,20 @@ impl SettingsView {
         window.focus(&focus, cx);
         let appearance =
             window.observe_window_appearance(|window, cx| settings::apply_theme(Some(window), cx));
+        let current_appearance = Settings::get(cx).appearance.clone();
+        let settings = cx.observe_global::<Settings>(|this, cx| {
+            let next = Settings::get(cx).appearance.clone();
+            if next != this.appearance {
+                this.appearance = next;
+                settings::apply_theme(None, cx);
+            }
+            cx.notify();
+        });
         Self {
             focus,
+            appearance: current_appearance,
             _appearance: appearance,
+            _settings: settings,
         }
     }
 
@@ -240,5 +258,47 @@ impl Render for SettingsView {
         // here as well as on the main window's.
         root.text_style().font_fallbacks = Some(style::font_fallbacks());
         root
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::ThemeMode;
+    use gpui::{BorrowAppContext as _, VisualTestContext};
+
+    #[gpui::test]
+    fn the_settings_window_applies_a_theme_change(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            gpui_component::init(cx);
+            cx.set_global(Settings::default());
+        });
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), |window, cx| {
+                    let view = cx.new(|cx| SettingsView::new(window, cx));
+                    cx.new(|cx| gpui_component::Root::new(view, window, cx))
+                })
+            })
+            .expect("open the settings window");
+        let mut visual_cx = VisualTestContext::from_window(window.into(), cx);
+        visual_cx.run_until_parked();
+
+        // The theme field writes the setting and the window's observer applies
+        // it. Updating only the global is what a change made in another window
+        // looks like, and this window has to turn dark without another edit.
+        visual_cx.update(|_, cx| {
+            cx.update_global::<Settings, _>(|settings, _| {
+                settings.appearance.theme = ThemeMode::Dark;
+            });
+        });
+        visual_cx.run_until_parked();
+
+        assert!(
+            visual_cx.update(|_, cx| cx.theme().is_dark()),
+            "the settings window has to repaint against the new theme"
+        );
     }
 }

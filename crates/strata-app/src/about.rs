@@ -140,6 +140,11 @@ struct AboutView {
     /// The window follows the system appearance like every other one; this
     /// keeps the subscription alive.
     _appearance: Subscription,
+    /// The appearance last applied, so unrelated setting changes do not reload
+    /// the palette.
+    appearance: crate::settings::Appearance,
+    /// Repaints this window when another one changes the theme.
+    _settings: Subscription,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -193,6 +198,15 @@ impl AboutView {
         window.focus(&focus, cx);
         let appearance =
             window.observe_window_appearance(|window, cx| settings::apply_theme(Some(window), cx));
+        let current_appearance = Settings::get(cx).appearance.clone();
+        let settings = cx.observe_global::<Settings>(|this, cx| {
+            let next = Settings::get(cx).appearance.clone();
+            if next != this.appearance {
+                this.appearance = next;
+                settings::apply_theme(None, cx);
+            }
+            cx.notify();
+        });
 
         let executable = std::env::current_exe().ok();
         let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -229,6 +243,8 @@ impl AboutView {
             git_version: None,
             copied: false,
             _appearance: appearance,
+            appearance: current_appearance,
+            _settings: settings,
         }
     }
 
