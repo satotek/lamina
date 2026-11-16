@@ -28,11 +28,7 @@ impl RepoView {
         let selected = self.palette_selected_commits();
         map.block(
             "strata::CompareCommitsThreeWay",
-            if self.is_ssh() {
-                Some(crate::remote_open::unavailable_reason())
-            } else {
-                compare::three_commit_blocked(repo_open, &selected)
-            },
+            compare::three_commit_blocked(repo_open, &selected),
         );
         map.block(
             "strata::CompareBranchThreeWay",
@@ -102,11 +98,6 @@ impl RepoView {
     /// command has nothing to open, which is why the branch row's menu is the
     /// only other way in.
     fn three_way_branch_blocked(&self) -> Option<String> {
-        // The merge-base read is not on the helper, so the palette must not
-        // report a missing merge base for a remote repository.
-        if self.is_ssh() {
-            return Some(crate::remote_open::unavailable_reason());
-        }
         let Some(branch) = self.branches.revealed_local_branch() else {
             return Some(t!("compare.select_branch").to_string());
         };
@@ -442,6 +433,16 @@ mod tests {
             blocked_reason(&view, &mut vcx, "strata::RefreshWorkingTree").as_deref(),
             Some(t!("title_bar.not_connected").as_ref()),
             "refresh cannot run until the tab is connected"
+        );
+        assert_eq!(
+            blocked_reason(&view, &mut vcx, THREE_WAY_COMMITS).as_deref(),
+            Some(t!("compare.no_repository").as_ref()),
+            "a disconnected tab has no commits to compare"
+        );
+        assert_eq!(
+            blocked_reason(&view, &mut vcx, THREE_WAY_BRANCH).as_deref(),
+            Some(t!("compare.select_branch").as_ref()),
+            "a disconnected tab has no revealed branch"
         );
     }
 }

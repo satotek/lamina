@@ -9,6 +9,7 @@ mod graph;
 mod operation;
 mod query;
 mod repo;
+mod three_way;
 
 pub use diff::{
     DiffLineDto, DiffOptionsDto, DiffRequestDto, DiffViewDto, FileDiffDto, GapDto,
@@ -34,6 +35,11 @@ pub use repo::{
     ChangeKindDto, CommitDto, ConflictEntryDto, ConflictKindDto, ConflictStyleDto, FileChangeDto,
     HeadDto, ObjectId, RefInfoDto, RefKindDto, RemoteInfoDto, RepoStateDto, SnapshotDto,
     StashInfoDto, TreeEntryDto, TreeEntryKindDto, UpstreamInfoDto, WorktreeStatusDto,
+};
+pub use three_way::{
+    FolderCompareCountsDto, FolderEntryKindDto, FolderEntryStatusDto, FolderSideInfoDto,
+    RepoCompareSideDto, ThreeWayPeerStatusDto, ThreeWayTreeChangeDto, ThreeWayTreeCompareDto,
+    ThreeWayTreeEntryDto,
 };
 
 #[cfg(test)]

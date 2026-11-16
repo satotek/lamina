@@ -2903,7 +2903,6 @@ fn local_row(
         row,
         move |menu, window, cx| {
             // A disabled entry says why, the way the commit menu's entries do.
-            let ssh = entity_menu.read(cx).is_ssh();
             let mut variables = entity_menu.read(cx).custom_variables();
             // `${branch}` is the branch this menu acts on, which need not be
             // the checked-out one.
@@ -2934,8 +2933,6 @@ fn local_row(
                 busy.then_some(t!("branch.reason.busy").to_string())
             };
             let head = view.compare_head();
-            // Two-way compare is a ticketed query. Three-way still needs the
-            // merge-base read, which stays behind `prefer_ssh` below.
             let compare_blocked = crate::repo_view::compare::with_current_branch_blocked(
                 view.session.is_some(),
                 active,
@@ -2959,8 +2956,7 @@ fn local_row(
                     },
                 )
             };
-            let three_way_blocked = prefer_ssh(
-                ssh,
+            let three_way_blocked =
                 crate::repo_view::compare::three_way_with_current_branch_blocked(
                     view.session.is_some(),
                     active,
@@ -2974,8 +2970,7 @@ fn local_row(
                     } else {
                         view.compare_branch_merge_base(&branch)
                     },
-                ),
-            );
+                );
             let three_way = {
                 let entity = entity_menu.clone();
                 let branch = branch.clone();

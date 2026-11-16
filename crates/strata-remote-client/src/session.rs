@@ -1174,6 +1174,14 @@ fn object_id(oid: Oid) -> ObjectId {
     ObjectId::from(oid)
 }
 
+fn oid_from(id: ObjectId) -> Result<Oid> {
+    Oid::try_from(id).map_err(|error| Error::other(error.to_string()))
+}
+
+fn tree_from(tree: proto::ThreeWayTreeCompareDto) -> Result<ThreeWayTreeCompare> {
+    ThreeWayTreeCompare::try_from(tree).map_err(|error| Error::other(error.to_string()))
+}
+
 impl RepoReader for RemoteReader {
     fn workdir(&self) -> Option<&Path> {
         // The remote working tree is not on this machine.
@@ -1357,38 +1365,79 @@ impl RepoReader for RemoteReader {
         Err(Error::other(UNSUPPORTED))
     }
 
-    fn merge_base(&self, _a: Oid, _b: Oid) -> Result<Option<Oid>> {
-        Err(Error::other(UNSUPPORTED))
+    fn merge_base(&self, a: Oid, b: Oid) -> Result<Option<Oid>> {
+        match self.call(Request::MergeBase {
+            a: object_id(a),
+            b: object_id(b),
+        })? {
+            Response::MergeBase { commit } => commit.map(oid_from).transpose(),
+            other => Err(unexpected(other)),
+        }
     }
 
-    fn three_way_tree(&self, _left: Oid, _base: Oid, _right: Oid) -> Result<ThreeWayTreeCompare> {
-        Err(Error::other(UNSUPPORTED))
+    fn three_way_tree(&self, left: Oid, base: Oid, right: Oid) -> Result<ThreeWayTreeCompare> {
+        match self.call(Request::ThreeWayTree {
+            left: object_id(left),
+            base: object_id(base),
+            right: object_id(right),
+        })? {
+            Response::ThreeWayTree { tree } => tree_from(*tree),
+            other => Err(unexpected(other)),
+        }
     }
 
     fn three_way_blobs(
         &self,
-        _left: Oid,
-        _base: Oid,
-        _right: Oid,
-        _path: &str,
+        left: Oid,
+        base: Oid,
+        right: Oid,
+        path: &str,
     ) -> Result<[Option<Vec<u8>>; 3]> {
-        Err(Error::other(UNSUPPORTED))
+        match self.call(Request::ThreeWayBlobs {
+            left: object_id(left),
+            base: object_id(base),
+            right: object_id(right),
+            path: path.to_owned(),
+        })? {
+            Response::ThreeWayBlobs { blobs } => Ok(blobs),
+            other => Err(unexpected(other)),
+        }
     }
 
-    fn three_way_roles(&self, _commits: [Oid; 3]) -> Result<ThreeWayRoles> {
-        Err(Error::other(UNSUPPORTED))
+    fn three_way_roles(&self, commits: [Oid; 3]) -> Result<ThreeWayRoles> {
+        match self.call(Request::ThreeWayRoles {
+            commits: commits.map(object_id),
+        })? {
+            Response::ThreeWayRoles { left, base, right } => Ok(ThreeWayRoles {
+                left: oid_from(left)?,
+                base: oid_from(base)?,
+                right: oid_from(right)?,
+            }),
+            other => Err(unexpected(other)),
+        }
     }
 
     fn compare_side_files(&self, _side: RepoCompareSide) -> Result<Vec<RepoCompareFile>> {
         Err(Error::other(UNSUPPORTED))
     }
 
-    fn compare_side_blob(&self, _side: RepoCompareSide, _path: &str) -> Result<Option<Vec<u8>>> {
-        Err(Error::other(UNSUPPORTED))
+    fn compare_side_blob(&self, side: RepoCompareSide, path: &str) -> Result<Option<Vec<u8>>> {
+        match self.call(Request::CompareSideBlob {
+            side: side.into(),
+            path: path.to_owned(),
+        })? {
+            Response::CompareSideBlob { data } => Ok(data),
+            other => Err(unexpected(other)),
+        }
     }
 
-    fn three_way_side_tree(&self, _sides: [RepoCompareSide; 3]) -> Result<ThreeWayTreeCompare> {
-        Err(Error::other(UNSUPPORTED))
+    fn three_way_side_tree(&self, sides: [RepoCompareSide; 3]) -> Result<ThreeWayTreeCompare> {
+        match self.call(Request::ThreeWaySideTree {
+            sides: sides.map(Into::into),
+        })? {
+            Response::ThreeWayTree { tree } => tree_from(*tree),
+            other => Err(unexpected(other)),
+        }
     }
 }
 

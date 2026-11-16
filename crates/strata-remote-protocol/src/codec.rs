@@ -428,6 +428,32 @@ mod tests {
                 path: "conflict.txt".into(),
             },
             Request::ConflictStyle,
+            Request::MergeBase { a: oid, b: oid },
+            Request::ThreeWayTree {
+                left: oid,
+                base: oid,
+                right: oid,
+            },
+            Request::ThreeWayBlobs {
+                left: oid,
+                base: oid,
+                right: oid,
+                path: "file.txt".into(),
+            },
+            Request::ThreeWayRoles {
+                commits: [oid, oid, oid],
+            },
+            Request::ThreeWaySideTree {
+                sides: [
+                    crate::dto::RepoCompareSideDto::Commit(oid),
+                    crate::dto::RepoCompareSideDto::Index,
+                    crate::dto::RepoCompareSideDto::Worktree,
+                ],
+            },
+            Request::CompareSideBlob {
+                side: crate::dto::RepoCompareSideDto::Worktree,
+                path: "file.txt".into(),
+            },
         ];
         for request in requests {
             let mut bytes = Vec::new();
@@ -491,6 +517,36 @@ mod tests {
             },
             Response::ConflictStyle {
                 style: crate::dto::ConflictStyleDto::Diff3,
+            },
+            Response::MergeBase { commit: Some(oid) },
+            Response::ThreeWayTree {
+                tree: Box::new(crate::dto::ThreeWayTreeCompareDto {
+                    left: crate::dto::RepoCompareSideDto::Commit(oid),
+                    base: crate::dto::RepoCompareSideDto::Index,
+                    right: crate::dto::RepoCompareSideDto::Worktree,
+                    entries: Vec::new(),
+                    counts: crate::dto::FolderCompareCountsDto {
+                        total: 0,
+                        identical: 0,
+                        different: 0,
+                        only_left: 0,
+                        only_middle: 0,
+                        only_right: 0,
+                        type_mismatch: 0,
+                    },
+                    merge_tree_checked: false,
+                }),
+            },
+            Response::ThreeWayBlobs {
+                blobs: [Some(b"left\n".to_vec()), None, Some(b"right\n".to_vec())],
+            },
+            Response::ThreeWayRoles {
+                left: oid,
+                base: oid,
+                right: oid,
+            },
+            Response::CompareSideBlob {
+                data: Some(b"worktree\n".to_vec()),
             },
         ];
         for response in responses {
