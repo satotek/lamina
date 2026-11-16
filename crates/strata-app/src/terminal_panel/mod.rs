@@ -199,7 +199,6 @@ impl TerminalTab {
 /// Interactive terminal panel managing a tabbed deck of PTY sessions.
 pub struct TerminalPanel {
     tabs: TabDeck<TerminalTab>,
-    next_tab_number: usize,
     next_tab_id: u64,
     working_dir: PathBuf,
     focus_handle: FocusHandle,
@@ -293,7 +292,6 @@ impl TerminalPanel {
 
         let mut panel = Self {
             tabs: TabDeck::new(),
-            next_tab_number: 1,
             next_tab_id: 1,
             working_dir,
             focus_handle,
@@ -483,8 +481,15 @@ impl TerminalPanel {
 
         let id = self.next_tab_id;
         self.next_tab_id = self.next_tab_id.wrapping_add(1);
-        let number = self.next_tab_number;
-        self.next_tab_number = self.next_tab_number.wrapping_add(1);
+        // One past the highest open tab, so names keep their order while tabs
+        // are open and start over at 1 once every tab has been closed.
+        let number = self
+            .tabs
+            .items()
+            .iter()
+            .map(|tab| tab.number)
+            .max()
+            .map_or(1, |highest| highest + 1);
 
         let tab = TerminalTab::new(id, number, self.cols, self.rows);
         self.tabs.open(tab);
@@ -1215,7 +1220,16 @@ impl TerminalPanel {
             .min_w_0()
             .h_full()
             .items_end()
-            .child(ui::compact_tab_strip("terminal-tab-strip", design).children(tabs))
+            // The strip is full width by default, which pushed the "+" button
+            // out of the panel; here it only takes what its tabs need and
+            // shrinks (scrolling) when they do not fit.
+            .child(
+                ui::compact_tab_strip("terminal-tab-strip", design)
+                    .w_auto()
+                    .flex_shrink(1.0)
+                    .min_w_0()
+                    .children(tabs),
+            )
             .child(
                 div()
                     .flex()
@@ -1232,6 +1246,14 @@ impl TerminalPanel {
                             .tooltip(t!("terminal.new_tab"))
                             .on_click(cx.listener(|this, _, window, cx| this.new_tab(window, cx))),
                     ),
+            )
+            // Carries the strip's bottom rule on to the panel's right edge.
+            .child(
+                div()
+                    .flex_1()
+                    .h_full()
+                    .border_b_1()
+                    .border_color(design.border),
             );
 
         let mut right = div()
