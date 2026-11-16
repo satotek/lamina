@@ -12,6 +12,7 @@
 //! confirmed it is usable for the repository's host. Nothing reads a token:
 //! each CLI owns its credentials.
 
+pub(crate) mod cli;
 pub mod gh;
 pub mod remote;
 

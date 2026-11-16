@@ -5,13 +5,13 @@
 //! a login or a repository. Commands run without a shell, never prompt, and
 //! give up after [`TIMEOUT`] so a hung CLI cannot pin a background worker.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
-use std::time::{Duration, Instant};
+use std::process::Output;
+use std::time::Duration;
 
 use serde_json::Value;
 
+use super::cli;
 use super::{
     ChecksState, ForgeCli, PullRequestChecks, PullRequestState, PullRequestSummary, ReviewState,
 };
@@ -254,118 +254,26 @@ fn status_context_outcome(check: &Value) -> Outcome {
 
 /// Runs one `gh` command in `workdir`, with stdin closed and a hard timeout.
 fn run(binary: &Path, args: &[&str], workdir: &Path) -> Result<Output> {
-    let mut command = Command::new(binary);
-    command
-        .args(args)
-        .current_dir(workdir)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // gh must never wait for a terminal answer: it is started from a
-        // window with no terminal attached.
-        .env("GH_PROMPT_DISABLED", "1")
-        .env("GH_NO_UPDATE_NOTIFIER", "1")
-        .env("GIT_TERMINAL_PROMPT", "0");
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt as _;
-        // No console window flashes for a background call.
-        command.creation_flags(0x0800_0000);
-    }
-
-    let child = command
-        .spawn()
-        .map_err(|error| Error::other(format!("could not run `gh`: {error}")))?;
-    let output = wait_with_timeout(child, TIMEOUT)?;
-    if output.status.success() {
-        return Ok(output);
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let detail = if stderr.trim().is_empty() {
-        stdout
-    } else {
-        stderr
-    };
-    Err(Error::other(format!(
-        "gh {} failed: {}",
-        args.get(1).copied().unwrap_or("command"),
-        short_reason(&detail)
-    )))
-}
-
-/// Waits for `child`, killing it after `timeout`.
-///
-/// The pipes are drained on their own threads: a large list can fill a pipe
-/// buffer, and a child blocked writing into it would never reach its exit
-/// status.
-fn wait_with_timeout(mut child: Child, timeout: Duration) -> Result<Output> {
-    let stdout = child.stdout.take().map(read_in_background);
-    let stderr = child.stderr.take().map(read_in_background);
-    let deadline = Instant::now() + timeout;
-
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = stdout.map(Join::join);
-                let _ = stderr.map(Join::join);
-                return Err(Error::other(format!(
-                    "gh did not answer within {} seconds",
-                    timeout.as_secs()
-                )));
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(error) => return Err(Error::other(format!("could not wait for gh: {error}"))),
-        }
-    };
-
-    Ok(Output {
-        status,
-        stdout: stdout.map(Join::join).unwrap_or_default(),
-        stderr: stderr.map(Join::join).unwrap_or_default(),
-    })
-}
-
-/// A reader thread plus its handle, kept together so the caller cannot join
-/// before taking the bytes.
-struct Join(std::thread::JoinHandle<Vec<u8>>);
-
-impl Join {
-    fn join(self) -> Vec<u8> {
-        self.0.join().unwrap_or_default()
-    }
-}
-
-fn read_in_background<R: Read + Send + 'static>(mut stream: R) -> Join {
-    Join(std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = stream.read_to_end(&mut bytes);
-        bytes
-    }))
-}
-
-/// The first line of a command's complaint, which is the one that names the
-/// problem. Long lines are cut so the status bar stays readable.
-fn short_reason(detail: &str) -> String {
-    let line = detail
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("no output");
-    let mut reason: String = line.chars().take(200).collect();
-    if line.chars().count() > 200 {
-        reason.push('…');
-    }
-    reason
+    // gh must never wait for a terminal answer: it is started from a window
+    // with no terminal attached.
+    cli::run(
+        binary,
+        args,
+        workdir,
+        TIMEOUT,
+        "gh",
+        &[
+            ("GH_PROMPT_DISABLED", "1"),
+            ("GH_NO_UPDATE_NOTIFIER", "1"),
+            ("GIT_TERMINAL_PROMPT", "0"),
+        ],
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Instant;
 
     const FIXTURE: &str = r#"[
       {
@@ -614,20 +522,6 @@ mod tests {
     #[test]
     fn checkout_passes_the_number_as_an_argument() {
         assert_eq!(checkout_arguments(123), ["pr", "checkout", "123"]);
-    }
-
-    #[test]
-    fn reasons_keep_one_short_line() {
-        let error = "HTTP 403: Resource not accessible by integration\n\nTry gh auth login\n";
-        assert_eq!(
-            short_reason(error),
-            "HTTP 403: Resource not accessible by integration"
-        );
-        assert_eq!(short_reason(" \n\t\n"), "no output");
-        let long = "x".repeat(500);
-        let reason = short_reason(&long);
-        assert_eq!(reason.chars().count(), 201);
-        assert!(reason.ends_with('…'));
     }
 
     /// Read-only smoke test against a real clone and a logged-in `gh`:
