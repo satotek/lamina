@@ -909,6 +909,12 @@ impl RepositorySession for RemoteSession {
         id
     }
 
+    fn cancel_operation(&self, id: OperationId) {
+        // The trait method shares its name with the inherent one. A bare
+        // `self.cancel_operation` here would recurse.
+        RemoteSession::cancel_operation(self, id);
+    }
+
     fn answer_askpass(&self, id: OperationId, answer: Option<String>) -> bool {
         // True when the answer was written. The helper drops it if the prompt
         // is already gone; the modal does not retry.
