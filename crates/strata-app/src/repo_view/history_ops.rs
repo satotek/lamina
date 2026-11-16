@@ -1118,7 +1118,7 @@ pub(crate) fn commit_menu(
             // dialog opened in the same turn. Cherry-pick has no dialog, so
             // only Revert looked like a no-op.
             window.defer(cx, move |window, cx| {
-                let _ = entity.update(cx, |view, cx| {
+                entity.update(cx, |view, cx| {
                     view.confirm_revert(commit, short, window, cx);
                 });
             });
@@ -1139,7 +1139,7 @@ pub(crate) fn commit_menu(
             // The context menu dismisses as this click returns and drops a
             // dialog opened in the same turn, the same way Revert did.
             window.defer(cx, move |window, cx| {
-                let _ = entity.update(cx, |view, cx| {
+                entity.update(cx, |view, cx| {
                     view.confirm_checkout_commit(commit, short, window, cx);
                 });
             });
