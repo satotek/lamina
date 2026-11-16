@@ -145,6 +145,9 @@ pub enum OperationDto {
     Checkout {
         branch: String,
     },
+    CheckoutCommit {
+        commit: ObjectId,
+    },
     CreateBranch {
         name: String,
         start_point: Option<String>,
@@ -268,6 +271,9 @@ impl TryFrom<&lamina_core::session::Operation> for OperationDto {
             },
             Operation::Checkout { branch } => Self::Checkout {
                 branch: branch.clone(),
+            },
+            Operation::CheckoutCommit { commit } => Self::CheckoutCommit {
+                commit: ObjectId::from(*commit),
             },
             Operation::CreateBranch {
                 name,
@@ -409,7 +415,6 @@ impl TryFrom<&lamina_core::session::Operation> for OperationDto {
             | Operation::LfsLock { .. }
             | Operation::LfsUnlock { .. }
             | Operation::LfsPull { .. }
-            | Operation::CheckoutCommit { .. }
             | Operation::RewordAcrossMerges { .. }
             | Operation::RewriteAcrossMerges { .. }
             | Operation::WriteCommitGraph => return Err(UnsupportedOperation),
@@ -442,6 +447,9 @@ impl TryFrom<OperationDto> for lamina_core::session::Operation {
             },
             OperationDto::Commit { message, amend } => Operation::Commit { message, amend },
             OperationDto::Checkout { branch } => Operation::Checkout { branch },
+            OperationDto::CheckoutCommit { commit } => Operation::CheckoutCommit {
+                commit: repo::oid(commit)?,
+            },
             OperationDto::CreateBranch {
                 name,
                 start_point,
@@ -646,6 +654,7 @@ mod tests {
             Operation::Checkout {
                 branch: "feature".into(),
             },
+            Operation::CheckoutCommit { commit },
             Operation::CreateBranch {
                 name: "feature".into(),
                 start_point: Some("main".into()),
@@ -773,7 +782,6 @@ mod tests {
             Operation::LfsPull {
                 path: "a.bin".into(),
             },
-            Operation::CheckoutCommit { commit },
             Operation::RewordAcrossMerges {
                 commit,
                 message: "reworded".into(),

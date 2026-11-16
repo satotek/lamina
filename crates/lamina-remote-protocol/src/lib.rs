@@ -26,4 +26,8 @@ pub use message::{ErrorKind, Event, Message, RemoteError, Request, Response};
 /// Version 2 adds mutations (`Run`), their progress events, credential
 /// prompts and the reads a rebase confirmation needs. An older helper fails
 /// the handshake, which is what makes the app replace it.
-pub const PROTOCOL_VERSION: u32 = 2;
+///
+/// Version 3 adds detached checkout (`Operation::CheckoutCommit`). The
+/// existing checkout keeps a trailing `--`, which would turn an object id
+/// into a pathspec, so the new operation is its own request.
+pub const PROTOCOL_VERSION: u32 = 3;

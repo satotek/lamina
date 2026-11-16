@@ -2234,6 +2234,17 @@ impl RepoView {
         });
     }
 
+    fn run_revert(
+        &mut self,
+        commit: Oid,
+        short: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let label = t!("history_ops.op.revert", short = short).to_string();
+        self.run_operation(Operation::Revert { commit }, label, window, cx);
+    }
+
     /// Asks before leaving the current branch for `commit`.
     ///
     /// The confirmation always opens. Skipping it when destructive
@@ -2246,9 +2257,11 @@ impl RepoView {
         cx: &mut Context<Self>,
     ) {
         let Some(state) = self.history_menu_state() else {
+            self.note_history_refusal(t!("remote.no_session").to_string(), cx);
             return;
         };
-        if state.blocked(HistoryAction::CheckoutCommit).is_some() {
+        if let Some(reason) = state.blocked(HistoryAction::CheckoutCommit) {
+            self.note_history_refusal(reason, cx);
             return;
         }
         let detail = t!("history_ops.checkout_commit_detail", short = short).to_string();
@@ -2281,17 +2294,6 @@ impl RepoView {
     ) {
         let label = t!("history_ops.op.checkout_commit", short = short).to_string();
         self.run_operation(Operation::CheckoutCommit { commit }, label, window, cx);
-    }
-
-    fn run_revert(
-        &mut self,
-        commit: Oid,
-        short: String,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let label = t!("history_ops.op.revert", short = short).to_string();
-        self.run_operation(Operation::Revert { commit }, label, window, cx);
     }
 
     /// A menu action that cannot run still has to say why. Returning without
@@ -3115,6 +3117,9 @@ mod tests {
         // dialog that the closing menu discarded, not a remote block.
         assert_eq!(state.blocked_for(HistoryAction::Revert, oid(1)), None);
         assert_eq!(state.blocked_for(HistoryAction::CherryPick, oid(1)), None);
+        // Detaching is a checkout the helper can run. A remote tab must not
+        // hide it the way it hides tags.
+        assert_eq!(state.blocked(HistoryAction::CheckoutCommit), None);
         assert_eq!(
             edit_blocked_on_line(&state, &[], None, EditAction::Reword).as_deref(),
             Some(reason.as_str())
