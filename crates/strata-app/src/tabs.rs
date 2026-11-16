@@ -83,7 +83,6 @@ impl<T> TabDeck<T> {
         &self.items
     }
 
-    #[cfg(feature = "terminal")]
     pub fn items_mut(&mut self) -> &mut [T] {
         &mut self.items
     }
