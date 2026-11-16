@@ -5,13 +5,15 @@
 //! answers both "which service is this" and "where is this commit, file,
 //! branch or pull request on its web pages". Pull-request questions go through
 //! [`ForgeCli`], so a repository view asks for "the pull requests of this
-//! checkout" without knowing which program answers. Bitbucket Cloud is links
+//! checkout" without knowing which program answers: `gh` on GitHub and `az`
+//! with the `azure-devops` extension on Azure DevOps. Bitbucket Cloud is links
 //! only for now.
 //!
 //! Every call is made only when the app has already found the program and
 //! confirmed it is usable for the repository's host. Nothing reads a token:
 //! each CLI owns its credentials.
 
+pub mod az;
 pub(crate) mod cli;
 pub mod gh;
 pub mod remote;
@@ -20,6 +22,7 @@ use std::path::Path;
 
 use crate::Result;
 
+pub use az::Az;
 pub use gh::Gh;
 pub use remote::{AzureDevOpsRemote, BitbucketRemote, ForgeKind, ForgeRemote};
 
@@ -104,7 +107,9 @@ pub struct PullRequestSummary {
 
 /// The two operations the app needs from a forge's command-line program.
 ///
-pub trait ForgeCli {
+/// `Send` lets the app move the chosen implementation into a background task
+/// without knowing which program it is.
+pub trait ForgeCli: Send {
     /// The pull requests whose head branch is one of the repository's
     /// branches, newest first as the host lists them.
     fn pull_requests_for_branches(&self, repo_dir: &Path) -> Result<Vec<PullRequestSummary>>;

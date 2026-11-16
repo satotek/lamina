@@ -40,6 +40,21 @@ pub(crate) fn run(
     )))
 }
 
+/// Runs `binary` and reports whether it exited successfully, without turning a
+/// non-zero exit into an error.
+///
+/// A probe such as `git rev-parse --verify` says "no" with its exit status, and
+/// the answer is part of the question rather than a failure to report.
+pub(crate) fn succeeded(
+    binary: &Path,
+    args: &[&str],
+    workdir: &Path,
+    timeout: Duration,
+    program: &str,
+) -> Result<bool> {
+    output(binary, args, workdir, timeout, program, &[]).map(|output| output.status.success())
+}
+
 fn output(
     binary: &Path,
     args: &[&str],
