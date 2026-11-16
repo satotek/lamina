@@ -580,9 +580,9 @@ fn abort_text(state: RepoState) -> Option<(String, String, String)> {
 
 /// Why "Resolve conflicts" cannot open, or `None` when it can.
 ///
-/// The editor needs the three index stages and the worktree bytes. A remote
-/// helper can stage a resolution, but it cannot yet supply those reads, so
-/// the button would otherwise do nothing.
+/// In-progress details name the commits, but the editor still needs the three
+/// index stages and the worktree file. Those reads are not on the wire, so
+/// the button stays closed on a remote tab.
 pub(crate) fn resolve_conflicts_blocked(ssh: bool) -> Option<String> {
     ssh.then(crate::remote_open::unavailable_reason)
 }
@@ -591,9 +591,6 @@ impl RepoView {
     /// Re-requests in-progress details whenever a snapshot publishes a
     /// non-normal state, and clears stale details as soon as git finishes.
     pub(crate) fn refresh_in_progress_details(&mut self) {
-        if self.is_ssh() {
-            return;
-        }
         let Some(session) = self.session.as_ref() else {
             return;
         };
