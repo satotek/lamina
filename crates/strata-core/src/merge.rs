@@ -318,17 +318,40 @@ struct Change {
     after: Range<usize>,
 }
 
-fn merge_lines(base: &[String], ours: &[String], theirs: &[String]) -> Vec<Segment> {
-    let ours_changes = changes(base, ours);
-    let theirs_changes = changes(base, theirs);
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum ThreeWayRegionKind {
+    Unchanged,
+    LeftOnly,
+    RightOnly,
+    BothSame,
+    Conflict,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ThreeWayRegion {
+    pub(crate) kind: ThreeWayRegionKind,
+    pub(crate) base: Range<usize>,
+    pub(crate) left: Range<usize>,
+    pub(crate) right: Range<usize>,
+}
+
+/// Aligns `left` and `right` against `base` into contiguous, non-overlapping
+/// regions covering every line of all three sides.
+pub(crate) fn align_three_way(
+    base: &[String],
+    left: &[String],
+    right: &[String],
+) -> Vec<ThreeWayRegion> {
+    let left_changes = changes(base, left);
+    let right_changes = changes(base, right);
 
     // Union of both sides' changed ranges in base coordinates. A range that
     // touches an insertion or another range from the other side describes one
     // overlapping region; adjacent replacements do not touch each other, so a
-    // change to one line by each side still merges cleanly.
-    let mut bounds: Vec<Range<usize>> = ours_changes
+    // change to one line by each side stays separate.
+    let mut bounds: Vec<Range<usize>> = left_changes
         .iter()
-        .chain(theirs_changes.iter())
+        .chain(right_changes.iter())
         .map(|change| change.before.clone())
         .collect();
     bounds.sort_by_key(|range| (range.start, range.end));
@@ -347,85 +370,99 @@ fn merge_lines(base: &[String], ours: &[String], theirs: &[String]) -> Vec<Segme
         }
     }
 
-    let mut segments = Vec::with_capacity(regions.len() * 2 + 1);
+    let mut out = Vec::with_capacity(regions.len() * 2 + 1);
     let mut cursor = 0;
     for region in regions {
         let end = region.end;
         if region.start > cursor {
-            segments.push(unchanged_segment(
+            out.push(unchanged_region(
                 cursor..region.start,
-                &ours_changes,
-                &theirs_changes,
+                &left_changes,
+                &right_changes,
             ));
         }
-        segments.push(change_segment(
+        out.push(changed_region(
             region,
-            &ours_changes,
-            &theirs_changes,
-            ours,
-            theirs,
+            &left_changes,
+            &right_changes,
+            left,
+            right,
         ));
         cursor = end;
     }
     if cursor < base.len() {
-        segments.push(unchanged_segment(
+        out.push(unchanged_region(
             cursor..base.len(),
-            &ours_changes,
-            &theirs_changes,
+            &left_changes,
+            &right_changes,
         ));
     }
-    segments
+    out
+}
+
+fn merge_lines(base: &[String], ours: &[String], theirs: &[String]) -> Vec<Segment> {
+    align_three_way(base, ours, theirs)
+        .into_iter()
+        .map(|region| Segment {
+            kind: match region.kind {
+                ThreeWayRegionKind::Unchanged => SegmentKind::Unchanged,
+                ThreeWayRegionKind::LeftOnly | ThreeWayRegionKind::BothSame => SegmentKind::Ours,
+                ThreeWayRegionKind::RightOnly => SegmentKind::Theirs,
+                ThreeWayRegionKind::Conflict => SegmentKind::Conflict,
+            },
+            base: region.base,
+            ours: region.left,
+            theirs: region.right,
+        })
+        .collect()
 }
 
 /// A stretch neither side changed. Insertions on its edges belong to the
 /// changed regions before and after it, so they are excluded here.
-fn unchanged_segment(
+fn unchanged_region(
     base: Range<usize>,
-    ours_changes: &[Change],
-    theirs_changes: &[Change],
-) -> Segment {
-    Segment {
-        kind: SegmentKind::Unchanged,
-        ours: map_start(ours_changes, base.start, false)..map_end(ours_changes, base.end, false),
-        theirs: map_start(theirs_changes, base.start, false)
-            ..map_end(theirs_changes, base.end, false),
+    left_changes: &[Change],
+    right_changes: &[Change],
+) -> ThreeWayRegion {
+    ThreeWayRegion {
+        kind: ThreeWayRegionKind::Unchanged,
+        left: map_start(left_changes, base.start, false)..map_end(left_changes, base.end, false),
+        right: map_start(right_changes, base.start, false)..map_end(right_changes, base.end, false),
         base,
     }
 }
 
 /// A region at least one side changed, mapped to both sides' line ranges.
-fn change_segment(
+fn changed_region(
     base: Range<usize>,
-    ours_changes: &[Change],
-    theirs_changes: &[Change],
-    ours: &[String],
-    theirs: &[String],
-) -> Segment {
-    let ours_range =
-        map_start(ours_changes, base.start, true)..map_end(ours_changes, base.end, true);
-    let theirs_range =
-        map_start(theirs_changes, base.start, true)..map_end(theirs_changes, base.end, true);
-    let ours_changed = region_changed(ours_changes, &base);
-    let theirs_changed = region_changed(theirs_changes, &base);
-    let kind = match (ours_changed, theirs_changed) {
-        (false, false) => SegmentKind::Unchanged,
-        (true, false) => SegmentKind::Ours,
-        (false, true) => SegmentKind::Theirs,
+    left_changes: &[Change],
+    right_changes: &[Change],
+    left: &[String],
+    right: &[String],
+) -> ThreeWayRegion {
+    let left_range =
+        map_start(left_changes, base.start, true)..map_end(left_changes, base.end, true);
+    let right_range =
+        map_start(right_changes, base.start, true)..map_end(right_changes, base.end, true);
+    let left_changed = region_changed(left_changes, &base);
+    let right_changed = region_changed(right_changes, &base);
+    let kind = match (left_changed, right_changed) {
+        (false, false) => ThreeWayRegionKind::Unchanged,
+        (true, false) => ThreeWayRegionKind::LeftOnly,
+        (false, true) => ThreeWayRegionKind::RightOnly,
         (true, true) => {
-            if ours[ours_range.clone()] == theirs[theirs_range.clone()] {
-                // The same edit on both sides is not a conflict; either side's
-                // range holds the merged text.
-                SegmentKind::Ours
+            if left[left_range.clone()] == right[right_range.clone()] {
+                ThreeWayRegionKind::BothSame
             } else {
-                SegmentKind::Conflict
+                ThreeWayRegionKind::Conflict
             }
         }
     };
-    Segment {
+    ThreeWayRegion {
         kind,
         base,
-        ours: ours_range,
-        theirs: theirs_range,
+        left: left_range,
+        right: right_range,
     }
 }
 

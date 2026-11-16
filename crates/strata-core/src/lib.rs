@@ -4,6 +4,7 @@
 //! so user hooks, signing and credential helpers behave exactly as in a terminal.
 
 pub mod askpass;
+pub mod compare;
 pub mod diff;
 pub mod encoding;
 #[cfg(unix)]
