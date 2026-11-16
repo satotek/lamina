@@ -53,11 +53,12 @@ pub use message::{ErrorKind, Event, Message, RemoteError, Request, Response};
 /// app replace it.
 ///
 /// Version 7 carries writes a remote tab runs through the same `Run` path as
-/// a local one: reflog undo and redo, worktrees, submodule update, and LFS
-/// track, lock, unlock and pull. LFS reads name an object id; the helper
-/// builds the object path itself. Later additions in this revision are
-/// repository configuration, tags and remotes, and the reads those views
-/// need. Paths in those messages are checked on the helper before git sees
-/// them. An older helper fails the handshake, which is what makes the app
-/// replace it.
+/// a local one: reflog undo and redo, worktrees, submodule update, LFS
+/// track, lock, unlock and pull, and `git config`. LFS reads name an object
+/// id; the helper builds the object path itself. A configuration write names
+/// a file the helper already listed, and the helper runs `git config` rather
+/// than editing that file itself. Later additions in this revision are tags,
+/// remotes, and the reads those views need. Paths in those messages are
+/// checked on the helper before git sees them. An older helper fails the
+/// handshake, which is what makes the app replace it.
 pub const PROTOCOL_VERSION: u32 = 7;

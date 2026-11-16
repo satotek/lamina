@@ -13,7 +13,7 @@
 //! here so the viewer and the write path agree on what is allowed.
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use gix::bstr::{BStr, ByteSlice};
 
@@ -273,6 +273,85 @@ impl GitConfig {
     pub fn identity_needing_local_override(&self) -> Option<&ConfigValue> {
         let email = self.identity.email.as_ref()?;
         email.origin.include.is_some().then_some(email)
+    }
+
+    /// Files the editor may write: local, worktree, global, XDG and includes.
+    ///
+    /// The system file is absent on purpose. A caller that was handed a path
+    /// checks it against this list instead of trusting the path.
+    pub fn writable_files(&self) -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        let mut push = |path: &Path| {
+            if !files.iter().any(|existing| existing == path) {
+                files.push(path.to_path_buf());
+            }
+        };
+        push(&self.files.local);
+        if let Some(path) = &self.files.worktree {
+            push(path);
+        }
+        if let Some(path) = &self.files.global {
+            push(path);
+        }
+        for include in &self.includes {
+            if include.layer != ConfigLayer::System
+                && let Some(path) = &include.path
+            {
+                push(path);
+            }
+        }
+        for entry in &self.entries {
+            for value in entry.values.iter().chain(entry.overridden.iter()) {
+                if value.layer == ConfigLayer::Xdg
+                    && let Some(path) = &value.origin.path
+                {
+                    push(path);
+                }
+            }
+        }
+        files
+    }
+}
+
+/// Refuse `file` unless it is absolute, has no `.` or `..`, and is one of the
+/// files [`GitConfig::writable_files`] names for `repo`.
+///
+/// The check runs before `git config --file`, which would otherwise create or
+/// edit whatever path it was given.
+pub fn require_writable_config_file(repo: &Path, file: &Path) -> Result<()> {
+    let Some(text) = file.to_str() else {
+        return Err(Error::other("path is not unicode"));
+    };
+    if text.is_empty() {
+        return Err(Error::other("path is empty"));
+    }
+    if text.chars().any(|character| character.is_control()) {
+        return Err(Error::other("path contains a control character"));
+    }
+    if !file.is_absolute() {
+        return Err(Error::other(format!(
+            "config path must be absolute: {text}"
+        )));
+    }
+    if file
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+    {
+        return Err(Error::other(format!(
+            "config path must not contain . or ..: {text}"
+        )));
+    }
+    let config = GitConfig::load(repo)?;
+    if config
+        .writable_files()
+        .iter()
+        .any(|allowed| allowed == file)
+    {
+        Ok(())
+    } else {
+        Err(Error::other(format!(
+            "config file is not one this repository writes: {text}"
+        )))
     }
 }
 
@@ -1610,6 +1689,39 @@ mod tests {
         repo.git(&["config", "user.email", "local@example.invalid"]);
         let config = GitConfig::read(&repo.open(), &sources(&global)).expect("read config");
         assert!(config.identity_needing_local_override().is_none());
+    }
+
+    #[test]
+    fn only_a_config_file_this_repository_lists_may_be_written() {
+        let repo = TestRepo::new();
+        let local = GitConfig::load(repo.path())
+            .expect("read config")
+            .files
+            .local;
+        assert!(
+            require_writable_config_file(repo.path(), &local).is_ok(),
+            "the repository's own config is writable"
+        );
+
+        let outside = repo.path().join("README.md");
+        assert!(
+            require_writable_config_file(repo.path(), &outside).is_err(),
+            "a file the config reader never listed is not writable"
+        );
+        let escape = PathBuf::from(format!(
+            "{}/../config",
+            local.parent().expect("config parent").display()
+        ));
+        assert!(
+            require_writable_config_file(repo.path(), &escape).is_err(),
+            "a .. component is refused even inside the git directory"
+        );
+        assert!(require_writable_config_file(repo.path(), Path::new("config")).is_err());
+        assert!(require_writable_config_file(repo.path(), Path::new("")).is_err());
+        assert!(
+            require_writable_config_file(repo.path(), Path::new("/tmp/co\nnfig")).is_err(),
+            "a control character is refused"
+        );
     }
 
     #[test]

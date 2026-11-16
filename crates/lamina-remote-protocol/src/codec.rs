@@ -474,6 +474,13 @@ mod tests {
             },
             Request::LfsAvailable,
             Request::LfsLocks,
+            Request::GitConfig,
+            Request::PreviewGitConfig {
+                path: "/repo/.git/config".into(),
+                layer: crate::dto::ConfigLayerDto::Local,
+                key: "user.name".into(),
+                change: crate::dto::ConfigChangeDto::Set("Ada".into()),
+            },
         ];
         for request in requests {
             let mut bytes = Vec::new();
@@ -590,6 +597,31 @@ mod tests {
                     owner: Some("Ada".into()),
                     locked_at: None,
                 }],
+            },
+            Response::GitConfig {
+                config: Box::new(crate::dto::GitConfigDto {
+                    entries: Vec::new(),
+                    includes: Vec::new(),
+                    identity: crate::dto::ConfigIdentityDto {
+                        name: None,
+                        email: None,
+                    },
+                    files: crate::dto::ConfigFilePathsDto {
+                        local: "/repo/.git/config".into(),
+                        worktree: None,
+                        global: None,
+                        system: None,
+                    },
+                }),
+            },
+            Response::ConfigPreview {
+                command: "git config --file /repo/.git/config --replace-all user.name Ada".into(),
+                before: String::new(),
+                after: "[user]\n\tname = Ada\n".into(),
+                len: 0,
+                hash: 1,
+                modified_secs: None,
+                modified_nanos: None,
             },
         ];
         for response in responses {

@@ -30,7 +30,7 @@ use gpui_component::switch::Switch;
 use gpui_component::{ActiveTheme as _, Selectable as _, TitleBar, h_flex, v_flex};
 use lamina_core::diff::LineKind;
 use lamina_core::git_cli::{
-    CommandLog, ConfigChange, ConfigPreview, ConfigTarget, ConfigWrite, Git,
+    CommandLog, ConfigChange, ConfigPreview, ConfigTarget, ConfigWrite, Git, GitConfigAccess,
 };
 use lamina_core::repo::{
     ConfigEntry, ConfigFilePaths, ConfigInclude, ConfigLayer, ConfigValue, GitConfig, ValueRule,
@@ -53,17 +53,69 @@ const HEIGHT: f32 = 680.0;
 const MIN_WIDTH: f32 = 640.0;
 const MIN_HEIGHT: f32 = 480.0;
 
-/// The repository whose configuration the window opens, plus the command log
-/// its session keeps. Updated by the active [`crate::repo_view::RepoView`];
-/// the module is careful to do nothing when no repository has been opened yet.
+/// Where a configuration read or write runs.
+///
+/// A local tab runs `git config` itself. A remote tab hands the same command
+/// to the helper, so this window never touches a path it cannot see. The label
+/// is what the window shows for the repository.
+#[derive(Clone)]
+pub(crate) struct ConfigSource {
+    label: String,
+    /// A remote source is tied to the session that published it, so a
+    /// reconnect has to reload even though the printed location is the same.
+    remote: bool,
+    access: Arc<dyn GitConfigAccess>,
+}
+
+impl ConfigSource {
+    pub(crate) fn label(&self) -> &str {
+        &self.label
+    }
+}
+
+/// A local checkout's configuration, read and written by this machine's `git`.
+struct LocalConfig {
+    repository: PathBuf,
+    binary: Option<PathBuf>,
+    /// The session's log, so the save shows up beside every other command.
+    /// The preview is left out: it writes a temporary file the user never asked
+    /// to change.
+    log: Option<Arc<CommandLog>>,
+}
+
+impl LocalConfig {
+    fn git(&self, with_log: bool) -> Git {
+        let mut git = Git::new(self.repository.clone());
+        if let Some(binary) = &self.binary {
+            git = git.with_git_binary(binary.clone());
+        }
+        if with_log && let Some(log) = &self.log {
+            git = git.with_log(Arc::clone(log));
+        }
+        git
+    }
+}
+
+impl GitConfigAccess for LocalConfig {
+    fn load_config(&self) -> lamina_core::Result<GitConfig> {
+        GitConfig::load(&self.repository)
+    }
+
+    fn preview_config(&self, write: &ConfigWrite) -> lamina_core::Result<ConfigPreview> {
+        self.git(false).config_preview(write)
+    }
+
+    fn apply_config(&self, preview: &ConfigPreview) -> lamina_core::Result<()> {
+        self.git(true).config_apply(preview)
+    }
+}
+
+/// The repository whose configuration the window opens. Updated by the active
+/// [`crate::repo_view::RepoView`]; the module is careful to do nothing when no
+/// repository has been opened yet.
 #[derive(Default)]
 struct CurrentRepository {
-    path: Option<PathBuf>,
-    /// Shared with the repository's session, so a configuration write shows up
-    /// in the same log as every other git command.
-    command_log: Option<Arc<CommandLog>>,
-    /// The active tab is a remote repository, which has no local config file.
-    remote: bool,
+    source: Option<ConfigSource>,
 }
 
 impl Global for CurrentRepository {}
@@ -86,51 +138,70 @@ pub fn bind(cx: &mut App) {
     crate::keymap::bind_group(cx, crate::keymap::Group::GitConfig);
 }
 
-/// Records the repository the next config command should open, and the log a
-/// write is recorded in.
+/// Records the local repository the next config command should open, and the
+/// log a write is recorded in.
 pub(crate) fn set_repository(path: PathBuf, command_log: Arc<CommandLog>, cx: &mut App) {
-    let repository = CurrentRepository {
-        path: Some(path),
-        command_log: Some(command_log),
-        remote: false,
-    };
+    set_source(
+        ConfigSource {
+            label: path.display().to_string(),
+            remote: false,
+            access: Arc::new(LocalConfig {
+                repository: path,
+                binary: Settings::get(cx).behaviour.git_executable.clone(),
+                log: Some(command_log),
+            }),
+        },
+        cx,
+    );
+}
+
+/// Records a remote tab's configuration, reached through its session.
+///
+/// The label is the `ssh://` location, so the window says which machine the
+/// values come from.
+pub(crate) fn set_remote_repository(access: Arc<dyn GitConfigAccess>, label: String, cx: &mut App) {
+    set_source(
+        ConfigSource {
+            label,
+            remote: true,
+            access,
+        },
+        cx,
+    );
+}
+
+fn set_source(source: ConfigSource, cx: &mut App) {
     if cx.has_global::<CurrentRepository>() {
-        *cx.global_mut::<CurrentRepository>() = repository;
+        cx.global_mut::<CurrentRepository>().source = Some(source);
     } else {
-        cx.set_global(repository);
+        cx.set_global(CurrentRepository {
+            source: Some(source),
+        });
     }
 }
 
 /// Whether a repository is available, for the settings window's link.
 pub(crate) fn has_repository(cx: &App) -> bool {
     cx.try_global::<CurrentRepository>()
-        .is_some_and(|repository| repository.path.is_some())
+        .is_some_and(|repository| repository.source.is_some())
 }
 
-/// The active tab is a remote repository, so the config viewer has no file.
-pub(crate) fn remote_repository(cx: &App) -> bool {
-    cx.try_global::<CurrentRepository>()
-        .is_some_and(|repository| repository.remote && repository.path.is_none())
-}
-
-/// Forgets the published repository. A remote tab has no local checkout, and
-/// leaving the previous path set would open that repository's config instead.
+/// Forgets the published repository. A remote tab that has not connected has
+/// nothing to read, and leaving the previous path set would open that
+/// repository's config instead.
 ///
 /// A unit test that never called [`bind`] has no global; that is not an error.
 pub(crate) fn clear_repository(cx: &mut App) {
     if !cx.has_global::<CurrentRepository>() {
         return;
     }
-    let repository = cx.global_mut::<CurrentRepository>();
-    repository.path = None;
-    repository.command_log = None;
-    repository.remote = true;
+    cx.global_mut::<CurrentRepository>().source = None;
 }
 
 fn open(cx: &mut App) {
-    let Some((repository, command_log)) = cx
+    let Some(source) = cx
         .try_global::<CurrentRepository>()
-        .and_then(|repository| Some((repository.path.clone()?, repository.command_log.clone())))
+        .and_then(|repository| repository.source.clone())
     else {
         return;
     };
@@ -140,9 +211,7 @@ fn open(cx: &mut App) {
         .and_then(|window| window.view.clone())
         && let Some(view) = view.upgrade()
     {
-        view.update(cx, |view, cx| {
-            view.set_repository(repository, command_log, cx)
-        });
+        view.update(cx, |view, cx| view.set_repository(source, cx));
         if let Some(handle) = cx
             .try_global::<OpenConfigWindow>()
             .and_then(|window| window.window)
@@ -169,7 +238,7 @@ fn open(cx: &mut App) {
         },
         move |window, cx| {
             settings::apply_theme(Some(window), cx);
-            let view = cx.new(|cx| GitConfigView::new(repository, command_log, window, cx));
+            let view = cx.new(|cx| GitConfigView::new(source, window, cx));
             *slot.borrow_mut() = Some(view.clone());
             cx.new(|cx| gpui_component::Root::new(view, window, cx))
         },
@@ -191,9 +260,8 @@ fn open(cx: &mut App) {
 }
 
 pub(crate) struct GitConfigView {
-    repository: PathBuf,
-    /// The session's log, when the window opened from a repository view.
-    command_log: Option<Arc<CommandLog>>,
+    /// Where the values come from and where a write goes.
+    source: ConfigSource,
     config: Option<GitConfig>,
     error: Option<String>,
     loading: bool,
@@ -218,12 +286,7 @@ pub(crate) struct GitConfigView {
 }
 
 impl GitConfigView {
-    fn new(
-        repository: PathBuf,
-        command_log: Option<Arc<CommandLog>>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    fn new(source: ConfigSource, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         let input = cx
@@ -246,8 +309,7 @@ impl GitConfigView {
             cx.notify();
         });
         let mut view = Self {
-            repository,
-            command_log,
+            source,
             config: None,
             error: None,
             loading: true,
@@ -267,17 +329,16 @@ impl GitConfigView {
         view
     }
 
-    fn set_repository(
-        &mut self,
-        repository: PathBuf,
-        command_log: Option<Arc<CommandLog>>,
-        cx: &mut Context<Self>,
-    ) {
-        self.command_log = command_log;
-        if self.repository == repository && (self.config.is_some() || self.loading) {
+    fn set_repository(&mut self, source: ConfigSource, cx: &mut Context<Self>) {
+        let same = if source.remote {
+            Arc::ptr_eq(&self.source.access, &source.access)
+        } else {
+            self.source.label() == source.label()
+        };
+        if same && (self.config.is_some() || self.loading) {
             return;
         }
-        self.repository = repository;
+        self.source = source;
         self.config = None;
         self.error = None;
         self.expanded.clear();
@@ -289,13 +350,11 @@ impl GitConfigView {
     fn load(&mut self, cx: &mut Context<Self>) {
         self.loading = true;
         self.error = None;
-        let repository = self.repository.clone();
+        let access = Arc::clone(&self.source.access);
         cx.spawn(async move |this, cx| {
             let read = cx
                 .background_executor()
-                .spawn(
-                    async move { GitConfig::load(&repository).map_err(|error| error.to_string()) },
-                )
+                .spawn(async move { access.load_config().map_err(|error| error.to_string()) })
                 .await;
             this.update(cx, |this, cx| {
                 this.loading = false;
@@ -378,8 +437,7 @@ impl GitConfigView {
                 cx,
                 view,
                 EditorRequest {
-                    repository: self.repository.clone(),
-                    command_log: self.command_log.clone(),
+                    source: self.source.clone(),
                     key,
                     change,
                     new_key,
@@ -1197,7 +1255,7 @@ impl Render for GitConfigView {
                             .child(
                                 self.last_written
                                     .clone()
-                                    .unwrap_or_else(|| self.repository.display().to_string()),
+                                    .unwrap_or_else(|| self.source.label().to_owned()),
                             ),
                     )
                     .child(
@@ -1378,8 +1436,7 @@ impl WriteKind {
 
 /// Everything the editor starts with, gathered by the view from its data.
 struct EditorRequest {
-    repository: PathBuf,
-    command_log: Option<Arc<CommandLog>>,
+    source: ConfigSource,
     key: String,
     change: ConfigChange,
     new_key: bool,
@@ -1396,8 +1453,7 @@ struct EditorRequest {
 /// file only while the stamp still matches.
 struct ConfigEditor {
     view: WeakEntity<GitConfigView>,
-    repository: PathBuf,
-    command_log: Option<Arc<CommandLog>>,
+    source: ConfigSource,
     targets: Vec<TargetChoice>,
     target: usize,
     key: String,
@@ -1411,6 +1467,9 @@ struct ConfigEditor {
     value_input: Entity<InputState>,
     preview: Option<ConfigPreview>,
     error: Option<String>,
+    /// A preview or a save is running. Both can cross a machine, so neither
+    /// may hold the window while it waits.
+    busy: bool,
     _inputs: Vec<Subscription>,
 }
 
@@ -1422,8 +1481,7 @@ impl ConfigEditor {
         window: &mut Window,
     ) -> Self {
         let EditorRequest {
-            repository,
-            command_log,
+            source,
             key,
             change,
             new_key,
@@ -1457,8 +1515,7 @@ impl ConfigEditor {
         });
         Self {
             view,
-            repository,
-            command_log,
+            source,
             targets,
             target: default,
             key,
@@ -1470,6 +1527,7 @@ impl ConfigEditor {
             value_input,
             preview: None,
             error: None,
+            busy: false,
             _inputs: vec![key_events, value_events],
         }
     }
@@ -1552,23 +1610,15 @@ impl ConfigEditor {
     }
 
     fn can_preview(&self, _cx: &App) -> bool {
-        self.validation_error().is_none() && !self.targets.is_empty()
+        !self.busy && self.validation_error().is_none() && !self.targets.is_empty()
     }
 
-    fn git(&self, cx: &App, with_log: bool) -> Git {
-        let mut git = Git::new(self.repository.clone());
-        if let Some(binary) = Settings::get(cx).behaviour.git_executable.clone() {
-            git = git.with_git_binary(binary);
-        }
-        if with_log && let Some(log) = self.command_log.clone() {
-            git = git.with_log(log);
-        }
-        git
-    }
-
-    /// Run the command against a copy. The preview does not get the session's
-    /// log: it writes a temporary file, and that is not a command the user ran.
+    /// Run the command against a copy. The source runs it, so a remote tab's
+    /// preview happens on the host and only the texts come back.
     fn preview(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
         self.error = None;
         self.preview = None;
         let write = match self.write() {
@@ -1579,10 +1629,24 @@ impl ConfigEditor {
                 return;
             }
         };
-        match self.git(cx, false).config_preview(&write) {
-            Ok(preview) => self.preview = Some(preview),
-            Err(error) => self.error = Some(error_text(error)),
-        }
+        let access = Arc::clone(&self.source.access);
+        self.busy = true;
+        cx.spawn(async move |this, cx| {
+            let preview = cx
+                .background_executor()
+                .spawn(async move { access.preview_config(&write) })
+                .await;
+            this.update(cx, |this, cx| {
+                this.busy = false;
+                match preview {
+                    Ok(preview) => this.preview = Some(preview),
+                    Err(error) => this.error = Some(error_text(error)),
+                }
+                cx.notify();
+            })
+            .ok();
+        })
+        .detach();
         cx.notify();
     }
 
@@ -1593,28 +1657,53 @@ impl ConfigEditor {
     }
 
     fn apply(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
         let Some(preview) = self.preview.clone() else {
             return;
         };
-        match self.git(cx, true).config_apply(&preview) {
-            Ok(()) => {
-                let command = preview.command.clone();
-                let key = preview.write.key.clone();
-                self.view
-                    .update(cx, |view, cx| view.after_write(command, key, cx))
+        let access = Arc::clone(&self.source.access);
+        let handle = window.window_handle();
+        let write = preview.clone();
+        self.busy = true;
+        cx.spawn(async move |this, cx| {
+            let applied = cx
+                .background_executor()
+                .spawn(async move { access.apply_config(&write) })
+                .await;
+            match applied {
+                Ok(()) => {
+                    let command = preview.command.clone();
+                    let key = preview.write.key.clone();
+                    this.update(cx, |this, cx| {
+                        this.busy = false;
+                        this.view
+                            .update(cx, |view, cx| view.after_write(command, key, cx))
+                            .ok();
+                        cx.notify();
+                    })
                     .ok();
-                // Closing here would drop this dialog while it is being
-                // updated; the same reasoning the reword dialog uses.
-                window.defer(cx, |window, cx| window.close_dialog(cx));
+                    // The dialog belongs to a window this task does not hold;
+                    // its handle closes it once the write is done.
+                    let _ = handle.update(cx, |_, window, cx| window.close_dialog(cx));
+                }
+                Err(error) => {
+                    this.update(cx, |this, cx| {
+                        this.busy = false;
+                        this.preview = None;
+                        this.error = Some(
+                            t!("git_config.not_changed_again", reason = error_text(error))
+                                .to_string(),
+                        );
+                        cx.notify();
+                    })
+                    .ok();
+                }
             }
-            Err(error) => {
-                self.preview = None;
-                self.error = Some(
-                    t!("git_config.not_changed_again", reason = error_text(error)).to_string(),
-                );
-                cx.notify();
-            }
-        }
+        })
+        .detach();
+        cx.notify();
     }
 
     fn form(&self, design: &Design, cx: &mut Context<Self>) -> gpui::AnyElement {

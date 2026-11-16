@@ -560,6 +560,18 @@ pub enum Operation {
     LfsPull {
         path: String,
     },
+    /// `git config --file` for one key. `path` is a file the repository
+    /// already writes; the stamp is what the preview recorded.
+    WriteGitConfig {
+        path: PathBuf,
+        layer: crate::repo::ConfigLayer,
+        key: String,
+        change: crate::git_cli::ConfigChange,
+        len: u64,
+        hash: u64,
+        modified_secs: Option<u64>,
+        modified_nanos: Option<u32>,
+    },
     /// `git commit-graph write --reachable --changed-paths`: make future
     /// history walks faster. Never started without an explicit user action.
     WriteCommitGraph,

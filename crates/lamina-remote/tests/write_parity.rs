@@ -513,3 +513,121 @@ fn lfs_reads_and_writes_match_a_local_session() {
     }
     helper.close();
 }
+
+/// The local side's configuration access, the same shape the app uses for a
+/// local tab: `git config` runs in this process against the checkout.
+struct LocalAccess {
+    repository: std::path::PathBuf,
+}
+
+impl lamina_core::git_cli::GitConfigAccess for LocalAccess {
+    fn load_config(&self) -> lamina_core::Result<lamina_core::repo::GitConfig> {
+        lamina_core::repo::GitConfig::load(&self.repository)
+    }
+
+    fn preview_config(
+        &self,
+        write: &lamina_core::git_cli::ConfigWrite,
+    ) -> lamina_core::Result<lamina_core::git_cli::ConfigPreview> {
+        lamina_core::git_cli::Git::new(self.repository.clone()).config_preview(write)
+    }
+
+    fn apply_config(
+        &self,
+        preview: &lamina_core::git_cli::ConfigPreview,
+    ) -> lamina_core::Result<()> {
+        lamina_core::git_cli::Git::new(self.repository.clone()).config_apply(preview)
+    }
+}
+
+fn local_value(repo: &TestRepo, key: &str) -> String {
+    repo.git(&["config", "--local", "--get", key])
+        .trim()
+        .to_owned()
+}
+
+#[test]
+fn a_config_read_preview_and_write_match_a_local_access() {
+    use lamina_core::git_cli::{ConfigChange, ConfigTarget, ConfigWrite, GitConfigAccess};
+    use lamina_core::repo::ConfigLayer;
+
+    let local_repo = two_commits();
+    let remote_repo = two_commits();
+    let helper = Helper::spawn(&remote_repo);
+    let local_access = LocalAccess {
+        repository: local_repo.path().to_path_buf(),
+    };
+    let remote_access = helper
+        .session
+        .git_config_access()
+        .expect("a remote session reaches the host's config");
+
+    // Both reads describe their own checkout, including the file list a write
+    // has to name.
+    let local_config = local_access.load_config().expect("local config");
+    let remote_config = remote_access.load_config().expect("remote config");
+    assert_eq!(
+        local_config.files.local,
+        local_repo.path().join(".git/config")
+    );
+    assert_eq!(
+        remote_config.files.local,
+        remote_repo.path().join(".git/config")
+    );
+    assert_eq!(
+        local_config
+            .entry("user.name")
+            .and_then(|entry| entry.effective())
+            .map(|value| value.value.clone()),
+        remote_config
+            .entry("user.name")
+            .and_then(|entry| entry.effective())
+            .map(|value| value.value.clone()),
+        "twins start with the same identity"
+    );
+
+    let write_for = |config: &lamina_core::repo::GitConfig| {
+        ConfigWrite::new(
+            ConfigTarget::new(config.files.local.clone(), ConfigLayer::Local),
+            "user.name",
+            ConfigChange::Set("Ada".into()),
+        )
+    };
+    let local_preview = local_access
+        .preview_config(&write_for(&local_config))
+        .expect("local preview");
+    let remote_preview = remote_access
+        .preview_config(&write_for(&remote_config))
+        .expect("remote preview");
+    assert_eq!(local_preview.after, remote_preview.after);
+    assert!(local_preview.changed());
+
+    local_access
+        .apply_config(&local_preview)
+        .expect("local save");
+    remote_access
+        .apply_config(&remote_preview)
+        .expect("remote save");
+    assert_eq!(local_value(&local_repo, "user.name"), "Ada");
+    assert_eq!(
+        local_value(&remote_repo, "user.name"),
+        "Ada",
+        "the helper wrote the host's file through git config"
+    );
+
+    // A file that moved since the preview is refused on both sides, so a
+    // concurrent edit is never overwritten.
+    assert!(local_access.apply_config(&local_preview).is_err());
+    assert!(remote_access.apply_config(&remote_preview).is_err());
+    assert_eq!(local_value(&local_repo, "user.name"), "Ada");
+    assert_eq!(local_value(&remote_repo, "user.name"), "Ada");
+
+    let loaded = remote_access.load_config().expect("reread");
+    let value = loaded
+        .entry("user.name")
+        .and_then(|entry| entry.effective())
+        .expect("the written value reads back");
+    assert_eq!(value.value, "Ada");
+    assert_eq!(value.layer, ConfigLayer::Local);
+    helper.close();
+}
