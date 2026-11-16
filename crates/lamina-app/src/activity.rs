@@ -165,6 +165,18 @@ impl Activity {
         self.running.is_empty()
     }
 
+    /// Ids the view submitted that have not reported back, oldest first.
+    pub(crate) fn ids(&self) -> Vec<OperationId> {
+        self.running.keys().copied().collect()
+    }
+
+    /// Drops every record. The next finished event is then ignored by the
+    /// indicator, which is what a cancel wants: the segment is already gone.
+    pub(crate) fn clear(&mut self) {
+        self.running.clear();
+        self.wake = None;
+    }
+
     /// Records a command this view just submitted and starts the tick loop.
     pub(crate) fn begin(
         &mut self,

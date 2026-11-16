@@ -20,9 +20,9 @@ use super::{PAGE, RepoView};
 #[cfg(feature = "terminal")]
 use crate::actions::ToggleTerminal;
 use crate::actions::{
-    self, ApplyPatch, CloseCompare, CompareBranchThreeWay, CompareCommitsThreeWay,
-    ExtendSelectionNext, ExtendSelectionPrevious, GoToChild, GoToHead, GoToParent,
-    GoToSecondParent, NavigateBack, NavigateForward, OpenInEditor, OpenTerminalHere,
+    self, ApplyPatch, CancelRunningOperation, CloseCompare, CompareBranchThreeWay,
+    CompareCommitsThreeWay, ExtendSelectionNext, ExtendSelectionPrevious, GoToChild, GoToHead,
+    GoToParent, GoToSecondParent, NavigateBack, NavigateForward, OpenInEditor, OpenTerminalHere,
     RedoLastAction, SelectFirst, SelectLast, SelectNext, SelectPageDown, SelectPageUp,
     SelectPrevious, StashChanges, SwitchBranch, ToggleDetailsMaximized, ToggleFrameStats,
     ToggleSidebar, ToggleWholeFile, UndoLastAction,
@@ -138,6 +138,9 @@ impl Render for RepoView {
             .on_action(
                 cx.listener(|this, _: &ApplyPatch, window, cx| this.open_apply_patch(window, cx)),
             )
+            .on_action(cx.listener(|this, _: &CancelRunningOperation, _, cx| {
+                this.cancel_running_operation(cx);
+            }))
             .on_action(cx.listener(|this, _: &CreateBranchFromHead, window, cx| {
                 this.create_branch_from_head(window, cx)
             }))

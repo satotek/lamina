@@ -43,6 +43,11 @@ impl RepoView {
         self.block_history_writes(&mut map);
         self.block_navigation(&mut map);
         self.block_local_machine_commands(&mut map);
+        map.block(
+            "lamina::CancelRunningOperation",
+            (!self.can_cancel_running_operation())
+                .then(|| t!("status.nothing_running").to_string()),
+        );
         map
     }
 
@@ -362,6 +367,11 @@ mod tests {
             blocked_reason(&view, &mut vcx, "lamina::OpenInEditor"),
             None
         );
+        assert_eq!(
+            blocked_reason(&view, &mut vcx, "lamina::CancelRunningOperation").as_deref(),
+            Some(t!("status.nothing_running").as_ref()),
+            "an idle repository has nothing to cancel"
+        );
     }
 
     #[gpui::test]
@@ -400,6 +410,11 @@ mod tests {
         assert_eq!(
             blocked_reason(&view, &mut vcx, "lamina::ToggleTerminal").as_deref(),
             Some(reason.as_str())
+        );
+        assert_eq!(
+            blocked_reason(&view, &mut vcx, "lamina::CancelRunningOperation").as_deref(),
+            Some(t!("status.nothing_running").as_ref()),
+            "a disconnected tab is not running a command"
         );
     }
 }
