@@ -197,6 +197,12 @@ fn repo_name(session: &dyn RepositorySession) -> String {
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| display_path(&path))
         }
+        // The remote path is not on this machine, so it must not be
+        // canonicalised through the local filesystem.
+        RepoLocation::Ssh { path, .. } => Path::new(&path)
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or(path),
     }
 }
 

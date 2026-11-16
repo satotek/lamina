@@ -25,6 +25,16 @@ use crate::{ConflictSides, FileChange, HeadInfo, Oid, Result, TreeEntry};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum RepoLocation {
     Local(PathBuf),
+    /// A repository the `strata-remote` helper serves on another machine.
+    ///
+    /// `path` is the root the helper reported. It is a path on that machine,
+    /// so local filesystem APIs must not be given it; `local_path` returns
+    /// `None` to make that explicit.
+    Ssh {
+        host: String,
+        port: Option<u16>,
+        path: String,
+    },
 }
 
 impl RepoLocation {
@@ -33,6 +43,7 @@ impl RepoLocation {
     pub fn local_path(&self) -> Option<&Path> {
         match self {
             Self::Local(path) => Some(path.as_path()),
+            Self::Ssh { .. } => None,
         }
     }
 
@@ -40,6 +51,10 @@ impl RepoLocation {
     pub fn display(&self) -> String {
         match self {
             Self::Local(path) => path.display().to_string(),
+            Self::Ssh { host, port, path } => match port {
+                Some(port) => format!("ssh://{host}:{port}/{path}"),
+                None => format!("ssh://{host}/{path}"),
+            },
         }
     }
 }
@@ -48,6 +63,10 @@ impl fmt::Display for RepoLocation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Local(path) => write!(f, "{}", path.display()),
+            Self::Ssh { host, port, path } => match port {
+                Some(port) => write!(f, "ssh://{host}:{port}/{path}"),
+                None => write!(f, "ssh://{host}/{path}"),
+            },
         }
     }
 }
