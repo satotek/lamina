@@ -437,29 +437,29 @@ impl RepoView {
         self.is_ssh() && error.contains(strata_remote_client::UNSUPPORTED)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn diff_row_count(&self) -> usize {
         self.diff_rows.len()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn connection_lost(&self) -> bool {
         self.remote_tab.as_ref().is_some_and(|tab| tab.lost)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn connect_failure(&self) -> Option<&str> {
         self.remote_tab
             .as_ref()
             .and_then(|tab| tab.error.as_deref())
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn files_error(&self) -> Option<&str> {
         self.files_error.as_deref()
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn diff_error(&self) -> Option<&str> {
         self.diff_error.as_deref()
     }
@@ -469,7 +469,7 @@ impl RepoView {
         self.remote_tab.as_ref().is_some_and(|tab| tab.placeholder)
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn history_reset_blocked(&self) -> Option<String> {
         self.history_menu_state()
             .and_then(|state| state.blocked(super::history_ops::HistoryAction::Reset))
@@ -521,14 +521,18 @@ fn retry_button(entity: Entity<RepoView>, id: &'static str) -> impl IntoElement 
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use std::path::{Path, PathBuf};
+    #[cfg(unix)]
     use std::time::{Duration, Instant};
 
     use gpui::TestAppContext;
 
     use super::super::Launch;
     use super::super::RepoView;
-    use crate::remote_open::{RemoteLaunch, RemoteSpec, SshOverride, unavailable_reason};
+    use crate::remote_open::{RemoteLaunch, RemoteSpec};
+    #[cfg(unix)]
+    use crate::remote_open::{SshOverride, unavailable_reason};
 
     fn open_app(cx: &mut TestAppContext) {
         cx.update(|cx| {
