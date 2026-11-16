@@ -295,8 +295,8 @@ fn a_build_id_mismatch_reinstalls_once() {
     let log = fs::read_to_string(&laid.log).unwrap();
     assert_eq!(
         log.matches("cat >").count(),
-        2,
-        "upload once, then replace: {log}"
+        1,
+        "a helper answering for another build is replaced once: {log}"
     );
     let check = Command::new(&path)
         .arg("--self-check")
@@ -305,6 +305,30 @@ fn a_build_id_mismatch_reinstalls_once() {
     assert!(check.status.success());
     let stdout = String::from_utf8(check.stdout).unwrap();
     assert!(!stdout.contains("not-this-build"), "{stdout}");
+}
+
+#[test]
+fn a_current_helper_is_not_uploaded_again() {
+    let scratch = Scratch::new();
+    let laid = layout(
+        &scratch,
+        &Fake {
+            os: "Linux",
+            arch: "x86_64",
+            lie: Lie::Never,
+            override_path: None,
+        },
+    );
+    host_helper(&laid.helpers);
+    let first = install(&laid, None).expect("first install");
+    let second = install(&laid, None).expect("reconnect");
+    assert_eq!(first, second);
+    let log = fs::read_to_string(&laid.log).unwrap();
+    assert_eq!(
+        log.matches("cat >").count(),
+        1,
+        "a reconnect reuses the installed helper: {log}"
+    );
 }
 
 #[test]

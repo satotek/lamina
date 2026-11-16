@@ -244,10 +244,13 @@ fn connect_worker(spec: RemoteSpec, ssh: Option<SshOverride>, sender: UnboundedS
         askpass_program: askpass_program.clone(),
         askpass: Some(Arc::clone(&askpass)),
     };
-    if let Err(error) = install_helper(&install) {
-        let _ = sender.unbounded_send(ConnectMsg::Failed(error.to_string()));
-        return;
-    }
+    let helper = match install_helper(&install) {
+        Ok(helper) => helper,
+        Err(error) => {
+            let _ = sender.unbounded_send(ConnectMsg::Failed(error.to_string()));
+            return;
+        }
+    };
     let _ = sender.unbounded_send(ConnectMsg::Phase(ConnectPhase::Opening));
     let options = SshOptions {
         program,
@@ -262,9 +265,10 @@ fn connect_worker(spec: RemoteSpec, ssh: Option<SshOverride>, sender: UnboundedS
     let events = sender.clone();
     // The callback runs on the client's reader thread. It only enqueues.
     // Blocking here, or dropping the session here, deadlocks the read loop.
-    let connected = RemoteSession::connect_ssh(
+    let connected = RemoteSession::open_ssh(
         target,
         spec.path,
+        helper,
         move |event| {
             let _ = events.unbounded_send(ConnectMsg::Session(event));
         },

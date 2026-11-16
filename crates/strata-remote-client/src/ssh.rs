@@ -194,6 +194,55 @@ impl RemoteSession {
             },
             askpass.as_ref(),
         )?;
+        Self::attach_ssh(
+            target, repo_path, helper, on_event, options, config, askpass,
+        )
+    }
+
+    /// Opens `repo_path` with a helper that [`install_helper`] already put on
+    /// the host. A caller that reports the install as its own step uses this
+    /// so the helper is not checked and copied a second time.
+    ///
+    /// [`install_helper`]: crate::install_helper
+    pub fn open_ssh(
+        target: RemoteTarget,
+        repo_path: impl Into<String>,
+        helper: impl Into<String>,
+        on_event: impl Fn(SessionEvent) + Send + Sync + 'static,
+        options: SshOptions,
+    ) -> Result<Self> {
+        let repo_path = repo_path.into();
+        let helper = helper.into();
+        if target.host.is_empty() {
+            return Err(Error::other("the remote host is empty"));
+        }
+        if repo_path.is_empty() {
+            return Err(Error::other("the remote repository path is empty"));
+        }
+        if helper.is_empty() {
+            return Err(Error::other("the remote helper path is empty"));
+        }
+        let askpass = start_askpass(options.askpass.as_ref(), options.askpass_program.as_deref())?;
+        Self::attach_ssh(
+            target,
+            repo_path,
+            helper,
+            on_event,
+            options,
+            ClientConfig::default(),
+            askpass,
+        )
+    }
+
+    fn attach_ssh(
+        target: RemoteTarget,
+        repo_path: String,
+        helper: String,
+        on_event: impl Fn(SessionEvent) + Send + Sync + 'static,
+        options: SshOptions,
+        config: ClientConfig,
+        askpass: Option<AskpassSession>,
+    ) -> Result<Self> {
         let (reader, writer, attach) = spawn_session(
             &options.program,
             target.port,
