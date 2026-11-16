@@ -524,11 +524,6 @@ impl RepoView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Three-way blob reads are not on the helper. The button is closed;
-        // this stops a later caller from opening an empty compare.
-        if self.refuse_if_ssh(cx) {
-            return;
-        }
         let Some(reader) = self.session.as_ref().map(|session| session.reader()) else {
             return;
         };
@@ -715,10 +710,7 @@ impl RepoView {
         let compare_three = {
             let entity = entity.clone();
             let picked = history.picked.len();
-            // Picked versions are a three-way file read. The helper does not
-            // serve those blobs, so the button stays closed on a remote tab.
-            let remote = self.is_ssh();
-            let mut button = crate::ui::button(
+            crate::ui::button(
                 "file-history-compare-three",
                 t!(
                     "file_history.three_way",
@@ -730,11 +722,8 @@ impl RepoView {
             .size(crate::ui::ButtonSize::Tiny)
             .ghost()
             .icon(gpui_kit_assets::IconName::Replace)
-            .disabled(remote || picked != MAX_PICKED_VERSIONS);
-            if remote {
-                button = button.tooltip(crate::remote_open::unavailable_reason());
-            }
-            button.on_click(move |_, window, cx| {
+            .disabled(picked != MAX_PICKED_VERSIONS)
+            .on_click(move |_, window, cx| {
                 entity.update(cx, |this, cx| {
                     this.open_file_history_three_way(window, cx);
                 });

@@ -305,6 +305,12 @@ fn is_blocking_read(request: &Request) -> bool {
             | Request::FileInWorktree { .. }
             | Request::ConflictSides { .. }
             | Request::ConflictStyle
+            | Request::MergeBase { .. }
+            | Request::ThreeWayTree { .. }
+            | Request::ThreeWayBlobs { .. }
+            | Request::ThreeWayRoles { .. }
+            | Request::ThreeWaySideTree { .. }
+            | Request::CompareSideBlob { .. }
     )
 }
 
@@ -448,7 +454,13 @@ fn answer_control(shared: &Arc<ServerShared>, chunk: usize, request: Request) ->
         | Request::MergeMessage
         | Request::FileInWorktree { .. }
         | Request::ConflictSides { .. }
-        | Request::ConflictStyle => {
+        | Request::ConflictStyle
+        | Request::MergeBase { .. }
+        | Request::ThreeWayTree { .. }
+        | Request::ThreeWayBlobs { .. }
+        | Request::ThreeWayRoles { .. }
+        | Request::ThreeWaySideTree { .. }
+        | Request::CompareSideBlob { .. } => {
             // `dispatch` sends these to a worker. Reaching here is a bug.
             Response::Error(RemoteError::other(
                 "internal error: a read was handled on the request loop",
@@ -604,6 +616,109 @@ fn answer_read(reader: &Arc<dyn lamina_core::session::RepoReader>, request: Requ
         Request::ConflictStyle => Response::ConflictStyle {
             style: reader.conflict_style().into(),
         },
+        Request::MergeBase { a, b } => {
+            let result = (|| {
+                let a = proto::ObjectId::try_into(a).map_err(protocol_error)?;
+                let b = proto::ObjectId::try_into(b).map_err(protocol_error)?;
+                reader.merge_base(a, b).map_err(remote_error)
+            })();
+            match result {
+                Ok(commit) => Response::MergeBase {
+                    commit: commit.map(Into::into),
+                },
+                Err(error) => Response::Error(error),
+            }
+        }
+        Request::ThreeWayTree { left, base, right } => {
+            let result = (|| {
+                let left = proto::ObjectId::try_into(left).map_err(protocol_error)?;
+                let base = proto::ObjectId::try_into(base).map_err(protocol_error)?;
+                let right = proto::ObjectId::try_into(right).map_err(protocol_error)?;
+                reader
+                    .three_way_tree(left, base, right)
+                    .map_err(remote_error)
+            })();
+            match result {
+                Ok(tree) => Response::ThreeWayTree {
+                    tree: Box::new(proto::ThreeWayTreeCompareDto::from(&tree)),
+                },
+                Err(error) => Response::Error(error),
+            }
+        }
+        Request::ThreeWayBlobs {
+            left,
+            base,
+            right,
+            path,
+        } => {
+            let result = (|| {
+                let left = proto::ObjectId::try_into(left).map_err(protocol_error)?;
+                let base = proto::ObjectId::try_into(base).map_err(protocol_error)?;
+                let right = proto::ObjectId::try_into(right).map_err(protocol_error)?;
+                reader
+                    .three_way_blobs(left, base, right, &path)
+                    .map_err(remote_error)
+            })();
+            match result {
+                Ok(blobs) => Response::ThreeWayBlobs { blobs },
+                Err(error) => Response::Error(error),
+            }
+        }
+        Request::ThreeWayRoles { commits } => {
+            let result = (|| {
+                let commits = [
+                    proto::ObjectId::try_into(commits[0]).map_err(protocol_error)?,
+                    proto::ObjectId::try_into(commits[1]).map_err(protocol_error)?,
+                    proto::ObjectId::try_into(commits[2]).map_err(protocol_error)?,
+                ];
+                reader.three_way_roles(commits).map_err(remote_error)
+            })();
+            match result {
+                Ok(roles) => Response::ThreeWayRoles {
+                    left: roles.left.into(),
+                    base: roles.base.into(),
+                    right: roles.right.into(),
+                },
+                Err(error) => Response::Error(error),
+            }
+        }
+        Request::ThreeWaySideTree { sides } => {
+            let result = (|| {
+                let sides = [
+                    lamina_core::compare::RepoCompareSide::try_from(sides[0])
+                        .map_err(protocol_error)?,
+                    lamina_core::compare::RepoCompareSide::try_from(sides[1])
+                        .map_err(protocol_error)?,
+                    lamina_core::compare::RepoCompareSide::try_from(sides[2])
+                        .map_err(protocol_error)?,
+                ];
+                reader.three_way_side_tree(sides).map_err(remote_error)
+            })();
+            match result {
+                Ok(tree) => Response::ThreeWayTree {
+                    tree: Box::new(proto::ThreeWayTreeCompareDto::from(&tree)),
+                },
+                Err(error) => Response::Error(error),
+            }
+        }
+        Request::CompareSideBlob { side, path } => {
+            let side = match lamina_core::compare::RepoCompareSide::try_from(side) {
+                Ok(side) => side,
+                Err(error) => return Response::Error(protocol_error(error)),
+            };
+            // The worktree side joins the path onto the checkout. A commit or
+            // the index only looks the path up inside git, which cannot leave
+            // the repository.
+            if side.is_worktree()
+                && let Err(error) = require_worktree_path(&path)
+            {
+                return Response::Error(error);
+            }
+            match reader.compare_side_blob(side, &path) {
+                Ok(data) => Response::CompareSideBlob { data },
+                Err(error) => Response::Error(remote_error(error)),
+            }
+        }
         other => Response::Error(RemoteError::other(format!(
             "internal error: {other:?} is not a repository read"
         ))),

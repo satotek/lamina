@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::dto::{
     CommitDto, ConflictStyleDto, DiffOptionsDto, DiffRequestDto, DiffViewDto, FileChangeDto,
-    GraphRowDto, HeadDto, ObjectId, OperationDto, QueryEvent, QueryRequest, SnapshotDto,
-    TreeEntryDto,
+    GraphRowDto, HeadDto, ObjectId, OperationDto, QueryEvent, QueryRequest, RepoCompareSideDto,
+    SnapshotDto, ThreeWayTreeCompareDto, TreeEntryDto,
 };
 
 /// A message the app sends to the helper.
@@ -115,6 +115,38 @@ pub enum Request {
     },
     /// `merge.conflictStyle`, which only changes how unresolved text is shown.
     ConflictStyle,
+    /// The best common ancestor of `a` and `b`, when they have one.
+    MergeBase {
+        a: ObjectId,
+        b: ObjectId,
+    },
+    /// Trees of three commits, with merge-conflict marks when git can make them.
+    ThreeWayTree {
+        left: ObjectId,
+        base: ObjectId,
+        right: ObjectId,
+    },
+    /// Blob contents of `path` in three commits. `None` is a missing side.
+    ThreeWayBlobs {
+        left: ObjectId,
+        base: ObjectId,
+        right: ObjectId,
+        path: String,
+    },
+    /// Which of three commits is the base, and which stay on the sides.
+    ThreeWayRoles {
+        commits: [ObjectId; 3],
+    },
+    /// The same tree comparison when a side may be the index or the worktree.
+    ThreeWaySideTree {
+        sides: [RepoCompareSideDto; 3],
+    },
+    /// One file of a comparison side. A worktree `path` must stay inside the
+    /// repository; the helper rejects anything that would leave it.
+    CompareSideBlob {
+        side: RepoCompareSideDto,
+        path: String,
+    },
 }
 
 /// A direct answer to one [`Request`].
@@ -178,6 +210,27 @@ pub enum Response {
     },
     ConflictStyle {
         style: ConflictStyleDto,
+    },
+    MergeBase {
+        commit: Option<ObjectId>,
+    },
+    /// Used for both a commit-only tree and a mixed side tree.
+    ///
+    /// Boxed so this variant does not make every `Response` huge: the tree is
+    /// the only payload that carries a list of rows.
+    ThreeWayTree {
+        tree: Box<ThreeWayTreeCompareDto>,
+    },
+    ThreeWayBlobs {
+        blobs: [Option<Vec<u8>>; 3],
+    },
+    ThreeWayRoles {
+        left: ObjectId,
+        base: ObjectId,
+        right: ObjectId,
+    },
+    CompareSideBlob {
+        data: Option<Vec<u8>>,
     },
 }
 

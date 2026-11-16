@@ -20,11 +20,11 @@ use crate::codec::ProtocolError;
 /// `usize` counts travel as `u64` so a 32-bit and a 64-bit peer agree on the
 /// frame. A value that does not fit the local pointer width is a bad frame,
 /// not a silently truncated length.
-fn wire_count(value: usize) -> u64 {
+pub(crate) fn wire_count(value: usize) -> u64 {
     value as u64
 }
 
-fn host_count(value: u64) -> Result<usize, ProtocolError> {
+pub(crate) fn host_count(value: u64) -> Result<usize, ProtocolError> {
     usize::try_from(value).map_err(|_| ProtocolError::Malformed("integer does not fit in usize"))
 }
 
