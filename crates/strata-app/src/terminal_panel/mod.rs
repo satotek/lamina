@@ -278,7 +278,7 @@ impl TerminalPanel {
 
     /// Like [`Self::new_quiet`], but with production spawn timing so a test can
     /// observe the shell waiting for the panel's first bounds.
-    #[cfg(test)]
+    #[cfg(all(test, not(windows)))]
     pub(crate) fn new_quiet_awaiting_bounds(
         working_dir: PathBuf,
         parent_focus: FocusHandle,
