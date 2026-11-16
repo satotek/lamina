@@ -483,6 +483,8 @@ pub struct RepoView {
     /// Commit-wide added/removed counts; the details pane keeps the selected
     /// file's counts until they arrive.
     stat: details::CommitStatSlot,
+    /// The selected commit's message body, cached around the selection.
+    commit_message: details::CommitMessageSlot,
     /// The range a multi-selection compares, and its answer.
     selection_diff: selection_diff::SelectionDiff,
     signatures: signatures::SignatureTracker,
@@ -679,6 +681,7 @@ impl RepoView {
             lfs_notice: None,
             lfs_notice_dismissed: false,
             stat: details::CommitStatSlot::default(),
+            commit_message: details::CommitMessageSlot::default(),
             selection_diff: selection_diff::SelectionDiff::default(),
             signatures: signatures::SignatureTracker::default(),
             show_signatures: crate::settings::Settings::get(cx)
@@ -1948,6 +1951,7 @@ impl RepoView {
         // The range replaces the commit-wide totals, so the focused commit has
         // none to show while several rows are selected.
         self.load_commit_stat(if multi { None } else { commit }, cx);
+        self.load_commit_message(if multi { None } else { commit }, cx);
         self.load_selected_signature(commit, cx);
         self.notify_if_active(cx);
     }

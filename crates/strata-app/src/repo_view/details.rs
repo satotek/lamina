@@ -1,6 +1,7 @@
 //! The commit details column: summary, author, id and parents, the files
 //! summary and the changed-file list.
 
+use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -65,6 +66,102 @@ impl CommitStatSlot {
     }
 }
 
+/// How many recent commit messages the details column keeps. Stepping through
+/// history back and forth is the common case, so the last few are enough.
+const MESSAGE_CACHE: usize = 12;
+
+/// Lines the commit body shows before it folds. The column's width decides how
+/// many source lines fit, so the fold is a height rather than a line count.
+const BODY_COLLAPSED_LINES: usize = 6;
+
+/// The selected commit's message body, plus the recent bodies around it.
+///
+/// The history carries only summaries, so the body is read on demand. An answer
+/// that arrives for a commit the user has already left is dropped, which the
+/// epoch tells apart.
+#[derive(Default)]
+pub(super) struct CommitMessageSlot {
+    commit: Option<Oid>,
+    /// Bumped on every selection change; an answer for an older value is stale.
+    epoch: u64,
+    /// The body of `commit` once its read answered. `None` while it loads and
+    /// for a message whose whole text is the summary.
+    body: Option<Arc<str>>,
+    /// Bodies read recently, oldest first. `None` marks a message that has no
+    /// body, so revisiting it does not read it again.
+    cache: VecDeque<(Oid, Option<Arc<str>>)>,
+    /// Whether the body on screen is unfolded. Only the current commit
+    /// remembers this; the next one starts folded.
+    expanded: bool,
+}
+
+impl CommitMessageSlot {
+    /// Points the slot at `commit` and returns the read the caller has to run.
+    fn begin(&mut self, commit: Option<Oid>) -> Option<(u64, Oid)> {
+        self.epoch = self.epoch.wrapping_add(1);
+        if self.commit != commit {
+            self.expanded = false;
+        }
+        self.commit = commit;
+        self.body = None;
+        let commit = commit?;
+        match self.recall(commit) {
+            Some(body) => {
+                self.body = body;
+                None
+            }
+            None => Some((self.epoch, commit)),
+        }
+    }
+
+    fn cache_position(&self, commit: Oid) -> Option<usize> {
+        self.cache.iter().position(|(id, _)| *id == commit)
+    }
+
+    /// The cached body for `commit`, moved to the back so the least recently
+    /// used entry is the one the cache drops.
+    fn recall(&mut self, commit: Oid) -> Option<Option<Arc<str>>> {
+        let index = self.cache_position(commit)?;
+        let entry = self.cache.remove(index)?;
+        let body = entry.1.clone();
+        self.cache.push_back(entry);
+        Some(body)
+    }
+
+    fn remember(&mut self, commit: Oid, body: Option<Arc<str>>) {
+        if let Some(index) = self.cache_position(commit) {
+            self.cache.remove(index);
+        }
+        self.cache.push_back((commit, body));
+        while self.cache.len() > MESSAGE_CACHE {
+            self.cache.pop_front();
+        }
+    }
+
+    /// True when `message` was read for the commit still on screen.
+    fn accept(&mut self, epoch: u64, commit: Oid, message: &str) -> bool {
+        if self.epoch != epoch || self.commit != Some(commit) {
+            return false;
+        }
+        let body = message_body(message).map(Arc::from);
+        self.body = body.clone();
+        self.remember(commit, body);
+        true
+    }
+
+    fn body(&self) -> Option<&str> {
+        self.body.as_deref()
+    }
+
+    fn expanded(&self) -> bool {
+        self.expanded
+    }
+
+    fn toggle_expanded(&mut self) {
+        self.expanded = !self.expanded;
+    }
+}
+
 impl RepoView {
     /// Requests the selected commit's totals. The details pane keeps showing
     /// the selected file's counts until the answer arrives.
@@ -82,6 +179,39 @@ impl RepoView {
         let ticket = session.request_commit_stat(commit);
         self.stat.start(commit, ticket);
         self.notify_if_active(cx);
+    }
+
+    /// Reads the selected commit's full message off the UI thread. The details
+    /// column already has the summary; this fills in the body below it.
+    pub(super) fn load_commit_message(&mut self, commit: Option<Oid>, cx: &mut Context<Self>) {
+        let Some((epoch, commit)) = self.commit_message.begin(commit) else {
+            return;
+        };
+        // The smoke run measures the renderer, not git reads.
+        if self.smoke {
+            return;
+        }
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let repo = session.reader();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { repo.commit_message(commit) })
+                .await;
+            // A failed read leaves the summary alone; a banner is not worth a
+            // body that was only extra context.
+            if let Ok(message) = result {
+                this.update(cx, |this, cx| {
+                    if this.commit_message.accept(epoch, commit, &message) {
+                        this.notify_if_active(cx);
+                    }
+                })
+                .ok();
+            }
+        })
+        .detach();
     }
 
     /// The commit's summary, author, id and parents at the top of the details
@@ -119,7 +249,11 @@ impl RepoView {
                     .font_weight(FontWeight::SEMIBOLD)
                     .line_height(gpui::relative(1.35))
                     .child(row.summary.to_string()),
-            )
+            );
+        if let Some(body) = self.commit_message.body() {
+            block = block.child(self.commit_body(body, design));
+        }
+        block = block
             .child(
                 div()
                     .flex()
@@ -267,6 +401,66 @@ impl RepoView {
             );
         }
         block.into_any_element()
+    }
+
+    /// The body under the summary: muted wrapping plain text, folded to a few
+    /// lines until the user asks for the rest. No markdown is interpreted,
+    /// because a commit message is text rather than documentation.
+    fn commit_body(&self, body: &str, design: &Design) -> AnyElement {
+        let expanded = self.commit_message.expanded();
+        let long = body_needs_toggle(body);
+        // A fixed line height makes the folded height exactly a line count; the
+        // column's width decides how much text that height holds.
+        let line_height = design.px(18.0);
+        let mut text = div()
+            .min_w_0()
+            .text_size(design.px(12.0))
+            .line_height(line_height)
+            .text_color(design.muted)
+            .whitespace_normal()
+            .child(body.to_owned());
+        if long && !expanded {
+            text = text
+                .max_h(line_height * BODY_COLLAPSED_LINES as f32)
+                .overflow_hidden();
+        }
+
+        let copy = body.to_owned();
+        let mut footer = div().flex().items_center().gap_1().child(
+            crate::ui::icon_button("copy-commit-body", IconName::Copy)
+                .size(crate::ui::ButtonSize::Tiny)
+                .ghost()
+                .tooltip(t!("details.copy_body").to_string())
+                .on_click(move |_, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
+                }),
+        );
+        if long {
+            let label = if expanded {
+                t!("details.body_show_less").to_string()
+            } else {
+                t!("details.body_show_more").to_string()
+            };
+            let entity = self.entity();
+            footer = footer.child(
+                crate::ui::button("commit-body-toggle", label)
+                    .size(crate::ui::ButtonSize::Tiny)
+                    .ghost()
+                    .on_click(move |_, _, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.commit_message.toggle_expanded();
+                            cx.notify();
+                        });
+                    }),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap_1()
+            .child(text)
+            .child(footer)
+            .into_any_element()
     }
 
     /// The compact details block for a multi-selection. It replaces one
@@ -830,6 +1024,44 @@ fn range_note(
         .into_any_element()
 }
 
+/// The part of `message` below the summary and the blank line that separates
+/// it, with trailing whitespace removed. `None` when the whole message is its
+/// subject: git keeps everything before the first blank line as the subject, so
+/// a message without that line has no body either.
+fn message_body(message: &str) -> Option<String> {
+    let mut lines = message
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line));
+    lines.next()?;
+    lines.by_ref().find(|line| line.trim().is_empty())?;
+    // Blank lines right after the separator would draw an empty gap under the
+    // summary rather than say anything.
+    let body = lines
+        .skip_while(|line| line.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let body = body.trim_end();
+    (!body.is_empty()).then(|| body.to_owned())
+}
+
+/// Whether `body` is taller than the folded block can show.
+///
+/// The column's width changes with the split, so this assumes the narrowest
+/// column: a body that might wrap past the folded height gets the toggle
+/// instead of being cut off without a way to read the rest.
+fn body_needs_toggle(body: &str) -> bool {
+    /// Characters that fit in the narrowest details column at the body size.
+    const NARROW_COLUMN_CHARS: usize = 40;
+    let mut lines = 0;
+    for line in body.split('\n') {
+        lines += line.chars().count().div_ceil(NARROW_COLUMN_CHARS).max(1);
+        if lines > BODY_COLLAPSED_LINES {
+            return true;
+        }
+    }
+    false
+}
+
 /// The commit HEAD points at, when the source knows it.
 pub(super) fn head_oid(source: Option<&Source>) -> Option<Oid> {
     match source?.head()? {
@@ -1008,5 +1240,97 @@ mod tests {
         assert_eq!(line_counts(&file(3, 0, false)), Some((3, 0)));
         assert_eq!(line_counts(&file(0, 2, false)), Some((0, 2)));
         assert_eq!(line_counts(&file(5, 4, false)), Some((5, 4)));
+    }
+
+    #[test]
+    fn the_body_is_what_follows_the_summary_and_its_blank_line() {
+        assert_eq!(message_body("Fix the thing\n"), None);
+        assert_eq!(message_body("Fix the thing"), None);
+        assert_eq!(
+            message_body("Fix the thing\n\nWhy it broke.\nHow it changed.\n"),
+            Some("Why it broke.\nHow it changed.".to_owned())
+        );
+        assert_eq!(
+            message_body("Fix the thing\r\n\r\nWhy it broke.\r\n"),
+            Some("Why it broke.".to_owned()),
+            "a CRLF message keeps its lines without the carriage returns"
+        );
+        assert_eq!(
+            message_body("Fix the thing\n\nWhy it broke.\n\n\n"),
+            Some("Why it broke.".to_owned()),
+            "trailing blank lines are not part of the body"
+        );
+        assert_eq!(
+            message_body("Fix the thing\nWhy it broke.\n"),
+            None,
+            "without the blank separator the whole message is the subject"
+        );
+        assert_eq!(
+            message_body("Fix the thing\n\n   \n\t\n"),
+            None,
+            "a body of blanks has nothing to show"
+        );
+    }
+
+    #[test]
+    fn a_late_message_for_a_commit_the_user_left_is_dropped() {
+        let mut slot = CommitMessageSlot::default();
+        let (epoch, commit) = slot
+            .begin(Some(oid(1)))
+            .expect("a read for the first commit");
+        assert!(
+            slot.begin(Some(oid(2))).is_some(),
+            "the second commit needs its own read"
+        );
+
+        assert!(!slot.accept(epoch, commit, "one\n\nold body"));
+        assert!(slot.body().is_none(), "the stale body must not be shown");
+
+        let (epoch, commit) = slot
+            .begin(Some(oid(2)))
+            .expect("a read for the second commit");
+        assert!(slot.accept(epoch, commit, "two\n\nnew body"));
+        assert_eq!(slot.body(), Some("new body"));
+    }
+
+    #[test]
+    fn a_message_already_read_is_not_read_again() {
+        let mut slot = CommitMessageSlot::default();
+        let (epoch, commit) = slot
+            .begin(Some(oid(1)))
+            .expect("a read for the first commit");
+        assert!(slot.accept(epoch, commit, "one\n\nbody"));
+
+        assert!(slot.begin(Some(oid(2))).is_some());
+        assert!(
+            slot.begin(Some(oid(1))).is_none(),
+            "the body came from the cache instead of another read"
+        );
+        assert_eq!(slot.body(), Some("body"));
+    }
+
+    #[test]
+    fn only_the_current_commit_remembers_its_expanded_body() {
+        let mut slot = CommitMessageSlot::default();
+        let (epoch, commit) = slot
+            .begin(Some(oid(1)))
+            .expect("a read for the first commit");
+        assert!(slot.accept(epoch, commit, "one\n\nbody"));
+        slot.toggle_expanded();
+        assert!(slot.expanded());
+
+        slot.begin(Some(oid(2)));
+        assert!(!slot.expanded(), "the next commit starts folded");
+    }
+
+    #[test]
+    fn a_body_past_the_fold_gets_the_toggle() {
+        assert!(!body_needs_toggle("one\ntwo\nthree"));
+        assert!(!body_needs_toggle("one\ntwo\nthree\nfour\nfive\nsix"));
+        assert!(body_needs_toggle("one\ntwo\nthree\nfour\nfive\nsix\nseven"));
+        assert!(
+            body_needs_toggle(&"x".repeat(40 * 7)),
+            "one long paragraph that wraps past the fold gets the toggle too"
+        );
     }
 }
