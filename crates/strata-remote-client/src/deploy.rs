@@ -2,18 +2,19 @@
 //!
 //! The helper has to run on the remote machine, and this process may be a
 //! macOS or Windows build that cannot execute a Linux binary. Release builds
-//! therefore cross-compile `strata-remote` ahead of time and the client only
-//! uploads the matching file. Packaging those binaries into the app is not
-//! done here. A release needs:
+//! therefore ship prebuilt `strata-remote` binaries and this crate only
+//! uploads the matching file:
 //!
 //! - `strata-remote` built for `x86_64-unknown-linux-musl` and
 //!   `aarch64-unknown-linux-musl`, with the same `STRATA_BUILD_ID` as the app
 //!   (the id is `version+STRATA_BUILD_ID`, or `version+dev` when it is unset).
-//!   musl is what lets the helper start without the build machine's libc.
+//!   musl is what lets the helper start without the host's libc.
 //! - Files named `strata-remote-<target>` in one directory. The app looks in
 //!   `remote-helpers/` next to its own executable when [`HELPER_DIR_ENV`] is
-//!   unset (that is where a release build places them; packaging the binaries
-//!   is a separate step) and otherwise uses the directory the variable names.
+//!   unset. A release archive puts that directory there (on macOS it is a
+//!   symlink to the copies under `Contents/Resources`, because an ad-hoc
+//!   signature cannot cover a Linux binary placed directly in `Contents/MacOS`).
+//!   Otherwise the variable names the directory.
 //! - No other operating system or architecture: the client reports an error
 //!   instead of compiling on the host.
 //!
