@@ -272,6 +272,7 @@ fn group_key(group: Group) -> &'static str {
         Group::Application => "application",
         Group::Zoom => "zoom",
         Group::Shortcuts => "shortcuts",
+        Group::Terminal => "terminal",
     }
 }
 
@@ -291,6 +292,7 @@ fn group_title(group: Group) -> String {
         Group::Application => t!("shortcuts.group.application"),
         Group::Zoom => t!("shortcuts.group.zoom"),
         Group::Shortcuts => t!("shortcuts.group.shortcuts"),
+        Group::Terminal => t!("shortcuts.group.terminal"),
     }
     .to_string()
 }

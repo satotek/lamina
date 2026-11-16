@@ -50,10 +50,11 @@ pub enum Group {
     Application,
     Zoom,
     Shortcuts,
+    Terminal,
 }
 
 /// Every group, in registration order.
-pub const GROUP_ORDER: [Group; 14] = [
+pub const GROUP_ORDER: [Group; 15] = [
     Group::Actions,
     Group::Settings,
     Group::GitConfig,
@@ -68,6 +69,7 @@ pub const GROUP_ORDER: [Group; 14] = [
     Group::Application,
     Group::Zoom,
     Group::Shortcuts,
+    Group::Terminal,
 ];
 
 /// One default binding of an action.
@@ -162,8 +164,6 @@ macro_rules! action {
     };
 }
 
-#[cfg(feature = "terminal")]
-use crate::actions::ToggleTerminal;
 use crate::actions::{
     ApplyPatch, CloneRepository, CloseCompare, CloseTab, ExtendSelectionNext,
     ExtendSelectionPrevious, GoToChild, GoToHead, GoToParent, GoToSecondParent, NavigateBack,
@@ -173,6 +173,10 @@ use crate::actions::{
     SelectPrevious, SelectTab1, SelectTab2, SelectTab3, SelectTab4, SelectTab5, SelectTab6,
     SelectTab7, SelectTab8, SelectTab9, StashChanges, SwitchBranch, ToggleDetailsMaximized,
     ToggleFrameStats, TogglePalette, ToggleSidebar, ToggleWholeFile, UndoLastAction, WORKSPACE,
+};
+#[cfg(feature = "terminal")]
+use crate::actions::{
+    CloseTerminalTab, NewTerminalTab, NextTerminalTab, PreviousTerminalTab, ToggleTerminal,
 };
 use crate::branch_switcher::{
     BranchSwitcherConfirm, BranchSwitcherDismiss, BranchSwitcherNext, BranchSwitcherPrevious,
@@ -216,6 +220,8 @@ const PICKER_DIALOG: &str = "PickerDialog";
 const PICKER_DIALOG_LIST: &str = "PickerDialog && !Input";
 const PALETTE_FIELD: &str = "Palette > Input";
 const SHORTCUTS_FIELD: &str = "ShortcutsDialog > Input";
+#[cfg(feature = "terminal")]
+const TERMINAL_PANEL: &str = "TerminalPanel";
 
 /// Every bindable action, in registration order.
 ///
@@ -1213,6 +1219,43 @@ pub static ACTIONS: &[ActionSpec] = &[
         DismissShortcuts,
         [binding("escape", Some(SHORTCUTS_FIELD))]
     ),
+    // --- terminal_panel::bind --------------------------------------------
+    #[cfg(feature = "terminal")]
+    action!(
+        "strata::NewTerminalTab",
+        "New terminal tab",
+        Terminal,
+        Some(TERMINAL_PANEL),
+        NewTerminalTab,
+        [binding("ctrl-shift-n", Some(TERMINAL_PANEL))]
+    ),
+    #[cfg(feature = "terminal")]
+    action!(
+        "strata::CloseTerminalTab",
+        "Close terminal tab",
+        Terminal,
+        Some(TERMINAL_PANEL),
+        CloseTerminalTab,
+        [binding("ctrl-shift-w", Some(TERMINAL_PANEL))]
+    ),
+    #[cfg(feature = "terminal")]
+    action!(
+        "strata::NextTerminalTab",
+        "Next terminal tab",
+        Terminal,
+        Some(TERMINAL_PANEL),
+        NextTerminalTab,
+        [binding("ctrl-shift-right", Some(TERMINAL_PANEL))]
+    ),
+    #[cfg(feature = "terminal")]
+    action!(
+        "strata::PreviousTerminalTab",
+        "Previous terminal tab",
+        Terminal,
+        Some(TERMINAL_PANEL),
+        PreviousTerminalTab,
+        [binding("ctrl-shift-left", Some(TERMINAL_PANEL))]
+    ),
 ];
 
 /// Looks up an action by its full name or its short one, ignoring case.
@@ -2201,6 +2244,14 @@ mod tests {
             ("secondary-0", "ResetZoom", ""),
             ("secondary-/", "ShowKeyboardShortcuts", ""),
             ("escape", "DismissShortcuts", "ShortcutsDialog > Input"),
+            #[cfg(feature = "terminal")]
+            ("ctrl-shift-n", "NewTerminalTab", "TerminalPanel"),
+            #[cfg(feature = "terminal")]
+            ("ctrl-shift-w", "CloseTerminalTab", "TerminalPanel"),
+            #[cfg(feature = "terminal")]
+            ("ctrl-shift-right", "NextTerminalTab", "TerminalPanel"),
+            #[cfg(feature = "terminal")]
+            ("ctrl-shift-left", "PreviousTerminalTab", "TerminalPanel"),
         ];
 
         // The groups are stored in one array; comparing the full dump fails

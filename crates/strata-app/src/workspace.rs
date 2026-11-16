@@ -1211,6 +1211,13 @@ fn on_workspace_released(window_id: WindowId, cx: &mut App) {
 /// Takes the slot's [`Session`] out and drops it on a background thread so
 /// closing or replacing a tab never blocks the UI thread on worker shutdown.
 fn detach_and_drop_slot(slot: RepoSlot, cx: &mut App) {
+    #[cfg(feature = "terminal")]
+    if let Some(terminal) = slot.view.update(cx, |view, _| {
+        view.terminal_open = false;
+        view.terminal.take()
+    }) {
+        terminal.update(cx, |panel, _| panel.close_all_sessions());
+    }
     if let Some(session) = slot.view.update(cx, |view, _| view.detach_session()) {
         crate::repo_view::drop_session_in_background(session);
     }
@@ -1897,5 +1904,183 @@ mod tests {
             drop(view);
             panic!("closing last tab kept RepoView alive (has_session={has_session})");
         }
+    }
+
+    #[cfg(all(not(windows), feature = "terminal"))]
+    #[gpui::test]
+    fn workspace_tabs_preserve_terminal_sessions_on_switch_and_kill_on_close(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use std::time::{Duration, Instant};
+
+        fn pid_alive(pid: u32) -> bool {
+            Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        }
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let alpha_dir = temp.path().join("alpha");
+        let beta_dir = temp.path().join("beta");
+        let config_dir = temp.path().join("config");
+
+        init_repo_with_commit(&alpha_dir);
+        init_repo_with_commit(&beta_dir);
+
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            gpui_component::init(cx);
+            let mut settings = Settings::default();
+            settings.tools.embedded_shell = Some("/bin/sh -c \"sleep 30\"".to_owned());
+            cx.set_global(settings);
+            crate::actions::bind(cx);
+            crate::terminal_panel::bind(cx);
+        });
+
+        let workspace_cell: std::rc::Rc<std::cell::RefCell<Option<Entity<Workspace>>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
+        let workspace_cell_init = workspace_cell.clone();
+        let initial_launch = Launch::open_quiet(&alpha_dir, None);
+        let config_dir_for_ws = config_dir.clone();
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), move |window, cx| {
+                    let workspace = cx.new(|cx| {
+                        let mut ws = Workspace::new(Some(initial_launch), window, cx);
+                        ws.recent_dir = Some(config_dir_for_ws.clone());
+                        ws.launch_repo = Launch::open_quiet;
+                        ws
+                    });
+                    *workspace_cell_init.borrow_mut() = Some(workspace.clone());
+                    cx.new(|cx| Root::new(workspace, window, cx))
+                })
+            })
+            .expect("open window");
+        let mut visual_cx = VisualTestContext::from_window(window.into(), cx);
+        visual_cx.run_until_parked();
+
+        let workspace = workspace_cell.borrow().clone().expect("workspace created");
+
+        // Open terminal in alpha and create 2 terminal tabs.
+        let alpha_pids = visual_cx.update(|window, cx| {
+            let Content::Tabs(deck) = &workspace.read(cx).content else {
+                panic!("expected repo tabs");
+            };
+            let alpha_view = deck.active().expect("alpha active").view.clone();
+            alpha_view.update(cx, |view, cx| {
+                view.quiet_terminal = true;
+                view.toggle_terminal(window, cx);
+            });
+            let panel = alpha_view
+                .read(cx)
+                .terminal
+                .clone()
+                .expect("alpha terminal created");
+            panel.update(cx, |p, cx| p.new_tab(window, cx));
+            assert_eq!(panel.read(cx).tab_count(), 2);
+            panel
+                .read(cx)
+                .tab_child_pids()
+                .into_iter()
+                .map(|p| p.expect("alpha terminal pid"))
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(alpha_pids.len(), 2);
+
+        // Open beta in a second repository tab with 1 terminal tab.
+        visual_cx.update(|window, cx| {
+            workspace
+                .update(cx, |ws, cx| ws.open_path_in_new_tab(&beta_dir, window, cx))
+                .expect("open beta tab");
+        });
+        visual_cx.run_until_parked();
+
+        let beta_pid = visual_cx.update(|window, cx| {
+            let Content::Tabs(deck) = &workspace.read(cx).content else {
+                panic!("expected repo tabs");
+            };
+            let beta_view = deck.active().expect("beta active").view.clone();
+            beta_view.update(cx, |view, cx| {
+                view.quiet_terminal = true;
+                view.toggle_terminal(window, cx);
+            });
+            let panel = beta_view
+                .read(cx)
+                .terminal
+                .clone()
+                .expect("beta terminal created");
+            assert_eq!(panel.read(cx).tab_count(), 1);
+            panel.read(cx).active_child_pid().expect("beta pid")
+        });
+
+        // Switch away to alpha and back to beta: all sessions must survive.
+        visual_cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            window.dispatch_action(Box::new(PreviousTab), cx);
+        });
+        visual_cx.run_until_parked();
+        for pid in alpha_pids.iter().chain(std::iter::once(&beta_pid)) {
+            assert!(
+                pid_alive(*pid),
+                "switching repository tabs must not kill terminal PID {pid}"
+            );
+        }
+        visual_cx.update(|_, cx| {
+            let Content::Tabs(deck) = &workspace.read(cx).content else {
+                panic!("expected repo tabs");
+            };
+            let alpha_view = &deck.items()[0].view;
+            let beta_view = &deck.items()[1].view;
+            assert_eq!(
+                alpha_view
+                    .read(cx)
+                    .terminal
+                    .as_ref()
+                    .expect("alpha terminal")
+                    .read(cx)
+                    .tab_count(),
+                2
+            );
+            assert_eq!(
+                beta_view
+                    .read(cx)
+                    .terminal
+                    .as_ref()
+                    .expect("beta terminal")
+                    .read(cx)
+                    .tab_count(),
+                1
+            );
+        });
+
+        // Close beta repository tab: beta's terminal PTY must terminate, alpha's must stay alive.
+        visual_cx.update(|window, cx| {
+            workspace.update(cx, |ws, cx| ws.close_tab(1, window, cx));
+        });
+        visual_cx.run_until_parked();
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while Instant::now() < deadline && pid_alive(beta_pid) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            !pid_alive(beta_pid),
+            "closing repository tab must kill its terminal PTY session"
+        );
+        for pid in &alpha_pids {
+            assert!(
+                pid_alive(*pid),
+                "closing another repository tab must keep surviving tab's terminal PID {pid} alive"
+            );
+        }
+
+        // Clean up remaining tab + window.
+        window
+            .update(&mut visual_cx, |_, window, _| window.remove_window())
+            .expect("close test window");
+        visual_cx.run_until_parked();
     }
 }

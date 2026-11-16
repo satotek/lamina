@@ -28,6 +28,9 @@ use crate::style::Design;
 /// the content below.
 pub const TAB_STRIP_HEIGHT: f32 = 32.0;
 
+/// Slimmer height for secondary tab strips such as the embedded terminal panel.
+pub const COMPACT_TAB_STRIP_HEIGHT: f32 = 28.0;
+
 #[derive(Clone)]
 struct DraggedTab {
     index: usize,
@@ -55,16 +58,25 @@ impl Render for DraggedTab {
 /// The horizontal container sitting directly below the title bar when
 /// multiple repository tabs are open.
 pub fn tab_strip(id: impl Into<ElementId>, design: &Design) -> Stateful<Div> {
+    tab_strip_sized(id, TAB_STRIP_HEIGHT, design).px_2()
+}
+
+/// A slimmer horizontal tab strip for panel headers such as the terminal panel.
+#[cfg_attr(not(feature = "terminal"), allow(dead_code))]
+pub fn compact_tab_strip(id: impl Into<ElementId>, design: &Design) -> Stateful<Div> {
+    tab_strip_sized(id, COMPACT_TAB_STRIP_HEIGHT, design).px_1()
+}
+
+fn tab_strip_sized(id: impl Into<ElementId>, height: f32, design: &Design) -> Stateful<Div> {
     div()
         .id(id)
         .relative()
         .flex()
         .flex_none()
         .items_end()
-        .h(design.px(TAB_STRIP_HEIGHT))
+        .h(design.px(height))
         .w_full()
         .overflow_x_scroll()
-        .px_2()
         .bg(design.chrome)
         // Drawn before the tabs, so an opaque tab fill hides the rule under
         // itself while the transparent inactive ones show it through.
@@ -116,15 +128,18 @@ type SelectHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
 type CloseHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 type ReorderHandler = Rc<dyn Fn(usize, usize, &mut Window, &mut App)>;
 
-/// One repository tab inside [`tab_strip`].
+/// One tab inside [`tab_strip`] or [`compact_tab_strip`].
 #[derive(IntoElement)]
 pub struct UiTab {
     id: ElementId,
     index: usize,
     label: SharedString,
     active: bool,
+    compact: bool,
     busy: bool,
     separator: bool,
+    always_show_close: bool,
+    active_bg: Option<Hsla>,
     tooltip: Option<SharedString>,
     hint: Option<SharedString>,
     on_select: Option<SelectHandler>,
@@ -146,8 +161,11 @@ pub fn tab(
         index,
         label: label.into(),
         active,
+        compact: false,
         busy: false,
         separator: false,
+        always_show_close: false,
+        active_bg: None,
         tooltip: None,
         hint: None,
         on_select: None,
@@ -158,6 +176,24 @@ pub fn tab(
 }
 
 impl UiTab {
+    #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
+    pub fn compact(mut self, compact: bool) -> Self {
+        self.compact = compact;
+        self
+    }
+
+    #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
+    pub fn active_bg(mut self, bg: Hsla) -> Self {
+        self.active_bg = Some(bg);
+        self
+    }
+
+    #[cfg_attr(not(feature = "terminal"), allow(dead_code))]
+    pub fn always_show_close(mut self, show: bool) -> Self {
+        self.always_show_close = show;
+        self
+    }
+
     pub fn busy(mut self, busy: bool) -> Self {
         self.busy = busy;
         self
@@ -210,8 +246,26 @@ impl RenderOnce for UiTab {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let colors = self.colors;
         let index = self.index;
-        let group: SharedString = format!("ui-tab-group-{index}").into();
+        let scope = if self.compact {
+            "compact-tab"
+        } else {
+            "ui-tab"
+        };
+        let group: SharedString = format!("{scope}-group-{index}").into();
         let label = self.label.clone();
+
+        let (height, min_w, max_w, gap, font_size, close_box) = if self.compact {
+            (
+                COMPACT_TAB_STRIP_HEIGHT,
+                72.0,
+                180.0,
+                4.0,
+                colors.font_size - 0.5 * colors.zoom,
+                16.0,
+            )
+        } else {
+            (TAB_STRIP_HEIGHT, 96.0, 220.0, 6.0, colors.font_size, 18.0)
+        };
 
         // The transparent top border reserves the accent line's 2 px so the
         // label does not move when the tab becomes active.
@@ -222,18 +276,18 @@ impl RenderOnce for UiTab {
             .flex()
             .flex_none()
             .items_center()
-            .gap(colors.px(6.0))
-            .h(colors.px(TAB_STRIP_HEIGHT))
-            .min_w(colors.px(96.0))
-            .max_w(colors.px(220.0))
-            .px_3()
+            .gap(colors.px(gap))
+            .h(colors.px(height))
+            .min_w(colors.px(min_w))
+            .max_w(colors.px(max_w))
+            .px(colors.px(if self.compact { 8.0 } else { 12.0 }))
             .border_t(px(2.0))
             .border_color(Hsla::transparent_black())
             .cursor_pointer()
-            .text_size(px(colors.font_size));
+            .text_size(px(font_size));
 
         tab = if self.active {
-            tab.bg(colors.background)
+            tab.bg(self.active_bg.unwrap_or(colors.background))
                 .border_color(colors.accent)
                 .text_color(colors.text)
                 .font_weight(FontWeight::MEDIUM)
@@ -244,12 +298,13 @@ impl RenderOnce for UiTab {
         };
 
         if self.separator {
+            let inset = if self.compact { 6.0 } else { 8.0 };
             tab = tab.child(
                 div()
                     .absolute()
                     .left_0()
-                    .top(colors.px(8.0))
-                    .bottom(colors.px(8.0))
+                    .top(colors.px(inset))
+                    .bottom(colors.px(inset))
                     .w(px(1.0))
                     .bg(colors.border),
             );
@@ -328,7 +383,7 @@ impl RenderOnce for UiTab {
         if self.busy {
             tab = tab.child(
                 div()
-                    .id(("ui-tab-busy", index))
+                    .id((SharedString::from(format!("{scope}-busy")), index))
                     .flex_none()
                     .w(colors.px(6.0))
                     .h(colors.px(6.0))
@@ -339,17 +394,17 @@ impl RenderOnce for UiTab {
 
         if let Some(on_close) = self.on_close {
             let close = div()
-                .id(("ui-tab-close", index))
+                .id((SharedString::from(format!("{scope}-close")), index))
                 .flex()
                 .flex_none()
                 .items_center()
                 .justify_center()
-                .w(colors.px(18.0))
-                .h(colors.px(18.0))
+                .w(colors.px(close_box))
+                .h(colors.px(close_box))
                 .rounded(colors.px(4.0))
-                .text_size(px(colors.font_size + colors.zoom))
+                .text_size(px(font_size + colors.zoom))
                 .text_color(colors.muted)
-                .when(!self.active, |close| {
+                .when(!self.active && !self.always_show_close, |close| {
                     close
                         .opacity(0.0)
                         .group_hover(group, |style| style.opacity(1.0))

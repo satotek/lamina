@@ -1006,11 +1006,22 @@ impl RepoView {
     #[cfg(feature = "terminal")]
     pub(crate) fn toggle_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.terminal_open {
-            self.close_terminal(window, cx);
+            self.close_terminal_with_reason(
+                crate::terminal_panel::TerminalCloseReason::Hide,
+                window,
+                cx,
+            );
             return;
         }
         if self.error.is_some() {
             return;
+        }
+        if self
+            .terminal
+            .as_ref()
+            .is_some_and(|panel| panel.read(cx).is_empty())
+        {
+            self.terminal.take();
         }
         if self.terminal.is_none() {
             let Some(dir) = self.terminal_working_dir() else {
@@ -1018,9 +1029,12 @@ impl RepoView {
             };
             let parent_focus = self.focus.clone();
             let weak = self.entity.clone();
-            let on_close: crate::terminal_panel::CloseHandler = Rc::new(move |window, cx| {
-                let _ = weak.update(cx, |this, cx| this.close_terminal(window, cx));
-            });
+            let on_close: crate::terminal_panel::CloseHandler =
+                Rc::new(move |reason, window, cx| {
+                    let _ = weak.update(cx, |this, cx| {
+                        this.close_terminal_with_reason(reason, window, cx)
+                    });
+                });
             #[cfg(test)]
             let quiet = self.quiet_terminal;
             let panel = cx.new(|cx| {
@@ -1053,7 +1067,18 @@ impl RepoView {
     }
 
     #[cfg(feature = "terminal")]
-    pub(crate) fn close_terminal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn close_terminal_with_reason(
+        &mut self,
+        reason: crate::terminal_panel::TerminalCloseReason,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(
+            reason,
+            crate::terminal_panel::TerminalCloseReason::LastTabClosed
+        ) {
+            self.terminal.take();
+        }
         if !self.terminal_open {
             return;
         }

@@ -127,6 +127,14 @@ actions!(
     [
         /// Opens or closes the embedded terminal panel for the active tab.
         ToggleTerminal,
+        /// Opens a new session tab inside the embedded terminal panel.
+        NewTerminalTab,
+        /// Closes the active session tab inside the embedded terminal panel.
+        CloseTerminalTab,
+        /// Switches to the next session tab inside the embedded terminal panel.
+        NextTerminalTab,
+        /// Switches to the previous session tab inside the embedded terminal panel.
+        PreviousTerminalTab,
     ]
 );
 
