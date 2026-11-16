@@ -11,7 +11,7 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, FocusHandle, FontWeight, InteractiveElement as _,
+    AnyElement, App, ClickEvent, ElementId, FocusHandle, FontWeight, Hsla, InteractiveElement as _,
     IntoElement, ParentElement as _, RenderOnce, SharedString, StatefulInteractiveElement as _,
     StyleRefinement, Styled, Window, div, px,
 };
@@ -51,6 +51,21 @@ pub enum ButtonSize {
 }
 
 type ClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+
+/// How much of the muted colour a disabled ghost button keeps.
+///
+/// A ghost button has no fill to dim, so its label and icon are the only thing
+/// telling the user it is inert. The component's disabled foreground is the
+/// muted colour at this opacity; it is applied again here because the ghost
+/// variant otherwise keeps text close enough to the normal colour to read as
+/// enabled at rest. It matches the muted disabled primary and normal buttons
+/// beside it.
+pub(crate) const DISABLED_GHOST_OPACITY: f32 = 0.5;
+
+/// The label and icon colour of a disabled ghost button.
+pub(crate) fn disabled_ghost_foreground(muted: Hsla) -> Hsla {
+    muted.opacity(DISABLED_GHOST_OPACITY)
+}
 
 /// A button built from a [`ButtonKind`] and a [`ButtonSize`].
 ///
@@ -327,7 +342,14 @@ impl RenderOnce for UiButton {
         } else {
             children
         };
-        button.children(children).refine_style(&style)
+        button.children(children).refine_style(&style).when(
+            disabled && matches!(kind, ButtonKind::Ghost),
+            |button| {
+                button
+                    .text_color(disabled_ghost_foreground(cx.theme().muted_foreground))
+                    .cursor_not_allowed()
+            },
+        )
     }
 }
 
@@ -454,5 +476,28 @@ impl RenderOnce for ActionTile {
             .when_some(self.on_click, |tile, on_click| {
                 tile.on_click(move |event, window, cx| on_click(event, window, cx))
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::style::Design;
+
+    #[test]
+    fn a_disabled_ghost_button_uses_the_muted_colour() {
+        let design = Design::default();
+        let disabled = disabled_ghost_foreground(design.muted);
+        assert_eq!(disabled.h, design.muted.h);
+        assert_eq!(disabled.s, design.muted.s);
+        assert_eq!(disabled.l, design.muted.l);
+        assert!(
+            disabled.a < 1.0,
+            "the label must be dimmer than an enabled ghost button"
+        );
+        assert_ne!(
+            disabled, design.text,
+            "a disabled ghost must not keep the enabled label colour"
+        );
     }
 }
