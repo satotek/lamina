@@ -44,7 +44,13 @@ pub fn build_id() -> String {
 
 struct ServerShared {
     /// `None` until `Session::open` returns, and again once shutdown starts.
-    session: Mutex<Option<Session>>,
+    ///
+    /// An `Arc` so a request can clone it and drop the mutex before `run_as`.
+    /// Holding the mutex across `run_as` deadlocks: the worker publishes a
+    /// snapshot, and that publish locks this mutex again. The clone lives only
+    /// for the send. A worker must not keep it, because `Session`'s drop joins
+    /// the workers.
+    session: Mutex<Option<Arc<Session>>>,
     outbox: Arc<Outbox>,
     /// Maps between the client's diff tickets and the local session's tickets.
     diff_routes: Mutex<DiffRoutes>,
@@ -188,7 +194,7 @@ fn serve_chunked(
     let session = Session::open(&root, move |event| {
         on_session_event(&callback_shared, chunk_size, event);
     })?;
-    *lock(&shared.session) = Some(session);
+    *lock(&shared.session) = Some(Arc::new(session));
 
     while let Some(frame) = proto::read_frame(&mut reader)? {
         let stream = frame.stream;
@@ -279,6 +285,9 @@ fn is_blocking_read(request: &Request) -> bool {
             | Request::BlobAt { .. }
             | Request::CommitMessage { .. }
             | Request::Parents { .. }
+            | Request::CommitsBetween { .. }
+            | Request::IsAncestor { .. }
+            | Request::MergeMessage
     )
 }
 
@@ -392,11 +401,40 @@ fn answer_control(shared: &Arc<ServerShared>, chunk: usize, request: Request) ->
         | Request::TreeEntries { .. }
         | Request::BlobAt { .. }
         | Request::CommitMessage { .. }
-        | Request::Parents { .. } => {
+        | Request::Parents { .. }
+        | Request::CommitsBetween { .. }
+        | Request::IsAncestor { .. }
+        | Request::MergeMessage => {
             // `dispatch` sends these to a worker. Reaching here is a bug.
             Response::Error(RemoteError::other(
                 "internal error: a read was handled on the request loop",
             ))
+        }
+        Request::Run { id, operation } => {
+            let session = Arc::clone(session);
+            drop(guard);
+            let operation = match lamina_core::session::Operation::try_from(operation) {
+                Ok(operation) => operation,
+                Err(error) => {
+                    return Some(Response::Error(protocol_error(error)));
+                }
+            };
+            session.run_as(lamina_core::session::OperationId(id), operation);
+            Response::Ok
+        }
+        Request::CancelOperation { id } => {
+            let session = Arc::clone(session);
+            drop(guard);
+            session.cancel_operation(lamina_core::session::OperationId(id));
+            Response::Ok
+        }
+        Request::AnswerAskpass { id, answer } => {
+            let session = Arc::clone(session);
+            drop(guard);
+            // `answer` is the secret when the prompt said so. It is handed to
+            // the waiting git child and must not be logged.
+            let _ = session.answer_askpass(lamina_core::session::OperationId(id), answer);
+            Response::Ok
         }
     })
 }
@@ -460,6 +498,39 @@ fn answer_read(reader: &Arc<dyn lamina_core::session::RepoReader>, request: Requ
                 Err(error) => Response::Error(error),
             }
         }
+        Request::CommitsBetween { base, tip } => {
+            let result = (|| {
+                let base = proto::ObjectId::try_into(base).map_err(protocol_error)?;
+                let tip = proto::ObjectId::try_into(tip).map_err(protocol_error)?;
+                reader.commits_between(base, tip).map_err(remote_error)
+            })();
+            match result {
+                Ok(commits) => Response::CommitsBetween {
+                    commits: commits.into_iter().map(Into::into).collect(),
+                },
+                Err(error) => Response::Error(error),
+            }
+        }
+        Request::IsAncestor {
+            ancestor,
+            descendant,
+        } => {
+            let result = (|| {
+                let ancestor = proto::ObjectId::try_into(ancestor).map_err(protocol_error)?;
+                let descendant = proto::ObjectId::try_into(descendant).map_err(protocol_error)?;
+                reader
+                    .is_ancestor(ancestor, descendant)
+                    .map_err(remote_error)
+            })();
+            match result {
+                Ok(yes) => Response::IsAncestor { yes },
+                Err(error) => Response::Error(error),
+            }
+        }
+        Request::MergeMessage => match reader.merge_message() {
+            Ok(message) => Response::MergeMessage { message },
+            Err(error) => Response::Error(remote_error(error)),
+        },
         other => Response::Error(RemoteError::other(format!(
             "internal error: {other:?} is not a repository read"
         ))),
@@ -509,8 +580,45 @@ fn on_session_event(shared: &Arc<ServerShared>, chunk: usize, event: SessionEven
         SessionEvent::LoadFailed { error } => {
             push_high(shared, 0, &Message::Event(Event::LoadFailed { error }));
         }
-        // Operations, progress and queries are outside this slice; the client
-        // never asks for them, so nothing is forwarded.
+        SessionEvent::OperationStarted { id } => {
+            push_high(
+                shared,
+                0,
+                &Message::Event(Event::OperationStarted { id: id.0 }),
+            );
+        }
+        SessionEvent::OperationProgress { id, text, percent } => {
+            push_high(
+                shared,
+                0,
+                &Message::Event(Event::OperationProgress {
+                    id: id.0,
+                    text,
+                    percent,
+                }),
+            );
+        }
+        SessionEvent::OperationFinished { id, error } => {
+            push_high(
+                shared,
+                0,
+                &Message::Event(Event::OperationFinished { id: id.0, error }),
+            );
+        }
+        SessionEvent::AskpassPrompt { id, prompt, secret } => {
+            // The prompt text is not the answer. The answer only travels back
+            // as `AnswerAskpass`, and this callback must not log either.
+            push_high(
+                shared,
+                0,
+                &Message::Event(Event::AskpassPrompt {
+                    id: id.0,
+                    prompt,
+                    secret,
+                }),
+            );
+        }
+        // Queries stay on the client. Nothing here asks for them.
         _ => {}
     }
 }

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::dto::{
     CommitDto, DiffOptionsDto, DiffRequestDto, DiffViewDto, FileChangeDto, GraphRowDto, HeadDto,
-    ObjectId, SnapshotDto, TreeEntryDto,
+    ObjectId, OperationDto, SnapshotDto, TreeEntryDto,
 };
 
 /// A message the app sends to the helper.
@@ -58,6 +58,38 @@ pub enum Request {
     CancelDiff {
         ticket: u64,
     },
+    /// Run a mutation. Progress and the outcome arrive as events carrying `id`,
+    /// which is the client's operation id so both sides name the same job.
+    Run {
+        id: u64,
+        operation: OperationDto,
+    },
+    /// Kill the git child of a running operation, or skip it if it has not
+    /// started yet.
+    CancelOperation {
+        id: u64,
+    },
+    /// Answer a credential or host-key prompt. `None` cancels it.
+    ///
+    /// The answer is a secret whenever the prompt said so. It must not be
+    /// written to a log.
+    AnswerAskpass {
+        id: u64,
+        answer: Option<String>,
+    },
+    /// Commits reachable from `tip` but not from `base`, oldest first.
+    /// A rebase confirmation uses this to name the commits it would replay.
+    CommitsBetween {
+        base: ObjectId,
+        tip: ObjectId,
+    },
+    /// Whether `ancestor` is an ancestor of `descendant`.
+    IsAncestor {
+        ancestor: ObjectId,
+        descendant: ObjectId,
+    },
+    /// The message git prepared for an in-progress merge, when there is one.
+    MergeMessage,
 }
 
 /// A direct answer to one [`Request`].
@@ -101,6 +133,15 @@ pub enum Response {
     /// request has one.
     Ok,
     Error(RemoteError),
+    CommitsBetween {
+        commits: Vec<ObjectId>,
+    },
+    IsAncestor {
+        yes: bool,
+    },
+    MergeMessage {
+        message: Option<String>,
+    },
 }
 
 /// An asynchronous update the helper pushes to the app.
@@ -129,6 +170,30 @@ pub enum Event {
     /// The helper could not read the repository (deleted, permissions, ...).
     LoadFailed {
         error: String,
+    },
+    OperationStarted {
+        id: u64,
+    },
+    /// A progress line from the git child. `percent` is set when the line
+    /// carries one.
+    OperationProgress {
+        id: u64,
+        text: String,
+        percent: Option<u8>,
+    },
+    /// `error` is git's stderr when the command failed, or a cancel message.
+    OperationFinished {
+        id: u64,
+        error: Option<String>,
+    },
+    /// A credential or host-key question raised by git on the helper.
+    ///
+    /// `secret` is true when the answer must be masked. The answer itself
+    /// travels back as [`Request::AnswerAskpass`] and is never an event.
+    AskpassPrompt {
+        id: u64,
+        prompt: String,
+        secret: bool,
     },
 }
 

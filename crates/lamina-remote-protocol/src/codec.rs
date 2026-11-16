@@ -395,6 +395,27 @@ mod tests {
                 },
             },
             Request::CancelDiff { ticket: 7 },
+            Request::Run {
+                id: 3,
+                operation: crate::dto::OperationDto::Commit {
+                    message: "subject".into(),
+                    amend: false,
+                },
+            },
+            Request::CancelOperation { id: 3 },
+            Request::AnswerAskpass {
+                id: 3,
+                answer: Some("not-logged".into()),
+            },
+            Request::CommitsBetween {
+                base: oid,
+                tip: oid,
+            },
+            Request::IsAncestor {
+                ancestor: oid,
+                descendant: oid,
+            },
+            Request::MergeMessage,
         ];
         for request in requests {
             let mut bytes = Vec::new();
@@ -443,6 +464,11 @@ mod tests {
             Response::Parents { parents: vec![oid] },
             Response::Ok,
             Response::Error(RemoteError::other("nope")),
+            Response::CommitsBetween { commits: vec![oid] },
+            Response::IsAncestor { yes: true },
+            Response::MergeMessage {
+                message: Some("Merge branch 'feature'".into()),
+            },
         ];
         for response in responses {
             let mut bytes = Vec::new();
@@ -471,6 +497,18 @@ mod tests {
             Event::LoadFailed {
                 error: "deleted".into(),
             },
+            Event::OperationStarted { id: 3 },
+            Event::OperationProgress {
+                id: 3,
+                text: "Receiving objects: 45%".into(),
+                percent: Some(45),
+            },
+            Event::OperationFinished { id: 3, error: None },
+            Event::AskpassPrompt {
+                id: 3,
+                prompt: "Password: ".into(),
+                secret: true,
+            },
         ];
         for event in events {
             let mut bytes = Vec::new();
@@ -486,5 +524,12 @@ mod tests {
     #[test]
     fn serializable_helper_is_instantiated() {
         _assert_serializable::<Message>();
+    }
+
+    #[test]
+    fn the_handshake_version_requires_a_current_helper() {
+        // Deploy replaces a helper whose `--self-check` reports a different
+        // protocol. Keeping the number here makes an accidental revert fail.
+        assert_eq!(crate::PROTOCOL_VERSION, 2);
     }
 }

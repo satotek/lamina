@@ -22,4 +22,8 @@ pub use message::{ErrorKind, Event, Message, RemoteError, Request, Response};
 
 /// Wire revision. The helper and the app must agree exactly; version
 /// negotiation is a hard failure instead of a best-effort decode.
-pub const PROTOCOL_VERSION: u32 = 1;
+///
+/// Version 2 adds mutations (`Run`), their progress events, credential
+/// prompts and the reads a rebase confirmation needs. An older helper fails
+/// the handshake, which is what makes the app replace it.
+pub const PROTOCOL_VERSION: u32 = 2;
