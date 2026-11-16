@@ -61,7 +61,12 @@ pub(crate) fn replay_detail(count: usize, onto_label: &str) -> String {
     match count {
         0 => t!("rebase.no_commits", onto = onto_label).to_string(),
         1 => t!("rebase.one_commit", onto = onto_label).to_string(),
-        count => t!("rebase.commits", count = count, onto = onto_label).to_string(),
+        count => t!(
+            &crate::i18n::count_key("rebase.commits", count),
+            count = count,
+            onto = onto_label
+        )
+        .to_string(),
     }
 }
 

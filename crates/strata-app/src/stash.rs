@@ -507,7 +507,11 @@ impl Render for StashDialog {
             .filter(|file| include_untracked || file.kind != ChangeKind::Untracked)
             .count();
         let summary = if ticked == eligible {
-            t!("stash.all_files", count = eligible).to_string()
+            t!(
+                &crate::i18n::count_key("stash.all_files", eligible),
+                count = eligible
+            )
+            .to_string()
         } else {
             t!("stash.some_files", ticked = ticked, eligible = eligible).to_string()
         };

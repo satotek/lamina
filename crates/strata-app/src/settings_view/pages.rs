@@ -394,6 +394,13 @@ fn history(control: f32, design: &Design) -> SettingPage {
 }
 
 fn behaviour(control: f32, design: &Design) -> SettingPage {
+    let every_minutes = |minutes: usize| {
+        t!(
+            &crate::i18n::count_key("settings.behaviour.every_minutes", minutes),
+            count = minutes
+        )
+        .to_string()
+    };
     shell(
         Section::Behaviour,
         t!("settings.behaviour.description").to_string(),
@@ -406,26 +413,11 @@ fn behaviour(control: f32, design: &Design) -> SettingPage {
                 choice(
                     &[
                         ("0", t!("settings.behaviour.off").to_string()),
-                        (
-                            "5",
-                            t!("settings.behaviour.every_minutes", count = 5).to_string(),
-                        ),
-                        (
-                            "10",
-                            t!("settings.behaviour.every_minutes", count = 10).to_string(),
-                        ),
-                        (
-                            "15",
-                            t!("settings.behaviour.every_minutes", count = 15).to_string(),
-                        ),
-                        (
-                            "30",
-                            t!("settings.behaviour.every_minutes", count = 30).to_string(),
-                        ),
-                        (
-                            "60",
-                            t!("settings.behaviour.every_minutes", count = 60).to_string(),
-                        ),
+                        ("5", every_minutes(5)),
+                        ("10", every_minutes(10)),
+                        ("15", every_minutes(15)),
+                        ("30", every_minutes(30)),
+                        ("60", every_minutes(60)),
                     ],
                     control,
                     |settings| settings.behaviour.auto_fetch_minutes.to_string(),

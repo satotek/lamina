@@ -489,7 +489,10 @@ impl RepoView {
                     .px_3()
                     .text_size(design.px(10.0))
                     .text_color(design.muted)
-                    .child(t!("history.loading", count = len).to_string()),
+                    .child(
+                        t!(&crate::i18n::count_key("history.loading", len), count = len)
+                            .to_string(),
+                    ),
             );
         }
         column.into_any_element()
@@ -511,7 +514,11 @@ impl RepoView {
                 });
         crate::ui::banner(
             crate::ui::BannerKind::Info,
-            t!("history.hidden_refs", count = count).to_string(),
+            t!(
+                &crate::i18n::count_key("history.hidden_refs", count),
+                count = count
+            )
+            .to_string(),
             design,
         )
         .action(show_all)

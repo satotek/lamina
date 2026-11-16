@@ -1440,7 +1440,11 @@ fn reset_detail(
             let lost = match changes {
                 0 => t!("history_ops.reset.no_changes").to_string(),
                 1 => t!("history_ops.reset.one_path").to_string(),
-                count => t!("history_ops.reset.paths", count = count).to_string(),
+                count => t!(
+                    &crate::i18n::count_key("history_ops.reset.paths", count),
+                    count = count
+                )
+                .to_string(),
             };
             t!(
                 "history_ops.reset.hard_detail",

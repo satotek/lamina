@@ -312,7 +312,13 @@ impl RepoView {
                 div()
                     .font_weight(FontWeight::SEMIBOLD)
                     .line_height(gpui::relative(1.35))
-                    .child(t!("history.commits_selected", count = summary.count).to_string()),
+                    .child(
+                        t!(
+                            &crate::i18n::count_key("history.commits_selected", summary.count),
+                            count = summary.count
+                        )
+                        .to_string(),
+                    ),
             )
             .child(
                 div()
@@ -340,7 +346,11 @@ impl RepoView {
                 ));
             } else if let Some(skipped) = self.selection_diff.skipped() {
                 block = block.child(range_note(
-                    t!("details.range_skipped", count = skipped).to_string(),
+                    t!(
+                        &crate::i18n::count_key("details.range_skipped", skipped),
+                        count = skipped
+                    )
+                    .to_string(),
                     design.muted,
                     design,
                 ));

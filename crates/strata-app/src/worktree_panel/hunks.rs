@@ -381,11 +381,19 @@ impl WorktreePanel {
         let mut actions = div().flex().items_center().gap_1();
         let (label, action) = match selected.side {
             Side::Unstaged => (
-                t!("worktree.stage_lines", count = count).to_string(),
+                t!(
+                    &crate::i18n::count_key("worktree.stage_lines", count),
+                    count = count
+                )
+                .to_string(),
                 LineAction::Stage,
             ),
             Side::Staged => (
-                t!("worktree.unstage_lines", count = count).to_string(),
+                t!(
+                    &crate::i18n::count_key("worktree.unstage_lines", count),
+                    count = count
+                )
+                .to_string(),
                 LineAction::Unstage,
             ),
             Side::Conflict => return div().into_any_element(),

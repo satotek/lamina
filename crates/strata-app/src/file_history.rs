@@ -1002,7 +1002,10 @@ impl RepoView {
                             .text_color(colors.muted_foreground)
                             .child(match commit {
                                 Some(commit) => t!(
-                                    "file_history.row_detail",
+                                    &crate::i18n::count_key(
+                                        "file_history.row_detail",
+                                        history.diff_rows.len()
+                                    ),
                                     author = data::short_oid(commit),
                                     count = history.diff_rows.len()
                                 )

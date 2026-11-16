@@ -384,7 +384,11 @@ fn file_row(
                 Side::Unstaged => {
                     let stage_entity = menu_entity.clone();
                     let label = if count > 1 {
-                        t!("worktree.stage_count", count = count).to_string()
+                        t!(
+                            &crate::i18n::count_key("worktree.stage_count", count),
+                            count = count
+                        )
+                        .to_string()
                     } else {
                         t!("common.stage").to_string()
                     };
@@ -396,7 +400,11 @@ fn file_row(
                     let label = match count {
                         1 if untracked => t!("worktree.delete_file").to_string(),
                         1 => t!("worktree.discard_changes").to_string(),
-                        _ => t!("worktree.discard_count", count = count).to_string(),
+                        _ => t!(
+                            &crate::i18n::count_key("worktree.discard_count", count),
+                            count = count
+                        )
+                        .to_string(),
                     };
                     menu = menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
                         discard_entity
@@ -445,7 +453,11 @@ fn file_row(
                 Side::Staged => {
                     let unstage_entity = menu_entity.clone();
                     let label = if count > 1 {
-                        t!("worktree.unstage_count", count = count).to_string()
+                        t!(
+                            &crate::i18n::count_key("worktree.unstage_count", count),
+                            count = count
+                        )
+                        .to_string()
                     } else {
                         t!("common.unstage").to_string()
                     };

@@ -167,7 +167,11 @@ impl RepoView {
         };
         let (name, dir) = style::path_parts(&path);
         let right = match self.fake {
-            Some(_) => t!("diff.header.rows", count = row_count).to_string(),
+            Some(_) => t!(
+                &crate::i18n::count_key("diff.header.rows", row_count),
+                count = row_count
+            )
+            .to_string(),
             None => match self.files.as_ref().map_or(0, Vec::len) {
                 0 => String::new(),
                 files => t!("diff.header.changed", count = files).to_string(),

@@ -1253,8 +1253,16 @@ impl RepoView {
         let title = match paths.as_slice() {
             [only] if !deletes => t!("worktree.discard_path", path = only).to_string(),
             [only] => t!("worktree.delete_path", path = only).to_string(),
-            _ if discards => t!("worktree.discard_files", count = paths.len()).to_string(),
-            _ => t!("worktree.delete_files", count = paths.len()).to_string(),
+            _ if discards => t!(
+                &crate::i18n::count_key("worktree.discard_files", paths.len()),
+                count = paths.len()
+            )
+            .to_string(),
+            _ => t!(
+                &crate::i18n::count_key("worktree.delete_files", paths.len()),
+                count = paths.len()
+            )
+            .to_string(),
         };
         let mut operations = Vec::new();
         if discards {
@@ -1313,7 +1321,11 @@ impl RepoView {
         }
         let title = match paths.as_slice() {
             [only] => t!("worktree.discard_staged_path", path = only).to_string(),
-            _ => t!("worktree.discard_staged_files", count = paths.len()).to_string(),
+            _ => t!(
+                &crate::i18n::count_key("worktree.discard_staged_files", paths.len()),
+                count = paths.len()
+            )
+            .to_string(),
         };
         self.ask_destructive(
             window,

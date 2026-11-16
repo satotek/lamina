@@ -2093,7 +2093,13 @@ impl CompareView {
                         .flex_none()
                         .text_size(design.px(11.0))
                         .text_color(design.muted)
-                        .child(t!("compare.hunks_count", count = hunk_count).to_string()),
+                        .child(
+                            t!(
+                                &crate::i18n::count_key("compare.hunks_count", hunk_count),
+                                count = hunk_count
+                            )
+                            .to_string(),
+                        ),
                 )
                 .when(hunk_count > 0, |bar| {
                     bar.child(
@@ -2242,7 +2248,11 @@ impl CompareView {
                     .active_change
                     .map(|idx| format!("{} / {}", idx + 1, total_changes))
                     .unwrap_or_else(|| {
-                        t!("compare.changes_count", count = total_changes).to_string()
+                        t!(
+                            &crate::i18n::count_key("compare.changes_count", total_changes),
+                            count = total_changes
+                        )
+                        .to_string()
                     });
                 bar.child(
                     div()

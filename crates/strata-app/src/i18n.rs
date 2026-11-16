@@ -187,6 +187,18 @@ pub fn lookup(locale: &str, key: &str) -> Option<String> {
         .map(Cow::into_owned)
 }
 
+/// The catalogue key for a counted message: `.one` for a single item and
+/// `.other` for everything else.
+///
+/// rust-i18n has no plural rules, so a count picks between two complete
+/// messages instead of substituting a noun: `t!(&count_key(base, count),
+/// count = count)`. Both keys must exist in every catalogue, which the tests
+/// below enforce for the keys the sources name.
+pub fn count_key(base: &str, count: usize) -> String {
+    let suffix = if count == 1 { "one" } else { "other" };
+    format!("{base}.{suffix}")
+}
+
 /// The palette title of an action. The action's identifier stays in English:
 /// only the text the user reads goes through the catalogue.
 pub fn action_title(full_name: &str, english: &str) -> String {
@@ -280,6 +292,32 @@ mod tests {
             .collect()
     }
 
+    /// Every base passed to [`count_key`] in this crate's sources. The `t!`
+    /// scan cannot see these keys because the call site builds the full key
+    /// from the count, so the counted suffixes are checked separately.
+    fn source_count_bases() -> BTreeSet<String> {
+        let sources = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut bases = BTreeSet::new();
+        let mut stack = vec![sources];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("source directory") {
+                let path = entry.expect("directory entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|ext| ext == "rs") {
+                    let text = std::fs::read_to_string(&path).expect("source file");
+                    for (index, _) in text.match_indices("count_key(\"") {
+                        let start = index + "count_key(\"".len();
+                        if let Some(end) = text[start..].find('"') {
+                            bases.insert(text[start..start + end].to_owned());
+                        }
+                    }
+                }
+            }
+        }
+        bases
+    }
+
     fn placeholders(text: &str) -> BTreeSet<&str> {
         let mut names = BTreeSet::new();
         let mut rest = text;
@@ -301,6 +339,48 @@ mod tests {
         for key in &keys {
             for locale in ["en", "ja"] {
                 assert!(lookup(locale, key).is_some(), "{locale} is missing `{key}`");
+            }
+        }
+        for base in source_count_bases() {
+            for suffix in ["one", "other"] {
+                let key = format!("{base}.{suffix}");
+                for locale in ["en", "ja"] {
+                    assert!(
+                        lookup(locale, &key).is_some(),
+                        "{locale} is missing `{key}` for `{base}`"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_count_selects_the_singular_or_plural_message() {
+        assert_eq!(
+            count_key("compare.changes_count", 0),
+            "compare.changes_count.other"
+        );
+        assert_eq!(
+            count_key("compare.changes_count", 1),
+            "compare.changes_count.one"
+        );
+        assert_eq!(
+            count_key("compare.changes_count", 2),
+            "compare.changes_count.other"
+        );
+    }
+
+    #[test]
+    fn every_singular_message_has_a_plural_sibling_in_both_locales() {
+        for locale in ["en", "ja"] {
+            let messages = messages(locale);
+            for key in messages.keys().filter(|key| key.ends_with(".one")) {
+                let base = key.strip_suffix(".one").expect("the `.one` suffix");
+                let plural = format!("{base}.other");
+                assert!(
+                    messages.contains_key(&plural),
+                    "{locale} has `{key}` without a matching `{plural}`"
+                );
             }
         }
     }

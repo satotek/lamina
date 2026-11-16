@@ -623,7 +623,11 @@ impl GitConfigView {
         }
         if entry.values.len() > 1 {
             row = row.child(crate::ui::status_badge(
-                t!("git_config.values_count", count = entry.values.len()).to_string(),
+                t!(
+                    &crate::i18n::count_key("git_config.values_count", entry.values.len()),
+                    count = entry.values.len()
+                )
+                .to_string(),
                 BadgeTone::Neutral,
                 design,
             ));
@@ -949,7 +953,13 @@ fn include_row(index: usize, include: &ConfigInclude, design: &Design) -> impl I
                 .flex_none()
                 .text_size(px(design.tiny()))
                 .text_color(design.muted)
-                .child(t!("git_config.values_count", count = include.values).to_string()),
+                .child(
+                    t!(
+                        &crate::i18n::count_key("git_config.values_count", include.values),
+                        count = include.values
+                    )
+                    .to_string(),
+                ),
         );
     }
     if let Some(error) = &include.error {
@@ -1151,9 +1161,13 @@ impl Render for GitConfigView {
                             ),
                     )
                     .child(
-                        div()
-                            .flex_none()
-                            .child(t!("git_config.keys_count", count = entries.len()).to_string()),
+                        div().flex_none().child(
+                            t!(
+                                &crate::i18n::count_key("git_config.keys_count", entries.len()),
+                                count = entries.len()
+                            )
+                            .to_string(),
+                        ),
                     ),
             );
         root.text_style().font_fallbacks = Some(crate::style::font_fallbacks());
