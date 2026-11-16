@@ -495,23 +495,25 @@ impl Remote {
         }
     }
 
-    /// Records the end of an operation this module started and tells the user
-    /// about it. Operations from other modules are ignored.
-    /// Returns true when the finished command changes the remote state the
-    /// pull-request badges describe (a successful fetch or push).
+    /// Records the end of an operation this module started and works out what
+    /// to tell the user. Operations from other modules are ignored.
+    ///
+    /// The caller shows the [`Finished::announcement`] with [`Announcement::show`].
+    /// It cannot happen here: this runs inside the repository view's update,
+    /// and the pull-request action has to read that same view.
     pub(crate) fn on_finished(
         &mut self,
         id: OperationId,
         error: Option<&str>,
         cx: &mut Context<RepoView>,
         active: bool,
-    ) -> bool {
+    ) -> Finished {
         let Some(running) = self.running.take() else {
-            return false;
+            return Finished::default();
         };
         if running.id != id {
             self.running = Some(running);
-            return false;
+            return Finished::default();
         }
 
         let failure = error.map(|error| (classify(error), first_error_line(error)));
@@ -534,12 +536,10 @@ impl Remote {
             }
             None => Notification::success(running.success.clone()).title(running.kind.label()),
         };
-        let entity = cx.entity();
-        // A branch just pushed to GitHub is the moment the pull-request form
-        // is useful; the action is added only when gh can open it.
-        let note = match (&failure, running.pull_request_branch.as_deref()) {
-            (None, Some(branch)) => crate::github::with_create_pr(note, &entity, branch, cx),
-            _ => note,
+        // A branch just pushed is the moment the pull-request form is useful.
+        let pull_request_branch = match &failure {
+            None => running.pull_request_branch.clone(),
+            Some(_) => None,
         };
         // A push the remote refused as non-fast-forward is the one failure the
         // user can resolve in place.
@@ -554,21 +554,33 @@ impl Remote {
         if active {
             cx.notify();
         }
-        let Some(window) = window_handle(cx) else {
-            return refresh;
-        };
         // An automatic fetch stays quiet while it works and after it succeeds;
         // only the first failure of a streak is worth interrupting for.
-        if !announces {
-            return refresh;
-        }
-        let _ = window.update(cx, |_, window, cx| {
-            window.push_notification(note, cx);
-            if active && let Some(offer) = offer {
-                open_force_dialog(entity, offer, window, cx);
-            }
+        let announcement = announces.then_some(Announcement {
+            note,
+            pull_request_branch,
+            offer,
         });
-        refresh
+        Finished {
+            refresh,
+            announcement,
+        }
+    }
+
+    /// Pretends a push of `branch` is running under `id`, so a test can finish
+    /// it without git.
+    #[cfg(test)]
+    pub(crate) fn start_push_for_test(&mut self, id: OperationId, branch: &str) {
+        self.running = Some(Running {
+            id,
+            kind: Kind::Push,
+            trigger: Trigger::Manual,
+            success: "pushed".to_owned(),
+            retry: None,
+            pull_request_branch: Some(branch.to_owned()),
+            text: None,
+            percent: None,
+        });
     }
 
     /// The status bar's operation segment, and nothing while idle.
@@ -621,6 +633,46 @@ impl Remote {
 ///
 /// Session events arrive on the foreground executor, so no window update is in
 /// progress when this runs and the handle can be updated here.
+/// What [`Remote::on_finished`] decided about a finished operation.
+#[derive(Default)]
+pub(crate) struct Finished {
+    /// The command changed the remote state the pull-request badges describe
+    /// (a successful fetch or push).
+    pub(crate) refresh: bool,
+    /// The notification to show, if the outcome is worth one.
+    pub(crate) announcement: Option<Announcement>,
+}
+
+/// A finished operation's notification, shown once the repository view's
+/// update can lend the view out.
+pub(crate) struct Announcement {
+    note: Notification,
+    pull_request_branch: Option<String>,
+    offer: Option<ForceOffer>,
+}
+
+impl Announcement {
+    /// Shows the notification, with the pull-request action when gh can open
+    /// one for the pushed branch, and the force-push offer for a rejected push.
+    pub(crate) fn show(self, view: &RepoView, active: bool, cx: &mut Context<RepoView>) {
+        let note = match self.pull_request_branch.as_deref() {
+            Some(branch) => crate::github::with_create_pr(self.note, view, branch, cx),
+            None => self.note,
+        };
+        let Some(window) = window_handle(cx) else {
+            return;
+        };
+        let entity = cx.entity();
+        let offer = self.offer;
+        let _ = window.update(cx, |_, window, cx| {
+            window.push_notification(note, cx);
+            if active && let Some(offer) = offer {
+                open_force_dialog(entity, offer, window, cx);
+            }
+        });
+    }
+}
+
 fn window_handle(cx: &mut Context<RepoView>) -> Option<gpui::AnyWindowHandle> {
     cx.active_window()
         .or_else(|| cx.windows().into_iter().next())

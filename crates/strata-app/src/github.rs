@@ -151,19 +151,18 @@ pub(crate) fn remote_branch_item(
 /// lost a pull request, and the refresh that follows it must not be throttled.
 pub(crate) fn with_create_pr(
     note: Notification,
-    entity: &Entity<RepoView>,
+    view: &RepoView,
     branch: &str,
     cx: &App,
 ) -> Notification {
-    if remote_for(entity.read(cx), cx).is_none() {
+    if remote_for(view, cx).is_none() {
         return note;
     }
-    entity.read(cx).pull_requests.note_push();
+    view.pull_requests.note_push();
 
     // The branch's pull request is already open: the form would ask GitHub for
     // a second one, so the notification offers the existing one instead.
-    let existing = entity
-        .read(cx)
+    let existing = view
         .pull_requests
         .open_for_branch(branch)
         .map(|pull_request| (pull_request.number, pull_request.url.clone()));
@@ -187,7 +186,11 @@ pub(crate) fn with_create_pr(
     let Some(gh) = tooling.gh().map(|info| info.binary.clone()) else {
         return note;
     };
-    let Some(workdir) = workdir(entity, cx) else {
+    let Some(workdir) = view
+        .session
+        .as_ref()
+        .map(|session| session.git_extras().workdir().to_path_buf())
+    else {
         return note;
     };
     let branch = branch.to_owned();

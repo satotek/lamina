@@ -1327,10 +1327,15 @@ impl RepoView {
                     }
                 }
                 self.worktree.on_operation_finished(id, error.as_deref());
-                let remote_finished =
-                    self.remote
-                        .on_finished(id, error.as_deref(), cx, self.active);
-                if remote_finished {
+                let finished = self
+                    .remote
+                    .on_finished(id, error.as_deref(), cx, self.active);
+                // Shown before the refresh below: a push notification leaves the
+                // marker that keeps that refresh from being throttled.
+                if let Some(announcement) = finished.announcement {
+                    announcement.show(self, self.active, cx);
+                }
+                if finished.refresh {
                     // `on_finished` reports a fetch and a push the same way;
                     // the push notification leaves a marker, and a push is the
                     // one remote command whose refresh must not be throttled.
@@ -3704,5 +3709,45 @@ mod tests {
                 "clicking the title bar terminal button again must close the embedded terminal"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod finished_push_tests {
+    use super::*;
+
+    #[gpui::test]
+    fn a_finished_push_is_announced_without_reading_the_view_mid_update(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            gpui_component::init(cx);
+            cx.set_global(crate::settings::Settings::default());
+        });
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let window = cx.add_window(|window, cx| {
+            let view = cx.new(|cx| RepoView::new(Launch::fake(3), window, cx));
+            let _ = sender.send(view.clone());
+            gpui_component::Root::new(view, window, cx)
+        });
+        let view = receiver.recv().expect("the repository view");
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        // The outcome arrives inside the view's own update, as it does from the
+        // session. Building the pull-request action there used to read the
+        // view again, and GPUI panics on that second lease.
+        vcx.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.remote.start_push_for_test(OperationId(7), "main");
+                view.on_event(
+                    SessionEvent::OperationFinished {
+                        id: OperationId(7),
+                        error: None,
+                    },
+                    cx,
+                );
+            });
+        });
+        vcx.run_until_parked();
     }
 }
