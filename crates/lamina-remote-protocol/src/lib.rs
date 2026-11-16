@@ -53,9 +53,9 @@ pub use message::{ErrorKind, Event, Message, RemoteError, Request, Response};
 /// app replace it.
 ///
 /// Version 7 carries writes a remote tab runs through the same `Run` path as
-/// a local one. It starts with reflog undo and redo. Later additions in this
-/// revision are worktrees, submodule update, LFS, repository configuration,
-/// tags and remotes, and the reads those views need. Paths in those messages
-/// are checked on the helper before git sees them. An older helper fails the
+/// a local one: reflog undo and redo, worktrees and submodule update. Later
+/// additions in this revision are LFS, repository configuration, tags and
+/// remotes, and the reads those views need. Paths in those messages are
+/// checked on the helper before git sees them. An older helper fails the
 /// handshake, which is what makes the app replace it.
 pub const PROTOCOL_VERSION: u32 = 7;

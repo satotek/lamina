@@ -522,14 +522,11 @@ fn answer_control(shared: &Arc<ServerShared>, chunk: usize, request: Request) ->
                     return Some(Response::Error(protocol_error(error)));
                 }
             };
-            // ResolveWithContent writes bytes itself, so a path has to be
-            // checked before git sees it. A symlink whose name is a normal
-            // relative path still has to be resolved on this machine; that
-            // check lives in the write, which runs here.
-            if let Some(path) = escaping_write_path(&operation) {
-                return Some(Response::Error(RemoteError::other(format!(
-                    "path must stay inside the worktree: {path}"
-                ))));
+            // A path is checked before git sees it. ResolveWithContent also
+            // writes bytes itself; a symlink whose name is a normal relative
+            // path is resolved in that write, which runs here.
+            if let Some(message) = rejected_operation_path(&operation) {
+                return Some(Response::Error(RemoteError::other(message)));
             }
             session.run_as(lamina_core::session::OperationId(id), operation);
             Response::Ok
@@ -787,30 +784,75 @@ fn answer_read(reader: &Arc<dyn lamina_core::session::RepoReader>, request: Requ
     }
 }
 
-/// A path a conflict write would touch, when it is not a single relative path
-/// inside the worktree. `None` means every path the operation writes is safe
-/// to hand to git, or the operation does not write a worktree path.
-fn escaping_write_path(operation: &lamina_core::session::Operation) -> Option<&str> {
-    let paths: Vec<&str> = match operation {
-        lamina_core::session::Operation::ResolveWithContent { path, .. }
-        | lamina_core::session::Operation::ResolveConflict { path, .. } => vec![path.as_str()],
-        lamina_core::session::Operation::MarkResolved(paths) => {
-            paths.iter().map(String::as_str).collect()
+/// Why an operation's path must not be handed to git, or `None` when every
+/// path is acceptable (or the operation carries none).
+///
+/// A new or removed worktree is a directory the user typed, usually a sibling
+/// of the repository, so it has to be absolute and is not required to stay
+/// inside the checkout. Every other path names a file inside the worktree.
+fn rejected_operation_path(operation: &lamina_core::session::Operation) -> Option<String> {
+    use lamina_core::session::Operation;
+    match operation {
+        Operation::WorktreeAdd { path, .. } | Operation::WorktreeRemove { path, .. } => {
+            require_explicit_absolute_path(path)
+                .err()
+                .map(|error| error.message)
         }
-        _ => return None,
-    };
-    paths
-        .into_iter()
-        .find(|path| require_worktree_path(path).is_err())
+        Operation::ResolveWithContent { path, .. } | Operation::ResolveConflict { path, .. } => {
+            require_worktree_path(path).err().map(|error| error.message)
+        }
+        Operation::MarkResolved(paths) => paths
+            .iter()
+            .find_map(|path| require_worktree_path(path).err().map(|error| error.message)),
+        Operation::SubmoduleUpdate { paths, .. } => paths
+            .iter()
+            .find_map(|path| require_worktree_path(path).err().map(|error| error.message)),
+        _ => None,
+    }
 }
 
-/// Rejects an empty path, an absolute path, `..` and a `.git` component.
+/// An absolute path the user typed for a worktree: no empty text, no control
+/// characters, and no `.` or `..` component that would escape the directory
+/// they named.
+fn require_explicit_absolute_path(path: &Path) -> Result<(), RemoteError> {
+    let Some(text) = path.to_str() else {
+        return Err(RemoteError::other("path is not unicode"));
+    };
+    if text.is_empty() {
+        return Err(RemoteError::other("path is empty"));
+    }
+    if text.chars().any(|character| character.is_control()) {
+        return Err(RemoteError::other("path contains a control character"));
+    }
+    if !path.is_absolute() {
+        return Err(RemoteError::other(format!(
+            "worktree path must be an absolute path: {text}"
+        )));
+    }
+    if path.components().any(|component| {
+        !matches!(
+            component,
+            Component::RootDir | Component::Prefix(_) | Component::Normal(_)
+        )
+    }) {
+        return Err(RemoteError::other(format!(
+            "worktree path must not contain . or ..: {text}"
+        )));
+    }
+    Ok(())
+}
+
+/// Rejects an empty path, an absolute path, `..`, a control character and a
+/// `.git` component.
 ///
 /// The bytes of a resolved file are written with `std::fs`, which does not
 /// apply git's pathspec rules. A symlink that points outside is not visible
 /// here; the write resolves it and refuses when the destination leaves the
 /// worktree.
 fn require_worktree_path(path: &str) -> Result<(), RemoteError> {
+    if path.chars().any(|character| character.is_control()) {
+        return Err(RemoteError::other("path contains a control character"));
+    }
     let relative = Path::new(path);
     if relative.as_os_str().is_empty() {
         return Err(RemoteError::other("path is empty"));

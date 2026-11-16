@@ -2580,13 +2580,12 @@ fn section_menu(
                     entity.update(cx, |view, cx| view.update_all_submodules(window, cx));
                 }
             };
-            let blocked = prefer_ssh(
-                ssh,
-                blocked_section(
-                    busy,
-                    !entity.read(cx).has_submodules(),
-                    t!("branch.empty.submodules").to_string(),
-                ),
+            // Update runs on the helper. Opening a submodule as a local
+            // checkout stays closed; that is the row menu, not this one.
+            let blocked = blocked_section(
+                busy,
+                !entity.read(cx).has_submodules(),
+                t!("branch.empty.submodules").to_string(),
             );
             menu.item(
                 PopupMenuItem::new(crate::ui::menu_label(
@@ -2610,14 +2609,11 @@ fn section_menu(
                     entity.update(cx, |view, cx| view.prune_worktrees(window, cx));
                 }
             };
-            let add_blocked = prefer_ssh(ssh, busy.then_some(t!("branch.reason.busy").to_string()));
-            let prune_blocked = prefer_ssh(
-                ssh,
-                blocked_section(
-                    busy,
-                    !entity.read(cx).has_prunable_worktree(),
-                    t!("branch.reason.no_missing_worktrees").to_string(),
-                ),
+            let add_blocked = busy.then_some(t!("branch.reason.busy").to_string());
+            let prune_blocked = blocked_section(
+                busy,
+                !entity.read(cx).has_prunable_worktree(),
+                t!("branch.reason.no_missing_worktrees").to_string(),
             );
             menu.item(
                 PopupMenuItem::new(crate::ui::menu_label(
@@ -3468,16 +3464,12 @@ fn submodule_row(
                 (status == SubmoduleStatus::Uninitialised)
                     .then_some(t!("branch.submodule.not_initialised").to_string()),
             );
-            let update_blocked = prefer_ssh(
-                ssh,
-                if status == SubmoduleStatus::Uninitialised {
-                    Some(t!("branch.submodule.not_initialised").to_string())
-                } else {
-                    busy.then_some(t!("branch.reason.busy").to_string())
-                },
-            );
-            let init_blocked =
-                prefer_ssh(ssh, busy.then_some(t!("branch.reason.busy").to_string()));
+            let update_blocked = if status == SubmoduleStatus::Uninitialised {
+                Some(t!("branch.submodule.not_initialised").to_string())
+            } else {
+                busy.then_some(t!("branch.reason.busy").to_string())
+            };
+            let init_blocked = busy.then_some(t!("branch.reason.busy").to_string());
             let open = {
                 let entity = menu_entity.clone();
                 let path = menu_path.clone();
@@ -3699,18 +3691,15 @@ fn worktree_row(
                 ssh,
                 prunable.then_some(t!("branch.reason.missing_worktree").to_string()),
             );
-            let remove_blocked = prefer_ssh(
-                ssh,
-                if is_main {
-                    Some(t!("branch.reason.main_worktree").to_string())
-                } else if locked {
-                    Some(t!("branch.reason.locked_worktree").to_string())
-                } else if prunable {
-                    Some(t!("branch.reason.missing_worktree").to_string())
-                } else {
-                    busy.then_some(t!("branch.reason.busy").to_string())
-                },
-            );
+            let remove_blocked = if is_main {
+                Some(t!("branch.reason.main_worktree").to_string())
+            } else if locked {
+                Some(t!("branch.reason.locked_worktree").to_string())
+            } else if prunable {
+                Some(t!("branch.reason.missing_worktree").to_string())
+            } else {
+                busy.then_some(t!("branch.reason.busy").to_string())
+            };
             let open = {
                 let entity = menu_entity.clone();
                 let path = copy_path.clone();

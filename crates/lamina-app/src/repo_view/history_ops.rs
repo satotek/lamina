@@ -1429,12 +1429,12 @@ pub(crate) fn commit_menu(
         ));
     }
 
-    // Two-way compare is a ticketed query. Creating a worktree and saving a
-    // patch still need this machine, so the remote reason wins over busy for
-    // those entries.
+    // Saving a patch still writes a file on this machine, so the remote
+    // reason wins over busy for that entry. Creating a worktree runs on the
+    // helper, so it only waits out a busy repository.
     let remote_reason = state.ssh.then(crate::remote_open::unavailable_reason);
     let busy_reason = state.busy().then(|| t!("branch.reason.busy").to_string());
-    let worktree_reason = remote_reason.or(busy_reason);
+    let patch_reason = remote_reason.or(busy_reason.clone());
     let branch_blocked = state.blocked(HistoryAction::CreateBranch);
     let tag_blocked = state.blocked(HistoryAction::CreateTag);
     menu = menu.separator();
@@ -1444,7 +1444,8 @@ pub(crate) fn commit_menu(
         short.clone(),
         branch_blocked,
         tag_blocked,
-        worktree_reason.clone(),
+        busy_reason,
+        patch_reason,
         shared.map(str::to_owned),
         entity.clone(),
         window,
@@ -1544,7 +1545,8 @@ fn create_menu(
     short: String,
     branch_blocked: Option<String>,
     tag_blocked: Option<String>,
-    busy: Option<String>,
+    worktree_blocked: Option<String>,
+    patch_blocked: Option<String>,
     shared: Option<String>,
     entity: Entity<RepoView>,
     window: &mut Window,
@@ -1598,10 +1600,10 @@ fn create_menu(
                 let short = short.clone();
                 PopupMenuItem::new(blocked_label(
                     t!("history_ops.menu.create_worktree").to_string(),
-                    busy.as_deref(),
+                    worktree_blocked.as_deref(),
                     shared.as_deref(),
                 ))
-                .disabled(busy.is_some())
+                .disabled(worktree_blocked.is_some())
                 .on_click(
                     move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                         entity.update(cx, |view, cx| {
@@ -1615,10 +1617,10 @@ fn create_menu(
                 let short = short.clone();
                 PopupMenuItem::new(blocked_label(
                     t!("history_ops.menu.save_patch").to_string(),
-                    busy.as_deref(),
+                    patch_blocked.as_deref(),
                     shared.as_deref(),
                 ))
-                .disabled(busy.is_some())
+                .disabled(patch_blocked.is_some())
                 .on_click(
                     move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                         let short = short.clone();

@@ -150,6 +150,17 @@ impl RepoView {
         resolve_repo_relative(workdir.as_deref(), path)
     }
 
+    /// A linked checkout's path is on the host when this tab is remote. Opening
+    /// it here would use whatever the same string means on this machine.
+    fn refuse_remote_checkout(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.is_ssh() {
+            return false;
+        }
+        self.status_note = Some(crate::remote_open::unavailable_reason());
+        cx.notify();
+        true
+    }
+
     /// Opens `path` in the current window, pushing this repository onto the
     /// workspace's navigation stack so the user can return to it.
     pub(crate) fn open_repository_in_window(
@@ -158,6 +169,9 @@ impl RepoView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.refuse_remote_checkout(cx) {
+            return;
+        }
         let resolved = self.resolve_child_path(path);
         let Some(workspace) = self.workspace.clone() else {
             // Standalone RepoView (e.g. a test without a Workspace) has no
@@ -188,6 +202,9 @@ impl RepoView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.refuse_remote_checkout(cx) {
+            return;
+        }
         let resolved = self.resolve_child_path(path);
         let Some(workspace) = self.workspace.clone() else {
             self.open_repository_in_new_window(&resolved, window, cx);
@@ -216,6 +233,9 @@ impl RepoView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.refuse_remote_checkout(cx) {
+            return;
+        }
         let resolved = self.resolve_child_path(path);
         match crate::picker::resolve_repository(&resolved) {
             Ok(root) => open_repository_window(root, cx),
@@ -330,10 +350,12 @@ impl RepoView {
             (None, None) => t!("history.from_head").to_string(),
         };
         let root = self.add_worktree_root();
+        let remote = self.is_ssh();
 
         let view = cx.weak_entity();
-        let dialog = cx
-            .new(|cx| AddWorktreeDialog::new(view, root, branches, start, start_label, window, cx));
+        let dialog = cx.new(|cx| {
+            AddWorktreeDialog::new(view, root, branches, start, start_label, remote, window, cx)
+        });
         show_worktree_dialog(dialog, window, cx);
     }
 
@@ -346,13 +368,15 @@ impl RepoView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.refuse_if_ssh(cx) || self.session.is_none() || self.is_busy() {
+        if self.session.is_none() || self.is_busy() {
             return;
         }
         let root = self.add_worktree_root();
+        let remote = self.is_ssh();
         let view = cx.weak_entity();
-        let dialog =
-            cx.new(|cx| AddWorktreeDialog::from_commit(view, root, commit, short, window, cx));
+        let dialog = cx.new(|cx| {
+            AddWorktreeDialog::from_commit(view, root, commit, short, remote, window, cx)
+        });
         show_worktree_dialog(dialog, window, cx);
     }
 
@@ -500,17 +524,22 @@ pub(crate) struct AddWorktreeDialog {
     allow_detached: bool,
     /// The name the default path uses while the branch field is empty.
     default_name: String,
+    /// A remote tab's directory is on the host. The dialog must not ask this
+    /// machine whether that path exists.
+    skip_local_dir_check: bool,
     _path_events: Subscription,
     _branch_events: Subscription,
 }
 
 impl AddWorktreeDialog {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         view: WeakEntity<RepoView>,
         root: PathBuf,
         branches: Vec<String>,
         start: Option<Oid>,
         start_label: String,
+        skip_local_dir_check: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -534,6 +563,7 @@ impl AddWorktreeDialog {
             false,
             default_name,
             default_path,
+            skip_local_dir_check,
             window,
             cx,
         )
@@ -546,6 +576,7 @@ impl AddWorktreeDialog {
         root: PathBuf,
         commit: Oid,
         short: String,
+        skip_local_dir_check: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -561,6 +592,7 @@ impl AddWorktreeDialog {
             true,
             short,
             default_path,
+            skip_local_dir_check,
             window,
             cx,
         )
@@ -577,6 +609,7 @@ impl AddWorktreeDialog {
         allow_detached: bool,
         default_name: String,
         default_path: String,
+        skip_local_dir_check: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -624,6 +657,7 @@ impl AddWorktreeDialog {
             path_edited: false,
             allow_detached,
             default_name,
+            skip_local_dir_check,
             _path_events,
             _branch_events,
         }
@@ -683,7 +717,11 @@ impl AddWorktreeDialog {
         } else {
             self.root.join(path)
         };
-        if std::fs::read_dir(&path).is_ok_and(|mut entries| entries.next().is_some()) {
+        // The directory is on this machine only for a local repository. A
+        // remote path is checked by the helper, which can see the host.
+        if !self.skip_local_dir_check
+            && std::fs::read_dir(&path).is_ok_and(|mut entries| entries.next().is_some())
+        {
             self.fail(
                 &t!("worktree.add.path_not_empty", path = path.display()),
                 cx,
@@ -730,7 +768,7 @@ impl AddWorktreeDialog {
         let offer_open = self.allow_detached;
         let _ = self.view.update(cx, |view, cx| {
             let started = view.run_operation(operation, label, window, cx);
-            if offer_open && started.is_some() {
+            if offer_open && started.is_some() && !self.skip_local_dir_check {
                 view.pending_worktree_open = Some(path);
             }
         });
