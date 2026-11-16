@@ -8,8 +8,8 @@
 pub mod theme;
 
 use gpui::{
-    AnyElement, App, FontFallbacks, Hsla, IntoElement, ParentElement as _, SharedString,
-    Styled as _, div, px, rgb,
+    AnyElement, App, Font, FontFallbacks, Hsla, IntoElement, ParentElement as _, Pixels,
+    SharedString, Styled as _, TextRun, Window, div, px, rgb,
 };
 use gpui::{Bounds, TitlebarOptions, canvas, fill, point};
 use gpui_component::{Colorize as _, Icon, Sizable as _, Theme};
@@ -642,6 +642,29 @@ pub fn font_fallbacks() -> FontFallbacks {
         ]
     };
     FontFallbacks::from_fonts(families.iter().map(|family| (*family).to_owned()).collect())
+}
+
+/// The advance width of one monospace cell at `font_size`.
+///
+/// The actual face and its fallbacks decide this, so panes that have to agree
+/// on how wide a column of code is measure it here instead of assuming a ratio.
+pub fn monospace_advance(window: &Window, family: &SharedString, font_size: Pixels) -> Pixels {
+    let run = TextRun {
+        len: 1,
+        font: Font {
+            family: family.clone(),
+            fallbacks: Some(font_fallbacks()),
+            ..Font::default()
+        },
+        color: Hsla::white(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window
+        .text_system()
+        .shape_line("M".into(), font_size, &[run], None)
+        .width()
 }
 
 /// The encoding to name in a diff header, or `None` for UTF-8.

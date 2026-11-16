@@ -11,8 +11,8 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable, Hsla,
     InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions, Render,
-    ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled, Subscription,
-    UniformListScrollHandle, WeakEntity, Window, div, px, uniform_list,
+    ScrollHandle, ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled,
+    Subscription, UniformListScrollHandle, WeakEntity, Window, div, px, uniform_list,
 };
 use gpui_component::Selectable as _;
 use gpui_component::dialog::DialogFooter;
@@ -28,6 +28,7 @@ use strata_core::compare::{
 use strata_core::diff::{DiffOptions, GapAction};
 use strata_core::image::ImageKind;
 use strata_core::lfs::format_size;
+use strata_core::text::display_width_with_tabs;
 
 use crate::diff_view::{self, DiffColors, DiffContext, DiffHighlights, DiffStyle, Row as DiffRow};
 use crate::image_diff;
@@ -620,6 +621,11 @@ pub(crate) struct CompareView {
     image_state: image_diff::State,
     // Three-way diff state
     three_way_scroll: UniformListScrollHandle,
+    /// One horizontal offset shared by all three text panes, so a wide line
+    /// scrolls to the same column in every pane.
+    three_way_h_scroll: ScrollHandle,
+    /// Widest line of the current three-way comparison, in font columns.
+    three_way_columns: usize,
     three_way_image_state: image_diff::State,
     three_way_svg_rendered: bool,
     active_change: Option<usize>,
@@ -658,6 +664,8 @@ impl CompareView {
             two_way_scroll: UniformListScrollHandle::default(),
             image_state: image_diff::State::new(),
             three_way_scroll: UniformListScrollHandle::default(),
+            three_way_h_scroll: ScrollHandle::default(),
+            three_way_columns: 0,
             three_way_image_state: image_diff::State::new(),
             three_way_svg_rendered: false,
             active_change: None,
@@ -717,6 +725,13 @@ impl CompareView {
         matches!(self.state, CompareState::Loading)
     }
 
+    /// Horizontal offset of the three-way text panes, for tests that drive the
+    /// shared scroll handle.
+    #[cfg(test)]
+    pub(crate) fn horizontal_scroll_offset(&self) -> f32 {
+        f32::from(self.three_way_h_scroll.offset().x)
+    }
+
     pub(crate) fn cancel(&mut self) {
         if let Some(flag) = self.cancel_flag.take() {
             flag.store(true, Ordering::Relaxed);
@@ -738,6 +753,8 @@ impl CompareView {
         self.diff_rows = Rc::new(Vec::new());
         self.active_change = None;
         self.three_way_svg_rendered = false;
+        self.three_way_h_scroll = ScrollHandle::default();
+        self.three_way_columns = 0;
         self.refresh_workspace_tab_strip(cx);
         cx.notify();
 
@@ -778,6 +795,13 @@ impl CompareView {
                 self.state = CompareState::TwoWayFile(Box::new(res));
             }
             BackgroundOutput::ThreeWayFile(Ok(Some(res))) => {
+                let tab_width = usize::from(Settings::get(cx).appearance.tab_width.max(1));
+                self.three_way_columns = three_way_max_columns(
+                    &res.left_lines,
+                    &res.middle_lines,
+                    &res.right_lines,
+                    tab_width,
+                );
                 self.state = CompareState::ThreeWayFile(Box::new(res));
             }
             BackgroundOutput::Folder(Ok(Some(res))) => {
@@ -1208,12 +1232,20 @@ impl CompareView {
         &self,
         res: &ThreeWayFileCompare,
         design: &Design,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let counts = res.counts();
         let total_changes = counts.total_changes();
         let style = DiffStyle::from_settings(cx, &design.mono);
         let diff_colors = DiffColors::from_design(design);
+        // Every pane reserves the width of the widest line in the comparison,
+        // not just its own, so one shared scroll offset can never be clamped
+        // by a pane with shorter lines.
+        let content_width =
+            crate::style::monospace_advance(window, style.mono(), px(style.font_size()))
+                * self.three_way_columns as f32
+                + style.px(24.0);
 
         let encoding_badge = [res.left_encoding, res.middle_encoding, res.right_encoding]
             .into_iter()
@@ -1366,6 +1398,7 @@ impl CompareView {
             let middle_hl = Arc::clone(&res.middle_highlights);
             let right_hl = Arc::clone(&res.right_highlights);
             let design_copy = design.clone();
+            let h_scroll = self.three_way_h_scroll.clone();
             let count = rows.len();
 
             uniform_list(
@@ -1386,6 +1419,8 @@ impl CompareView {
                                 &diff_colors,
                                 &style,
                                 &design_copy,
+                                content_width,
+                                &h_scroll,
                             )
                         })
                         .collect::<Vec<_>>()
@@ -1579,7 +1614,7 @@ impl Focusable for CompareView {
 }
 
 impl Render for CompareView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let design = Design::new(cx.theme(), Settings::get(cx));
         let title = self.tab_title();
         let loading = self.is_loading();
@@ -1613,7 +1648,7 @@ impl Render for CompareView {
                 .child(ui::banner(ui::BannerKind::Danger, error.clone(), &design))
                 .into_any_element(),
             CompareState::TwoWayFile(res) => self.render_two_way(res, &design, cx),
-            CompareState::ThreeWayFile(res) => self.render_three_way(res, &design, cx),
+            CompareState::ThreeWayFile(res) => self.render_three_way(res, &design, window, cx),
             CompareState::Folder(res) => self.render_folder(res, &design, cx),
         };
 
@@ -1832,6 +1867,21 @@ fn render_three_way_images(
         .into_any_element()
 }
 
+/// Wide enough for the widest line of any of the three sides, in columns.
+fn three_way_max_columns(
+    left: &[String],
+    middle: &[String],
+    right: &[String],
+    tab_width: usize,
+) -> usize {
+    left.iter()
+        .chain(middle.iter())
+        .chain(right.iter())
+        .map(|line| display_width_with_tabs(line, tab_width))
+        .max()
+        .unwrap_or(0)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_three_way_row(
     row: strata_core::compare::ThreeWayRow,
@@ -1844,6 +1894,8 @@ fn render_three_way_row(
     diff: &DiffColors,
     style: &DiffStyle,
     design: &Design,
+    content_width: gpui::Pixels,
+    h_scroll: &ScrollHandle,
 ) -> AnyElement {
     let (left_tint, middle_tint, right_tint) = three_way_tints(row.kind, design);
     div()
@@ -1856,7 +1908,16 @@ fn render_three_way_row(
         .text_size(px(style.font_size()))
         .text_color(diff.text)
         .child(three_way_cell(
-            row.left, left_lines, left_hl, left_tint, diff, style, design, true,
+            row.left,
+            left_lines,
+            left_hl,
+            left_tint,
+            diff,
+            style,
+            design,
+            0,
+            content_width,
+            h_scroll,
         ))
         .child(three_way_cell(
             row.middle,
@@ -1866,7 +1927,9 @@ fn render_three_way_row(
             diff,
             style,
             design,
-            true,
+            1,
+            content_width,
+            h_scroll,
         ))
         .child(three_way_cell(
             row.right,
@@ -1876,7 +1939,9 @@ fn render_three_way_row(
             diff,
             style,
             design,
-            false,
+            2,
+            content_width,
+            h_scroll,
         ))
         .into_any_element()
 }
@@ -1907,7 +1972,9 @@ fn three_way_cell(
     diff: &DiffColors,
     style: &DiffStyle,
     design: &Design,
-    border_right: bool,
+    side: usize,
+    content_width: gpui::Pixels,
+    h_scroll: &ScrollHandle,
 ) -> AnyElement {
     let mut cell = div()
         .flex()
@@ -1918,7 +1985,7 @@ fn three_way_cell(
         .h_full()
         .overflow_hidden()
         .when_some(tint, |cell, tint| cell.bg(tint))
-        .when(border_right, |cell| {
+        .when(side < 2, |cell| {
             cell.border_r_1().border_color(design.border)
         });
 
@@ -1940,12 +2007,34 @@ fn three_way_cell(
                     .child(number.to_string()),
             )
             .child(
+                // The line numbers stay put; only the code pans, so the three
+                // panes can share this handle and keep their columns aligned.
                 div()
+                    .id(("compare-3way-pane", number as usize * 3 + side))
+                    .debug_selector({
+                        let name = match side {
+                            0 => "compare-3way-left",
+                            1 => "compare-3way-middle",
+                            _ => "compare-3way-right",
+                        };
+                        move || name.to_string()
+                    })
+                    .flex()
                     .flex_1()
                     .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .child(diff_view::styled_line(text, style, spans, diff)),
+                    .h_full()
+                    .items_center()
+                    .overflow_x_scroll()
+                    .restrict_scroll_to_axis()
+                    .track_scroll(h_scroll)
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(content_width)
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .child(diff_view::styled_line(text, style, spans, diff)),
+                    ),
             );
     }
     cell.into_any_element()
@@ -2163,6 +2252,21 @@ mod tests {
     #[test]
     fn dialog_cancel_is_a_secondary_button() {
         assert_eq!(dialog_cancel_button().button_kind(), ButtonKind::Normal);
+    }
+
+    #[test]
+    fn shared_three_way_width_covers_the_widest_side() {
+        let left = vec!["short".to_owned()];
+        let middle = vec!["\tindented".to_owned()];
+        let right = vec!["日本語".to_owned(), "x".to_owned()];
+
+        // Four columns before the tab stop, plus four columns of indent.
+        assert_eq!(three_way_max_columns(&left, &middle, &right, 4), 12);
+        assert_eq!(three_way_max_columns(&left, &middle, &right, 8), 16);
+        assert_eq!(
+            three_way_max_columns(&left, &middle, &right, 1),
+            display_width_with_tabs("\tindented", 1)
+        );
     }
 
     #[test]

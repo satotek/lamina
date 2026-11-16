@@ -578,22 +578,7 @@ pub fn measure_cell_size(
     font_family: &SharedString,
     font_size: Pixels,
 ) -> Size<Pixels> {
-    let run = TextRun {
-        len: 1,
-        font: Font {
-            family: font_family.clone(),
-            fallbacks: Some(style::font_fallbacks()),
-            ..Font::default()
-        },
-        color: Hsla::white(),
-        background_color: None,
-        underline: None,
-        strikethrough: None,
-    };
-    let shaped = window
-        .text_system()
-        .shape_line("M".into(), font_size, &[run], None);
-    let width = shaped.width().max(px(6.0));
+    let width = style::monospace_advance(window, font_family, font_size).max(px(6.0));
     let height = (font_size * 1.4).ceil().max(px(12.0));
     size(width, height)
 }

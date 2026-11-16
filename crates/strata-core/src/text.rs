@@ -13,6 +13,24 @@ pub fn display_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }
 
+/// The number of columns `text` occupies once tabs expand to the next stop.
+///
+/// A pane that has to reserve room for its widest line measures the same way
+/// the text is drawn: a tab advances to the next multiple of `tab_width`
+/// instead of counting as one column.
+pub fn display_width_with_tabs(text: &str, tab_width: usize) -> usize {
+    let tab_width = tab_width.max(1);
+    let mut columns = 0;
+    for character in text.chars() {
+        if character == '\t' {
+            columns += tab_width - columns % tab_width;
+        } else {
+            columns += UnicodeWidthChar::width(character).unwrap_or(0);
+        }
+    }
+    columns
+}
+
 /// `text` cut to at most `max` columns, with `…` marking the cut.
 ///
 /// Never splits a character: a wide character that does not fit is dropped,
@@ -52,6 +70,20 @@ mod tests {
         assert_eq!(display_width("😀😀"), 4);
         assert_eq!(display_width("aあb"), 4);
         assert_eq!(display_width("é"), 1, "a precomposed accent is one column");
+    }
+
+    #[test]
+    fn tabs_advance_to_the_next_stop() {
+        assert_eq!(display_width_with_tabs("abc", 4), 3);
+        assert_eq!(display_width_with_tabs("\tx", 4), 5);
+        assert_eq!(display_width_with_tabs("abc\tx", 4), 5);
+        assert_eq!(display_width_with_tabs("abcd\tx", 4), 9);
+        assert_eq!(display_width_with_tabs("日本\tx", 4), 9);
+        assert_eq!(
+            display_width_with_tabs("a\tb", 0),
+            3,
+            "a zero width is a stop"
+        );
     }
 
     #[test]

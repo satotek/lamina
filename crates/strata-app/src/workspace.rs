@@ -2372,6 +2372,79 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn three_way_compare_draws_lines_wider_than_a_pane(cx: &mut gpui::TestAppContext) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let long = "x".repeat(400);
+        let left = temp.path().join("left.txt");
+        let base = temp.path().join("base.txt");
+        let right = temp.path().join("right.txt");
+        std::fs::write(&left, format!("{long}\nbase\n")).unwrap();
+        std::fs::write(&base, "\tbase\n").unwrap();
+        std::fs::write(&right, format!("{long}tail\nbase\n")).unwrap();
+
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            gpui_component::init(cx);
+            cx.set_global(Settings::default());
+            crate::actions::bind(cx);
+        });
+
+        let workspace_cell: std::rc::Rc<std::cell::RefCell<Option<Entity<Workspace>>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
+        let workspace_cell_init = workspace_cell.clone();
+        let target = CompareTarget::ThreeWayFiles {
+            left,
+            middle: base,
+            right,
+        };
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), move |window, cx| {
+                    let workspace = cx.new(|cx| Workspace::new_with_compare(target, window, cx));
+                    *workspace_cell_init.borrow_mut() = Some(workspace.clone());
+                    cx.new(|cx| Root::new(workspace, window, cx))
+                })
+            })
+            .expect("open window");
+        let mut visual_cx = VisualTestContext::from_window(window.into(), cx);
+        visual_cx.run_until_parked();
+
+        let workspace = workspace_cell.borrow().clone().expect("workspace created");
+        let compare = visual_cx.update(|_, cx| {
+            let ws = workspace.read(cx);
+            let Content::Tabs(deck) = &ws.content else {
+                panic!("expected compare tab");
+            };
+            let TabSlot::Compare(slot) = deck.active().expect("active slot") else {
+                panic!("expected compare slot");
+            };
+            assert!(!slot.view.read(cx).is_loading());
+            slot.view.clone()
+        });
+        // A wide text pane has to lay out and paint without a clipped
+        // remainder or a scroll-state panic.
+        visual_cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+
+        let pane = visual_cx
+            .debug_bounds("compare-3way-left")
+            .expect("the left text pane records its bounds");
+        visual_cx.simulate_event(gpui::ScrollEvent {
+            position: pane.center(),
+            delta: gpui::ScrollDelta::Pixels(gpui::point(px(-120.0), px(0.0))),
+            modifiers: Default::default(),
+            touch_phase: gpui::TouchPhase::Moved,
+            source: gpui::ScrollSource::Pointer,
+        });
+        assert!(
+            visual_cx.update(|_, cx| compare.read(cx).horizontal_scroll_offset()) < 0.0,
+            "a horizontal scroll over a pane has to move the shared offset"
+        );
+    }
+
     #[cfg(all(not(windows), feature = "terminal"))]
     #[gpui::test]
     fn workspace_tabs_preserve_terminal_sessions_on_switch_and_kill_on_close(
