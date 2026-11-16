@@ -153,6 +153,33 @@ pub enum Request {
     CommitChangedFileCount {
         commit: ObjectId,
     },
+    /// LFS metadata for `path` at `commit`, when that blob is a pointer.
+    /// `path` must stay inside the worktree.
+    LfsInfoAt {
+        commit: ObjectId,
+        path: String,
+    },
+    /// LFS metadata for the index blob at `path`.
+    LfsInfoInIndex {
+        path: String,
+    },
+    /// LFS metadata for the worktree file at `path`.
+    LfsInfoInWorktree {
+        path: String,
+    },
+    /// Whether any attributes file in the repository sets `filter=lfs`.
+    UsesLfs,
+    /// The stored object for a pointer. `oid` is `sha256:` plus 64 hex
+    /// digits; the helper rejects anything else and never accepts a path.
+    ReadLfsObject {
+        oid: String,
+        size: u64,
+        max_bytes: u64,
+    },
+    /// Whether `git lfs version` succeeds on the host.
+    LfsAvailable,
+    /// Locks `git lfs locks --json` reports.
+    LfsLocks,
 }
 
 /// A direct answer to one [`Request`].
@@ -246,6 +273,22 @@ pub enum Response {
     /// depend on the machine that encoded it.
     CommitChangedFileCount {
         count: u64,
+    },
+    LfsInfo {
+        info: Option<crate::dto::LfsInfoDto>,
+    },
+    UsesLfs {
+        uses: bool,
+    },
+    /// `None` when the object is absent or larger than the requested limit.
+    LfsObject {
+        data: Option<Vec<u8>>,
+    },
+    LfsAvailable {
+        available: bool,
+    },
+    LfsLocks {
+        locks: Vec<crate::dto::LfsLockDto>,
     },
 }
 

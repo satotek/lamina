@@ -881,7 +881,6 @@ impl RepoView {
                             &diff_style,
                             SectionHost {
                                 entity: entity.clone(),
-                                ssh: entity.read(cx).is_ssh(),
                             },
                         )
                     })
@@ -962,10 +961,9 @@ impl RepoView {
 }
 
 /// The list item renderer already sits at the argument limit, so the session
-/// handle and the remote flag travel together.
+/// handle travels in one value.
 struct SectionHost {
     entity: gpui::Entity<RepoView>,
-    ssh: bool,
 }
 
 fn render_section(
@@ -977,7 +975,7 @@ fn render_section(
     style: &DiffStyle,
     host: SectionHost,
 ) -> AnyElement {
-    let SectionHost { entity, ssh } = host;
+    let SectionHost { entity } = host;
     let (name, dir) = style::path_parts(&section.path);
     let encoding = entry
         .and_then(|entry| entry.outcome.as_ref().ok())
@@ -1063,17 +1061,11 @@ fn render_section(
                     if missing {
                         let path = section.path.clone();
                         let lfs_entity = entity.clone();
-                        // LFS pulls are not on the helper yet, so the button
-                        // stays visible but cannot start a download.
-                        let mut download = ui::button(
+                        let download = ui::button(
                             ElementId::named_usize("uncommitted-lfs-download", index),
                             t!("worktree.download").to_string(),
                         )
-                        .size(ButtonSize::Tiny)
-                        .disabled(ssh);
-                        if ssh {
-                            download = download.tooltip(crate::remote_open::unavailable_reason());
-                        }
+                        .size(ButtonSize::Tiny);
                         card = card.action(download.on_click(move |_, window, cx| {
                             let path = path.clone();
                             lfs_entity.update(cx, |this, cx| {
