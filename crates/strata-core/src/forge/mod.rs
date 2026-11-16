@@ -1,22 +1,26 @@
-//! Optional forge CLI integration: pull requests on the repository's own
-//! hosting service.
+//! Optional forge integration: pull requests and web links on the repository's
+//! own hosting service.
 //!
-//! Only GitHub is implemented, through `gh`. The calls go through [`ForgeCli`]
-//! so a repository view asks for "the pull requests of this checkout" without
-//! knowing which program answers, and a second forge can be added beside
-//! [`Gh`] without touching the UI.
+//! [`remote`] turns a clone URL into a host-neutral [`ForgeRemote`], which
+//! answers both "which service is this" and "where is this commit, file,
+//! branch or pull request on its web pages". Pull-request questions go through
+//! [`ForgeCli`], so a repository view asks for "the pull requests of this
+//! checkout" without knowing which program answers. Bitbucket Cloud is links
+//! only for now.
 //!
-//! Every function here is called only when the app has already found the
-//! program and confirmed it is logged in for the repository's host. Nothing
-//! reads a token: the CLI owns its credentials.
+//! Every call is made only when the app has already found the program and
+//! confirmed it is usable for the repository's host. Nothing reads a token:
+//! each CLI owns its credentials.
 
 pub mod gh;
+pub mod remote;
 
 use std::path::Path;
 
 use crate::Result;
 
 pub use gh::Gh;
+pub use remote::{AzureDevOpsRemote, BitbucketRemote, ForgeKind, ForgeRemote};
 
 /// Where a pull request is in its life cycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -98,6 +102,7 @@ pub struct PullRequestSummary {
 }
 
 /// The two operations the app needs from a forge's command-line program.
+///
 pub trait ForgeCli {
     /// The pull requests whose head branch is one of the repository's
     /// branches, newest first as the host lists them.

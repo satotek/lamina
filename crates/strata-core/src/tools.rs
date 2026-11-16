@@ -1,16 +1,18 @@
-//! Optional ghq and GitHub CLI integration.
+//! Optional external tool integration: ghq, the GitHub CLI and the Azure CLI.
 //!
-//! Both programs are optional: every function here is called only when the app
+//! The programs are optional: every function here is called only when the app
 //! has already found the executable, and detection reports a plain error
 //! instead of making the rest of Strata depend on it.
 //!
 //! The commands are run directly, never through a shell, so paths and branch
 //! names reach the programs exactly as they are. Nothing here reads a token:
-//! `gh` keeps its own credentials.
+//! each CLI keeps its own credentials.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+
+use serde_json::Value;
 
 use crate::{Error, Result};
 
@@ -34,6 +36,19 @@ pub struct GhInfo {
     pub version: String,
     /// Hosts `gh auth status` reports an account for, in its own order.
     pub hosts: Vec<String>,
+    pub logged_in: bool,
+}
+
+/// What a working `az` installation reported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AzInfo {
+    pub binary: PathBuf,
+    /// `az version`'s first line, when the program answers it.
+    pub version: Option<String>,
+    /// The installed `azure-devops` extension's version. `None` when the
+    /// extension is missing, which is the one state a hint can fix.
+    pub extension: Option<String>,
+    /// Whether `az account show` named a signed-in account.
     pub logged_in: bool,
 }
 
@@ -89,6 +104,31 @@ impl GitHubRemote {
         format!("{}/tree/{}", self.base_url(), encode(branch, true))
     }
 
+    /// `https://host/owner/repo/pull/<number>`.
+    pub fn pull_request_url(&self, number: u64) -> String {
+        format!("{}/pull/{number}", self.base_url())
+    }
+
+    /// The compare page that asks for a pull request from `branch`.
+    ///
+    /// Without a target the host fills in the repository's default branch. The
+    /// `expand=1` form opens the form rather than the commit list.
+    pub fn create_pull_request_url(&self, branch: &str, target: Option<&str>) -> String {
+        match target {
+            Some(target) => format!(
+                "{}/compare/{}...{}?expand=1",
+                self.base_url(),
+                encode(target, true),
+                encode(branch, true)
+            ),
+            None => format!(
+                "{}/compare/{}?expand=1",
+                self.base_url(),
+                encode(branch, true)
+            ),
+        }
+    }
+
     /// `https://host/owner/repo/blob/<sha>/<path>`, with `#L10-L20` for a
     /// range of lines. A single line gets `#L10`.
     pub fn blob_url(&self, commit: &str, path: &str, lines: Option<(u32, u32)>) -> String {
@@ -114,9 +154,32 @@ impl GitHubRemote {
 
 /// Finds `program` on `PATH`, without running it.
 pub fn find_binary(program: &str) -> Option<PathBuf> {
+    find_on_path(&format!("{program}{}", std::env::consts::EXE_SUFFIX))
+}
+
+/// Finds `az` on `PATH`.
+///
+/// The Windows installer ships a batch launcher instead of an executable, so a
+/// plain `az.exe` lookup would never find it there.
+pub fn find_az() -> Option<PathBuf> {
+    if let Some(binary) = find_binary("az") {
+        return Some(binary);
+    }
+    #[cfg(windows)]
+    {
+        for name in ["az.cmd", "az.bat"] {
+            if let Some(binary) = find_on_path(name) {
+                return Some(binary);
+            }
+        }
+    }
+    None
+}
+
+fn find_on_path(file_name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     std::env::split_paths(&path)
-        .map(|dir| dir.join(format!("{program}{}", std::env::consts::EXE_SUFFIX)))
+        .map(|dir| dir.join(file_name))
         .find(|candidate| candidate.is_file())
 }
 
@@ -174,6 +237,60 @@ pub fn detect_gh() -> Result<GhInfo> {
         version,
         logged_in: auth.status.success() && !hosts.is_empty(),
         hosts,
+    })
+}
+
+/// Runs `az version`, `az extension show --name azure-devops` and
+/// `az account show`.
+///
+/// A missing extension or a signed-out account is a successful detection that
+/// names the state, because each has a single command that fixes it; only a
+/// missing or unusable program is an error, the same split [`detect_gh`] uses.
+pub fn detect_az() -> Result<AzInfo> {
+    let binary = find_az().ok_or_else(|| Error::other("az is not installed"))?;
+    let version = run_tool(&binary, &["version"], None, None)
+        .ok()
+        .and_then(|output| first_line(&output).map(str::to_owned));
+
+    // The extension is what provides `az repos`; without it even a signed-in
+    // account cannot list pull requests.
+    let extension = run_tool(
+        &binary,
+        &[
+            "extension",
+            "show",
+            "--name",
+            "azure-devops",
+            "--output",
+            "json",
+        ],
+        None,
+        None,
+    )
+    .ok()
+    .and_then(|output| String::from_utf8(output.stdout).ok())
+    .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+    .and_then(|value| {
+        value
+            .get("version")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    });
+
+    let logged_in = command(
+        &binary,
+        &["account", "show", "--output", "json"],
+        None,
+        None,
+    )
+    .output()
+    .is_ok_and(|output| output.status.success() && !output.stdout.is_empty());
+
+    Ok(AzInfo {
+        binary,
+        version,
+        extension,
+        logged_in,
     })
 }
 
@@ -297,7 +414,7 @@ fn command(
     root_override: Option<&Path>,
     workdir: Option<&Path>,
 ) -> Command {
-    let mut command = Command::new(binary);
+    let mut command = process(binary);
     command
         .args(args)
         .stdin(Stdio::null())
@@ -316,6 +433,22 @@ fn command(
         command.creation_flags(0x0800_0000);
     }
     command
+}
+
+/// A command that starts `binary`.
+///
+/// Windows runs a batch launcher such as `az.cmd` through `cmd.exe`; passing
+/// the file to `CreateProcess` directly fails with a bad executable format.
+pub(crate) fn process(binary: &Path) -> Command {
+    #[cfg(windows)]
+    if binary.extension().is_some_and(|extension| {
+        extension.eq_ignore_ascii_case("cmd") || extension.eq_ignore_ascii_case("bat")
+    }) {
+        let mut command = Command::new("cmd");
+        command.arg("/C").arg(binary);
+        return command;
+    }
+    Command::new(binary)
 }
 
 fn first_line(output: &Output) -> Option<&str> {
@@ -362,7 +495,7 @@ fn looks_like_host(token: &str) -> bool {
 /// Accepted forms are a URL with a scheme and the scp-like `user@host:path`.
 /// Ports and credentials are dropped; a local path has no host and returns
 /// `None`.
-fn split_remote(url: &str) -> Option<(String, String)> {
+pub(crate) fn split_remote(url: &str) -> Option<(String, String)> {
     let url = url.trim().trim_end_matches('/');
     if url.is_empty() {
         return None;
@@ -403,7 +536,7 @@ fn split_remote(url: &str) -> Option<(String, String)> {
 }
 
 /// Percent-encodes a URL path or segment, keeping `/` when `keep_slash`.
-fn encode(value: &str, keep_slash: bool) -> String {
+pub(crate) fn encode(value: &str, keep_slash: bool) -> String {
     let mut encoded = String::with_capacity(value.len());
     for byte in value.bytes() {
         match byte {
@@ -417,6 +550,39 @@ fn encode(value: &str, keep_slash: bool) -> String {
         }
     }
     encoded
+}
+
+/// Decodes the `%XX` escapes a remote URL uses for names with spaces.
+///
+/// A malformed escape is kept as written rather than losing the name: a link
+/// built from half a repository name is worse than one that keeps the text.
+pub(crate) fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%'
+            && index + 2 < bytes.len()
+            && let (Some(high), Some(low)) =
+                (hex_value(bytes[index + 1]), hex_value(bytes[index + 2]))
+        {
+            decoded.push(high << 4 | low);
+            index += 3;
+        } else {
+            decoded.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8_lossy(&decoded).into_owned()
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
