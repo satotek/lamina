@@ -45,9 +45,6 @@ impl RepoView {
     /// `StashChanges`: asks for a message and stashes the working tree, or only
     /// the files still ticked in the dialog's checklist.
     pub(crate) fn stash_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.refuse_if_ssh(cx) {
-            return;
-        }
         if self.session.is_none() {
             notify(
                 window,
@@ -341,7 +338,6 @@ pub(crate) fn sidebar_row(
         &colors.design,
         row,
         move |menu, _window, cx| {
-            let ssh = entity.read(cx).is_ssh();
             let detail = entity.read(cx).stash_detail(index);
             let menu = match detail {
                 Some(detail) => menu
@@ -375,11 +371,7 @@ pub(crate) fn sidebar_row(
                     entity.update(cx, |view, cx| view.confirm_stash_drop(index, window, cx));
                 }
             };
-            let blocked = if ssh {
-                Some(crate::remote_open::unavailable_reason())
-            } else {
-                busy.then_some(t!("branch.reason.busy").to_string())
-            };
+            let blocked = busy.then_some(t!("branch.reason.busy").to_string());
             menu.item(PopupMenuItem::new(t!("stash.reveal").to_string()).on_click(reveal))
                 .item(
                     PopupMenuItem::new(crate::ui::menu_label(

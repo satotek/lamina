@@ -2536,7 +2536,8 @@ pub(crate) fn drop_entries(
     Some(entries)
 }
 
-/// A remote repository refuses every write, ahead of a merely busy local one.
+/// Actions the helper does not run stay unavailable on a remote repository,
+/// ahead of a merely busy local one.
 fn prefer_ssh(ssh: bool, reason: Option<String>) -> Option<String> {
     if ssh {
         Some(crate::remote_open::unavailable_reason())
@@ -2693,10 +2694,9 @@ fn remote_group_header(
         &colors.design,
         header,
         move |menu, _window, cx| {
-            let blocked = prefer_ssh(
-                menu_entity.read(cx).is_ssh(),
-                busy.then_some(t!("branch.reason.busy").to_string()),
-            );
+            let ssh = menu_entity.read(cx).is_ssh();
+            let fetch_blocked = busy.then_some(t!("branch.reason.busy").to_string());
+            let manage_blocked = prefer_ssh(ssh, fetch_blocked.clone());
             let fetch = {
                 let entity = menu_entity.clone();
                 let name = menu_name.clone();
@@ -2732,35 +2732,35 @@ fn remote_group_header(
             menu.item(
                 PopupMenuItem::new(crate::ui::menu_label(
                     t!("branch.menu.fetch").to_string(),
-                    blocked.as_ref(),
+                    fetch_blocked.as_ref(),
                 ))
-                .disabled(blocked.is_some())
+                .disabled(fetch_blocked.is_some())
                 .on_click(fetch),
             )
             .separator()
             .item(
                 PopupMenuItem::new(crate::ui::menu_label(
                     t!("branch.menu.rename").to_string(),
-                    blocked.as_ref(),
+                    manage_blocked.as_ref(),
                 ))
-                .disabled(blocked.is_some())
+                .disabled(manage_blocked.is_some())
                 .on_click(rename),
             )
             .item(
                 PopupMenuItem::new(crate::ui::menu_label(
                     t!("branch.menu.edit_url").to_string(),
-                    blocked.as_ref(),
+                    manage_blocked.as_ref(),
                 ))
-                .disabled(blocked.is_some())
+                .disabled(manage_blocked.is_some())
                 .on_click(edit_url),
             )
             .separator()
             .item(
                 PopupMenuItem::new(crate::ui::menu_label(
                     t!("branch.menu.remove").to_string(),
-                    blocked.as_ref(),
+                    manage_blocked.as_ref(),
                 ))
-                .disabled(blocked.is_some())
+                .disabled(manage_blocked.is_some())
                 .on_click(remove),
             )
         },
@@ -2908,45 +2908,31 @@ fn local_row(
             // `${branch}` is the branch this menu acts on, which need not be
             // the checked-out one.
             variables.branch = Some(branch.clone());
-            let checkout_blocked = prefer_ssh(
-                ssh,
-                branch_blocked(active, t!("branch.reason.checked_out").to_string(), busy),
-            );
-            let merge_blocked = prefer_ssh(
-                ssh,
-                branch_blocked(active, t!("branch.reason.current").to_string(), busy),
-            );
-            let create_blocked =
-                prefer_ssh(ssh, busy.then_some(t!("branch.reason.busy").to_string()));
-            let delete_blocked = prefer_ssh(
-                ssh,
-                branch_blocked(active, t!("branch.reason.current").to_string(), busy),
-            );
+            let checkout_blocked =
+                branch_blocked(active, t!("branch.reason.checked_out").to_string(), busy);
+            let merge_blocked =
+                branch_blocked(active, t!("branch.reason.current").to_string(), busy);
+            let create_blocked = busy.then_some(t!("branch.reason.busy").to_string());
+            let delete_blocked =
+                branch_blocked(active, t!("branch.reason.current").to_string(), busy);
             let rebase = entity_menu
                 .read(cx)
                 .branch_rebase_target(RefKind::LocalBranch, &branch);
-            let rename_blocked =
-                prefer_ssh(ssh, busy.then_some(t!("branch.reason.busy").to_string()));
+            let rename_blocked = busy.then_some(t!("branch.reason.busy").to_string());
             let view = entity_menu.read(cx);
             let upstream = view.branch_upstream(&branch);
             let has_upstream = upstream.is_some();
             let has_remote_branches = !view.upstream_choices().is_empty();
-            let set_blocked = prefer_ssh(
-                ssh,
-                if !has_remote_branches {
-                    Some(t!("branch.empty.no_remote_branches").to_string())
-                } else {
-                    busy.then_some(t!("branch.reason.busy").to_string())
-                },
-            );
-            let unset_blocked = prefer_ssh(
-                ssh,
-                if !has_upstream {
-                    Some(t!("branch.reason.no_upstream").to_string())
-                } else {
-                    busy.then_some(t!("branch.reason.busy").to_string())
-                },
-            );
+            let set_blocked = if !has_remote_branches {
+                Some(t!("branch.empty.no_remote_branches").to_string())
+            } else {
+                busy.then_some(t!("branch.reason.busy").to_string())
+            };
+            let unset_blocked = if !has_upstream {
+                Some(t!("branch.reason.no_upstream").to_string())
+            } else {
+                busy.then_some(t!("branch.reason.busy").to_string())
+            };
             let head = view.compare_head();
             let compare_blocked = prefer_ssh(
                 ssh,
@@ -2974,7 +2960,8 @@ fn local_row(
                     },
                 )
             };
-            let three_way_blocked =
+            let three_way_blocked = prefer_ssh(
+                ssh,
                 crate::repo_view::compare::three_way_with_current_branch_blocked(
                     view.session.is_some(),
                     active,
@@ -2988,7 +2975,8 @@ fn local_row(
                     } else {
                         view.compare_branch_merge_base(&branch)
                     },
-                );
+                ),
+            );
             let three_way = {
                 let entity = entity_menu.clone();
                 let branch = branch.clone();
@@ -3266,10 +3254,7 @@ fn remote_row(
         &colors.design,
         row_element,
         move |menu, _window, cx| {
-            let blocked = prefer_ssh(
-                entity_menu.read(cx).is_ssh(),
-                busy.then_some(t!("branch.reason.busy").to_string()),
-            );
+            let blocked = busy.then_some(t!("branch.reason.busy").to_string());
             let rebase = entity_menu
                 .read(cx)
                 .branch_rebase_target(RefKind::RemoteBranch, &remote);
@@ -4242,6 +4227,11 @@ impl RepoView {
         short_name: &str,
         cx: &mut Context<Self>,
     ) {
+        // The helper's walk is not refiltered until a later phase, so applying
+        // the scope locally would show a graph the request did not change.
+        if self.refuse_if_ssh(cx) {
+            return;
+        }
         let Some(session) = self.session.as_ref() else {
             return;
         };
@@ -4260,6 +4250,9 @@ impl RepoView {
 
     /// Restores every ref as a history starting point, undoing "show only".
     pub(crate) fn show_all_refs(&mut self, cx: &mut Context<Self>) {
+        if self.refuse_if_ssh(cx) {
+            return;
+        }
         let Some(session) = self.session.as_ref() else {
             return;
         };
@@ -4290,7 +4283,7 @@ impl RepoView {
         short_name: &str,
         cx: &mut Context<Self>,
     ) {
-        if self.session.is_none() {
+        if self.refuse_if_ssh(cx) || self.session.is_none() {
             return;
         }
         let full_name = ref_full_name(kind, short_name);
@@ -4311,7 +4304,7 @@ impl RepoView {
 
     /// Restores every hidden ref to the history graph.
     pub(crate) fn show_hidden_refs(&mut self, cx: &mut Context<Self>) {
-        if self.session.is_none() {
+        if self.refuse_if_ssh(cx) || self.session.is_none() {
             return;
         }
         if self.hidden_refs.is_empty() {
@@ -4354,16 +4347,10 @@ impl RepoView {
             .then(|| self.fast_forward_ready(&source.name, &target))
             .flatten();
         let busy = self.is_busy();
-        let Some(mut entries) = drop_entries(&source, &target, head.as_deref(), busy, fast_forward)
+        let Some(entries) = drop_entries(&source, &target, head.as_deref(), busy, fast_forward)
         else {
             return;
         };
-        if self.is_ssh() {
-            let reason = crate::remote_open::unavailable_reason();
-            for entry in &mut entries {
-                entry.blocked = Some(reason.clone());
-            }
-        }
         self.branches.drop_menu = Some(DropMenu {
             position,
             source,

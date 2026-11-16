@@ -827,7 +827,7 @@ impl RepoView {
         operation: Operation,
         cx: &mut Context<Self>,
     ) {
-        if self.refuse_if_ssh(cx) {
+        if self.refuse_unsupported(&operation, cx) {
             return;
         }
         let Some(session) = self.session.as_ref() else {
@@ -839,9 +839,6 @@ impl RepoView {
     }
 
     pub(crate) fn open_worktree(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.refuse_if_ssh(cx) {
-            return;
-        }
         self.leave_reflog(cx);
         self.mode = MainMode::Worktree;
         let focus = self.worktree.ensure_focus(cx);
