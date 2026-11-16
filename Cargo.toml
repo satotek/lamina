@@ -5,6 +5,8 @@ members = [
     "crates/strata-app",
     "crates/strata-term",
     "crates/strata-remote-protocol",
+    "crates/strata-remote-client",
+    "crates/strata-remote",
 ]
 
 [workspace.package]
@@ -18,6 +20,7 @@ homepage = "https://github.com/satotek/strata"
 [workspace.dependencies]
 strata-core = { path = "crates/strata-core" }
 strata-remote-protocol = { path = "crates/strata-remote-protocol" }
+strata-remote-client = { path = "crates/strata-remote-client" }
 
 # The phase-0 benchmark has to be judged on release builds, where frame pacing
 # is not dominated by unoptimised element layout.

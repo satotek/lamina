@@ -7887,6 +7887,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "strata-remote"
+version = "0.1.2"
+dependencies = [
+ "strata-core",
+ "strata-remote-client",
+ "strata-remote-protocol",
+]
+
+[[package]]
+name = "strata-remote-client"
+version = "0.1.2"
+dependencies = [
+ "strata-core",
+ "strata-remote-protocol",
+]
+
+[[package]]
 name = "strata-remote-protocol"
 version = "0.1.2"
 dependencies = [
