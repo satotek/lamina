@@ -7,8 +7,6 @@
 //! and runs on every platform.
 
 use std::io::{Read, Write};
-#[cfg(unix)]
-use std::process::{Child, ChildStdin, ChildStdout};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
@@ -214,10 +212,27 @@ fn assert_diffs_match(
     );
 }
 
+fn wait_for_remote(session: &RemoteSession, events: &Receiver<SessionEvent>) -> Arc<RepoSnapshot> {
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let snapshot = session.snapshot();
+        if snapshot.commits.complete && snapshot.head.is_some() {
+            return snapshot;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match events.recv_timeout(remaining) {
+            Ok(SessionEvent::LoadFailed { error }) => panic!("remote load failed: {error}"),
+            Ok(_) => {}
+            Err(error) => panic!("remote snapshot did not complete: {error}"),
+        }
+    }
+}
+
 fn assert_parity(repo: &TestRepo, remote: &RemoteSession, remote_events: &Receiver<SessionEvent>) {
     let (local, local_events) = open_local(repo);
     let local_snapshot = wait_for_local(&local, &local_events);
-    let remote_snapshot = remote.snapshot();
+    // `connect` returns after the first chunk. The walk may still be running.
+    let remote_snapshot = wait_for_remote(remote, remote_events);
     assert_snapshots_match(&local_snapshot, &remote_snapshot);
 
     assert_readers_match(&local, remote);
@@ -252,14 +267,19 @@ fn assert_parity(repo: &TestRepo, remote: &RemoteSession, remote_events: &Receiv
 #[test]
 fn an_in_process_helper_matches_a_local_session() {
     let repo = fixture();
-    let (client, server_read, server_write) = duplex();
+    let (client_read, client_write, server_read, server_write) = duplex();
     let root = repo.path().to_path_buf();
     let server = std::thread::spawn(move || strata_remote::serve(server_read, server_write, root));
 
     let (tx, rx) = mpsc::channel();
-    let remote = RemoteSession::connect(client, RemoteTarget::new("local-duplex"), move |event| {
-        let _ = tx.send(event);
-    })
+    let remote = RemoteSession::connect(
+        client_read,
+        client_write,
+        RemoteTarget::new("local-duplex"),
+        move |event| {
+            let _ = tx.send(event);
+        },
+    )
     .expect("connect to the in-process helper");
 
     assert_parity(&repo, &remote, &rx);
@@ -289,11 +309,8 @@ fn a_spawned_helper_matches_a_local_session() {
 
     let (tx, rx) = mpsc::channel();
     let remote = RemoteSession::connect(
-        ChildTransport {
-            stdin: Some(stdin),
-            stdout,
-            child,
-        },
+        stdout,
+        stdin,
         RemoteTarget::new("test-host"),
         move |event| {
             let _ = tx.send(event);
@@ -302,6 +319,9 @@ fn a_spawned_helper_matches_a_local_session() {
     .expect("connect to the spawned helper");
 
     assert_parity(&repo, &remote, &rx);
+    drop(remote);
+    let status = child.wait().expect("wait for helper");
+    assert!(status.success(), "helper exited with {status}");
 }
 
 /// `stdin` EOF is the shutdown signal; the helper must exit successfully
@@ -340,88 +360,6 @@ fn self_check_reports_the_protocol_version_and_build() {
         "{stdout}"
     );
     assert!(stdout.contains("build: "), "{stdout}");
-}
-
-/// Buffered stdin/stdout of a spawned helper.
-#[cfg(unix)]
-struct ChildTransport {
-    stdin: Option<ChildStdin>,
-    stdout: ChildStdout,
-    child: Child,
-}
-
-#[cfg(unix)]
-impl Read for ChildTransport {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.stdout.read(buf)
-    }
-}
-
-#[cfg(unix)]
-impl Write for ChildTransport {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.stdin
-            .as_mut()
-            .expect("stdin is open until drop")
-            .write(buf)
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.stdin
-            .as_mut()
-            .expect("stdin is open until drop")
-            .flush()
-    }
-}
-
-#[cfg(unix)]
-impl Drop for ChildTransport {
-    fn drop(&mut self) {
-        // Closing stdin is the documented shutdown; wait so the process does
-        // not outlive the test.
-        drop(self.stdin.take());
-        let _ = self.child.wait();
-    }
-}
-
-/// Client end of the in-memory duplex.
-struct Duplex {
-    tx: mpsc::Sender<Vec<u8>>,
-    rx: Receiver<Vec<u8>>,
-    pending: Vec<u8>,
-    offset: usize,
-}
-
-impl Read for Duplex {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        if self.offset == self.pending.len() {
-            match self.rx.recv() {
-                Ok(chunk) => {
-                    self.pending = chunk;
-                    self.offset = 0;
-                }
-                Err(_) => return Ok(0),
-            }
-        }
-        let available = &self.pending[self.offset..];
-        let take = available.len().min(buf.len());
-        buf[..take].copy_from_slice(&available[..take]);
-        self.offset += take;
-        Ok(take)
-    }
-}
-
-impl Write for Duplex {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        // A closed peer is indistinguishable from a full pipe here; the
-        // server stops on its own EOF.
-        let _ = self.tx.send(buf.to_vec());
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
 }
 
 struct DuplexRead {
@@ -464,16 +402,16 @@ impl Write for DuplexWrite {
     }
 }
 
-fn duplex() -> (Duplex, DuplexRead, DuplexWrite) {
+fn duplex() -> (DuplexRead, DuplexWrite, DuplexRead, DuplexWrite) {
     let (client_tx, server_rx) = mpsc::channel();
     let (server_tx, client_rx) = mpsc::channel();
     (
-        Duplex {
-            tx: client_tx,
+        DuplexRead {
             rx: client_rx,
             pending: Vec::new(),
             offset: 0,
         },
+        DuplexWrite { tx: client_tx },
         DuplexRead {
             rx: server_rx,
             pending: Vec::new(),
