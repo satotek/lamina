@@ -1256,9 +1256,8 @@ pub(crate) fn commit_menu(
     // One grouped entry rather than a submenu, so the compare view is one
     // click away from the commit it starts at.
     menu = menu.separator();
-    // Two-way compare is a ticketed query. Creating a worktree and saving a
-    // patch still need this machine, so the remote reason wins over busy
-    // for those entries.
+    // Two-way compare is a ticketed query. Saving a patch still writes a file
+    // on this machine. Creating a worktree runs on the helper.
     let remote_reason = state.ssh.then(crate::remote_open::unavailable_reason);
     // A menu only opens with a session, so the repository is there.
     let compare_blocked = super::compare::with_head_blocked(true, Some(commit), state.head);
@@ -1297,7 +1296,8 @@ pub(crate) fn commit_menu(
     );
 
     let busy_reason = state.busy().then(|| t!("branch.reason.busy").to_string());
-    let worktree_reason = remote_reason.or(busy_reason);
+    let worktree_reason = busy_reason.clone();
+    let patch_reason = remote_reason.or(busy_reason);
     let worktree_short = short.clone();
     let create_worktree = {
         let entity = entity.clone();
@@ -1318,10 +1318,10 @@ pub(crate) fn commit_menu(
         let short = short.clone();
         PopupMenuItem::new(blocked_label(
             t!("history_ops.menu.save_patch").to_string(),
-            worktree_reason.as_deref(),
+            patch_reason.as_deref(),
             shared.as_deref(),
         ))
-        .disabled(worktree_reason.is_some())
+        .disabled(patch_reason.is_some())
         .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
             let short = short.clone();
             entity.update(cx, |view, cx| {

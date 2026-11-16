@@ -245,6 +245,25 @@ pub enum OperationDto {
     RedoReflog {
         entry: ReflogEntryDto,
     },
+    /// `git submodule update [--init]`. An empty `paths` updates every submodule.
+    SubmoduleUpdate {
+        paths: Vec<String>,
+        init: bool,
+    },
+    /// `git worktree add` at an absolute path the user typed.
+    WorktreeAdd {
+        path: String,
+        branch: Option<String>,
+        new_branch: Option<String>,
+        commit: Option<ObjectId>,
+    },
+    /// `git worktree remove` of an absolute path.
+    WorktreeRemove {
+        path: String,
+        force: bool,
+    },
+    /// `git worktree prune`.
+    WorktreePrune,
 }
 
 impl TryFrom<&strata_core::session::Operation> for OperationDto {
@@ -408,6 +427,26 @@ impl TryFrom<&strata_core::session::Operation> for OperationDto {
             Operation::RedoReflog { entry } => Self::RedoReflog {
                 entry: ReflogEntryDto::from(entry),
             },
+            Operation::SubmoduleUpdate { paths, init } => Self::SubmoduleUpdate {
+                paths: paths.clone(),
+                init: *init,
+            },
+            Operation::WorktreeAdd {
+                path,
+                branch,
+                new_branch,
+                commit,
+            } => Self::WorktreeAdd {
+                path: path_on_wire(path)?,
+                branch: branch.clone(),
+                new_branch: new_branch.clone(),
+                commit: commit.map(ObjectId::from),
+            },
+            Operation::WorktreeRemove { path, force } => Self::WorktreeRemove {
+                path: path_on_wire(path)?,
+                force: *force,
+            },
+            Operation::WorktreePrune => Self::WorktreePrune,
             // Kept off the wire on purpose: the remote tab still refuses these.
             Operation::AddRemote { .. }
             | Operation::RenameRemote { .. }
@@ -418,10 +457,6 @@ impl TryFrom<&strata_core::session::Operation> for OperationDto {
             | Operation::ApplyPatch { .. }
             | Operation::CreateTag { .. }
             | Operation::DeleteTag { .. }
-            | Operation::SubmoduleUpdate { .. }
-            | Operation::WorktreeAdd { .. }
-            | Operation::WorktreeRemove { .. }
-            | Operation::WorktreePrune
             | Operation::LfsTrack { .. }
             | Operation::LfsLock { .. }
             | Operation::LfsUnlock { .. }
@@ -579,8 +614,33 @@ impl TryFrom<OperationDto> for strata_core::session::Operation {
             OperationDto::RedoReflog { entry } => Operation::RedoReflog {
                 entry: entry.try_into()?,
             },
+            OperationDto::SubmoduleUpdate { paths, init } => {
+                Operation::SubmoduleUpdate { paths, init }
+            }
+            OperationDto::WorktreeAdd {
+                path,
+                branch,
+                new_branch,
+                commit,
+            } => Operation::WorktreeAdd {
+                path: std::path::PathBuf::from(path),
+                branch,
+                new_branch,
+                commit: commit.map(repo::oid).transpose()?,
+            },
+            OperationDto::WorktreeRemove { path, force } => Operation::WorktreeRemove {
+                path: std::path::PathBuf::from(path),
+                force,
+            },
+            OperationDto::WorktreePrune => Operation::WorktreePrune,
         })
     }
+}
+
+/// Worktree paths cross the wire as text. A path that is not Unicode cannot
+/// be named in a frame, so the operation stays local.
+fn path_on_wire(path: &std::path::Path) -> Result<String, UnsupportedOperation> {
+    path.to_str().map(str::to_owned).ok_or(UnsupportedOperation)
 }
 
 fn line_pairs(
@@ -789,6 +849,31 @@ mod tests {
                     kind: ReflogKind::Commit,
                 },
             },
+            Operation::SubmoduleUpdate {
+                paths: vec!["libs/ui".into()],
+                init: true,
+            },
+            Operation::SubmoduleUpdate {
+                paths: Vec::new(),
+                init: false,
+            },
+            Operation::WorktreeAdd {
+                path: std::path::PathBuf::from("/tmp/repo-feature"),
+                branch: Some("feature".into()),
+                new_branch: None,
+                commit: None,
+            },
+            Operation::WorktreeAdd {
+                path: std::path::PathBuf::from("/tmp/repo-topic"),
+                branch: None,
+                new_branch: Some("topic".into()),
+                commit: Some(commit),
+            },
+            Operation::WorktreeRemove {
+                path: std::path::PathBuf::from("/tmp/repo-feature"),
+                force: true,
+            },
+            Operation::WorktreePrune,
         ];
         for operation in &operations {
             assert!(is_supported_operation(operation), "{operation:?}");
@@ -813,11 +898,6 @@ mod tests {
                 message: None,
             },
             Operation::DeleteTag { name: "v1".into() },
-            Operation::SubmoduleUpdate {
-                paths: Vec::new(),
-                init: true,
-            },
-            Operation::WorktreePrune,
             Operation::LfsPull {
                 path: "a.bin".into(),
             },
