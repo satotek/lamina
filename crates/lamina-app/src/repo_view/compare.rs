@@ -12,7 +12,7 @@
 //! keeps the History details split: the file column and the diff share the
 //! saved fraction and the same draggable boundary.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -547,11 +547,19 @@ impl RepoView {
         });
     }
 
+    /// The repository's root, as the compare tab's path line shows it.
+    ///
+    /// A local tab gets the checkout. A remote tab gets its `ssh://` location:
+    /// the host's path is not on this machine, so it is shown, never opened.
     pub(crate) fn repository_root(&self) -> PathBuf {
-        self.session
-            .as_ref()
-            .and_then(|session| session.location().local_path().map(Path::to_path_buf))
-            .unwrap_or_default()
+        let Some(session) = self.session.as_ref() else {
+            return PathBuf::new();
+        };
+        let location = session.location();
+        match location.local_path() {
+            Some(path) => path.to_path_buf(),
+            None => PathBuf::from(location.display()),
+        }
     }
 
     /// The commit HEAD points at, or `None` on an unborn branch.
