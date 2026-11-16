@@ -20,11 +20,12 @@ use super::{PAGE, RepoView};
 #[cfg(feature = "terminal")]
 use crate::actions::ToggleTerminal;
 use crate::actions::{
-    self, ApplyPatch, CloseCompare, ExtendSelectionNext, ExtendSelectionPrevious, GoToChild,
-    GoToHead, GoToParent, GoToSecondParent, NavigateBack, NavigateForward, OpenInEditor,
-    OpenTerminalHere, RedoLastAction, SelectFirst, SelectLast, SelectNext, SelectPageDown,
-    SelectPageUp, SelectPrevious, StashChanges, SwitchBranch, ToggleDetailsMaximized,
-    ToggleFrameStats, ToggleSidebar, ToggleWholeFile, UndoLastAction,
+    self, ApplyPatch, CloseCompare, CompareBranchThreeWay, CompareCommitsThreeWay,
+    ExtendSelectionNext, ExtendSelectionPrevious, GoToChild, GoToHead, GoToParent,
+    GoToSecondParent, NavigateBack, NavigateForward, OpenInEditor, OpenTerminalHere,
+    RedoLastAction, SelectFirst, SelectLast, SelectNext, SelectPageDown, SelectPageUp,
+    SelectPrevious, StashChanges, SwitchBranch, ToggleDetailsMaximized, ToggleFrameStats,
+    ToggleSidebar, ToggleWholeFile, UndoLastAction,
 };
 use crate::branches::CreateBranchFromHead;
 use crate::commands::RunCustomCommand;
@@ -99,6 +100,12 @@ impl Render for RepoView {
             .on_action(
                 cx.listener(|this, _: &CloseCompare, window, cx| this.close_compare(window, cx)),
             )
+            .on_action(cx.listener(|this, _: &CompareBranchThreeWay, window, cx| {
+                this.three_way_branch_command(window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &CompareCommitsThreeWay, window, cx| {
+                this.three_way_commits_command(window, cx)
+            }))
             .on_action(
                 cx.listener(|this, _: &FocusSearch, window, cx| this.focus_search(window, cx)),
             )

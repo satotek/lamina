@@ -165,15 +165,15 @@ macro_rules! action {
 }
 
 use crate::actions::{
-    ApplyPatch, CloneRepository, CloseCompare, CloseTab, ExtendSelectionNext,
-    ExtendSelectionPrevious, GoToChild, GoToHead, GoToParent, GoToSecondParent, NavigateBack,
-    NavigateForward, NewRepository, NewTab, NextTab, OpenCompare, OpenGitConfig, OpenInEditor,
-    OpenRepository, OpenSettings, OpenTerminalHere, PreviousTab, Quit, REPO_VIEW, REPO_VIEW_LIST,
-    RedoLastAction, ReopenClosedTab, SelectFirst, SelectLast, SelectNext, SelectPageDown,
-    SelectPageUp, SelectPrevious, SelectTab1, SelectTab2, SelectTab3, SelectTab4, SelectTab5,
-    SelectTab6, SelectTab7, SelectTab8, SelectTab9, StashChanges, SwitchBranch,
-    ToggleDetailsMaximized, ToggleFrameStats, TogglePalette, ToggleSidebar, ToggleWholeFile,
-    UndoLastAction, WORKSPACE,
+    ApplyPatch, CloneRepository, CloseCompare, CloseTab, CompareBranchThreeWay,
+    CompareCommitsThreeWay, ExtendSelectionNext, ExtendSelectionPrevious, GoToChild, GoToHead,
+    GoToParent, GoToSecondParent, NavigateBack, NavigateForward, NewRepository, NewTab, NextTab,
+    OpenCompare, OpenGitConfig, OpenInEditor, OpenRepository, OpenSettings, OpenTerminalHere,
+    PreviousTab, Quit, REPO_VIEW, REPO_VIEW_LIST, RedoLastAction, ReopenClosedTab, SelectFirst,
+    SelectLast, SelectNext, SelectPageDown, SelectPageUp, SelectPrevious, SelectTab1, SelectTab2,
+    SelectTab3, SelectTab4, SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9,
+    StashChanges, SwitchBranch, ToggleDetailsMaximized, ToggleFrameStats, TogglePalette,
+    ToggleSidebar, ToggleWholeFile, UndoLastAction, WORKSPACE,
 };
 #[cfg(feature = "terminal")]
 use crate::actions::{
@@ -689,6 +689,26 @@ pub static ACTIONS: &[ActionSpec] = &[
         [],
         51,
         false
+    ),
+    action!(
+        "strata::CompareBranchThreeWay",
+        "Three-way compare with current branch",
+        Actions,
+        Some(REPO_VIEW),
+        CompareBranchThreeWay,
+        [],
+        52,
+        true
+    ),
+    action!(
+        "strata::CompareCommitsThreeWay",
+        "Three-way compare commits",
+        Actions,
+        Some(REPO_VIEW),
+        CompareCommitsThreeWay,
+        [],
+        53,
+        true
     ),
     action!(
         "strata::OpenGitConfig",
@@ -2340,7 +2360,7 @@ mod tests {
             }
         }
         // Every built-in palette entry has a registry row.
-        let expected_count = if cfg!(feature = "terminal") { 50 } else { 49 };
+        let expected_count = if cfg!(feature = "terminal") { 52 } else { 51 };
         assert_eq!(orders.len(), expected_count);
     }
 

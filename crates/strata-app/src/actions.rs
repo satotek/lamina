@@ -86,6 +86,13 @@ actions!(
         /// Re-applies the last action this view undid. Handled on `RepoView`
         /// by `reflog.rs`.
         RedoLastAction,
+        /// Compares the branch the sidebar revealed last with the current
+        /// branch across their merge base. Handled on `RepoView` by
+        /// `repo_view::compare`.
+        CompareBranchThreeWay,
+        /// Compares exactly three selected commits with one as the base.
+        /// Handled on `RepoView` by `repo_view::compare`.
+        CompareCommitsThreeWay,
         /// Opens a terminal in the repository's working tree. Handled on
         /// `RepoView` by `title_bar.rs`.
         OpenTerminalHere,
