@@ -12,12 +12,16 @@
 //! deadlock the reader that would deliver the answer.
 //!
 //! A lost connection is reported as [`SessionEvent::LoadFailed`] with
-//! [`CONNECTION_LOST`]. The last snapshot stays readable. Later requests fail
-//! immediately with that error.
+//! [`CONNECTION_LOST`] (stderr from `ssh` appended when there is any). The last
+//! snapshot stays readable. Later requests fail immediately with that error.
 
+mod deploy;
 mod session;
+mod ssh;
 
+pub use deploy::{HELPER_DIR_ENV, HELPER_OVERRIDE_ENV, InstallOptions, install_helper, target_for};
 pub use session::{CONNECTION_LOST, ClientConfig, RemoteSession, RemoteTarget, UNSUPPORTED};
+pub use ssh::{AskpassHandler, SshOptions};
 
 #[cfg(test)]
 mod tests;

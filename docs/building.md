@@ -153,3 +153,26 @@ cargo clippy -p strata-app --no-default-features --all-targets -- -D warnings
 ```
 
 For headless Linux UI smoke runs (`STRATA_SMOKE=1` under `Xvfb`) and CLI debug flags, see [crates/strata-app/README.md](../crates/strata-app/README.md).
+
+## Remote helper binaries
+
+Opening a repository over SSH uploads `strata-remote` and runs it on the host.
+The file has to be a musl build: the machine that built the app may be macOS
+or Windows, and the host must be able to execute the helper without that
+machine's C library. This repository does not yet bundle those binaries or
+cross-compile them in the release workflow. A release still needs to:
+
+- Build `strata-remote` for `x86_64-unknown-linux-musl` and
+  `aarch64-unknown-linux-musl` with the same `STRATA_BUILD_ID` the app was
+  built with. The id the client checks is `<version>+<STRATA_BUILD_ID>`, or
+  `<version>+dev` when the variable is unset. A mismatch makes the client
+  delete its upload and try once more; it will not keep a helper from a
+  different build.
+- Name the files `strata-remote-<target>` and point the launcher at their
+  directory with `STRATA_REMOTE_HELPER_DIR`.
+- Leave every other operating system and architecture unsupported. The client
+  reports an error. It does not compile on the remote host.
+
+`STRATA_REMOTE_HELPER`, set in the remote user's environment to an executable
+path, skips the upload. The client still checks the build id and does not
+delete that file when the id does not match.
