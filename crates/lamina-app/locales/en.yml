@@ -1805,6 +1805,7 @@ remote_repo.reconnect: "Reconnect"
 remote_repo.placeholder: "Connect"
 remote_repo.placeholder_detail: "This remote repository is not connected."
 remote_repo.badge: "Remote"
+remote_repo.no_terminal: "the embedded terminal is not part of this build"
 
 # App updates
 action.check_for_updates: "Check for Updates…"
@@ -1828,4 +1829,3 @@ updater.error_title: "Update check failed"
 updater.placeholder_key: "Update signing key is not configured in this build."
 updater.check_failed: "Could not check for updates: %{error}"
 updater.install_failed: "Could not install update: %{error}"
-

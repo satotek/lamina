@@ -390,6 +390,29 @@ impl RepoView {
                 .is_some_and(|session| matches!(session.location(), RepoLocation::Ssh { .. }))
     }
 
+    /// True when a remote tab has a live connection. Commands that run
+    /// something against the host wait for this; a lost connection closes them
+    /// again until the reconnect banner succeeds.
+    pub(crate) fn remote_connected(&self) -> bool {
+        self.session.is_some() && !self.remote_tab.as_ref().is_some_and(|tab| tab.lost)
+    }
+
+    /// The command the embedded terminal runs for this tab's host, with the
+    /// same `ssh` program and options the session dials with.
+    #[cfg(feature = "terminal")]
+    pub(super) fn remote_terminal_command(&self) -> Option<crate::terminal_panel::TerminalCommand> {
+        let tab = self.remote_tab.as_ref()?;
+        if !self.remote_connected() {
+            return None;
+        }
+        let (program, args) = crate::remote_open::terminal_command(&tab.spec, tab.ssh.as_ref());
+        Some(crate::terminal_panel::TerminalCommand {
+            program,
+            args,
+            title: crate::remote_open::terminal_tab_title(&tab.spec),
+        })
+    }
+
     /// Records the remote-repository reason and reports that the caller should
     /// stop. The status bar shows it; a toast would read as a failed command.
     pub(crate) fn refuse_if_ssh(&mut self, cx: &mut Context<Self>) -> bool {
@@ -712,13 +735,12 @@ fn retry_button(entity: Entity<RepoView>, id: &'static str) -> impl IntoElement 
 mod tests {
     use std::time::{Duration, Instant};
 
-    #[cfg(unix)]
-    use std::path::{Path, PathBuf};
-
     use gpui::TestAppContext;
 
     use super::super::Launch;
     use super::super::RepoView;
+    #[cfg(unix)]
+    use super::super::remote_fixture::{install_host_helper, layout_fake_ssh, wait_for_helper};
     use super::{connection_rtt_status, focus_refresh_applies, remote_refresh_due};
     use crate::remote_open::{RemoteLaunch, RemoteSpec};
 
@@ -820,15 +842,7 @@ mod tests {
         // that wake as non-deterministic unless parking is allowed.
         cx.dispatcher.allow_parking();
 
-        let scratch = std::env::temp_dir().join(format!(
-            "lamina-app-ssh-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|elapsed| elapsed.as_nanos())
-                .unwrap_or(0)
-        ));
-        std::fs::create_dir_all(&scratch).expect("scratch dir");
+        let scratch = super::super::remote_fixture::scratch_dir("lamina-app-ssh");
         let laid = layout_fake_ssh(&scratch);
         let helper = wait_for_helper();
         install_host_helper(&helper, &laid.helpers);
@@ -958,127 +972,5 @@ mod tests {
         });
 
         let _ = std::fs::remove_dir_all(&scratch);
-    }
-
-    #[cfg(unix)]
-    struct LaidOut {
-        ssh: PathBuf,
-        helpers: PathBuf,
-        log: PathBuf,
-        pid: PathBuf,
-    }
-
-    #[cfg(unix)]
-    fn layout_fake_ssh(scratch: &Path) -> LaidOut {
-        let bin = scratch.join("bin");
-        let home = scratch.join("home");
-        let helpers = scratch.join("helpers");
-        std::fs::create_dir_all(&bin).unwrap();
-        std::fs::create_dir_all(&home).unwrap();
-        std::fs::create_dir_all(&helpers).unwrap();
-        let log = scratch.join("ssh.log");
-        let pid = scratch.join("session.pid");
-        let uname = "#!/bin/sh\nif [ \"$1\" = \"-s\" ]; then\n  echo Linux\n  exit 0\nfi\nif [ \"$1\" = \"-m\" ]; then\n  echo x86_64\n  exit 0\nfi\necho unknown\nexit 0\n";
-        write_exec(&bin.join("uname"), uname);
-        let script = format!(
-            r#"#!/bin/sh
-export HOME={home}
-unset XDG_CACHE_HOME
-export PATH={bin}:$PATH
-LOG={log}
-{{
-  printf 'CMD'
-  for arg in "$@"; do
-    printf ' <%s>' "$arg"
-  done
-  printf '\n'
-}} >> "$LOG"
-after=0
-cmd=
-for arg in "$@"; do
-  if [ "$after" = 1 ]; then
-    cmd="$cmd $arg"
-    continue
-  fi
-  if [ "$arg" = "--" ]; then
-    after=1
-  fi
-done
-cmd=${{cmd# }}
-if [ -z "$cmd" ]; then
-  echo "fake ssh: no remote command" >&2
-  exit 2
-fi
-case "$cmd" in
-  *--stdio*)
-    # A background command would have its stdin pointed at /dev/null, and the
-    # helper would exit before the handshake. Replace this process instead, so
-    # the recorded pid is the helper and killing it closes the pipes.
-    echo $$ > {pid}
-    # The arguments are already shell-quoted by the client. Splitting them
-    # here is only safe because this test's paths have no spaces.
-    set -- $cmd
-    exec "$@"
-    ;;
-esac
-exec sh -c "$cmd"
-"#,
-            home = sh_quote(&home.display().to_string()),
-            bin = sh_quote(&bin.display().to_string()),
-            log = sh_quote(&log.display().to_string()),
-            pid = sh_quote(&pid.display().to_string()),
-        );
-        let ssh = bin.join("ssh");
-        write_exec(&ssh, &script);
-        LaidOut {
-            ssh,
-            helpers,
-            log,
-            pid,
-        }
-    }
-
-    #[cfg(unix)]
-    fn sh_quote(value: &str) -> String {
-        format!("'{}'", value.replace('\'', "'\\''"))
-    }
-
-    #[cfg(unix)]
-    fn write_exec(path: &Path, text: &str) {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::write(path, text).unwrap();
-        let mut perms = std::fs::metadata(path).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(path, perms).unwrap();
-    }
-
-    /// The workspace build places `lamina-remote` next to this test binary's
-    /// `deps` directory. A package test can start before that binary is linked.
-    #[cfg(unix)]
-    fn wait_for_helper() -> PathBuf {
-        let exe = std::env::current_exe().expect("current exe");
-        let mut dir = exe.parent().expect("binary directory").to_path_buf();
-        if dir.file_name().is_some_and(|name| name == "deps") {
-            dir.pop();
-        }
-        let helper = dir.join("lamina-remote");
-        let deadline = Instant::now() + Duration::from_secs(180);
-        while !helper.is_file() {
-            if Instant::now() > deadline {
-                panic!("lamina-remote was not built at {}", helper.display());
-            }
-            std::thread::sleep(Duration::from_millis(200));
-        }
-        helper
-    }
-
-    #[cfg(unix)]
-    fn install_host_helper(source: &Path, dir: &Path) {
-        use std::os::unix::fs::PermissionsExt;
-        let dest = dir.join("lamina-remote-x86_64-unknown-linux-musl");
-        std::fs::copy(source, &dest).expect("copy helper");
-        let mut perms = std::fs::metadata(&dest).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&dest, perms).unwrap();
     }
 }

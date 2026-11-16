@@ -117,10 +117,24 @@ pub(crate) enum TerminalCloseReason {
 /// Callback invoked when the terminal panel should hide or be torn down.
 pub(crate) type CloseHandler = Rc<dyn Fn(TerminalCloseReason, &mut Window, &mut App)>;
 
+/// A fixed command for every tab in a panel, instead of the shell from the
+/// settings. A remote tab runs its `ssh` here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TerminalCommand {
+    pub program: String,
+    pub args: Vec<String>,
+    /// Tab title until the shell sets its own, so a remote tab reads
+    /// `host:path` rather than "Terminal 1".
+    pub title: String,
+}
+
 struct TerminalTab {
     id: u64,
     number: usize,
     session: Option<TerminalSession>,
+    /// Fallback title from the panel's fixed command, under any title the
+    /// shell reports through OSC.
+    title: Option<String>,
     /// Set while the tab waits for the panel's first layout before it spawns its
     /// shell, so the shell starts at the real grid size instead of the default.
     spawn_pending: bool,
@@ -157,6 +171,7 @@ impl TerminalTab {
             id,
             number,
             session: None,
+            title: None,
             spawn_pending: false,
             snapshot: TerminalSnapshot::default(),
             osc_title: None,
@@ -183,6 +198,7 @@ impl TerminalTab {
             .as_deref()
             .filter(|t| !t.trim().is_empty())
             .map(str::to_owned)
+            .or_else(|| self.title.clone())
             .unwrap_or_else(|| t!("terminal.tab_title", index = self.number).to_string())
     }
 
@@ -205,6 +221,9 @@ pub struct TerminalPanel {
     tabs: TabDeck<TerminalTab>,
     next_tab_id: u64,
     working_dir: PathBuf,
+    /// Set when the panel is not a plain local shell: a remote tab runs `ssh`
+    /// in every tab instead of the configured embedded shell.
+    command: Option<TerminalCommand>,
     focus_handle: FocusHandle,
     parent_focus: FocusHandle,
     on_close: Option<CloseHandler>,
@@ -233,6 +252,18 @@ impl Focusable for TerminalPanel {
     }
 }
 
+/// What a new panel is built from. Grouped so the constructors and `create`
+/// stay readable, since the panel has more setup than one call wants.
+struct PanelSetup {
+    working_dir: PathBuf,
+    /// A fixed command for every tab, instead of the configured shell.
+    command: Option<TerminalCommand>,
+    parent_focus: FocusHandle,
+    on_close: Option<CloseHandler>,
+    /// Whether a new tab waits for the panel's first layout before spawning.
+    spawn_awaits_bounds: bool,
+}
+
 impl TerminalPanel {
     /// Creates a terminal panel with an initial shell tab in `working_dir`.
     ///
@@ -245,16 +276,34 @@ impl TerminalPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let spawn_awaits_bounds = true;
-        Self::create(
+        let setup = PanelSetup {
             working_dir,
+            command: None,
             parent_focus,
             on_close,
-            spawn_awaits_bounds,
-            false,
-            window,
-            cx,
-        )
+            spawn_awaits_bounds: true,
+        };
+        Self::create(setup, false, window, cx)
+    }
+
+    /// Creates a panel whose tabs always run `command`, the way a remote tab
+    /// runs its `ssh` instead of a local shell.
+    pub(crate) fn new_with_command(
+        working_dir: PathBuf,
+        command: TerminalCommand,
+        parent_focus: FocusHandle,
+        on_close: Option<CloseHandler>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let setup = PanelSetup {
+            working_dir,
+            command: Some(command),
+            parent_focus,
+            on_close,
+            spawn_awaits_bounds: true,
+        };
+        Self::create(setup, false, window, cx)
     }
 
     #[cfg(test)]
@@ -265,18 +314,35 @@ impl TerminalPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        // Quiet panels are never laid out and their events are drained by hand,
-        // so their shells start right away.
-        let spawn_awaits_bounds = false;
-        Self::create(
+        let setup = PanelSetup {
             working_dir,
+            command: None,
             parent_focus,
             on_close,
-            spawn_awaits_bounds,
-            true,
-            window,
-            cx,
-        )
+            // Quiet panels are never laid out and their events are drained by
+            // hand, so their shells start right away.
+            spawn_awaits_bounds: false,
+        };
+        Self::create(setup, true, window, cx)
+    }
+
+    /// Like [`Self::new_with_command`] without the layout wait, for tests.
+    #[cfg(test)]
+    pub(crate) fn new_quiet_with_command(
+        working_dir: PathBuf,
+        command: TerminalCommand,
+        parent_focus: FocusHandle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let setup = PanelSetup {
+            working_dir,
+            command: Some(command),
+            parent_focus,
+            on_close: None,
+            spawn_awaits_bounds: false,
+        };
+        Self::create(setup, true, window, cx)
     }
 
     /// Like [`Self::new_quiet`], but with production spawn timing so a test can
@@ -289,27 +355,29 @@ impl TerminalPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let spawn_awaits_bounds = true;
-        Self::create(
+        let setup = PanelSetup {
             working_dir,
+            command: None,
             parent_focus,
             on_close,
-            spawn_awaits_bounds,
-            true,
-            window,
-            cx,
-        )
+            spawn_awaits_bounds: true,
+        };
+        Self::create(setup, true, window, cx)
     }
 
     fn create(
-        working_dir: PathBuf,
-        parent_focus: FocusHandle,
-        on_close: Option<CloseHandler>,
-        spawn_awaits_bounds: bool,
+        setup: PanelSetup,
         #[cfg_attr(not(test), allow(unused_variables))] quiet: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let PanelSetup {
+            working_dir,
+            command,
+            parent_focus,
+            on_close,
+            spawn_awaits_bounds,
+        } = setup;
         // A verbatim `\\?\` directory would leave cmd.exe (and so every batch
         // file run from the shell) in the Windows directory instead.
         let working_dir = lamina_core::fs_path::strip_verbatim(working_dir);
@@ -350,6 +418,7 @@ impl TerminalPanel {
             tabs: TabDeck::new(),
             next_tab_id: 1,
             working_dir,
+            command,
             focus_handle,
             parent_focus,
             on_close,
@@ -549,7 +618,10 @@ impl TerminalPanel {
             .max()
             .map_or(1, |highest| highest + 1);
 
-        let tab = TerminalTab::new(id, number, self.cols, self.rows);
+        let mut tab = TerminalTab::new(id, number, self.cols, self.rows);
+        if let Some(command) = &self.command {
+            tab.title = Some(command.title.clone());
+        }
         self.tabs.open(tab);
         self.reveal_tab(self.tabs.active_index());
         self.spawn_session_for_tab(id, theme, focused, cx);
@@ -727,7 +799,12 @@ impl TerminalPanel {
         }
 
         let configured = Settings::get(cx).tools.embedded_shell.as_deref();
-        let parsed = parse_shell_command(configured);
+        let parsed = match &self.command {
+            // A fixed command replaces the configured shell entirely: the
+            // settings slot describes a local shell, and ssh has its own argv.
+            Some(command) => Ok((Some(command.program.clone()), command.args.clone())),
+            None => parse_shell_command(configured),
+        };
         let panel_cols = self.cols;
         let panel_rows = self.rows;
         let cols = panel_cols.max(2);
@@ -1786,6 +1863,71 @@ mod tests {
             ))
         );
         assert!(parse_shell_command(Some("/bin/sh -c 'unclosed")).is_err());
+    }
+
+    #[cfg(all(test, not(windows)))]
+    #[test]
+    fn a_fixed_command_panel_titles_its_tabs_with_the_target() {
+        // The title is the only part of the fixed command a panel can show
+        // without a window, so this covers the fallback the tab strip reads.
+        let mut tab = TerminalTab::new(1, 1, 80, 24);
+        tab.title = Some("git@example.com:/srv/my repo".to_owned());
+        assert_eq!(tab.display_title(), "git@example.com:/srv/my repo");
+        assert_eq!(
+            TerminalTab::new(1, 1, 80, 24).display_title(),
+            t!("terminal.tab_title", index = 1).to_string(),
+            "a plain shell keeps the numbered title"
+        );
+    }
+
+    #[cfg(all(test, not(windows)))]
+    #[gpui::test]
+    fn a_fixed_command_replaces_the_configured_shell(cx: &mut gpui::TestAppContext) {
+        use std::time::Instant;
+
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            gpui_component::init(cx);
+            let mut settings = Settings::default();
+            // A shell that cannot start: only the fixed command can print.
+            settings.tools.embedded_shell = Some("/nonexistent/lamina-shell".to_owned());
+            cx.set_global(settings);
+        });
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let command = TerminalCommand {
+            program: "/bin/sh".to_owned(),
+            args: vec!["-c".to_owned(), "printf READY".to_owned()],
+            title: "git@example.com:/srv/my repo".to_owned(),
+        };
+        let window = cx.add_window(|window, cx| {
+            let parent = cx.focus_handle();
+            TerminalPanel::new_quiet_with_command(
+                dir.path().to_path_buf(),
+                command,
+                parent,
+                window,
+                cx,
+            )
+        });
+        let panel = window.root(cx).expect("root panel");
+        let mut vcx = gpui::VisualTestContext::from_window(window.into(), cx);
+        assert_eq!(
+            panel.read_with(&vcx, |panel, _| panel.tab_titles()),
+            ["git@example.com:/srv/my repo"]
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut ready = false;
+        while Instant::now() < deadline {
+            panel.update(&mut vcx, |panel, cx| {
+                panel.flush_quiet_events(cx);
+                ready = panel.snapshot().text().contains("READY");
+            });
+            if ready {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(15));
+        }
+        assert!(ready, "the fixed command is what the tab runs");
     }
 
     #[gpui::test]

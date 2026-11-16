@@ -700,9 +700,23 @@ impl RepoView {
     }
 
     /// Opens a terminal in the repository's working tree.
-    pub(crate) fn open_terminal_here(&mut self, cx: &mut Context<Self>) {
-        if self.refuse_if_ssh(cx) {
-            return;
+    ///
+    /// A remote tab has no local checkout, so the external terminal cannot
+    /// help there: the action opens the embedded ssh session instead.
+    pub(crate) fn open_terminal_here(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_ssh() {
+            #[cfg(feature = "terminal")]
+            {
+                self.open_terminal_panel(window, cx);
+                return;
+            }
+            #[cfg(not(feature = "terminal"))]
+            {
+                let _ = window;
+                self.status_note = Some(t!("remote_repo.no_terminal").to_string());
+                self.notify_if_active(cx);
+                return;
+            }
         }
         let Some(dir) = self.work_dir() else {
             self.report_tool_error(t!("title_bar.open_repository_first").to_string(), cx);
@@ -783,9 +797,10 @@ impl RepoView {
     #[cfg(feature = "terminal")]
     pub(super) fn terminal_button(&self, design: &Design, window: &Window) -> AnyElement {
         let open = self.terminal_open;
-        let enabled = self.error.is_none() && self.terminal_working_dir().is_some();
-        let tooltip = if self.is_ssh() {
-            crate::remote_open::unavailable_reason()
+        let ready = self.terminal_working_dir().is_some();
+        let enabled = self.error.is_none() && ready;
+        let tooltip = if self.is_ssh() && !ready {
+            t!("title_bar.not_connected").to_string()
         } else {
             self.terminal_toggle_tooltip(window)
         };
@@ -811,7 +826,7 @@ impl RepoView {
     fn terminal_button(&self, design: &Design, _window: &Window) -> AnyElement {
         let enabled = self.work_dir().is_some();
         let tooltip = if self.is_ssh() {
-            crate::remote_open::unavailable_reason()
+            t!("remote_repo.no_terminal").to_string()
         } else {
             t!("action.open_terminal_here").to_string()
         };
@@ -823,9 +838,9 @@ impl RepoView {
             .text_color(design.muted)
             .tooltip(tooltip)
             .disabled(!enabled)
-            .on_click(move |_, _, cx| {
+            .on_click(move |_, window, cx| {
                 if let Some(entity) = entity.upgrade() {
-                    entity.update(cx, |this, cx| this.open_terminal_here(cx));
+                    entity.update(cx, |this, cx| this.open_terminal_here(window, cx));
                 }
             })
             .into_any_element()
