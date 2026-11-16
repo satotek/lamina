@@ -289,6 +289,16 @@ impl RepoView {
 
     /// True for the whole life of a remote tab, before a session exists and
     /// after it does. A local tab stays false.
+    /// A remote tab with no session that is not dialling: the restored
+    /// Connect placeholder, or an attempt that failed.
+    pub(super) fn remote_not_connected(&self) -> bool {
+        self.session.is_none()
+            && self
+                .remote_tab
+                .as_ref()
+                .is_some_and(|tab| tab.placeholder || tab.error.is_some())
+    }
+
     pub(crate) fn is_ssh(&self) -> bool {
         self.remote_tab.is_some()
             || self
@@ -576,6 +586,10 @@ mod tests {
             let view = view.read(cx);
             assert!(view.session.is_none(), "startup must not dial");
             assert!(view.is_connect_placeholder());
+            assert!(
+                view.remote_not_connected(),
+                "the title bar must not say loading"
+            );
             assert!(view.is_ssh());
             assert_eq!(view.commit_count(), 0);
         });
