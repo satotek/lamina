@@ -578,6 +578,15 @@ fn abort_text(state: RepoState) -> Option<(String, String, String)> {
     })
 }
 
+/// Why "Resolve conflicts" cannot open, or `None` when it can.
+///
+/// The editor needs the three index stages and the worktree bytes. A remote
+/// helper can stage a resolution, but it cannot yet supply those reads, so
+/// the button would otherwise do nothing.
+pub(crate) fn resolve_conflicts_blocked(ssh: bool) -> Option<String> {
+    ssh.then(crate::remote_open::unavailable_reason)
+}
+
 impl RepoView {
     /// Re-requests in-progress details whenever a snapshot publishes a
     /// non-normal state, and clears stale details as soon as git finishes.
@@ -638,16 +647,25 @@ impl RepoView {
         let mut banner = crate::ui::banner(crate::ui::BannerKind::Warning, state.text, design);
 
         if state.conflicts > 0 {
-            let resolve = entity.clone();
-            banner = banner.action(
-                crate::ui::button(
-                    "in-progress-resolve",
-                    t!("progress.resolve_conflicts").to_string(),
-                )
-                .on_click(move |_, window, cx| {
+            // The conflict editor reads index stages and the worktree file.
+            // Those reads are not on the wire, so opening it on a remote tab
+            // fails with nothing on screen. Abort stays available: it is a
+            // supported write.
+            let blocked = resolve_conflicts_blocked(self.is_ssh());
+            let mut button = crate::ui::button(
+                "in-progress-resolve",
+                t!("progress.resolve_conflicts").to_string(),
+            )
+            .disabled(blocked.is_some());
+            if let Some(reason) = blocked {
+                button = button.tooltip(reason);
+            } else {
+                let resolve = entity.clone();
+                button = button.on_click(move |_, window, cx| {
                     resolve.update(cx, |this, cx| this.open_conflicts(window, cx));
-                }),
-            );
+                });
+            }
+            banner = banner.action(button);
         }
 
         if let Some(enabled) = state.can_continue {
@@ -774,6 +792,15 @@ impl RepoView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_conflicts_stays_closed_until_a_remote_tab_can_read_stages() {
+        assert_eq!(resolve_conflicts_blocked(false), None);
+        assert_eq!(
+            resolve_conflicts_blocked(true).as_deref(),
+            Some(crate::remote_open::unavailable_reason().as_str())
+        );
+    }
 
     #[test]
     fn the_banner_names_the_operation_and_the_conflicts_left() {
