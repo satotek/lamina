@@ -165,8 +165,7 @@ impl RepoView {
             cx,
             crate::ui::Confirm::new(
                 t!("stash.drop_title", index = index).to_string(),
-                "The stashed changes are deleted. Unlike a pop, the changes are not \
-                 applied to the working tree first.",
+                t!("stash.drop_detail").to_string(),
             )
             .ok_label(t!("stash.drop_button").to_string()),
             move |window, cx| {
@@ -548,10 +547,7 @@ impl Render for StashDialog {
                 div()
                     .text_size(design.px(11.0))
                     .text_color(muted)
-                    .child(format!(
-                        "{summary} The staged and unstaged parts of each ticked file are \
-                         stashed, and the rest of the working tree stays as it is."
-                    )),
+                    .child(t!("stash.dialog_body", summary = summary).to_string()),
             )
             .child(Input::new(&self.input))
             .child(

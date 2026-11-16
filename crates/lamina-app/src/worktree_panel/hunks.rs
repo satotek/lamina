@@ -134,7 +134,7 @@ impl WorktreePanel {
         let (path, side) = selected
             .as_ref()
             .map(|selected| (selected.path.clone(), Some(selected.side)))
-            .unwrap_or_else(|| ("no file selected".to_owned(), None));
+            .unwrap_or_else(|| (t!("worktree.no_file_selected").to_string(), None));
         let kind = selected.as_ref().and_then(|selected| match selected.side {
             Side::Unstaged => snapshot
                 .status
@@ -222,9 +222,9 @@ impl WorktreePanel {
                 .ghost()
                 .selected(active)
                 .tooltip(if active {
-                    "Show only the changes"
+                    t!("worktree.show_only_changes").to_string()
                 } else {
-                    "Show every line of the file"
+                    t!("worktree.show_every_line").to_string()
                 })
                 .on_click(move |_event, _window, cx| {
                     toggle_entity.update(cx, |this, cx| this.toggle_worktree_whole_file(cx));
