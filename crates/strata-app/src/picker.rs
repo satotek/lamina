@@ -299,6 +299,7 @@ impl Picker {
             .iter()
             .map(|label| crate::palette::Candidate {
                 label,
+                alias: None,
                 visible: true,
                 recent: None,
             })

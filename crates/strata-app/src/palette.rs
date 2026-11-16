@@ -76,6 +76,10 @@ struct Command {
     source: Source,
     /// What the user searches and reads.
     label: String,
+    /// The registry's English title when the interface language shows another
+    /// one. Command names are git vocabulary people often think of in English
+    /// whatever the interface language, so both find the command.
+    alias: Option<String>,
     /// Stable identity across reloads of `commands.json`, for the recent list.
     identity: String,
     /// Commands about a repository are left out of the welcome screen's list.
@@ -98,6 +102,8 @@ impl Command {
         Self {
             source: Source::Builtin(spec),
             label: keymap::display_title(spec),
+            alias: Some(spec.title.to_owned())
+                .filter(|title| *title != keymap::display_title(spec)),
             identity: keymap::short_name(spec.name).to_owned(),
             needs_repo: slot.needs_repo,
             key: None,
@@ -108,6 +114,7 @@ impl Command {
         Self {
             source: Source::Custom(index),
             label: command.spec.title.clone(),
+            alias: None,
             identity: format!("custom:{}", command.spec.title),
             needs_repo: true,
             key: command.spec.key.clone(),
@@ -244,6 +251,7 @@ impl Palette {
                 let command = &self.commands[entry.command];
                 Candidate {
                     label: &command.label,
+                    alias: command.alias.as_deref(),
                     visible: entry.handled && (self.repo_open || !command.needs_repo),
                     recent: recents.position(&command.identity),
                 }
@@ -298,8 +306,14 @@ impl Palette {
         cx.stop_propagation();
     }
 
-    fn row(&self, position: usize, entry: usize, design: &Design) -> AnyElement {
+    fn row(&self, position: usize, entry: usize, query: &str, design: &Design) -> AnyElement {
         let command = &self.commands[self.entries[entry].command];
+        // When only the English title matched, show it, or the row would seem
+        // to have nothing to do with what was typed.
+        let matched_alias = command
+            .alias
+            .as_ref()
+            .filter(|_| !query.trim().is_empty() && score(query, &command.label).is_none());
         let entity = self.entity.clone();
         let mut row = ui::list_row(
             ("palette-command", position),
@@ -317,6 +331,15 @@ impl Palette {
                 .truncate()
                 .child(command.label.clone()),
         );
+        if let Some(alias) = matched_alias {
+            row = row.child(
+                div()
+                    .flex_none()
+                    .text_size(px(design.small()))
+                    .text_color(design.muted)
+                    .child(alias.clone()),
+            );
+        }
         if let Some(binding) = &self.entries[entry].binding {
             row = row.child(ui::kbd(binding.clone(), design));
         }
@@ -328,6 +351,7 @@ impl Render for Palette {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let design = Design::new(cx.theme(), Settings::get(cx));
         let filtered = self.filtered(cx);
+        let query = self.input.read(cx).value().to_string();
 
         let mut list = div().flex().flex_col().w_full().py_1();
         if filtered.is_empty() {
@@ -337,7 +361,7 @@ impl Render for Palette {
                 filtered
                     .iter()
                     .enumerate()
-                    .map(|(position, &entry)| self.row(position, entry, &design)),
+                    .map(|(position, &entry)| self.row(position, entry, &query, &design)),
             );
         }
 
@@ -503,6 +527,8 @@ pub(crate) fn shortcut_label(keystroke: &str) -> String {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Candidate<'a> {
     pub(crate) label: &'a str,
+    /// A second name the query may match instead, such as the English title.
+    pub(crate) alias: Option<&'a str>,
     /// Whether this opening of the palette may show it.
     pub(crate) visible: bool,
     /// Position in the recently-used list; `None` when never run.
@@ -525,7 +551,11 @@ pub(crate) fn rank(candidates: &[Candidate<'_>], query: &str) -> Vec<usize> {
             if query.is_empty() {
                 Some((index, 0, candidate.recent))
             } else {
-                score(query, candidate.label).map(|score| (index, score, candidate.recent))
+                let label = score(query, candidate.label);
+                let alias = candidate.alias.and_then(|alias| score(query, alias));
+                label
+                    .max(alias)
+                    .map(|score| (index, score, candidate.recent))
             }
         })
         .collect();
@@ -608,10 +638,31 @@ mod tests {
             .iter()
             .map(|label| Candidate {
                 label,
+                alias: None,
                 visible: true,
                 recent: None,
             })
             .collect()
+    }
+
+    #[test]
+    fn a_command_is_found_by_its_english_title_too() {
+        let candidates = [
+            Candidate {
+                label: "リモートをフェッチ",
+                alias: Some("Fetch remotes"),
+                visible: true,
+                recent: None,
+            },
+            Candidate {
+                label: "ブランチをプッシュ",
+                alias: Some("Push branch"),
+                visible: true,
+                recent: None,
+            },
+        ];
+        assert_eq!(rank(&candidates, "fetch"), vec![0]);
+        assert_eq!(rank(&candidates, "プッシュ"), vec![1]);
     }
 
     #[test]
