@@ -455,6 +455,25 @@ mod tests {
                 path: "file.txt".into(),
             },
             Request::CommitChangedFileCount { commit: oid },
+            Request::LfsInfoAt {
+                commit: oid,
+                path: "data.bin".into(),
+            },
+            Request::LfsInfoInIndex {
+                path: "data.bin".into(),
+            },
+            Request::LfsInfoInWorktree {
+                path: "data.bin".into(),
+            },
+            Request::UsesLfs,
+            Request::ReadLfsObject {
+                oid: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    .into(),
+                size: 6,
+                max_bytes: 1024,
+            },
+            Request::LfsAvailable,
+            Request::LfsLocks,
         ];
         for request in requests {
             let mut bytes = Vec::new();
@@ -551,6 +570,27 @@ mod tests {
                 data: Some(b"worktree\n".to_vec()),
             },
             Response::CommitChangedFileCount { count: 3 },
+            Response::LfsInfo {
+                info: Some(crate::dto::LfsInfoDto {
+                    oid: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .into(),
+                    size: 6,
+                    present: true,
+                }),
+            },
+            Response::UsesLfs { uses: true },
+            Response::LfsObject {
+                data: Some(b"hello\n".to_vec()),
+            },
+            Response::LfsAvailable { available: false },
+            Response::LfsLocks {
+                locks: vec![crate::dto::LfsLockDto {
+                    id: "1".into(),
+                    path: "data.bin".into(),
+                    owner: Some("Ada".into()),
+                    locked_at: None,
+                }],
+            },
         ];
         for response in responses {
             let mut bytes = Vec::new();

@@ -326,14 +326,8 @@ fn file_row(
             if !menu_lfs_tracked {
                 let track_entity = menu_entity.clone();
                 let track_path = menu_path.clone();
-                let track_reason = remote_reason.clone();
-                menu = menu.item(
-                    PopupMenuItem::new(crate::ui::menu_label(
-                        t!("lfs.track").to_string(),
-                        track_reason.as_ref(),
-                    ))
-                    .disabled(ssh)
-                    .on_click(move |_, window, cx| {
+                menu = menu.item(PopupMenuItem::new(t!("lfs.track").to_string()).on_click(
+                    move |_, window, cx| {
                         let path = track_path.clone();
                         track_entity.update(cx, |this, cx| {
                             this.run_operation(
@@ -343,8 +337,8 @@ fn file_row(
                                 cx,
                             );
                         });
-                    }),
-                );
+                    },
+                ));
             }
             if locking_available {
                 match menu_locks.get(&menu_path) {
@@ -355,14 +349,8 @@ fn file_row(
                             Some(owner) => t!("lfs.unlock_owner", owner = owner).to_string(),
                             None => t!("lfs.unlock").to_string(),
                         };
-                        let unlock_reason = remote_reason.clone();
-                        menu = menu.item(
-                            PopupMenuItem::new(crate::ui::menu_label(
-                                label,
-                                unlock_reason.as_ref(),
-                            ))
-                            .disabled(ssh)
-                            .on_click(move |_, window, cx| {
+                        menu =
+                            menu.item(PopupMenuItem::new(label).on_click(move |_, window, cx| {
                                 let path = unlock_path.clone();
                                 unlock_entity.update(cx, |this, cx| {
                                     let label = t!("lfs.op_unlock", path = path).to_string();
@@ -373,20 +361,13 @@ fn file_row(
                                         cx,
                                     );
                                 });
-                            }),
-                        );
+                            }));
                     }
                     None => {
                         let lock_entity = menu_entity.clone();
                         let lock_path = menu_path.clone();
-                        let lock_reason = remote_reason.clone();
-                        menu = menu.item(
-                            PopupMenuItem::new(crate::ui::menu_label(
-                                t!("lfs.lock").to_string(),
-                                lock_reason.as_ref(),
-                            ))
-                            .disabled(ssh)
-                            .on_click(move |_, window, cx| {
+                        menu = menu.item(PopupMenuItem::new(t!("lfs.lock").to_string()).on_click(
+                            move |_, window, cx| {
                                 let path = lock_path.clone();
                                 lock_entity.update(cx, |this, cx| {
                                     let label = t!("lfs.op_lock", path = path).to_string();
@@ -397,8 +378,8 @@ fn file_row(
                                         cx,
                                     );
                                 });
-                            }),
-                        );
+                            },
+                        ));
                     }
                 }
             }

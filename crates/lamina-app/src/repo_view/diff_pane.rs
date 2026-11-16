@@ -377,15 +377,8 @@ impl RepoView {
         let mut card = ui::lfs_card(summary, design);
         if missing && let Some(path) = self.selected_file_path() {
             let entity = self.entity();
-            let ssh = self.is_ssh();
-            // LFS pulls are not on the helper yet, so the button stays
-            // visible but cannot start a download.
-            let mut download = ui::button("lfs-download", t!("worktree.download").to_string())
-                .size(ButtonSize::Tiny)
-                .disabled(ssh);
-            if ssh {
-                download = download.tooltip(crate::remote_open::unavailable_reason());
-            }
+            let download = ui::button("lfs-download", t!("worktree.download").to_string())
+                .size(ButtonSize::Tiny);
             card = card.action(download.on_click(move |_, window, cx| {
                 let path = path.clone();
                 entity.update(cx, |this, cx| {
