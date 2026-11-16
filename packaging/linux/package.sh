@@ -1,8 +1,9 @@
 #!/bin/sh
 # Packages the Linux build into dist/lamina-<version>-linux-<arch>.tar.gz: the
-# binary, the desktop entry, the hicolor icons, install.sh, both licences and
-# the third-party notices. The archive unpacks into one directory and needs no
-# build tools on the machine that installs it.
+# binary, the desktop entry, the hicolor icons, install.sh, both licences, the
+# third-party notices and (when they were staged) remote-helpers/. The archive
+# unpacks into one directory and needs no build tools on the machine that
+# installs it.
 #
 #     direnv exec . packaging/linux/package.sh
 #     packaging/linux/package.sh --target aarch64-unknown-linux-gnu
@@ -14,9 +15,10 @@ root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
 usage() {
     cat <<'EOF'
 Packages the Linux build into dist/lamina-<version>-linux-<arch>.tar.gz: the
-binary, the desktop entry, the hicolor icons, install.sh, both licences and
-the third-party notices. The archive unpacks into one directory and needs no
-build tools on the machine that installs it.
+binary, the desktop entry, the hicolor icons, install.sh, both licences, the
+third-party notices and (when they were staged) remote-helpers/. The archive
+unpacks into one directory and needs no build tools on the machine that
+installs it.
 
     direnv exec . packaging/linux/package.sh
     packaging/linux/package.sh --target aarch64-unknown-linux-gnu
@@ -26,7 +28,11 @@ Options:
     --no-build         package a release binary that already exists
 
 Environment:
-    NOTICES  notices file to embed (default: dist/THIRD-PARTY-NOTICES.md)
+    NOTICES         notices file to embed (default: dist/THIRD-PARTY-NOTICES.md)
+    REMOTE_HELPERS  directory of lamina-remote-<target> binaries to embed.
+                    When unset, remote-helpers/ at the repository root is
+                    used if it exists. The files land in remote-helpers/
+                    next to the lamina binary.
 EOF
 }
 
@@ -110,6 +116,14 @@ cp "$notices" "$stage/THIRD-PARTY-NOTICES.md"
 for size in 16 32 48 64 128 256 512; do
     cp "$icons/$size.png" "$stage/icons/$size.png"
 done
+
+# install.sh copies this directory to <prefix>/bin/remote-helpers/, which is
+# the directory current_exe() looks in. chmod in the helper installer records
+# mode 755 in the tarball.
+helpers=$(lamina_remote_helper_dir "$root")
+if [ -n "$helpers" ]; then
+    lamina_install_remote_helpers "$helpers" "$stage/remote-helpers"
+fi
 
 rm -f "$archive"
 tar -czf "$archive" -C "$dist" "$name"

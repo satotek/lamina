@@ -1,10 +1,10 @@
 #!/bin/sh
-# Builds dist/Lamina.app: the release binary, a bundle Info.plist and the
-# checked-in Lamina.icns, then signs it so it launches on this Mac. Without an
-# identity the signature is ad hoc; the release workflow imports a self-signed
-# certificate and passes its name so the app keeps one identity across
-# releases. Nothing here notarises the app; dmg.sh turns the result into a disk
-# image.
+# Builds dist/Lamina.app: the release binary, a bundle Info.plist, the
+# checked-in Lamina.icns and (when they were staged) the remote helpers, then
+# signs it so it launches on this Mac. Without an identity the signature is ad
+# hoc; the release workflow imports a self-signed certificate and passes its
+# name so the app keeps one identity across releases. Nothing here notarises
+# the app; dmg.sh turns the result into a disk image.
 #
 # Run it from the dev shell so cargo and the release target directory match a
 # normal build:
@@ -34,7 +34,13 @@ Options:
     --sign <identity>  sign with that identity instead of ad hoc
 
 Environment:
-    NOTICES  notices file to embed (default: dist/THIRD-PARTY-NOTICES.md)
+    NOTICES              notices file to embed (default: dist/THIRD-PARTY-NOTICES.md)
+    REMOTE_HELPERS       directory of lamina-remote-<target> binaries to embed.
+                         When unset, remote-helpers/ at the repository root is
+                         used if it exists. The Linux binaries cannot sit directly
+                         under Contents/MacOS (codesign treats that as nested
+                         code), so the bytes go in Contents/Resources and
+                         Contents/MacOS/remote-helpers is a relative symlink.
     LAMINA_SIGNING_IDENTITY  identity to sign with when --sign is absent
 EOF
 }
@@ -116,6 +122,17 @@ cp "$icon" "$app/Contents/Resources/Lamina.icns"
 # Licences travel inside the bundle; dmg.sh also copies them to the image root.
 cp LICENSE-MIT LICENSE-APACHE "$app/Contents/Resources/"
 cp "$notices" "$app/Contents/Resources/THIRD-PARTY-NOTICES.md"
+
+# The app looks for remote-helpers/ beside its own executable. codesign treats
+# every regular file under Contents/MacOS as nested code, and a Linux binary
+# cannot take an ad-hoc signature, so the bytes live in Resources and the
+# directory next to the executable is a relative symlink. Sign after this:
+# the symlink has to be part of the bundle seal.
+helpers=$(lamina_remote_helper_dir "$root")
+if [ -n "$helpers" ]; then
+    lamina_install_remote_helpers "$helpers" "$app/Contents/Resources/remote-helpers"
+    ln -s ../Resources/remote-helpers "$app/Contents/MacOS/remote-helpers"
+fi
 
 # 14.0 matches the deployment target the Rust toolchain compiles for
 # (`LC_BUILD_VERSION minos`); GPUI's Metal renderer needs a current SDK too.

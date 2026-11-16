@@ -18,6 +18,11 @@ env:
   # The About window embeds this rather than asking git, because a packaged
   # checkout may not carry a .git directory.
   LAMINA_BUILD_COMMIT: ${{ github.sha }}
+  # The app and the bundled lamina-remote binaries compare this token. It has
+  # to be the same value for every job in the run; a mismatch makes the app
+  # reject its own helper. build.rs embeds it (option_env! alone would not
+  # invalidate a cached crate).
+  LAMINA_BUILD_ID: ${{ github.sha }}
   # crates/lamina-term/build.rs refuses any other Zig version.
   ZIG_VERSION: "0.17.1"
   # Linux releases build on ubuntu-22.04 for an older glibc floor. Its newest
@@ -84,12 +89,57 @@ jobs:
           fi
           echo "building Lamina ${version}"
 
+  # One build of the two Linux musl helpers, shared by every platform archive.
+  # The app looks for remote-helpers/ beside its own executable and uploads the
+  # file that matches the remote machine. aarch64 has no native musl linker on
+  # this runner; cargo-zigbuild uses the Zig toolchain already pinned above.
+  remote-helpers:
+    name: build remote helpers
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Install Rust toolchain
+        run: rustup show
+
+      - name: Add the musl targets
+        run: rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+
+      - name: Install Zig
+        uses: vercel-labs/setup-zig@v1.0.2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      # 0.23.4 is the revision exercised with Zig 0.17.1. install-action
+      # resolves the @version from GitHub releases rather than floating latest.
+      - name: Install cargo-zigbuild
+        uses: taiki-e/install-action@v2.90.5
+        with:
+          tool: cargo-zigbuild@0.23.4
+
+      - uses: Swatinem/rust-cache@v2.9.3
+
+      - name: Build the helpers
+        run: scripts/build-remote-helpers.sh "$GITHUB_WORKSPACE/remote-helpers"
+
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: remote-helpers
+          path: remote-helpers/
+          if-no-files-found: error
+          retention-days: 7
+
   build:
     name: build (${{ matrix.name }})
-    needs: version
+    needs: [version, remote-helpers]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
     env:
+      # Packaging scripts copy this directory next to the executable. An
+      # absolute path so a script that changes directory still finds it.
+      REMOTE_HELPERS: ${{ github.workspace }}/remote-helpers
       # A step's `if:` cannot read a secret, so the presence test is computed
       # here; the certificate itself only reaches the step that imports it.
       HAS_SIGNING_P12: ${{ secrets.STRATA_SIGNING_P12 != '' }}
@@ -114,6 +164,11 @@ jobs:
             target: x86_64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v7.0.1
+
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          name: remote-helpers
+          path: remote-helpers
 
       - name: Install Linux dependencies
         if: runner.os == 'Linux'
@@ -201,6 +256,12 @@ jobs:
           else
             packaging/macos/bundle.sh --target ${{ matrix.target }}
           fi
+          # The helpers are a symlink under Contents/MacOS; codesign seals that
+          # link, and the Linux binaries themselves live in Resources.
+          codesign --verify --verbose=2 dist/Lamina.app
+          test -L dist/Lamina.app/Contents/MacOS/remote-helpers
+          test -x dist/Lamina.app/Contents/MacOS/remote-helpers/lamina-remote-x86_64-unknown-linux-musl
+          test -x dist/Lamina.app/Contents/MacOS/remote-helpers/lamina-remote-aarch64-unknown-linux-musl
           packaging/macos/dmg.sh --target ${{ matrix.target }}
           hdiutil verify dist/*.dmg
 
@@ -239,6 +300,12 @@ jobs:
           test -f "$tmp/prefix/share/applications/lamina.desktop"
           test -f "$tmp/prefix/share/icons/hicolor/512x512/apps/lamina.png"
           test -f "$tmp/prefix/share/doc/lamina/THIRD-PARTY-NOTICES.md"
+          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            helper="$tmp/prefix/bin/remote-helpers/lamina-remote-$target"
+            test -x "$helper"
+            mode=$(stat -c %a "$helper")
+            test "$mode" = "755"
+          done
 
       - uses: actions/upload-artifact@v7.0.2
         with:
@@ -268,8 +335,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
+      # dist-* only. The remote-helpers artifact is an input to the build
+      # jobs; publishing it would add loose binaries to the release and to
+      # SHA256SUMS.txt.
       - uses: actions/download-artifact@v8.0.2
         with:
+          pattern: dist-*
           path: dist
           merge-multiple: true
 

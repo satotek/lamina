@@ -262,6 +262,10 @@ impl RepoView {
     }
 
     fn flush_visible_changed_file_counts(&mut self, generation: u64, cx: &mut Context<Self>) {
+        if self.is_ssh() {
+            self.changed_counts.pending.clear();
+            return;
+        }
         if self.changed_counts.generation != generation {
             return;
         }

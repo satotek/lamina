@@ -169,12 +169,12 @@ use crate::actions::{
     ApplyPatch, CloneRepository, CloseCompare, CloseTab, CompareBranchThreeWay,
     CompareCommitsThreeWay, ExtendSelectionNext, ExtendSelectionPrevious, GoToChild, GoToHead,
     GoToParent, GoToSecondParent, NavigateBack, NavigateForward, NewRepository, NewTab, NextTab,
-    OpenCompare, OpenGitConfig, OpenInEditor, OpenRepository, OpenSettings, OpenTerminalHere,
-    PreviousTab, Quit, REPO_VIEW, REPO_VIEW_LIST, RedoLastAction, ReopenClosedTab, SelectFirst,
-    SelectLast, SelectNext, SelectPageDown, SelectPageUp, SelectPrevious, SelectTab1, SelectTab2,
-    SelectTab3, SelectTab4, SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9,
-    StashChanges, SwitchBranch, ToggleDetailsMaximized, ToggleFrameStats, TogglePalette,
-    ToggleSidebar, ToggleWholeFile, UndoLastAction, WORKSPACE,
+    OpenCompare, OpenGitConfig, OpenInEditor, OpenRemoteRepository, OpenRepository, OpenSettings,
+    OpenTerminalHere, PreviousTab, Quit, REPO_VIEW, REPO_VIEW_LIST, RedoLastAction,
+    ReopenClosedTab, SelectFirst, SelectLast, SelectNext, SelectPageDown, SelectPageUp,
+    SelectPrevious, SelectTab1, SelectTab2, SelectTab3, SelectTab4, SelectTab5, SelectTab6,
+    SelectTab7, SelectTab8, SelectTab9, StashChanges, SwitchBranch, ToggleDetailsMaximized,
+    ToggleFrameStats, TogglePalette, ToggleSidebar, ToggleWholeFile, UndoLastAction, WORKSPACE,
 };
 #[cfg(feature = "terminal")]
 use crate::actions::{
@@ -614,6 +614,16 @@ pub static ACTIONS: &[ActionSpec] = &[
         OpenRepository,
         [binding("secondary-o", None)],
         0,
+        false
+    ),
+    action!(
+        "lamina::OpenRemoteRepository",
+        "Open Remote Repository…",
+        Actions,
+        None,
+        OpenRemoteRepository,
+        [],
+        54,
         false
     ),
     action!(
