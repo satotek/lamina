@@ -24,7 +24,7 @@ use gpui_kit_assets::IconName;
 use strata_core::compare::{
     FolderCompareEntry, FolderCompareOptions, FolderCompareResult, FolderEntryKind,
     FolderEntryStatus, RepoCompareSide, RepoCompareTree, ThreeWayCompareMode, ThreeWayDiffKind,
-    ThreeWayFileCompare, ThreeWayImageCompare, ThreeWayPeerStatus, ThreeWaySide,
+    ThreeWayFileCompare, ThreeWayImageCompare, ThreeWayPeerStatus, ThreeWayRow, ThreeWaySide,
     ThreeWayTreeChange, ThreeWayTreeCompare, TwoWayFileCompare, compare_folders,
     compare_three_optional_files, compare_three_sides, compare_two_bytes,
     compare_two_optional_files, compare_two_repo_sides,
@@ -3419,11 +3419,33 @@ fn three_way_badges(
     }
 }
 
-/// The row's three tints and the marker colour on each pane boundary.
+/// How one pane's cell in a row is painted.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum CellPaint {
+    /// The side has no line in this row, so the cell is a neutral filler. A
+    /// side without a line has nothing that could differ, and painting it
+    /// with a neighbour's tint made the empty cell read as content.
+    Filler,
+    /// A line that matches its neighbour.
+    Plain,
+    /// A line that differs from a neighbour, in that diff's tint.
+    Tinted(Hsla),
+}
+
+/// The neutral wash behind a cell whose side has no line.
+///
+/// It has to read as "nothing here" beside every diff tint, so it is the
+/// border grey rather than the field or hunk-header grey, which sit close to
+/// the softer tints.
+fn filler_background(design: &Design) -> Hsla {
+    design.border
+}
+
+/// The row's three cell paints and the marker colour on each pane boundary.
 struct ThreeWayTints {
-    left: Option<Hsla>,
-    middle: Option<Hsla>,
-    right: Option<Hsla>,
+    left: CellPaint,
+    middle: CellPaint,
+    right: CellPaint,
     /// The boundary between the left and middle panes.
     left_boundary: Option<Hsla>,
     /// The boundary between the middle and right panes.
@@ -3432,7 +3454,7 @@ struct ThreeWayTints {
 
 #[allow(clippy::too_many_arguments)]
 fn render_three_way_row(
-    row: strata_core::compare::ThreeWayRow,
+    row: ThreeWayRow,
     mode: ThreeWayCompareMode,
     left_lines: &[String],
     middle_lines: &[String],
@@ -3446,7 +3468,7 @@ fn render_three_way_row(
     content_width: gpui::Pixels,
     h_scroll: &ScrollHandle,
 ) -> AnyElement {
-    let tints = three_way_tints(row.kind, mode, design);
+    let tints = three_way_tints(row, mode, design);
     div()
         .flex()
         .flex_row()
@@ -3498,68 +3520,68 @@ fn render_three_way_row(
         .into_any_element()
 }
 
-fn three_way_tints(
-    kind: ThreeWayDiffKind,
-    mode: ThreeWayCompareMode,
-    design: &Design,
-) -> ThreeWayTints {
-    if mode == ThreeWayCompareMode::NoBase {
-        return match kind.peer_status() {
-            ThreeWayPeerStatus::Same => ThreeWayTints {
-                left: None,
-                middle: None,
-                right: None,
-                left_boundary: None,
-                middle_boundary: None,
-            },
-            ThreeWayPeerStatus::LeftMiddleDiffer => ThreeWayTints {
-                left: Some(design.accent_soft),
-                middle: Some(design.accent_soft),
-                right: None,
-                left_boundary: Some(design.accent),
-                middle_boundary: None,
-            },
-            ThreeWayPeerStatus::MiddleRightDiffer => ThreeWayTints {
-                left: None,
-                middle: Some(design.accent_soft),
-                right: Some(design.accent_soft),
-                left_boundary: None,
-                middle_boundary: Some(design.accent),
-            },
-            ThreeWayPeerStatus::AllDifferent => ThreeWayTints {
-                left: Some(design.diff_removed_bg),
-                middle: Some(design.diff_hunk_header),
-                right: Some(design.diff_removed_bg),
-                left_boundary: Some(design.accent),
-                middle_boundary: Some(design.accent),
-            },
-            ThreeWayPeerStatus::MissingSomeSide => ThreeWayTints {
-                left: None,
-                middle: None,
-                right: None,
-                left_boundary: None,
-                middle_boundary: None,
-            },
+fn three_way_tints(row: ThreeWayRow, mode: ThreeWayCompareMode, design: &Design) -> ThreeWayTints {
+    let (left, middle, right, left_boundary, middle_boundary) =
+        if mode == ThreeWayCompareMode::NoBase {
+            match row.kind.peer_status() {
+                ThreeWayPeerStatus::Same | ThreeWayPeerStatus::MissingSomeSide => {
+                    (None, None, None, None, None)
+                }
+                ThreeWayPeerStatus::LeftMiddleDiffer => (
+                    Some(design.accent_soft),
+                    Some(design.accent_soft),
+                    None,
+                    Some(design.accent),
+                    None,
+                ),
+                ThreeWayPeerStatus::MiddleRightDiffer => (
+                    None,
+                    Some(design.accent_soft),
+                    Some(design.accent_soft),
+                    None,
+                    Some(design.accent),
+                ),
+                ThreeWayPeerStatus::AllDifferent => (
+                    Some(design.diff_removed_bg),
+                    Some(design.diff_hunk_header),
+                    Some(design.diff_removed_bg),
+                    Some(design.accent),
+                    Some(design.accent),
+                ),
+            }
+        } else {
+            let (left, middle, right) = match row.kind {
+                ThreeWayDiffKind::Unchanged => (None, None, None),
+                ThreeWayDiffKind::LeftChanged => (Some(design.diff_added_bg), None, None),
+                ThreeWayDiffKind::RightChanged => (None, None, Some(design.diff_added_bg)),
+                ThreeWayDiffKind::BothAgree => {
+                    (Some(design.accent_soft), None, Some(design.accent_soft))
+                }
+                ThreeWayDiffKind::BothDisagree => (
+                    Some(design.diff_removed_bg),
+                    Some(design.diff_hunk_header),
+                    Some(design.diff_removed_bg),
+                ),
+            };
+            (left, middle, right, None, None)
         };
-    }
 
-    let (left, middle, right) = match kind {
-        ThreeWayDiffKind::Unchanged => (None, None, None),
-        ThreeWayDiffKind::LeftChanged => (Some(design.diff_added_bg), None, None),
-        ThreeWayDiffKind::RightChanged => (None, None, Some(design.diff_added_bg)),
-        ThreeWayDiffKind::BothAgree => (Some(design.accent_soft), None, Some(design.accent_soft)),
-        ThreeWayDiffKind::BothDisagree => (
-            Some(design.diff_removed_bg),
-            Some(design.diff_hunk_header),
-            Some(design.diff_removed_bg),
-        ),
-    };
     ThreeWayTints {
-        left,
-        middle,
-        right,
-        left_boundary: None,
-        middle_boundary: None,
+        left: cell_paint(row.left, left),
+        middle: cell_paint(row.middle, middle),
+        right: cell_paint(row.right, right),
+        left_boundary,
+        middle_boundary,
+    }
+}
+
+/// A side without a line in this row is filler, whatever the row's diff says:
+/// the tint belongs to content, and the pane beside it carries the change.
+fn cell_paint(line: Option<u32>, tint: Option<Hsla>) -> CellPaint {
+    match (line, tint) {
+        (None, _) => CellPaint::Filler,
+        (Some(_), Some(tint)) => CellPaint::Tinted(tint),
+        (Some(_), None) => CellPaint::Plain,
     }
 }
 
@@ -3568,7 +3590,7 @@ fn three_way_cell(
     line: Option<u32>,
     lines: &[String],
     highlights: &[strata_core::highlight::LineHighlights],
-    tint: Option<Hsla>,
+    paint: CellPaint,
     boundary: Option<Hsla>,
     diff: &DiffColors,
     style: &DiffStyle,
@@ -3585,13 +3607,32 @@ fn three_way_cell(
         .min_w_0()
         .h_full()
         .overflow_hidden()
-        .when_some(tint, |cell, tint| cell.bg(tint))
+        .when_some(
+            match paint {
+                CellPaint::Filler => Some(filler_background(design)),
+                CellPaint::Plain => None,
+                CellPaint::Tinted(tint) => Some(tint),
+            },
+            |cell, tint| cell.bg(tint),
+        )
         .when(side < 2, |cell| match boundary {
             // A marked boundary is the row-level cue that this pane differs
             // from its neighbour.
             Some(marker) => cell.border_r(px(2.0)).border_color(marker),
             None => cell.border_r_1().border_color(design.border),
-        });
+        })
+        // The gutter is the same width in every pane, filler or not, so the
+        // three columns keep their alignment.
+        .child(
+            div()
+                .flex_none()
+                .w(style.px(38.0))
+                .pr_1()
+                .text_size(px(style.font_size() - style.scale(2.0)))
+                .text_color(diff.gutter)
+                .text_right()
+                .when_some(line, |gutter, number| gutter.child(number.to_string())),
+        );
 
     if let Some(number) = line {
         let text = lines
@@ -3599,47 +3640,36 @@ fn three_way_cell(
             .map(String::as_str)
             .unwrap_or_default();
         let spans = highlights.get(number as usize - 1);
-        cell = cell
-            .child(
-                div()
-                    .flex_none()
-                    .w(style.px(38.0))
-                    .pr_1()
-                    .text_size(px(style.font_size() - style.scale(2.0)))
-                    .text_color(diff.gutter)
-                    .text_right()
-                    .child(number.to_string()),
-            )
-            .child(
-                // The line numbers stay put; only the code pans, so the three
-                // panes can share this handle and keep their columns aligned.
-                div()
-                    .id(("compare-3way-pane", number as usize * 3 + side))
-                    .debug_selector({
-                        let name = match side {
-                            0 => "compare-3way-left",
-                            1 => "compare-3way-middle",
-                            _ => "compare-3way-right",
-                        };
-                        move || name.to_string()
-                    })
-                    .flex()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .items_center()
-                    .overflow_x_scroll()
-                    .restrict_scroll_to_axis()
-                    .track_scroll(h_scroll)
-                    .child(
-                        div()
-                            .flex_none()
-                            .w(content_width)
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .child(diff_view::styled_line(text, style, spans, diff)),
-                    ),
-            );
+        cell = cell.child(
+            // The line numbers stay put; only the code pans, so the three
+            // panes can share this handle and keep their columns aligned.
+            div()
+                .id(("compare-3way-pane", number as usize * 3 + side))
+                .debug_selector({
+                    let name = match side {
+                        0 => "compare-3way-left",
+                        1 => "compare-3way-middle",
+                        _ => "compare-3way-right",
+                    };
+                    move || name.to_string()
+                })
+                .flex()
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .items_center()
+                .overflow_x_scroll()
+                .restrict_scroll_to_axis()
+                .track_scroll(h_scroll)
+                .child(
+                    div()
+                        .flex_none()
+                        .w(content_width)
+                        .overflow_hidden()
+                        .whitespace_nowrap()
+                        .child(diff_view::styled_line(text, style, spans, diff)),
+                ),
+        );
     }
     cell.into_any_element()
 }
@@ -4289,6 +4319,61 @@ mod tests {
         assert_eq!(fit_1x.back_label, fit_15x.back_label);
         assert_eq!(fit_1x.new_compare_label, fit_15x.new_compare_label);
         assert!((fit_15x.used() - fit_1x.used() * 1.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_side_without_a_line_is_filler_and_never_a_diff_tint() {
+        let design = Design::default();
+        // The middle has no line where the right does: the change lives on the
+        // right cell, and the middle|right boundary marks it.
+        let row = ThreeWayRow {
+            kind: ThreeWayDiffKind::RightChanged,
+            left: None,
+            middle: None,
+            right: Some(1),
+        };
+
+        let peers = three_way_tints(row, ThreeWayCompareMode::NoBase, &design);
+        assert_eq!(peers.left, CellPaint::Filler);
+        assert_eq!(peers.middle, CellPaint::Filler);
+        assert_eq!(peers.right, CellPaint::Tinted(design.accent_soft));
+        assert_eq!(peers.middle_boundary, Some(design.accent));
+        assert_eq!(peers.left_boundary, None);
+
+        // The base mode has the same rule: only the side with content carries
+        // the tint.
+        let base = three_way_tints(row, ThreeWayCompareMode::MiddleBase, &design);
+        assert_eq!(base.left, CellPaint::Filler);
+        assert_eq!(base.middle, CellPaint::Filler);
+        assert_eq!(base.right, CellPaint::Tinted(design.diff_added_bg));
+
+        // A row where the left is empty but the middle has a line marks the
+        // left|middle boundary instead.
+        let left_empty = ThreeWayRow {
+            kind: ThreeWayDiffKind::LeftChanged,
+            left: None,
+            middle: Some(2),
+            right: Some(2),
+        };
+        let tints = three_way_tints(left_empty, ThreeWayCompareMode::NoBase, &design);
+        assert_eq!(tints.left, CellPaint::Filler);
+        assert_eq!(tints.middle, CellPaint::Tinted(design.accent_soft));
+        assert_eq!(tints.left_boundary, Some(design.accent));
+        assert_eq!(tints.middle_boundary, None);
+    }
+
+    #[test]
+    fn the_filler_stays_apart_from_every_diff_tint() {
+        let design = Design::default();
+        let filler = filler_background(&design);
+        for tint in [
+            design.accent_soft,
+            design.diff_added_bg,
+            design.diff_removed_bg,
+            design.diff_hunk_header,
+        ] {
+            assert_ne!(filler, tint, "the filler must not read as a diff tint");
+        }
     }
 
     #[gpui::test]
