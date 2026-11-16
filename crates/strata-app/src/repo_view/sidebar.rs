@@ -95,15 +95,17 @@ impl RepoView {
             .border_r_1()
             .border_color(design.border);
         // The header is where the rail's expand button turns back into the
-        // full sidebar; the sections below it are what makes the width useful.
+        // full sidebar. With no heading, the strip is only as tall as that
+        // button, so the first section starts that much higher.
         let collapse = ui::icon_button("sidebar-collapse", IconName::PanelLeftClose)
-            .size(ui::ButtonSize::Small)
+            .size(ui::ButtonSize::Tiny)
             .ghost()
             .tooltip(t!("sidebar.collapse").to_string())
             .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)));
         sidebar = sidebar.child(
-            ui::section_header("sidebar-header", t!("sidebar.title").to_string(), design)
-                .trailing(collapse),
+            ui::section_header("sidebar-header", "", design)
+                .trailing(collapse)
+                .h(design.px(20.0)),
         );
         // The scope is a property of the history pane, but the sidebar is where
         // the refs and the way out of the filter both are.

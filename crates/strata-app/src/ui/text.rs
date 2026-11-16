@@ -157,8 +157,11 @@ impl RenderOnce for SectionHeader {
             row = row.child(icon);
         }
         // The count reads as part of the heading, so it sits next to the
-        // label; a group's actions stay on the far edge.
-        row = row.child(div().flex_none().truncate().child(self.label));
+        // label; a group's actions stay on the far edge. An empty label is a
+        // strip with no heading, only its controls.
+        if !self.label.is_empty() {
+            row = row.child(div().flex_none().truncate().child(self.label));
+        }
         if let Some(count) = self.count {
             row = row.child(
                 div()
