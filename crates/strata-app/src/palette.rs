@@ -17,6 +17,10 @@
 //! recent first) and lead the empty list, which is what makes the palette a
 //! fast repeat path.
 
+use std::collections::HashMap;
+use std::time::Duration;
+
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Action, AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable as _, Global,
     InteractiveElement as _, IntoElement, KeyBinding, OperatingSystem, ParentElement, Render,
@@ -41,6 +45,8 @@ const PALETTE: &str = "Palette";
 const WIDTH: f32 = 560.0;
 /// How many commands the empty list remembers running.
 const MAX_RECENT: usize = 5;
+/// How long an unavailable command's reason stays in the hint line.
+const BLOCKED_NOTICE: Duration = Duration::from_secs(2);
 
 actions!(
     strata_palette,
@@ -133,6 +139,79 @@ impl Command {
     }
 }
 
+/// Whether one command can run in the view that opened the palette.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Availability {
+    Available,
+    /// The command stays listed and searchable, but activating it only says
+    /// why it cannot run.
+    Unavailable(SharedString),
+}
+
+impl Availability {
+    fn reason(&self) -> Option<&SharedString> {
+        match self {
+            Availability::Available => None,
+            Availability::Unavailable(reason) => Some(reason),
+        }
+    }
+}
+
+/// The reasons the view gave for its commands, keyed by the action's registry
+/// name (`strata::CompareCommitsThreeWay`). An action with no entry runs.
+///
+/// The view computes this when the palette opens, from the state it is showing
+/// at that moment; the palette only reads it.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AvailabilityMap {
+    reasons: HashMap<&'static str, String>,
+}
+
+impl AvailabilityMap {
+    /// Records `reason` for `action`, if the command is blocked at all.
+    pub(crate) fn block(&mut self, action: &'static str, reason: Option<String>) {
+        if let Some(reason) = reason {
+            self.reasons.insert(action, reason);
+        }
+    }
+
+    fn of(&self, action: &str) -> Availability {
+        match self.reasons.get(action) {
+            Some(reason) => Availability::Unavailable(reason.clone().into()),
+            None => Availability::Available,
+        }
+    }
+
+    /// The reason a command was blocked, for tests that check the rules the
+    /// repository view applies before the palette draws a row.
+    #[cfg(test)]
+    pub(crate) fn reason(&self, action: &str) -> Option<&str> {
+        self.reasons.get(action).map(String::as_str)
+    }
+
+    /// Reads the active repository view's reasons for `window`. The window's
+    /// root is the component library's `Root`, which wraps the workspace; a
+    /// window without a workspace (an About window, a test rooted elsewhere)
+    /// has no repository commands to block.
+    fn for_window(window: &Window, cx: &App) -> Self {
+        if let Some(Some(workspace)) = window.root::<crate::workspace::Workspace>() {
+            return workspace.read(cx).palette_availability(cx);
+        }
+        window
+            .root::<gpui_component::Root>()
+            .flatten()
+            .and_then(|root| {
+                root.read(cx)
+                    .view()
+                    .clone()
+                    .downcast::<crate::workspace::Workspace>()
+                    .ok()
+            })
+            .map(|workspace| workspace.read(cx).palette_availability(cx))
+            .unwrap_or_default()
+    }
+}
+
 /// Every command the palette can offer: the registry's palette entries in
 /// their chosen order, then the user's commands in file order.
 fn commands(cx: &App) -> Vec<Command> {
@@ -175,6 +254,8 @@ struct Entry {
     handled: bool,
     /// The key that runs it, spelled for the platform.
     binding: Option<SharedString>,
+    /// Whether the view can actually run it now.
+    availability: Availability,
 }
 
 struct Palette {
@@ -192,13 +273,28 @@ struct Palette {
     repo_open: bool,
     /// Position in the filtered list, not an index into `entries`.
     selected: usize,
+    /// The reason the last activation was refused, shown in the hint line for
+    /// a moment so the row does not just look inert.
+    notice: Option<SharedString>,
+    /// Guards the notice's timer: an older timer must not clear a newer reason.
+    notice_epoch: u64,
     _input_events: Subscription,
 }
 
 impl Palette {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::new_with(window, cx, AvailabilityMap::for_window(window, cx))
+    }
+
+    /// `availability` is what the opening view reported; tests pass it in
+    /// directly instead of building a workspace to answer for one command.
+    fn new_with(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        availability: AvailabilityMap,
+    ) -> Self {
         let commands = commands(cx);
-        let (entries, repo_open) = snapshot(&commands, window, cx);
+        let (entries, repo_open) = snapshot(&commands, &availability, window, cx);
         let return_focus = window.focused(cx);
         let input = cx.new(|cx| {
             InputState::new(window, cx).placeholder(t!("palette.placeholder").to_string())
@@ -237,6 +333,8 @@ impl Palette {
             entries,
             repo_open,
             selected: 0,
+            notice: None,
+            notice_epoch: 0,
             _input_events,
         }
     }
@@ -277,6 +375,13 @@ impl Palette {
             return;
         };
         let command_index = self.entries[entry].command;
+        // A command the view cannot run says why and leaves the palette open:
+        // closing it would hide the reason and lose the query the user typed.
+        if let Availability::Unavailable(reason) = &self.entries[entry].availability {
+            let reason = reason.clone();
+            self.refuse(reason, cx);
+            return;
+        }
         let command = &self.commands[command_index];
         let action = command.action();
         cx.global_mut::<RecentCommands>()
@@ -301,6 +406,25 @@ impl Palette {
         });
     }
 
+    /// Keeps the palette open and puts `reason` under the field for a moment.
+    fn refuse(&mut self, reason: SharedString, cx: &mut App) {
+        self.notice = Some(reason);
+        self.notice_epoch = self.notice_epoch.wrapping_add(1);
+        let epoch = self.notice_epoch;
+        let entity = self.entity.clone();
+        cx.spawn(async move |cx| {
+            cx.background_executor().timer(BLOCKED_NOTICE).await;
+            entity.update(cx, |this, cx| {
+                if this.notice_epoch == epoch {
+                    this.notice = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify(self.entity.entity_id());
+    }
+
     fn dismiss(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         window.close_dialog(cx);
         cx.stop_propagation();
@@ -308,6 +432,8 @@ impl Palette {
 
     fn row(&self, position: usize, entry: usize, query: &str, design: &Design) -> AnyElement {
         let command = &self.commands[self.entries[entry].command];
+        let availability = &self.entries[entry].availability;
+        let unavailable = availability.reason().is_some();
         // When only the English title matched, show it, or the row would seem
         // to have nothing to do with what was typed.
         let matched_alias = command
@@ -321,6 +447,11 @@ impl Palette {
             design,
         )
         .cursor_pointer()
+        .when(unavailable, |row| {
+            // A row the view cannot run still searches and selects, but it
+            // must not read like an available one.
+            row.text_color(design.muted).cursor_not_allowed()
+        })
         .on_click(move |_, window, cx| {
             entity.update(cx, |palette, cx| palette.run(position, window, cx));
         })
@@ -338,6 +469,18 @@ impl Palette {
                     .text_size(px(design.small()))
                     .text_color(design.muted)
                     .child(alias.clone()),
+            );
+        }
+        if let Some(reason) = availability.reason() {
+            row = row.child(
+                div()
+                    .flex_none()
+                    .min_w_0()
+                    .max_w(px(190.0))
+                    .truncate()
+                    .text_size(px(design.tiny()))
+                    .text_color(design.muted)
+                    .child(reason.clone()),
             );
         }
         if let Some(binding) = &self.entries[entry].binding {
@@ -365,6 +508,20 @@ impl Render for Palette {
             );
         }
 
+        let hint = match &self.notice {
+            Some(reason) => div()
+                .min_w_0()
+                .truncate()
+                .text_color(design.remove_text)
+                .child(reason.clone())
+                .into_any_element(),
+            None => div()
+                .min_w_0()
+                .truncate()
+                .child(t!("palette.hint").to_string())
+                .into_any_element(),
+        };
+
         div()
             .flex()
             .flex_col()
@@ -380,10 +537,11 @@ impl Render for Palette {
                     .flex()
                     .items_center()
                     .justify_between()
+                    .gap_2()
                     .px_1()
                     .text_size(px(design.tiny()))
                     .text_color(design.muted)
-                    .child(t!("palette.hint").to_string())
+                    .child(hint)
                     .child(if filtered.len() == 1 {
                         t!("palette.commands.one", count = filtered.len()).to_string()
                     } else {
@@ -426,8 +584,14 @@ fn open(window: &mut Window, cx: &mut App) {
     window.defer(cx, move |window, cx| focus.focus(window, cx));
 }
 
-/// Reads what the window can run and which key runs it.
-fn snapshot(commands: &[Command], window: &Window, cx: &App) -> (Vec<Entry>, bool) {
+/// Reads what the window can run, why it cannot run some commands, and which
+/// key runs each one.
+fn snapshot(
+    commands: &[Command],
+    availability: &AvailabilityMap,
+    window: &Window,
+    cx: &App,
+) -> (Vec<Entry>, bool) {
     let available = window.available_actions(cx);
     let focus = window.focused(cx);
     let os = cx.platform_info().os;
@@ -445,6 +609,12 @@ fn snapshot(commands: &[Command], window: &Window, cx: &App) -> (Vec<Entry>, boo
                 // repository view, which is also what makes it runnable.
                 Source::Custom(_) => repo_open,
             };
+            let availability_entry = match spec.source {
+                Source::Builtin(spec) => availability.of(spec.name),
+                // A user command carries its own arguments, so the view's
+                // repository rules are the only ones that apply to it.
+                Source::Custom(_) => Availability::Available,
+            };
             // `bindings_for_action` reads the context stack the last render
             // left behind; asking for the focused handle's own stack is what
             // finds the view's bindings while the palette's dialog does not
@@ -461,6 +631,7 @@ fn snapshot(commands: &[Command], window: &Window, cx: &App) -> (Vec<Entry>, boo
                 command,
                 handled,
                 binding,
+                availability: availability_entry,
             }
         })
         .collect();
@@ -741,6 +912,131 @@ mod tests {
         assert_eq!(shortcut_label("escape"), "Esc");
         assert_eq!(shortcut_label("⌘⇧P"), "⌘⇧P");
         assert_eq!(shortcut_label("⌘,"), "⌘,");
+    }
+
+    #[test]
+    fn an_availability_map_keeps_the_reason_a_view_gave() {
+        let mut map = AvailabilityMap::default();
+        map.block("strata::CompareCommitsThreeWay", None);
+        map.block(
+            "strata::CompareBranchThreeWay",
+            Some("no branch is revealed".to_owned()),
+        );
+        assert_eq!(
+            map.of("strata::CompareCommitsThreeWay"),
+            Availability::Available
+        );
+        assert_eq!(
+            map.of("strata::CompareBranchThreeWay"),
+            Availability::Unavailable("no branch is revealed".into())
+        );
+        assert_eq!(map.of("strata::StashChanges"), Availability::Available);
+    }
+
+    /// Enter on a row the view cannot run keeps the palette open and puts the
+    /// reason where the hint was. The row stays in the list and searchable;
+    /// only its activation is refused.
+    #[gpui::test]
+    fn an_unavailable_command_stays_open_and_shows_its_reason(cx: &mut gpui::TestAppContext) {
+        use gpui::{IntoElement, ParentElement as _, QuitMode, Render, VisualTestContext, div};
+
+        struct Host;
+        impl Render for Host {
+            fn render(
+                &mut self,
+                _window: &mut gpui::Window,
+                _cx: &mut gpui::Context<Self>,
+            ) -> impl IntoElement {
+                div()
+            }
+        }
+
+        cx.update(|cx| {
+            cx.set_quit_mode(QuitMode::Explicit);
+            gpui_component::init(cx);
+            cx.set_global(Settings::default());
+            cx.set_global(CommandState::default());
+            cx.set_global(RecentCommands::default());
+        });
+
+        let palette_cell = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), move |window, cx| {
+                    let host = cx.new(|_| Host);
+                    cx.new(|cx| gpui_component::Root::new(host, window, cx))
+                })
+            })
+            .expect("a window");
+        let mut visual = VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        visual.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+
+        let palette_init = palette_cell.clone();
+        visual.update(|window, cx| {
+            let mut map = AvailabilityMap::default();
+            map.block(
+                "strata::CompareCommitsThreeWay",
+                Some(t!("compare.select_three").to_string()),
+            );
+            let palette = cx.new(|cx| {
+                let mut palette = Palette::new_with(window, cx, map);
+                palette.repo_open = true;
+                let command = palette
+                    .commands
+                    .iter()
+                    .position(|command| {
+                        matches!(
+                            command.source,
+                            Source::Builtin(spec)
+                                if spec.name == "strata::CompareCommitsThreeWay"
+                        )
+                    })
+                    .expect("the three-way command is in the palette");
+                palette.entries[command].handled = true;
+                palette.selected = 0;
+                palette
+            });
+            *palette_init.borrow_mut() = Some(palette);
+        });
+        let palette = palette_cell.borrow().clone().expect("the palette");
+
+        visual.update(|window, cx| {
+            let content = palette.clone();
+            window.open_dialog(cx, move |dialog, _, _| {
+                let content = content.clone();
+                dialog
+                    .entrance(gpui_component::dialog::DialogEntrance::None)
+                    .on_ok(|_, _, _| false)
+                    .content(move |body, _, _| body.child(content.clone()))
+            });
+        });
+        visual.run_until_parked();
+        assert!(
+            visual.update(|window, cx| window.has_active_dialog(cx)),
+            "test setup: the palette must be open"
+        );
+
+        // This is exactly what `Enter` runs in the field's `PressEnter`
+        // subscriber. The offscreen harness does not route a synthetic Enter
+        // into the input's key context, so the handler is called directly.
+        visual.update(|window, cx| {
+            palette.update(cx, |palette, cx| palette.run(0, window, cx));
+        });
+        visual.run_until_parked();
+
+        assert!(
+            visual.update(|window, cx| window.has_active_dialog(cx)),
+            "an unavailable command must not close the palette"
+        );
+        let notice = palette.read_with(&visual, |palette, _| palette.notice.clone());
+        assert_eq!(
+            notice.as_deref(),
+            Some(t!("compare.select_three").as_ref()),
+            "the hint line must say why the command did not run"
+        );
     }
 
     #[test]

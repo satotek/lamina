@@ -460,6 +460,20 @@ impl Workspace {
         }
     }
 
+    /// Why the active repository tab's palette commands cannot run, or an empty
+    /// map on the welcome screen and on a standalone compare tab, whose
+    /// commands are all available.
+    pub(crate) fn palette_availability(&self, cx: &App) -> crate::palette::AvailabilityMap {
+        match &self.content {
+            Content::Tabs(deck) => deck
+                .active()
+                .and_then(TabSlot::as_repo)
+                .map(|slot| slot.view.read(cx).command_availability())
+                .unwrap_or_default(),
+            Content::Welcome(_) => crate::palette::AvailabilityMap::default(),
+        }
+    }
+
     fn current_repo_name(&self, cx: &App) -> Option<String> {
         let Content::Tabs(deck) = &self.content else {
             return None;

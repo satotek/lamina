@@ -9,6 +9,7 @@
 mod blame_view;
 mod changed_counts;
 mod chrome;
+mod command_availability;
 mod commit_graph;
 mod commit_list;
 mod commit_selection;

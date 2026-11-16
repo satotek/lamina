@@ -121,7 +121,7 @@ impl GraphMove {
 
     /// Why the move has no target. The reason is folded into the menu label,
     /// which is where a disabled gesture explains itself.
-    fn blocked_reason(self) -> String {
+    pub(super) fn blocked_reason(self) -> String {
         match self {
             GraphMove::Parent => t!("navigation.no_parent"),
             GraphMove::SecondParent => t!("navigation.no_second_parent"),

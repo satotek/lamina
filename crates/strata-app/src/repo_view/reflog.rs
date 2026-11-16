@@ -621,7 +621,7 @@ impl RepoView {
         }
     }
 
-    fn undo_gate(&self) -> UndoGate {
+    pub(super) fn undo_gate(&self) -> UndoGate {
         let Some(session) = self.session.as_ref() else {
             return UndoGate {
                 busy: true,
