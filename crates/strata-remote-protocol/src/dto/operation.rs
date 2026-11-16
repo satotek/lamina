@@ -264,6 +264,22 @@ pub enum OperationDto {
     },
     /// `git worktree prune`.
     WorktreePrune,
+    /// `git lfs track`. `path` is a pattern or a worktree path.
+    LfsTrack {
+        path: String,
+    },
+    /// `git lfs lock`.
+    LfsLock {
+        path: String,
+    },
+    /// `git lfs unlock`.
+    LfsUnlock {
+        path: String,
+    },
+    /// `git lfs pull --include=<path>`.
+    LfsPull {
+        path: String,
+    },
 }
 
 impl TryFrom<&strata_core::session::Operation> for OperationDto {
@@ -447,6 +463,10 @@ impl TryFrom<&strata_core::session::Operation> for OperationDto {
                 force: *force,
             },
             Operation::WorktreePrune => Self::WorktreePrune,
+            Operation::LfsTrack { path } => Self::LfsTrack { path: path.clone() },
+            Operation::LfsLock { path } => Self::LfsLock { path: path.clone() },
+            Operation::LfsUnlock { path } => Self::LfsUnlock { path: path.clone() },
+            Operation::LfsPull { path } => Self::LfsPull { path: path.clone() },
             // Kept off the wire on purpose: the remote tab still refuses these.
             Operation::AddRemote { .. }
             | Operation::RenameRemote { .. }
@@ -457,10 +477,6 @@ impl TryFrom<&strata_core::session::Operation> for OperationDto {
             | Operation::ApplyPatch { .. }
             | Operation::CreateTag { .. }
             | Operation::DeleteTag { .. }
-            | Operation::LfsTrack { .. }
-            | Operation::LfsLock { .. }
-            | Operation::LfsUnlock { .. }
-            | Operation::LfsPull { .. }
             | Operation::WriteCommitGraph => return Err(UnsupportedOperation),
         })
     }
@@ -633,6 +649,10 @@ impl TryFrom<OperationDto> for strata_core::session::Operation {
                 force,
             },
             OperationDto::WorktreePrune => Operation::WorktreePrune,
+            OperationDto::LfsTrack { path } => Operation::LfsTrack { path },
+            OperationDto::LfsLock { path } => Operation::LfsLock { path },
+            OperationDto::LfsUnlock { path } => Operation::LfsUnlock { path },
+            OperationDto::LfsPull { path } => Operation::LfsPull { path },
         })
     }
 }
@@ -874,6 +894,18 @@ mod tests {
                 force: true,
             },
             Operation::WorktreePrune,
+            Operation::LfsTrack {
+                path: "*.bin".into(),
+            },
+            Operation::LfsLock {
+                path: "data.bin".into(),
+            },
+            Operation::LfsUnlock {
+                path: "dir/data.bin".into(),
+            },
+            Operation::LfsPull {
+                path: "data.bin".into(),
+            },
         ];
         for operation in &operations {
             assert!(is_supported_operation(operation), "{operation:?}");
@@ -898,9 +930,6 @@ mod tests {
                 message: None,
             },
             Operation::DeleteTag { name: "v1".into() },
-            Operation::LfsPull {
-                path: "a.bin".into(),
-            },
             Operation::WriteCommitGraph,
         ];
         for operation in &excluded {

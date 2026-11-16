@@ -6,6 +6,7 @@
 
 mod diff;
 mod graph;
+mod lfs;
 mod operation;
 mod query;
 mod repo;
@@ -19,6 +20,7 @@ pub use diff::{
 pub use graph::{
     CommitChunkDto, GraphRowDto, HalfDto, PassThroughDto, SegmentDto, chunk_ids, rows_from_dto,
 };
+pub use lfs::{LfsInfoDto, LfsLockDto};
 pub use operation::{
     ConflictSideDto, OperationDto, RemoteBranchDto, ResetModeDto, UnsupportedOperation,
     is_supported_operation,

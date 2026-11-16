@@ -968,11 +968,15 @@ impl RepoView {
 
     fn sync_after_snapshot(&mut self, cx: &mut Context<Self>) {
         if self.is_ssh() {
-            // LFS and pull requests stay on this machine. Ticketed reads go to
-            // the helper with the snapshot it just published.
+            // Pull requests stay on this machine. LFS metadata and locks are
+            // read on the host; ticketed reads use the snapshot it published.
             self.sync_selection(cx);
             self.note_remote_history();
             self.sync_worktree(cx);
+            if self.mode == MainMode::Worktree {
+                self.load_worktree_lfs(cx);
+                self.load_lfs_locks(cx);
+            }
             self.search_on_snapshot(cx);
             self.file_history_on_snapshot(cx);
             self.reflog_on_snapshot(cx);
@@ -2385,9 +2389,6 @@ impl RepoView {
     /// Shows the install hint once when the repository tracks LFS files but
     /// the `git-lfs` command is missing.
     fn check_lfs_notice(&mut self, cx: &mut Context<Self>) {
-        if self.is_ssh() {
-            return;
-        }
         let Some(session) = &self.session else {
             return;
         };

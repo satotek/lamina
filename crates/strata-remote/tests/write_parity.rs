@@ -12,6 +12,7 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
+use strata_core::lfs::LfsPointer;
 use strata_core::session::{Operation, OperationId, RepositorySession, Session, SessionEvent};
 use strata_core::test_support::TestRepo;
 use strata_core::{ReflogEntry, ReflogKind};
@@ -396,5 +397,119 @@ fn updating_a_submodule_matches_a_local_session() {
         local_repo.git(&["rev-parse", "HEAD:libs/demo"]),
         "update checks out the recorded commit"
     );
+    helper.close();
+}
+
+const LFS_HEX: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+
+/// Same pointer commit in two twins. The object is planted by hand so the
+/// read does not depend on `git-lfs` being installed.
+fn pointer_repo() -> TestRepo {
+    let repo = TestRepo::new();
+    let pointer =
+        format!("version https://git-lfs.github.com/spec/v1\noid sha256:{LFS_HEX}\nsize 6\n");
+    repo.write("data.bin", &pointer);
+    repo.write(".gitattributes", "*.bin filter=lfs\n");
+    repo.commit("pointer");
+    let object = repo
+        .path()
+        .join(".git")
+        .join("lfs")
+        .join("objects")
+        .join(&LFS_HEX[..2])
+        .join(&LFS_HEX[2..4])
+        .join(LFS_HEX);
+    std::fs::create_dir_all(object.parent().expect("object parent")).expect("lfs dir");
+    std::fs::write(object, b"hello\n").expect("lfs object");
+    repo
+}
+
+fn run_outcome_local(
+    session: &Session,
+    events: &Receiver<SessionEvent>,
+    operation: Operation,
+) -> Option<String> {
+    let id = session.run(operation);
+    wait_finished(events, id)
+}
+
+fn run_outcome_remote(helper: &Helper, operation: Operation) -> Option<String> {
+    let id = helper.session.run(operation);
+    wait_finished(&helper.events, id)
+}
+
+#[test]
+fn lfs_reads_and_writes_match_a_local_session() {
+    let local_repo = pointer_repo();
+    let remote_repo = pointer_repo();
+    assert_eq!(local_repo.head(), remote_repo.head());
+    let commit = local_repo.head();
+
+    let (local, local_events) = open_local(&local_repo);
+    let helper = Helper::spawn(&remote_repo);
+    let local_reader = local.reader();
+    let remote_reader = helper.session.reader();
+
+    assert_eq!(
+        local_reader
+            .lfs_info_at(commit, "data.bin")
+            .expect("local info"),
+        remote_reader
+            .lfs_info_at(commit, "data.bin")
+            .expect("remote info")
+    );
+    assert_eq!(
+        local_reader.uses_lfs(),
+        remote_reader.uses_lfs(),
+        "both see the attributes pattern"
+    );
+    let pointer = LfsPointer {
+        oid: format!("sha256:{LFS_HEX}"),
+        size: 6,
+    };
+    assert_eq!(
+        local_reader
+            .read_lfs_object(&pointer, 1024)
+            .expect("local object"),
+        remote_reader
+            .read_lfs_object(&pointer, 1024)
+            .expect("remote object")
+    );
+    assert_eq!(
+        local.git_extras().lfs_available(),
+        helper.session.git_extras().lfs_available()
+    );
+
+    // Track rewrites `.gitattributes` when git-lfs is installed and fails the
+    // same way on both sides when it is not. Lock, unlock and pull need an
+    // LFS server, so a missing command or a missing remote still has to leave
+    // both repositories identical.
+    let writes = [
+        Operation::LfsTrack {
+            path: "*.bin".into(),
+        },
+        Operation::LfsLock {
+            path: "data.bin".into(),
+        },
+        Operation::LfsUnlock {
+            path: "data.bin".into(),
+        },
+        Operation::LfsPull {
+            path: "data.bin".into(),
+        },
+    ];
+    for operation in writes {
+        let local_error = run_outcome_local(&local, &local_events, operation.clone());
+        let remote_error = run_outcome_remote(&helper, operation);
+        assert_eq!(
+            local_error.is_none(),
+            remote_error.is_none(),
+            "local {local_error:?} remote {remote_error:?}"
+        );
+        assert_eq!(
+            repository_state(&local_repo),
+            repository_state(&remote_repo)
+        );
+    }
     helper.close();
 }

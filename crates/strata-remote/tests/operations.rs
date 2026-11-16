@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 
 use strata_core::HeadInfo;
 use strata_core::error::OPERATION_CANCELLED;
+use strata_core::lfs::LfsPointer;
 use strata_core::merge::{ConflictStyle, ContentHash};
 use strata_core::session::{
     ConflictSide, Operation, OperationId, RepositorySession, Session, SessionEvent,
@@ -713,6 +714,155 @@ fn worktree_and_submodule_paths_that_escape_are_rejected() {
         before,
         "a rejected path must not create a worktree"
     );
+}
+
+const LFS_HEX: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+/// A commit whose blob is an LFS pointer, plus the object the pointer names.
+///
+/// No `git-lfs` binary is required: the pointer is ordinary text, and the
+/// object file is placed where the helper derives the path from the id.
+fn commit_lfs_pointer(repo: &TestRepo) -> strata_core::Oid {
+    let pointer =
+        format!("version https://git-lfs.github.com/spec/v1\noid sha256:{LFS_HEX}\nsize 6\n");
+    repo.write("data.bin", &pointer);
+    repo.write(".gitattributes", "*.bin filter=lfs\n");
+    let commit = repo.commit("pointer");
+    let object = repo
+        .path()
+        .join(".git")
+        .join("lfs")
+        .join("objects")
+        .join(&LFS_HEX[..2])
+        .join(&LFS_HEX[2..4])
+        .join(LFS_HEX);
+    std::fs::create_dir_all(object.parent().expect("object parent")).expect("lfs dir");
+    std::fs::write(object, b"hello\n").expect("lfs object");
+    commit
+}
+
+#[test]
+fn lfs_paths_and_object_ids_that_escape_are_rejected() {
+    let repo = TestRepo::new();
+    identity(&repo);
+    let commit = commit_lfs_pointer(&repo);
+    let (remote, events, server) = serve(&repo);
+    let reader = remote.reader();
+
+    let info = reader
+        .lfs_info_at(commit, "data.bin")
+        .expect("lfs info")
+        .expect("the blob is a pointer");
+    assert_eq!(info.oid, format!("sha256:{LFS_HEX}"));
+    assert!(info.present, "the planted object is readable");
+    assert!(reader.uses_lfs(), "the attributes file marks *.bin");
+    let pointer = LfsPointer {
+        oid: info.oid.clone(),
+        size: info.size,
+    };
+    let bytes = reader
+        .read_lfs_object(&pointer, 1024)
+        .expect("object read")
+        .expect("object bytes");
+    assert_eq!(bytes, b"hello\n");
+    assert!(
+        reader
+            .read_lfs_object(&pointer, 1)
+            .expect("capped read")
+            .is_none(),
+        "an object larger than the limit is not sent"
+    );
+
+    let outside = reader.lfs_info_at(commit, "../secret");
+    let outside = outside.expect_err(".. must be refused").to_string();
+    assert!(outside.contains("worktree"), "{outside}");
+    let git_dir = reader
+        .lfs_info_in_index(".git/config")
+        .expect_err(".git must be refused")
+        .to_string();
+    assert!(git_dir.contains(".git"), "{git_dir}");
+    let empty = reader
+        .lfs_info_in_worktree("")
+        .expect_err("an empty path must be refused")
+        .to_string();
+    assert!(empty.contains("empty"), "{empty}");
+    let control = reader
+        .read_lfs_object(
+            &LfsPointer {
+                oid: "sha256:abcd\n".into(),
+                size: 1,
+            },
+            32,
+        )
+        .expect_err("a control character must be refused")
+        .to_string();
+    assert!(control.contains("control"), "{control}");
+    let traversal = reader
+        .read_lfs_object(
+            &LfsPointer {
+                oid: "../etc/passwd".into(),
+                size: 1,
+            },
+            32,
+        )
+        .expect_err("a path is not an object id")
+        .to_string();
+    assert!(traversal.contains("sha256"), "{traversal}");
+
+    let cases = [
+        (Operation::LfsTrack { path: "..".into() }, "worktree"),
+        (
+            Operation::LfsLock {
+                path: "../outside".into(),
+            },
+            "worktree",
+        ),
+        (
+            Operation::LfsUnlock {
+                path: ".git/config".into(),
+            },
+            ".git",
+        ),
+        (
+            Operation::LfsPull {
+                path: String::new(),
+            },
+            "empty",
+        ),
+        (
+            Operation::LfsTrack {
+                path: "libs/../secret".into(),
+            },
+            "worktree",
+        ),
+        (
+            Operation::LfsPull {
+                path: "data\n.bin".into(),
+            },
+            "control",
+        ),
+    ];
+    for (operation, needle) in cases {
+        let id = remote.run(operation);
+        let (error, _) = wait_finished(&events, id);
+        let error = error.expect("the helper must reject the path");
+        assert!(error.contains(needle), "expected {needle:?} in {error}");
+    }
+
+    // `*` is a normal path component. A pattern must reach git, not the
+    // worktree-path check, even when git-lfs itself is missing.
+    let tracked = remote.run(Operation::LfsTrack {
+        path: "*.bin".into(),
+    });
+    let (error, _) = wait_finished(&events, tracked);
+    if let Some(error) = error {
+        assert!(
+            !error.contains("worktree") && !error.contains("control"),
+            "a pattern was treated as an escape: {error}"
+        );
+    }
+    drop(remote);
+    server.join().expect("server thread");
 }
 
 #[cfg(unix)]

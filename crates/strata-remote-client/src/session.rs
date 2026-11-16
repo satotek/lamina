@@ -1075,6 +1075,7 @@ impl RepositorySession for RemoteSession {
 
     fn git_extras(&self) -> Arc<dyn GitExtras> {
         Arc::new(RemoteExtras {
+            inner: Arc::downgrade(&self.inner),
             root: self.inner.root.clone(),
             log: Arc::new(CommandLog::new()),
         })
@@ -1343,24 +1344,51 @@ impl RepoReader for RemoteReader {
         None
     }
 
-    fn lfs_info_at(&self, _commit: Oid, _path: &str) -> Result<Option<LfsInfo>> {
-        Err(Error::other(UNSUPPORTED))
+    fn lfs_info_at(&self, commit: Oid, path: &str) -> Result<Option<LfsInfo>> {
+        match self.call(Request::LfsInfoAt {
+            commit: object_id(commit),
+            path: path.to_owned(),
+        })? {
+            Response::LfsInfo { info } => Ok(info.map(Into::into)),
+            other => Err(unexpected(other)),
+        }
     }
 
-    fn lfs_info_in_index(&self, _path: &str) -> Result<Option<LfsInfo>> {
-        Err(Error::other(UNSUPPORTED))
+    fn lfs_info_in_index(&self, path: &str) -> Result<Option<LfsInfo>> {
+        match self.call(Request::LfsInfoInIndex {
+            path: path.to_owned(),
+        })? {
+            Response::LfsInfo { info } => Ok(info.map(Into::into)),
+            other => Err(unexpected(other)),
+        }
     }
 
-    fn lfs_info_in_worktree(&self, _path: &str) -> Result<Option<LfsInfo>> {
-        Err(Error::other(UNSUPPORTED))
+    fn lfs_info_in_worktree(&self, path: &str) -> Result<Option<LfsInfo>> {
+        match self.call(Request::LfsInfoInWorktree {
+            path: path.to_owned(),
+        })? {
+            Response::LfsInfo { info } => Ok(info.map(Into::into)),
+            other => Err(unexpected(other)),
+        }
     }
 
     fn uses_lfs(&self) -> bool {
-        false
+        matches!(
+            self.call(Request::UsesLfs),
+            Ok(Response::UsesLfs { uses: true })
+        )
     }
 
-    fn read_lfs_object(&self, _pointer: &LfsPointer, _max_bytes: usize) -> Result<Option<Vec<u8>>> {
-        Err(Error::other(UNSUPPORTED))
+    fn read_lfs_object(&self, pointer: &LfsPointer, max_bytes: usize) -> Result<Option<Vec<u8>>> {
+        let max_bytes = u64::try_from(max_bytes).unwrap_or(u64::MAX);
+        match self.call(Request::ReadLfsObject {
+            oid: pointer.oid.clone(),
+            size: pointer.size,
+            max_bytes,
+        })? {
+            Response::LfsObject { data } => Ok(data),
+            other => Err(unexpected(other)),
+        }
     }
 
     fn parents(&self, commit: Oid) -> Result<Vec<Oid>> {
@@ -1541,15 +1569,17 @@ impl RepoReader for RemoteReader {
     }
 }
 
-/// CLI helpers have no remote equivalent in this slice.
+/// CLI helpers that can run on the host. `format_patch` stays local because
+/// saving a patch is still a file on this machine.
 struct RemoteExtras {
+    inner: std::sync::Weak<Inner>,
     root: PathBuf,
     log: Arc<CommandLog>,
 }
 
 impl GitExtras for RemoteExtras {
     fn workdir(&self) -> &Path {
-        // The remote root; not a local path. Every method below refuses to run.
+        // The remote root; not a local path. Callers must not open it.
         &self.root
     }
 
@@ -1558,11 +1588,24 @@ impl GitExtras for RemoteExtras {
     }
 
     fn lfs_available(&self) -> bool {
-        false
+        let Some(inner) = self.inner.upgrade() else {
+            return false;
+        };
+        matches!(
+            inner.call(Request::LfsAvailable),
+            Ok(Response::LfsAvailable { available: true })
+        )
     }
 
     fn lfs_locks(&self) -> Result<Vec<LfsLock>> {
-        Err(Error::other(UNSUPPORTED))
+        let inner = self
+            .inner
+            .upgrade()
+            .ok_or_else(|| Error::other("the remote session was closed"))?;
+        match inner.call(Request::LfsLocks)? {
+            Response::LfsLocks { locks } => Ok(locks.into_iter().map(Into::into).collect()),
+            other => Err(unexpected(other)),
+        }
     }
 
     fn format_patch(&self, _commit: Oid) -> Result<Vec<u8>> {

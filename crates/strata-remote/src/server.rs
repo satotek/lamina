@@ -302,8 +302,8 @@ fn write_frames(outbox: Arc<Outbox>, mut writer: impl Write) {
 
 fn dispatch(shared: &Arc<ServerShared>, stream: u16, chunk: usize, request: Request) {
     if is_blocking_read(&request) {
-        let reader = match session_reader(shared) {
-            Ok(reader) => reader,
+        let (reader, extras) = match session_services(shared) {
+            Ok(services) => services,
             Err(response) => {
                 push_high(shared, stream, &Message::Response(response));
                 return;
@@ -315,7 +315,7 @@ fn dispatch(shared: &Arc<ServerShared>, stream: u16, chunk: usize, request: Requ
         // A failed spawn used to drop the request, and the client waited until
         // its own timeout. Answer on this thread instead.
         if !spawn_worker(shared, move || {
-            let response = answer_read(&reader, request);
+            let response = answer_read(&reader, &extras, request);
             push_high(&task, stream, &Message::Response(response));
         }) {
             push_high(
@@ -356,15 +356,28 @@ fn is_blocking_read(request: &Request) -> bool {
             | Request::ThreeWaySideTree { .. }
             | Request::CompareSideBlob { .. }
             | Request::CommitChangedFileCount { .. }
+            | Request::LfsInfoAt { .. }
+            | Request::LfsInfoInIndex { .. }
+            | Request::LfsInfoInWorktree { .. }
+            | Request::UsesLfs
+            | Request::ReadLfsObject { .. }
+            | Request::LfsAvailable
+            | Request::LfsLocks
     )
 }
 
-fn session_reader(
+fn session_services(
     shared: &ServerShared,
-) -> Result<Arc<dyn strata_core::session::RepoReader>, Response> {
+) -> Result<
+    (
+        Arc<dyn strata_core::session::RepoReader>,
+        Arc<dyn strata_core::session::GitExtras>,
+    ),
+    Response,
+> {
     let guard = lock(&shared.session);
     match guard.as_ref() {
-        Some(session) => Ok(session.reader()),
+        Some(session) => Ok((session.reader(), session.git_extras())),
         None => Err(Response::Error(RemoteError::other(
             "the repository session is not ready",
         ))),
@@ -507,7 +520,14 @@ fn answer_control(shared: &Arc<ServerShared>, chunk: usize, request: Request) ->
         | Request::ThreeWayRoles { .. }
         | Request::ThreeWaySideTree { .. }
         | Request::CompareSideBlob { .. }
-        | Request::CommitChangedFileCount { .. } => {
+        | Request::CommitChangedFileCount { .. }
+        | Request::LfsInfoAt { .. }
+        | Request::LfsInfoInIndex { .. }
+        | Request::LfsInfoInWorktree { .. }
+        | Request::UsesLfs
+        | Request::ReadLfsObject { .. }
+        | Request::LfsAvailable
+        | Request::LfsLocks => {
             // `dispatch` sends these to a worker. Reaching here is a bug.
             Response::Error(RemoteError::other(
                 "internal error: a read was handled on the request loop",
@@ -548,7 +568,11 @@ fn answer_control(shared: &Arc<ServerShared>, chunk: usize, request: Request) ->
     })
 }
 
-fn answer_read(reader: &Arc<dyn strata_core::session::RepoReader>, request: Request) -> Response {
+fn answer_read(
+    reader: &Arc<dyn strata_core::session::RepoReader>,
+    extras: &Arc<dyn strata_core::session::GitExtras>,
+    request: Request,
+) -> Response {
     match request {
         Request::Head => match reader.head() {
             Ok(head) => Response::Head {
@@ -778,6 +802,75 @@ fn answer_read(reader: &Arc<dyn strata_core::session::RepoReader>, request: Requ
                 Err(error) => Response::Error(error),
             }
         }
+        Request::LfsInfoAt { commit, path } => {
+            if let Err(error) = require_worktree_path(&path) {
+                return Response::Error(error);
+            }
+            let result = proto::ObjectId::try_into(commit)
+                .map_err(protocol_error)
+                .and_then(|commit| reader.lfs_info_at(commit, &path).map_err(remote_error));
+            match result {
+                Ok(info) => Response::LfsInfo {
+                    info: info.as_ref().map(proto::LfsInfoDto::from),
+                },
+                Err(error) => Response::Error(error),
+            }
+        }
+        Request::LfsInfoInIndex { path } => {
+            if let Err(error) = require_worktree_path(&path) {
+                return Response::Error(error);
+            }
+            match reader.lfs_info_in_index(&path) {
+                Ok(info) => Response::LfsInfo {
+                    info: info.as_ref().map(proto::LfsInfoDto::from),
+                },
+                Err(error) => Response::Error(remote_error(error)),
+            }
+        }
+        Request::LfsInfoInWorktree { path } => {
+            if let Err(error) = require_worktree_path(&path) {
+                return Response::Error(error);
+            }
+            match reader.lfs_info_in_worktree(&path) {
+                Ok(info) => Response::LfsInfo {
+                    info: info.as_ref().map(proto::LfsInfoDto::from),
+                },
+                Err(error) => Response::Error(remote_error(error)),
+            }
+        }
+        Request::UsesLfs => Response::UsesLfs {
+            uses: reader.uses_lfs(),
+        },
+        Request::ReadLfsObject {
+            oid,
+            size,
+            max_bytes,
+        } => {
+            // The client names an object id, never a file. The store path is
+            // derived here so a request cannot point at an arbitrary file.
+            if let Err(error) = require_lfs_oid(&oid) {
+                return Response::Error(error);
+            }
+            let Ok(max_bytes) = usize::try_from(max_bytes) else {
+                return Response::Error(RemoteError::other(
+                    "lfs read is larger than this helper can hold",
+                ));
+            };
+            let pointer = strata_core::lfs::LfsPointer { oid, size };
+            match reader.read_lfs_object(&pointer, max_bytes) {
+                Ok(data) => Response::LfsObject { data },
+                Err(error) => Response::Error(remote_error(error)),
+            }
+        }
+        Request::LfsAvailable => Response::LfsAvailable {
+            available: extras.lfs_available(),
+        },
+        Request::LfsLocks => match extras.lfs_locks() {
+            Ok(locks) => Response::LfsLocks {
+                locks: locks.iter().map(proto::LfsLockDto::from).collect(),
+            },
+            Err(error) => Response::Error(remote_error(error)),
+        },
         other => Response::Error(RemoteError::other(format!(
             "internal error: {other:?} is not a repository read"
         ))),
@@ -807,8 +900,33 @@ fn rejected_operation_path(operation: &strata_core::session::Operation) -> Optio
         Operation::SubmoduleUpdate { paths, .. } => paths
             .iter()
             .find_map(|path| require_worktree_path(path).err().map(|error| error.message)),
+        Operation::LfsTrack { path }
+        | Operation::LfsLock { path }
+        | Operation::LfsUnlock { path }
+        | Operation::LfsPull { path } => {
+            require_worktree_path(path).err().map(|error| error.message)
+        }
         _ => None,
     }
+}
+
+/// An LFS object id is `sha256:` and 64 hex digits. Anything else is refused
+/// before the helper joins it onto `lfs/objects`.
+fn require_lfs_oid(oid: &str) -> Result<(), RemoteError> {
+    if oid.chars().any(|character| character.is_control()) {
+        return Err(RemoteError::other(
+            "lfs object id contains a control character",
+        ));
+    }
+    let Some(hex) = oid.strip_prefix("sha256:") else {
+        return Err(RemoteError::other("lfs object id must start with sha256:"));
+    };
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(RemoteError::other(
+            "lfs object id must be 64 hexadecimal digits",
+        ));
+    }
+    Ok(())
 }
 
 /// An absolute path the user typed for a worktree: no empty text, no control
