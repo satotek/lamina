@@ -144,7 +144,6 @@ pub static PLACEMENTS: &[Placement] = &[
     item("Quit", MenuKind::Strata, 2),
     item("NewTab", MenuKind::File, 0),
     item("OpenRepository", MenuKind::File, 1),
-    item("OpenRemoteRepository", MenuKind::File, 1),
     item("CloneRepository", MenuKind::File, 1),
     item("NewRepository", MenuKind::File, 1),
     item("OpenCompare", MenuKind::File, 1),

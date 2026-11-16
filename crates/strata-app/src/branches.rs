@@ -2536,15 +2536,6 @@ pub(crate) fn drop_entries(
     Some(entries)
 }
 
-/// A remote repository refuses every write, ahead of a merely busy local one.
-fn prefer_ssh(ssh: bool, reason: Option<String>) -> Option<String> {
-    if ssh {
-        Some(crate::remote_open::unavailable_reason())
-    } else {
-        reason
-    }
-}
-
 /// The section-level actions of the two lists git stores outside the refs.
 fn section_menu(
     menu: PopupMenu,
@@ -2553,7 +2544,6 @@ fn section_menu(
     entity: &Entity<RepoView>,
     cx: &App,
 ) -> PopupMenu {
-    let ssh = entity.read(cx).is_ssh();
     match section {
         Section::Remote => {
             let add = {
@@ -2562,7 +2552,7 @@ fn section_menu(
                     entity.update(cx, |view, cx| view.open_add_remote(window, cx));
                 }
             };
-            let blocked = prefer_ssh(ssh, busy.then_some(t!("branch.reason.busy").to_string()));
+            let blocked = busy.then_some(t!("branch.reason.busy").to_string());
             menu.item(
                 PopupMenuItem::new(crate::ui::menu_label(
                     t!("branch.menu.add_remote").to_string(),
@@ -2579,13 +2569,10 @@ fn section_menu(
                     entity.update(cx, |view, cx| view.update_all_submodules(window, cx));
                 }
             };
-            let blocked = prefer_ssh(
-                ssh,
-                blocked_section(
-                    busy,
-                    !entity.read(cx).has_submodules(),
-                    t!("branch.empty.submodules").to_string(),
-                ),
+            let blocked = blocked_section(
+                busy,
+                !entity.read(cx).has_submodules(),
+                t!("branch.empty.submodules").to_string(),
             );
             menu.item(
                 PopupMenuItem::new(crate::ui::menu_label(
@@ -2609,14 +2596,11 @@ fn section_menu(
                     entity.update(cx, |view, cx| view.prune_worktrees(window, cx));
                 }
             };
-            let add_blocked = prefer_ssh(ssh, busy.then_some(t!("branch.reason.busy").to_string()));
-            let prune_blocked = prefer_ssh(
-                ssh,
-                blocked_section(
-                    busy,
-                    !entity.read(cx).has_prunable_worktree(),
-                    t!("branch.reason.no_missing_worktrees").to_string(),
-                ),
+            let add_blocked = busy.then_some(t!("branch.reason.busy").to_string());
+            let prune_blocked = blocked_section(
+                busy,
+                !entity.read(cx).has_prunable_worktree(),
+                t!("branch.reason.no_missing_worktrees").to_string(),
             );
             menu.item(
                 PopupMenuItem::new(crate::ui::menu_label(
@@ -2692,11 +2676,8 @@ fn remote_group_header(
         format!("remote-group-menu-{name}"),
         &colors.design,
         header,
-        move |menu, _window, cx| {
-            let blocked = prefer_ssh(
-                menu_entity.read(cx).is_ssh(),
-                busy.then_some(t!("branch.reason.busy").to_string()),
-            );
+        move |menu, _window, _cx| {
+            let blocked = busy.then_some(t!("branch.reason.busy").to_string());
             let fetch = {
                 let entity = menu_entity.clone();
                 let name = menu_name.clone();
@@ -2903,59 +2884,41 @@ fn local_row(
         row,
         move |menu, window, cx| {
             // A disabled entry says why, the way the commit menu's entries do.
-            let ssh = entity_menu.read(cx).is_ssh();
             let mut variables = entity_menu.read(cx).custom_variables();
             // `${branch}` is the branch this menu acts on, which need not be
             // the checked-out one.
             variables.branch = Some(branch.clone());
-            let checkout_blocked = prefer_ssh(
-                ssh,
-                branch_blocked(active, t!("branch.reason.checked_out").to_string(), busy),
-            );
-            let merge_blocked = prefer_ssh(
-                ssh,
-                branch_blocked(active, t!("branch.reason.current").to_string(), busy),
-            );
-            let create_blocked =
-                prefer_ssh(ssh, busy.then_some(t!("branch.reason.busy").to_string()));
-            let delete_blocked = prefer_ssh(
-                ssh,
-                branch_blocked(active, t!("branch.reason.current").to_string(), busy),
-            );
+            let checkout_blocked =
+                branch_blocked(active, t!("branch.reason.checked_out").to_string(), busy);
+            let merge_blocked =
+                branch_blocked(active, t!("branch.reason.current").to_string(), busy);
+            let create_blocked = busy.then_some(t!("branch.reason.busy").to_string());
+            let delete_blocked =
+                branch_blocked(active, t!("branch.reason.current").to_string(), busy);
             let rebase = entity_menu
                 .read(cx)
                 .branch_rebase_target(RefKind::LocalBranch, &branch);
-            let rename_blocked =
-                prefer_ssh(ssh, busy.then_some(t!("branch.reason.busy").to_string()));
+            let rename_blocked = busy.then_some(t!("branch.reason.busy").to_string());
             let view = entity_menu.read(cx);
             let upstream = view.branch_upstream(&branch);
             let has_upstream = upstream.is_some();
             let has_remote_branches = !view.upstream_choices().is_empty();
-            let set_blocked = prefer_ssh(
-                ssh,
-                if !has_remote_branches {
-                    Some(t!("branch.empty.no_remote_branches").to_string())
-                } else {
-                    busy.then_some(t!("branch.reason.busy").to_string())
-                },
-            );
-            let unset_blocked = prefer_ssh(
-                ssh,
-                if !has_upstream {
-                    Some(t!("branch.reason.no_upstream").to_string())
-                } else {
-                    busy.then_some(t!("branch.reason.busy").to_string())
-                },
-            );
+            let set_blocked = if !has_remote_branches {
+                Some(t!("branch.empty.no_remote_branches").to_string())
+            } else {
+                busy.then_some(t!("branch.reason.busy").to_string())
+            };
+            let unset_blocked = if !has_upstream {
+                Some(t!("branch.reason.no_upstream").to_string())
+            } else {
+                busy.then_some(t!("branch.reason.busy").to_string())
+            };
             let head = view.compare_head();
-            let compare_blocked = prefer_ssh(
-                ssh,
-                crate::repo_view::compare::with_current_branch_blocked(
-                    view.session.is_some(),
-                    active,
-                    busy,
-                    head,
-                ),
+            let compare_blocked = crate::repo_view::compare::with_current_branch_blocked(
+                view.session.is_some(),
+                active,
+                busy,
+                head,
             );
             let compare = {
                 let entity = entity_menu.clone();
@@ -3266,10 +3229,7 @@ fn remote_row(
         &colors.design,
         row_element,
         move |menu, _window, cx| {
-            let blocked = prefer_ssh(
-                entity_menu.read(cx).is_ssh(),
-                busy.then_some(t!("branch.reason.busy").to_string()),
-            );
+            let blocked = busy.then_some(t!("branch.reason.busy").to_string());
             let rebase = entity_menu
                 .read(cx)
                 .branch_rebase_target(RefKind::RemoteBranch, &remote);
@@ -3389,11 +3349,8 @@ fn tag_row(
         ("tag-menu", index),
         &colors.design,
         row_element,
-        move |menu, _window, cx| {
-            let blocked = prefer_ssh(
-                menu_entity.read(cx).is_ssh(),
-                busy.then_some(t!("branch.reason.busy").to_string()),
-            );
+        move |menu, _window, _cx| {
+            let blocked = busy.then_some(t!("branch.reason.busy").to_string());
             menu.item(
                 PopupMenuItem::new(crate::ui::menu_label(
                     t!("branch.menu.show_only_tag").to_string(),
@@ -3482,23 +3439,15 @@ fn submodule_row(
         ("submodule-menu", index),
         &colors.design,
         row_element,
-        move |menu, _window, cx| {
-            let ssh = menu_entity.read(cx).is_ssh();
-            let open_blocked = prefer_ssh(
-                ssh,
-                (status == SubmoduleStatus::Uninitialised)
-                    .then_some(t!("branch.submodule.not_initialised").to_string()),
-            );
-            let update_blocked = prefer_ssh(
-                ssh,
-                if status == SubmoduleStatus::Uninitialised {
-                    Some(t!("branch.submodule.not_initialised").to_string())
-                } else {
-                    busy.then_some(t!("branch.reason.busy").to_string())
-                },
-            );
-            let init_blocked =
-                prefer_ssh(ssh, busy.then_some(t!("branch.reason.busy").to_string()));
+        move |menu, _window, _cx| {
+            let open_blocked = (status == SubmoduleStatus::Uninitialised)
+                .then_some(t!("branch.submodule.not_initialised").to_string());
+            let update_blocked = if status == SubmoduleStatus::Uninitialised {
+                Some(t!("branch.submodule.not_initialised").to_string())
+            } else {
+                busy.then_some(t!("branch.reason.busy").to_string())
+            };
+            let init_blocked = busy.then_some(t!("branch.reason.busy").to_string());
             let open = {
                 let entity = menu_entity.clone();
                 let path = menu_path.clone();
@@ -3704,34 +3653,25 @@ fn worktree_row(
         ("worktree-menu", index),
         &colors.design,
         row_element,
-        move |menu, _window, cx| {
-            let ssh = menu_entity.read(cx).is_ssh();
-            let open_in_window_blocked = prefer_ssh(
-                ssh,
-                if prunable {
-                    Some(t!("branch.reason.missing_worktree").to_string())
-                } else if current {
-                    Some(t!("branch.reason.already_open").to_string())
-                } else {
-                    None
-                },
-            );
-            let open_new_window_blocked = prefer_ssh(
-                ssh,
-                prunable.then_some(t!("branch.reason.missing_worktree").to_string()),
-            );
-            let remove_blocked = prefer_ssh(
-                ssh,
-                if is_main {
-                    Some(t!("branch.reason.main_worktree").to_string())
-                } else if locked {
-                    Some(t!("branch.reason.locked_worktree").to_string())
-                } else if prunable {
-                    Some(t!("branch.reason.missing_worktree").to_string())
-                } else {
-                    busy.then_some(t!("branch.reason.busy").to_string())
-                },
-            );
+        move |menu, _window, _cx| {
+            let open_in_window_blocked = if prunable {
+                Some(t!("branch.reason.missing_worktree").to_string())
+            } else if current {
+                Some(t!("branch.reason.already_open").to_string())
+            } else {
+                None
+            };
+            let open_new_window_blocked =
+                prunable.then_some(t!("branch.reason.missing_worktree").to_string());
+            let remove_blocked = if is_main {
+                Some(t!("branch.reason.main_worktree").to_string())
+            } else if locked {
+                Some(t!("branch.reason.locked_worktree").to_string())
+            } else if prunable {
+                Some(t!("branch.reason.missing_worktree").to_string())
+            } else {
+                busy.then_some(t!("branch.reason.busy").to_string())
+            };
             let open = {
                 let entity = menu_entity.clone();
                 let path = copy_path.clone();
@@ -4354,16 +4294,10 @@ impl RepoView {
             .then(|| self.fast_forward_ready(&source.name, &target))
             .flatten();
         let busy = self.is_busy();
-        let Some(mut entries) = drop_entries(&source, &target, head.as_deref(), busy, fast_forward)
+        let Some(entries) = drop_entries(&source, &target, head.as_deref(), busy, fast_forward)
         else {
             return;
         };
-        if self.is_ssh() {
-            let reason = crate::remote_open::unavailable_reason();
-            for entry in &mut entries {
-                entry.blocked = Some(reason.clone());
-            }
-        }
         self.branches.drop_menu = Some(DropMenu {
             position,
             source,

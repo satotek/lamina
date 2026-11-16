@@ -582,9 +582,6 @@ impl RepoView {
     /// Re-requests in-progress details whenever a snapshot publishes a
     /// non-normal state, and clears stale details as soon as git finishes.
     pub(crate) fn refresh_in_progress_details(&mut self) {
-        if self.is_ssh() {
-            return;
-        }
         let Some(session) = self.session.as_ref() else {
             return;
         };

@@ -68,8 +68,6 @@ pub(crate) struct MenuState {
     head: Option<Oid>,
     /// Tracked staged or worktree changes. Core refuses a rebase with them.
     dirty: bool,
-    /// The repository is on another machine, so every write is refused.
-    ssh: bool,
 }
 
 impl MenuState {
@@ -85,14 +83,7 @@ impl MenuState {
             busy,
             head: commit,
             dirty: false,
-            ssh: false,
         }
-    }
-
-    /// Marks every history write unavailable. `read` stays about the snapshot.
-    pub(crate) fn with_ssh(mut self, ssh: bool) -> Self {
-        self.ssh = ssh;
-        self
     }
 
     /// Adds the worktree state the snapshot carries; `read` stays about HEAD.
@@ -133,9 +124,6 @@ impl MenuState {
     /// A running operation is reported before a half-finished one: it is the
     /// state that will change on its own.
     pub(crate) fn shared_reason(&self) -> Option<String> {
-        if self.ssh {
-            return Some(crate::remote_open::unavailable_reason());
-        }
         if self.busy {
             Some(t!("branch.reason.busy").to_string())
         } else if self.pending {
@@ -160,9 +148,6 @@ impl MenuState {
     /// A tag can be created or deleted while another operation is in progress
     /// (it only writes a ref), but not while git is busy with one.
     pub(crate) fn blocked(&self, action: HistoryAction) -> Option<String> {
-        if self.ssh {
-            return Some(crate::remote_open::unavailable_reason());
-        }
         if self.busy {
             return Some(t!("branch.reason.busy").to_string());
         }
@@ -182,9 +167,6 @@ impl MenuState {
     /// [`Self::blocked`] plus the commit-specific rule: picking or reverting
     /// HEAD itself has nothing to apply.
     pub(crate) fn blocked_for(&self, action: HistoryAction, commit: Oid) -> Option<String> {
-        if self.ssh {
-            return Some(crate::remote_open::unavailable_reason());
-        }
         if matches!(action, HistoryAction::CherryPick | HistoryAction::Revert)
             && self.head == Some(commit)
         {
@@ -1536,8 +1518,7 @@ impl RepoView {
         let snapshot = self.session.as_ref()?.snapshot();
         Some(
             MenuState::read(snapshot.head.as_ref(), snapshot.state, self.is_busy())
-                .with_worktree(&snapshot.status)
-                .with_ssh(self.is_ssh()),
+                .with_worktree(&snapshot.status),
         )
     }
 
@@ -2422,32 +2403,6 @@ mod tests {
         ] {
             assert_eq!(state.blocked(action), None, "{action:?} needs no branch");
         }
-    }
-
-    #[test]
-    fn a_remote_repository_blocks_every_history_action() {
-        let head = branch("main", oid(2));
-        let reason = crate::remote_open::unavailable_reason();
-        let state = MenuState::read(Some(&head), RepoState::Normal, false).with_ssh(true);
-        assert_eq!(state.shared_reason().as_deref(), Some(reason.as_str()));
-        assert_eq!(
-            state.blocked(HistoryAction::Reset).as_deref(),
-            Some(reason.as_str())
-        );
-        // The remote reason wins over "that commit is HEAD" and over a busy
-        // or half-finished repository.
-        assert_eq!(
-            state
-                .blocked_for(HistoryAction::CherryPick, oid(2))
-                .as_deref(),
-            Some(reason.as_str())
-        );
-        let busy = MenuState::read(Some(&head), RepoState::Merging, true).with_ssh(true);
-        assert_eq!(
-            busy.blocked(HistoryAction::CreateTag).as_deref(),
-            Some(reason.as_str())
-        );
-        assert_eq!(busy.shared_reason().as_deref(), Some(reason.as_str()));
     }
 
     #[test]

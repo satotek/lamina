@@ -14,7 +14,6 @@ output lands in `dist/`, which is git-ignored.
 | `windows/package.ps1` | Builds and zips `strata.exe`, the README, the licences and the notices. |
 | `third-party/generate.sh` | Writes the third-party notices that every artifact carries. |
 | `third-party/libghostty-vt.md` | The part of those notices that cargo-about cannot see: the Zig side of the terminal backend. |
-| `third-party/remote-helper.md` | MIT notices for the C library linked into the musl remote helper, which is also outside the crate graph. |
 | `third-party/catppuccin.md` | MIT notice for the bundled Catppuccin colour palettes. |
 
 The app icon lives with the other resources, not here:
@@ -41,13 +40,9 @@ several minutes of Zig work.
 
 1. `version` fails unless the tag equals the `[workspace.package] version` in
    `Cargo.toml` (so `v0.1.0` needs `version = "0.1.0"`).
-2. `remote-helpers` cross-compiles `strata-remote` for
-   `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` once, with
-   the same `STRATA_BUILD_ID` as the app (the commit the workflow checked
-   out). Each platform build downloads that artifact.
-3. `build` compiles with `--release --locked` on three runners, packages the
-   result with the scripts below (including `remote-helpers/` next to the
-   executable), and uploads each archive as a workflow artifact:
+2. `build` compiles with `--release --locked` on three runners, packages the
+   result with the scripts below, and uploads each archive as a workflow
+   artifact:
    - `Strata-<version>-macos-arm64.dmg` on `macos-15`
      (`aarch64-apple-darwin`)
    - `Strata-<version>-windows-x64.zip` on `windows-latest`
@@ -55,10 +50,9 @@ several minutes of Zig work.
    - `strata-<version>-linux-x86_64.tar.gz` on `ubuntu-22.04`
      (`x86_64-unknown-linux-gnu`, the oldest hosted runner, so the archive
      needs no newer glibc than 2.35)
-4. `publish` (tags only) downloads the `dist-*` archives, writes
-   `SHA256SUMS.txt`, and creates a **draft** GitHub release with generated
-   notes. The helper artifact is not a release asset. A manual dispatch stops
-   after step 3 and leaves the archives in the workflow run.
+3. `publish` (tags only) downloads the archives, writes `SHA256SUMS.txt`, and
+   creates a **draft** GitHub release with generated notes. A manual dispatch
+   stops after step 2 and leaves the archives in the workflow run.
 
 Every artifact carries both licences and `THIRD-PARTY-NOTICES.md`, which
 `third-party/generate.sh` produces from `cargo-about` plus the pinned Zig
@@ -80,13 +74,6 @@ binary to `Contents/MacOS/strata` and `Strata.icns`, `LICENSE-MIT`,
 `Contents/Info.plist`, and signs the bundle ad hoc (`codesign -s -`). It needs
 `dist/THIRD-PARTY-NOTICES.md`, so run `third-party/generate.sh` first, or point
 `NOTICES` at another file.
-
-When `REMOTE_HELPERS` is set, or `remote-helpers/` exists at the repository
-root, the musl binaries are copied to `Contents/Resources/remote-helpers` and
-`Contents/MacOS/remote-helpers` becomes a relative symlink to that directory.
-The symlink is what the app opens. It is created before the ad-hoc signature
-so the seal covers it. A regular file under `Contents/MacOS` would be nested
-code, and codesign cannot sign a Linux binary.
 
 The signature is enough for local use; Gatekeeper still treats the app as
 unsigned for anything downloaded, and there is no notarization. The version
@@ -120,9 +107,8 @@ PREFIX=$HOME/.local direnv exec . packaging/linux/install.sh
 `package.sh` builds the release binary and writes
 `dist/strata-<version>-linux-<arch>.tar.gz`. The archive unpacks into one
 directory holding `strata`, `strata.desktop`, `icons/<size>.png` (16–512),
-`install.sh`, `LICENSE-MIT`, `LICENSE-APACHE`, `THIRD-PARTY-NOTICES.md` and,
-when the helpers were staged, `remote-helpers/`. It installs on a machine
-with no toolchain:
+`install.sh`, `LICENSE-MIT`, `LICENSE-APACHE` and `THIRD-PARTY-NOTICES.md`, so
+it installs on a machine with no toolchain:
 
 ```sh
 tar -xzf strata-0.1.0-linux-x86_64.tar.gz
@@ -133,11 +119,9 @@ PREFIX=$HOME/.local strata-0.1.0-linux-x86_64/install.sh
 release binary first and installs from the repository. Either way it drops the
 binary in `bin/`, `strata.desktop` in `share/applications/`, the icons in
 `share/icons/hicolor/<size>x<size>/apps/strata.png` and the licences in
-`share/doc/strata/`. From a release archive it also installs
-`remote-helpers/` to `bin/remote-helpers/`, beside `strata`, so the running
-app still finds the helpers next to its executable. It is a convenience for a
-development machine or the release archive, not a distribution package: a
-distro build needs its own dependency and library-path handling.
+`share/doc/strata/`. It is a convenience for a development machine or the
+release archive, not a distribution package: a distro build needs its own
+dependency and library-path handling.
 
 `package.sh` takes `--target <triple>` and `--no-build` like the macOS scripts,
 and `NOTICES=<path>` to point at a notices file other than
@@ -160,8 +144,7 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\package.ps1
 
 Builds with `cargo build --release --locked -p strata-app` and writes
 `dist\Strata-<version>-windows-x64.zip` containing `strata.exe`, `README.txt`,
-both licences, `THIRD-PARTY-NOTICES.md` and, when the helpers were staged,
-`remote-helpers\` next to the executable. `-Target <triple>` and `-NoBuild`
+both licences and `THIRD-PARTY-NOTICES.md`. `-Target <triple>` and `-NoBuild`
 mirror the shell scripts, and the script resolves the binary through
 `CARGO_TARGET_DIR`. `build.rs` embeds `resources/icon/strata.ico` in the
 executable, which is what Explorer, the taskbar and every window show, so the
@@ -177,15 +160,10 @@ nix shell nixpkgs#cargo-about --command \
 
 The script renders `about.hbs` through `cargo-about` (configuration in
 `about.toml`, which accepts only the licences actually present in the
-lockfile), appends `third-party/libghostty-vt.md`,
-`third-party/remote-helper.md` and `third-party/catppuccin.md`, and writes the
-result. It needs `cargo-about` on PATH; the Nix package and
-`cargo install cargo-about` both work, and CI installs it with
-`taiki-e/install-action`.
-
-`about.toml` already accepts every licence in the `strata-remote` crate
-graph: that graph is a subset of the workspace `cargo-about` walks for the
-app. The musl C library is not a crate; `remote-helper.md` covers it.
+lockfile), appends `third-party/libghostty-vt.md` and
+`third-party/catppuccin.md`, and writes the result. It needs `cargo-about` on
+PATH; the Nix package and `cargo install cargo-about` both work, and CI installs
+it with `taiki-e/install-action`.
 
 The appended section matters because `cargo-about` only walks Cargo's graph:
 libghostty-vt, its Zig packages (Highway, Wuffs, Aro, `translate_c`, uucode) and

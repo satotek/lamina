@@ -206,8 +206,6 @@ impl Render for RepoView {
         root = root.child(self.activity_progress(&design));
         if let Some((path, error)) = &self.error {
             root = root.child(self.error_screen(path, error, &design));
-        } else if self.connect_page_visible() {
-            root = root.child(self.connect_page(&design));
         } else {
             // The body is laid out from the window width rather than from
             // measured bounds: the sidebar, the commit list's columns and the
@@ -253,9 +251,6 @@ impl Render for RepoView {
             // is showing, so a stopped operation is visible from the history
             // and not only from the working tree.
             let mut main = div().flex().flex_col().flex_1().min_w_0().min_h_0();
-            if let Some(banner) = self.connection_banner(entity.clone(), &design) {
-                main = main.child(banner);
-            }
             if let Some(text) = self.lfs_notice.clone()
                 && !self.lfs_notice_dismissed
             {

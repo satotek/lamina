@@ -691,7 +691,7 @@ impl RepoView {
     /// Asks the session worker to rescan the loaded history with the current
     /// text and toggles.
     pub(crate) fn start_search(&mut self, cx: &mut Context<Self>) {
-        if self.is_ssh() || !self.search.is_active() {
+        if !self.search.is_active() {
             return;
         }
         let Some(session) = self.session.as_ref() else {
@@ -836,7 +836,7 @@ impl RepoView {
     /// Re-runs the search when the history grew: rows computed against an older
     /// generation leave newly loaded commits out of the results.
     pub(crate) fn search_on_snapshot(&mut self, cx: &mut Context<Self>) {
-        if self.is_ssh() || !self.search.is_active() {
+        if !self.search.is_active() {
             return;
         }
         let Some(session) = self.session.as_ref() else {
@@ -865,7 +865,7 @@ impl RepoView {
     /// Focuses the search field (`ctrl-f`/`cmd-f`), leaving the file-history
     /// view if it is open.
     pub(crate) fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.is_ssh() || self.session.is_none() {
+        if self.session.is_none() {
             return;
         }
         self.close_file_history(window, cx);

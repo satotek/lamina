@@ -692,9 +692,6 @@ impl RepoView {
 
     /// Why a remote command cannot run right now, if it cannot.
     pub(crate) fn remote_blocked(&self) -> Option<String> {
-        if self.is_ssh() {
-            return Some(crate::remote_open::unavailable_reason());
-        }
         if self.session.is_none() {
             return Some(no_session());
         }
@@ -934,9 +931,6 @@ impl RepoView {
         pull_request_branch: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        if self.refuse_if_ssh(cx) {
-            return;
-        }
         let Some(session) = self.session.as_ref() else {
             return;
         };

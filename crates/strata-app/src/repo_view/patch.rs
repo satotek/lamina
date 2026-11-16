@@ -78,7 +78,7 @@ impl RepoView {
 
     /// "Apply patch…": chooses a `*.patch`/`*.diff` file and applies it.
     pub(crate) fn open_apply_patch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.refuse_if_ssh(cx) || self.session.is_none() || self.is_busy() {
+        if self.session.is_none() || self.is_busy() {
             return;
         }
         let receiver = cx.prompt_for_paths(PathPromptOptions {

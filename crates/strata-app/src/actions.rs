@@ -48,8 +48,6 @@ actions!(
         /// Opens another repository (picker, recent list). Handled by the
         /// workspace.
         OpenRepository,
-        /// Opens a repository on another machine. Handled by the workspace.
-        OpenRemoteRepository,
         /// Opens the clone dialog to create a repository from a URL. Handled
         /// by the workspace.
         CloneRepository,

@@ -163,11 +163,7 @@ impl RepoView {
                 ui::rail_item(
                     "rail-working-tree",
                     icon(IconName::FileText, design.scale(15.0), design.text),
-                    if self.is_ssh() {
-                        crate::remote_open::unavailable_reason()
-                    } else {
-                        t!("sidebar.working_tree").to_string()
-                    },
+                    t!("sidebar.working_tree").to_string(),
                     design,
                 )
                 .count(staged + unstaged)
@@ -194,11 +190,7 @@ impl RepoView {
                 ui::rail_item(
                     "rail-reflog",
                     icon(IconName::ClockArrowDown, design.scale(15.0), design.text),
-                    if self.is_ssh() {
-                        crate::remote_open::unavailable_reason()
-                    } else {
-                        t!("sidebar.reflog").to_string()
-                    },
+                    t!("sidebar.reflog").to_string(),
                     design,
                 )
                 .selected(self.mode == MainMode::Reflog)
@@ -267,7 +259,6 @@ impl RepoView {
         let history = self.mode == MainMode::History;
         let reflog = self.mode == MainMode::Reflog;
 
-        let ssh = self.is_ssh();
         let working_tree = div()
             .id("working-tree-entry")
             .flex()
@@ -280,12 +271,6 @@ impl RepoView {
             .cursor_pointer()
             .when(worktree, |row| row.bg(design.selected))
             .hover(|style| style.bg(design.selected))
-            .when(ssh, |row| {
-                let reason = crate::remote_open::unavailable_reason();
-                row.tooltip(move |window, cx| {
-                    gpui_component::tooltip::Tooltip::new(reason.clone()).build(window, cx)
-                })
-            })
             .on_click(
                 cx.listener(|this, _: &ClickEvent, window, cx| this.open_worktree(window, cx)),
             )

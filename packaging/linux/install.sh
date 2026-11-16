@@ -1,8 +1,6 @@
 #!/bin/sh
 # Installs a Linux build into a prefix: the binary, the hicolor icons, the
-# desktop entry, (when they ship next to this script) the licences, and the
-# remote helpers. Helpers go in <prefix>/bin/remote-helpers/ so they stay
-# beside the installed binary, which is where the app looks.
+# desktop entry and (when they ship next to this script) the licences.
 #
 # From the release archive, which needs no toolchain:
 #
@@ -49,19 +47,6 @@ fi
 
 install -Dm755 "$bin" "$prefix/bin/strata"
 install -Dm644 "$desktop" "$prefix/share/applications/strata.desktop"
-
-# Only a release archive carries the helpers. They have to stay in the same
-# directory as the installed binary: the app looks next to current_exe().
-if [ -d "$here/remote-helpers" ]; then
-    for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
-        helper=$here/remote-helpers/strata-remote-$target
-        if [ ! -f "$helper" ]; then
-            echo "install.sh: missing remote helper $helper" >&2
-            exit 1
-        fi
-        install -Dm755 "$helper" "$prefix/bin/remote-helpers/strata-remote-$target"
-    done
-fi
 
 # The window icon is the 128px file embedded in the binary; the desktop entry
 # needs the whole hicolor ladder for panels, task switchers and file managers.

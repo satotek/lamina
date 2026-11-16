@@ -1,7 +1,6 @@
 #!/bin/sh
-# Builds dist/Strata.app: the release binary, a bundle Info.plist, the
-# checked-in Strata.icns and (when they were staged) the remote helpers, then
-# signs it ad hoc so it launches on this Mac.
+# Builds dist/Strata.app: the release binary, a bundle Info.plist and the
+# checked-in Strata.icns, then signs it ad hoc so it launches on this Mac.
 # Nothing here notarises the app; the release workflow uses the same script and
 # dmg.sh to turn the result into a disk image.
 #
@@ -30,13 +29,7 @@ Options:
     --no-build         bundle a release binary that already exists
 
 Environment:
-    NOTICES          notices file to embed (default: dist/THIRD-PARTY-NOTICES.md)
-    REMOTE_HELPERS   directory of strata-remote-<target> binaries to embed.
-                     When unset, remote-helpers/ at the repository root is
-                     used if it exists. The Linux binaries cannot sit directly
-                     under Contents/MacOS (codesign treats that as nested
-                     code), so the bytes go in Contents/Resources and
-                     Contents/MacOS/remote-helpers is a relative symlink.
+    NOTICES  notices file to embed (default: dist/THIRD-PARTY-NOTICES.md)
 EOF
 }
 
@@ -109,17 +102,6 @@ cp "$icon" "$app/Contents/Resources/Strata.icns"
 # Licences travel inside the bundle; dmg.sh also copies them to the image root.
 cp LICENSE-MIT LICENSE-APACHE "$app/Contents/Resources/"
 cp "$notices" "$app/Contents/Resources/THIRD-PARTY-NOTICES.md"
-
-# The app looks for remote-helpers/ beside its own executable. codesign treats
-# every regular file under Contents/MacOS as nested code, and a Linux binary
-# cannot take an ad-hoc signature, so the bytes live in Resources and the
-# directory next to the executable is a relative symlink. Sign after this:
-# the symlink has to be part of the bundle seal.
-helpers=$(strata_remote_helper_dir "$root")
-if [ -n "$helpers" ]; then
-    strata_install_remote_helpers "$helpers" "$app/Contents/Resources/remote-helpers"
-    ln -s ../Resources/remote-helpers "$app/Contents/MacOS/remote-helpers"
-fi
 
 # 14.0 matches the deployment target the Rust toolchain compiles for
 # (`LC_BUILD_VERSION minos`); GPUI's Metal renderer needs a current SDK too.

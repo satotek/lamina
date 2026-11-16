@@ -1,8 +1,7 @@
 #!/bin/sh
 # Writes the third-party notices file that ships in every release artifact:
 # the Rust crate licences collected by cargo-about, followed by the Zig-native
-# dependencies that crates/strata-term/build.rs compiles into libghostty-vt
-# and the C library linked into the musl remote helper.
+# dependencies that crates/strata-term/build.rs compiles into libghostty-vt.
 #
 #     packaging/third-party/generate.sh dist/THIRD-PARTY-NOTICES.md
 #
@@ -17,8 +16,7 @@ usage() {
     cat <<'EOF'
 Writes the third-party notices file that ships in every release artifact: the
 Rust crate licences collected by cargo-about, followed by the Zig-native
-dependencies that crates/strata-term/build.rs compiles into libghostty-vt and
-the C library linked into the musl remote helper.
+dependencies that crates/strata-term/build.rs compiles into libghostty-vt.
 
     packaging/third-party/generate.sh dist/THIRD-PARTY-NOTICES.md
 
@@ -61,10 +59,7 @@ trap 'rm -rf "$tmp"' EXIT
 cd "$root"
 "$cargo_about" generate --locked --config about.toml about.hbs -o "$tmp/rust.md"
 
-cat "$tmp/rust.md" \
-    packaging/third-party/libghostty-vt.md \
-    packaging/third-party/remote-helper.md \
-    packaging/third-party/catppuccin.md > "$tmp/notices.md"
+cat "$tmp/rust.md" packaging/third-party/libghostty-vt.md packaging/third-party/catppuccin.md > "$tmp/notices.md"
 mv "$tmp/notices.md" "$out"
 
 echo "wrote $out"
