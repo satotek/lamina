@@ -502,6 +502,13 @@ impl Inner {
         if self.closing.swap(true, Ordering::SeqCst) {
             return;
         }
+        // A caller blocked on a write has to return when the session goes
+        // away, or a background thread stays parked on a channel nobody will
+        // answer.
+        let waiters = std::mem::take(&mut *lock(&self.operation_waiters));
+        for (_, waiter) in waiters {
+            let _ = waiter.send(Some("the remote session was closed".to_owned()));
+        }
         self.wake.notify_all();
         if let Some(handle) = lock(&self.ping).take() {
             let _ = handle.join();
@@ -562,10 +569,8 @@ impl Inner {
         }
         // A caller blocked on a write has no other way to learn the link died.
         let waiters = std::mem::take(&mut *lock(&self.operation_waiters));
-        for (id, waiter) in waiters {
-            if inflight.contains(&id) {
-                let _ = waiter.send(Some(message.clone()));
-            }
+        for (_, waiter) in waiters {
+            let _ = waiter.send(Some(message.clone()));
         }
         // A drop already set `closing`: the app closed the session on purpose,
         // and a LoadFailed for that would look like the repository broke.
