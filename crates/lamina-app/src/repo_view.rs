@@ -994,10 +994,12 @@ impl RepoView {
 
     fn sync_after_snapshot(&mut self, cx: &mut Context<Self>) {
         if self.is_ssh() {
-            // History, diffs and the tree are the reads a remote tab can do.
-            // The other refreshes ask for operations the helper does not serve.
+            // History, diffs and the working tree are what a remote tab can
+            // refresh from the snapshot the helper just published. LFS, search
+            // and the extra lists still ask for reads the helper does not serve.
             self.sync_selection(cx);
             self.note_remote_history();
+            self.sync_worktree(cx);
             return;
         }
         self.sync_selection(cx);
@@ -1657,7 +1659,7 @@ impl RepoView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<OperationId> {
-        if self.refuse_if_ssh(cx) {
+        if self.refuse_unsupported(&operation, cx) {
             return None;
         }
         if self.session.is_none() || self.is_busy() {

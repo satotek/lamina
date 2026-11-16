@@ -879,7 +879,10 @@ impl RepoView {
                             &render_design,
                             &diff_colors,
                             &diff_style,
-                            entity.clone(),
+                            SectionHost {
+                                entity: entity.clone(),
+                                ssh: entity.read(cx).is_ssh(),
+                            },
                         )
                     })
                     .size_full(),
@@ -958,6 +961,13 @@ impl RepoView {
     }
 }
 
+/// The list item renderer already sits at the argument limit, so the session
+/// handle and the remote flag travel together.
+struct SectionHost {
+    entity: gpui::Entity<RepoView>,
+    ssh: bool,
+}
+
 fn render_section(
     index: usize,
     section: &UncommittedSection,
@@ -965,8 +975,9 @@ fn render_section(
     design: &Design,
     colors: &DiffColors,
     style: &DiffStyle,
-    entity: gpui::Entity<RepoView>,
+    host: SectionHost,
 ) -> AnyElement {
+    let SectionHost { entity, ssh } = host;
     let (name, dir) = style::path_parts(&section.path);
     let encoding = entry
         .and_then(|entry| entry.outcome.as_ref().ok())
@@ -1052,24 +1063,28 @@ fn render_section(
                     if missing {
                         let path = section.path.clone();
                         let lfs_entity = entity.clone();
-                        card = card.action(
-                            ui::button(
-                                ElementId::named_usize("uncommitted-lfs-download", index),
-                                t!("worktree.download").to_string(),
-                            )
-                            .size(ButtonSize::Tiny)
-                            .on_click(move |_, window, cx| {
-                                let path = path.clone();
-                                lfs_entity.update(cx, |this, cx| {
-                                    this.run_operation(
-                                        lamina_core::session::Operation::LfsPull { path },
-                                        t!("worktree.download_lfs").to_string(),
-                                        window,
-                                        cx,
-                                    );
-                                });
-                            }),
-                        );
+                        // LFS pulls are not on the helper yet, so the button
+                        // stays visible but cannot start a download.
+                        let mut download = ui::button(
+                            ElementId::named_usize("uncommitted-lfs-download", index),
+                            t!("worktree.download").to_string(),
+                        )
+                        .size(ButtonSize::Tiny)
+                        .disabled(ssh);
+                        if ssh {
+                            download = download.tooltip(crate::remote_open::unavailable_reason());
+                        }
+                        card = card.action(download.on_click(move |_, window, cx| {
+                            let path = path.clone();
+                            lfs_entity.update(cx, |this, cx| {
+                                this.run_operation(
+                                    lamina_core::session::Operation::LfsPull { path },
+                                    t!("worktree.download_lfs").to_string(),
+                                    window,
+                                    cx,
+                                );
+                            });
+                        }));
                     }
                     container = container.child(card);
                 }

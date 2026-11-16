@@ -409,6 +409,9 @@ impl TryFrom<&lamina_core::session::Operation> for OperationDto {
             | Operation::LfsLock { .. }
             | Operation::LfsUnlock { .. }
             | Operation::LfsPull { .. }
+            | Operation::CheckoutCommit { .. }
+            | Operation::RewordAcrossMerges { .. }
+            | Operation::RewriteAcrossMerges { .. }
             | Operation::WriteCommitGraph => return Err(UnsupportedOperation),
         })
     }
@@ -593,7 +596,9 @@ fn stash_index(index: u64) -> Result<usize, ProtocolError> {
 mod tests {
     use lamina_core::merge::ContentHash;
     use lamina_core::patch::LineSelection;
-    use lamina_core::session::{ConflictSide, Operation, RemoteBranch, ResetMode};
+    use lamina_core::session::{
+        AcrossMergesAction, ConflictSide, Operation, RemoteBranch, ResetMode,
+    };
 
     use super::*;
 
@@ -767,6 +772,15 @@ mod tests {
             Operation::WorktreePrune,
             Operation::LfsPull {
                 path: "a.bin".into(),
+            },
+            Operation::CheckoutCommit { commit },
+            Operation::RewordAcrossMerges {
+                commit,
+                message: "reworded".into(),
+            },
+            Operation::RewriteAcrossMerges {
+                commit,
+                action: AcrossMergesAction::Drop,
             },
             Operation::WriteCommitGraph,
         ];

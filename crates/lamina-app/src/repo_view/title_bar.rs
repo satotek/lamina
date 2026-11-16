@@ -317,12 +317,8 @@ impl RepoView {
             .child(stash_button(
                 design,
                 fit.stash_label,
-                !self.is_ssh(),
-                if self.is_ssh() {
-                    crate::remote_open::unavailable_reason()
-                } else {
-                    t!("action.stash_changes").to_string()
-                },
+                true,
+                t!("action.stash_changes").to_string(),
             ))
             .child(separator)
             .child(self.terminal_button(design, window))

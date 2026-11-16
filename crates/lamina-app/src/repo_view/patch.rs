@@ -26,6 +26,10 @@ impl RepoView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // `format-patch` is not on the helper.
+        if self.refuse_if_ssh(cx) {
+            return;
+        }
         let Some(session) = self.session.as_ref() else {
             return;
         };
