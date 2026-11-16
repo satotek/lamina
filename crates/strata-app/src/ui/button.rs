@@ -344,6 +344,12 @@ pub struct ActionTile {
     on_click: Option<ClickHandler>,
 }
 
+/// The narrowest an action tile may get before the row wraps.
+///
+/// The width covers the longest welcome label ("Open from path…") plus the
+/// tile's padding, so a wrapped row never cuts a label instead.
+const ACTION_TILE_MIN_WIDTH: f32 = 120.0;
+
 pub fn action_tile(
     id: impl Into<ElementId>,
     icon: IconName,
@@ -405,7 +411,7 @@ impl RenderOnce for ActionTile {
             .flex()
             .flex_col()
             .flex_1()
-            .min_w_0()
+            .min_w(design.px(ACTION_TILE_MIN_WIDTH))
             .justify_between()
             .gap(design.px(8.0))
             .px(design.px(10.0))

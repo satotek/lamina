@@ -959,7 +959,7 @@ impl Picker {
 
         div()
             .w_full()
-            .when(self.mode == Mode::Page, |body| body.max_w(design.px(620.0)))
+            .when(self.mode == Mode::Page, |body| body.max_w(design.px(680.0)))
             .flex()
             .flex_col()
             .min_h_0()
@@ -1028,6 +1028,7 @@ impl Picker {
 
         div()
             .flex()
+            .flex_wrap()
             .items_stretch()
             .gap(design.px(8.0))
             .w_full()
