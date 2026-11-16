@@ -422,13 +422,18 @@ mod tests {
             Some(reason.as_str()),
             "the config file lives on the host"
         );
-        for action in ["lamina::OpenTerminalHere", "lamina::OpenInEditor"] {
-            assert_eq!(
-                blocked_reason(&view, &mut vcx, action).as_deref(),
-                Some(t!("title_bar.not_connected").as_ref()),
-                "{action}"
-            );
-        }
+        #[cfg(feature = "terminal")]
+        let terminal = Some(t!("title_bar.not_connected").to_string());
+        #[cfg(not(feature = "terminal"))]
+        let terminal = Some(t!("remote_repo.no_terminal").to_string());
+        assert_eq!(
+            blocked_reason(&view, &mut vcx, "lamina::OpenTerminalHere").as_deref(),
+            terminal.as_deref()
+        );
+        assert_eq!(
+            blocked_reason(&view, &mut vcx, "lamina::OpenInEditor").as_deref(),
+            Some(t!("title_bar.not_connected").as_ref())
+        );
         #[cfg(feature = "terminal")]
         assert_eq!(
             blocked_reason(&view, &mut vcx, "lamina::ToggleTerminal").as_deref(),
@@ -508,10 +513,17 @@ mod tests {
             vcx.run_until_parked();
         }
 
+        #[cfg(feature = "terminal")]
         assert_eq!(
             blocked_reason(&view, &mut vcx, "lamina::OpenTerminalHere"),
             None,
             "a connected tab can open a terminal on the host"
+        );
+        #[cfg(not(feature = "terminal"))]
+        assert_eq!(
+            blocked_reason(&view, &mut vcx, "lamina::OpenTerminalHere").as_deref(),
+            Some(t!("remote_repo.no_terminal").as_ref()),
+            "this build has no way to reach the host"
         );
         assert_eq!(
             blocked_reason(&view, &mut vcx, "lamina::OpenInEditor"),

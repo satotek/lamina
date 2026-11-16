@@ -28,6 +28,7 @@ mod rebase_dialog;
 pub(crate) mod rebase_onto;
 mod rebase_plan;
 mod reflog;
+mod remote_copy;
 #[cfg(all(test, unix))]
 mod remote_fixture;
 mod remote_tab;
@@ -553,6 +554,10 @@ pub struct RepoView {
     status_clock: status_bar::StatusClock,
     /// Set for the life of a remote tab, including before a session exists.
     remote_tab: Option<remote_tab::RemoteTab>,
+    /// The read-only copies the editor opened for this tab, removed with it.
+    remote_copy: Option<remote_copy::RemoteCopyDir>,
+    /// The copy being fetched, held so the frame does not cancel it.
+    remote_copy_task: Option<Task<()>>,
 
     title: String,
     target_frame_ms: f32,
@@ -761,6 +766,8 @@ impl RepoView {
             status_note: None,
             status_clock: status_bar::StatusClock::default(),
             remote_tab: None,
+            remote_copy: None,
+            remote_copy_task: None,
             title,
             target_frame_ms: 1000.0 / 60.0,
             overlay: smoke,
@@ -1125,6 +1132,10 @@ impl RepoView {
                 session.cancel_query(ticket);
             }
         }
+        // The copies belonged to the session being replaced, and the host may
+        // not be the one the next session reaches.
+        self.remote_copy = None;
+        self.remote_copy_task = None;
         self._bridge.take();
         self._rtt.take();
         #[cfg(feature = "terminal")]
