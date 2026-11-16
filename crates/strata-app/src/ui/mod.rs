@@ -19,6 +19,7 @@ mod confirm;
 pub mod file_tree;
 mod focus;
 pub(crate) mod gallery;
+mod hscrollbar;
 pub mod lfs;
 mod menu;
 mod rail;
@@ -49,6 +50,7 @@ pub use button::{
 pub use checkbox::{checkbox, gutter_checkbox};
 pub use confirm::{Confirm, confirm, confirm_with};
 pub(crate) use focus::focus_input;
+pub use hscrollbar::h_scrollbar;
 pub use lfs::{install_hint, lfs_badge, lfs_card};
 pub use menu::{context_menu, menu_label};
 pub use rail::{RAIL_WIDTH, rail, rail_item};
@@ -60,7 +62,7 @@ pub use split::{SplitExtent, clamp_fraction, split_handle, split_pixels};
 pub use swatch::{swatch_label, swatch_label_with_tag, swatch_strip};
 #[cfg(feature = "terminal")]
 pub use tab::{COMPACT_TAB_STRIP_HEIGHT, compact_tab_strip};
-pub use tab::{tab, tab_strip};
+pub use tab::{reveal_tab, tab, tab_strip};
 #[cfg(feature = "terminal")]
 pub use terminal_grid::{
     TerminalGrid, TerminalGridProps, TerminalScrollbarHandle, grid_dimensions_for_bounds,

@@ -45,6 +45,10 @@ use crate::style::{self, Design};
 use crate::ui::{self, BadgeTone, ButtonKind, ButtonSize, RowState};
 use crate::workspace::Workspace;
 
+/// Below this window width the compare header puts its controls on a second
+/// row instead of letting them be clipped by the title.
+const COMPARE_HEADER_STACK_WIDTH: f32 = 900.0;
+
 /// Validated target for a standalone 2-way or 3-way comparison.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CompareTarget {
@@ -448,9 +452,12 @@ impl CompareValidationError {
 /// One choice the revision picker offers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RevisionOption {
-    /// What the field shows once the user picks it, and what validation reads
-    /// back: a branch or tag name, an object id, or a localized side name.
+    /// What validation reads back: a branch or tag name, an object id, or a
+    /// localized side name.
     pub spec: String,
+    /// What the field shows once the user picks it: the short id and summary
+    /// for a commit, the ref name for a branch or tag, or the side's name.
+    pub display: String,
     /// What the picker row reads, which for a commit adds its summary.
     pub label: String,
     pub side: RepoCompareSide,
@@ -513,6 +520,11 @@ pub(crate) fn validate_revision_inputs(
         .collect()
 }
 
+/// A full object id, which the picker stores as a spec but never shows.
+fn is_full_oid(spec: &str) -> bool {
+    spec.len() == 40 && spec.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 fn resolve_revision(
     spec: &str,
     options: &RevisionOptions,
@@ -520,11 +532,18 @@ fn resolve_revision(
     if let Some(option) = options
         .options
         .iter()
-        .find(|option| option.spec == spec || option.label == spec)
+        .find(|option| option.spec == spec || option.display == spec || option.label == spec)
     {
         return Ok(DialogRevision {
             side: option.side,
-            label: option.label.clone(),
+            // A commit's display text is the short id plus its summary, but a
+            // compare pane labels a commit by the branch or tag that points at
+            // it, which the caller looks up from the oid when this is empty.
+            label: if is_full_oid(&option.spec) {
+                String::new()
+            } else {
+                option.spec.clone()
+            },
         });
     }
     let Some(reader) = options.reader.as_ref() else {
@@ -1001,7 +1020,10 @@ impl CompareDialog {
                         .on_click(move |_, window, cx| {
                             dismiss.update(cx, |state, cx| state.dismiss(window, cx));
                             input.update(cx, |state, cx| {
-                                state.set_value(choice.spec.clone(), window, cx);
+                                // The field shows the short id and summary; the
+                                // full commit stays in the option's resolved
+                                // side, so the comparison opens the same commit.
+                                state.set_value(choice.display.clone(), window, cx);
                             });
                             let _ = entity.update(cx, |_, cx| cx.notify());
                         }),
@@ -1882,134 +1904,179 @@ impl CompareView {
         cx.notify();
     }
 
-    fn header(&self, design: &Design, cx: &mut Context<Self>) -> AnyElement {
+    fn header(&self, design: &Design, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let subtitle = self.root.subtitle();
+        let title = self.tab_title();
+        // Below this width the title's own row cannot share a line with the
+        // three-way controls without squeezing the title to nothing, so the
+        // controls move to a second row; the header grows instead of clipping.
+        let stacked = f32::from(window.viewport_size().width) < COMPARE_HEADER_STACK_WIDTH;
 
-        TitleBar::new()
-            .h(design.px(style::TITLE_BAR_HEIGHT))
-            .bg(design.chrome)
-            .border_color(design.border)
+        let mut title_row = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .min_w_0()
             .child(
                 div()
                     .flex()
-                    .items_center()
-                    .gap_2()
                     .flex_none()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(design.px(7.0))
-                            .child(style::app_mark(design.scale(style::BRAND_MARK)))
-                            .child(style::wordmark(
-                                design.scale(style::BRAND_WORDMARK),
-                                design.text,
-                            )),
-                    )
-                    .child(div().w(px(1.0)).h(design.px(18.0)).mx_1().bg(design.border))
-                    .when(self.drilled_relative_path.is_some(), |bar| {
-                        bar.child(
-                            ui::button(
-                                "compare-back-folder",
-                                t!("compare.back_to_folder").to_string(),
-                            )
-                            .ghost()
-                            .size(ButtonSize::Small)
-                            .icon(IconName::ArrowLeft)
-                            .on_click(cx.listener(
-                                |this, _, window, cx| {
-                                    this.back_to_folder(window, cx);
-                                },
-                            )),
-                        )
-                    })
-                    .child(
-                        Icon::new(IconName::Replace)
-                            .size(design.px(14.0))
-                            .text_color(design.text),
-                    )
-                    .child(
-                        div()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_size(px(design.ui))
-                            .child(self.tab_title()),
-                    )
-                    .when(self.mode == ThreeWayCompareMode::MiddleBase, |bar| {
-                        bar.when_some(self.root.revisions(), |bar, source| {
-                            let base_is_left = source.middle.side == source.left.side;
-                            let base_is_right = source.middle.side == source.right.side;
-                            bar.child(
-                                ui::button(
-                                    "compare-use-left-base",
-                                    t!("compare.three_way.use_left_as_base").to_string(),
-                                )
-                                .ghost()
-                                .size(ButtonSize::Tiny)
-                                .icon(IconName::Replace)
-                                .disabled(base_is_left)
-                                .on_click(cx.listener(
-                                    |this, _, window, cx| {
-                                        this.use_side_as_base(BaseChoice::Left, window, cx);
-                                    },
-                                )),
-                            )
-                            .child(
-                                ui::button(
-                                    "compare-use-right-base",
-                                    t!("compare.three_way.use_right_as_base").to_string(),
-                                )
-                                .ghost()
-                                .size(ButtonSize::Tiny)
-                                .icon(IconName::Replace)
-                                .disabled(base_is_right)
-                                .on_click(cx.listener(
-                                    |this, _, window, cx| {
-                                        this.use_side_as_base(BaseChoice::Right, window, cx);
-                                    },
-                                )),
-                            )
-                        })
-                    }),
+                    .items_center()
+                    .gap(design.px(7.0))
+                    .child(style::app_mark(design.scale(style::BRAND_MARK)))
+                    .child(style::wordmark(
+                        design.scale(style::BRAND_WORDMARK),
+                        design.text,
+                    )),
             )
             .child(
                 div()
+                    .flex_none()
+                    .w(px(1.0))
+                    .h(design.px(18.0))
+                    .mx_1()
+                    .bg(design.border),
+            )
+            .when(self.drilled_relative_path.is_some(), |bar| {
+                bar.child(
+                    ui::button(
+                        "compare-back-folder",
+                        t!("compare.back_to_folder").to_string(),
+                    )
+                    .ghost()
+                    .size(ButtonSize::Small)
+                    .icon(IconName::ArrowLeft)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.back_to_folder(window, cx);
+                    })),
+                )
+            })
+            .child(
+                Icon::new(IconName::Replace)
+                    .flex_none()
+                    .size(design.px(14.0))
+                    .text_color(design.text),
+            )
+            .child({
+                let tooltip: SharedString = title.clone().into();
+                div()
+                    .id("compare-title")
                     .flex_1()
                     .min_w_0()
+                    .truncate()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_size(px(design.ui))
+                    .child(title)
+                    .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
+            });
+
+        if !stacked {
+            title_row = title_row.child(
+                div()
+                    .flex_shrink(1.0)
+                    .min_w_0()
+                    .truncate()
                     .px_3()
                     .text_size(design.px(11.0))
                     .text_color(design.muted)
-                    .truncate()
                     .child(subtitle),
+            );
+        }
+
+        let mut controls = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_1()
+            .occlude()
+            .debug_selector(|| "compare-header-controls".to_string());
+
+        if self.mode == ThreeWayCompareMode::MiddleBase
+            && let Some(source) = self.root.revisions()
+        {
+            let base_is_left = source.middle.side == source.left.side;
+            let base_is_right = source.middle.side == source.right.side;
+            controls = controls
+                .child(
+                    ui::button(
+                        "compare-use-left-base",
+                        t!("compare.three_way.use_left_as_base").to_string(),
+                    )
+                    .ghost()
+                    .size(ButtonSize::Tiny)
+                    .icon(IconName::Replace)
+                    .disabled(base_is_left)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.use_side_as_base(BaseChoice::Left, window, cx);
+                    })),
+                )
+                .child(
+                    ui::button(
+                        "compare-use-right-base",
+                        t!("compare.three_way.use_right_as_base").to_string(),
+                    )
+                    .ghost()
+                    .size(ButtonSize::Tiny)
+                    .icon(IconName::Replace)
+                    .disabled(base_is_right)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.use_side_as_base(BaseChoice::Right, window, cx);
+                    })),
+                );
+        }
+
+        if self.root.is_three_way() {
+            controls = controls.child(self.mode_toggle(design, cx));
+        }
+
+        controls = controls
+            .child(
+                ui::icon_button("compare-refresh", IconName::RefreshCw)
+                    .ghost()
+                    .size(ButtonSize::Small)
+                    .tooltip(t!("compare.refresh").to_string())
+                    .on_click(cx.listener(|this, _, window, cx| this.reload(window, cx))),
             )
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .flex_none()
-                    .occlude()
-                    .when(self.root.is_three_way(), |row| {
-                        row.child(self.mode_toggle(design, cx))
-                    })
-                    .child(
-                        ui::icon_button("compare-refresh", IconName::RefreshCw)
-                            .ghost()
-                            .size(ButtonSize::Small)
-                            .tooltip(t!("compare.refresh").to_string())
-                            .on_click(cx.listener(|this, _, window, cx| this.reload(window, cx))),
-                    )
-                    .child(
-                        ui::button("compare-new", t!("compare.new_compare").to_string())
-                            .ghost()
-                            .size(ButtonSize::Small)
-                            .icon(IconName::Replace)
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                if let Some(ws) = this.workspace.upgrade() {
-                                    ws.update(cx, |ws, cx| ws.open_compare_dialog(window, cx));
-                                }
-                            })),
-                    ),
-            )
+                ui::button("compare-new", t!("compare.new_compare").to_string())
+                    .ghost()
+                    .size(ButtonSize::Small)
+                    .icon(IconName::Replace)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if let Some(ws) = this.workspace.upgrade() {
+                            ws.update(cx, |ws, cx| ws.open_compare_dialog(window, cx));
+                        }
+                    })),
+            );
+
+        let bar = if stacked {
+            div()
+                .flex()
+                .flex_col()
+                .items_stretch()
+                .gap_1()
+                .w_full()
+                .debug_selector(|| "compare-header".to_string())
+                .child(title_row)
+                .child(div().flex().justify_end().w_full().child(controls))
+        } else {
+            div()
+                .flex()
+                .items_center()
+                .justify_end()
+                .gap_2()
+                .w_full()
+                .debug_selector(|| "compare-header".to_string())
+                .child(title_row.flex_1())
+                .child(controls)
+        };
+
+        TitleBar::new()
+            .h_auto()
+            .min_h(design.px(style::TITLE_BAR_HEIGHT))
+            .bg(design.chrome)
+            .border_color(design.border)
+            .child(bar)
             .into_any_element()
     }
 
@@ -2200,6 +2267,15 @@ impl CompareView {
             crate::style::monospace_advance(window, style.mono(), px(style.font_size()))
                 * self.three_way_columns as f32
                 + style.px(24.0);
+        // One pane's code area: the row is split evenly, and each cell spends
+        // the line-number gutter and its border before the code starts. The
+        // bar is only drawn when the widest line is wider than that, which is
+        // exactly when the panes can scroll horizontally.
+        let pane_width = px((f32::from(window.viewport_size().width) - 4.0) / 3.0
+            - f32::from(style.px(38.0))
+            - f32::from(design.px(2.0)))
+        .max(px(1.0));
+        let show_h_scrollbar = content_width > pane_width;
 
         let encoding_badge = [res.left_encoding, res.middle_encoding, res.right_encoding]
             .into_iter()
@@ -2384,6 +2460,15 @@ impl CompareView {
             .child(subheader)
             .child(pane_headers)
             .child(body)
+            .when(show_h_scrollbar, |col| {
+                col.child(ui::h_scrollbar(
+                    "compare-3way-hscroll",
+                    &self.three_way_h_scroll,
+                    pane_width,
+                    content_width,
+                    design,
+                ))
+            })
             .into_any_element()
     }
 
@@ -2637,7 +2722,7 @@ impl Render for CompareView {
             .bg(design.background)
             .text_color(design.text)
             .track_focus(&self.focus_handle)
-            .child(self.header(&design, cx));
+            .child(self.header(&design, window, cx));
         root.text_style().font_fallbacks = Some(style::font_fallbacks());
 
         if let Some(workspace) = self.workspace.upgrade()
@@ -3641,16 +3726,19 @@ mod tests {
             options: vec![
                 RevisionOption {
                     spec: "main".to_owned(),
+                    display: "main".to_owned(),
                     label: "main".to_owned(),
                     side: RepoCompareSide::Commit(head_oid),
                 },
                 RevisionOption {
                     spec: t!("compare.working_tree").to_string(),
+                    display: t!("compare.working_tree").to_string(),
                     label: t!("compare.working_tree").to_string(),
                     side: RepoCompareSide::Worktree,
                 },
                 RevisionOption {
                     spec: t!("compare.staged").to_string(),
+                    display: t!("compare.staged").to_string(),
                     label: t!("compare.staged").to_string(),
                     side: RepoCompareSide::Index,
                 },
@@ -3697,6 +3785,42 @@ mod tests {
             validate_revision_inputs("main", "main", "", &RevisionOptions::default()),
             Err(CompareValidationError::NoRepository)
         );
+    }
+
+    #[test]
+    fn a_picked_commit_shows_a_short_label_but_resolves_to_the_full_id() {
+        let repo = strata_core::test_support::TestRepo::new();
+        repo.write("a.txt", "one\n");
+        let first = repo.commit("first");
+        let short = crate::data::short_oid(first);
+        let display = format!("{short} first");
+        let working_tree = t!("compare.working_tree").to_string();
+        let options = RevisionOptions {
+            reader: Some(Arc::new(repo.open())),
+            options: vec![
+                RevisionOption {
+                    spec: first.to_string(),
+                    display: display.clone(),
+                    label: display.clone(),
+                    side: RepoCompareSide::Commit(first),
+                },
+                RevisionOption {
+                    spec: working_tree.clone(),
+                    display: working_tree.clone(),
+                    label: working_tree.clone(),
+                    side: RepoCompareSide::Worktree,
+                },
+            ],
+        };
+
+        let sides = validate_revision_inputs(&display, &working_tree, "", &options)
+            .expect("the short label resolves through the picker choice");
+        assert_eq!(sides[0].side, RepoCompareSide::Commit(first));
+        assert!(
+            sides[0].label.is_empty(),
+            "a commit label is looked up from the full id, not the field text"
+        );
+        assert_eq!(sides[1].side, RepoCompareSide::Worktree);
     }
 
     #[gpui::test]
@@ -3886,6 +4010,69 @@ mod tests {
         assert_eq!(
             validate_ordered_paths(&[file.clone(), file.clone(), file.clone(), file]),
             Err(CompareValidationError::WrongArgCount(4))
+        );
+    }
+
+    #[gpui::test]
+    fn the_compare_header_keeps_its_controls_inside_the_minimum_window(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use gpui::{Bounds, WindowBounds, WindowOptions, point, size};
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let name = "a-very-long-source-file-name-that-needs-truncating.rs";
+        let left = tmp.path().join(name);
+        let middle = tmp.path().join(name);
+        let right = tmp.path().join(name);
+        for path in [&left, &middle, &right] {
+            fs::write(path, "one\ntwo\n").unwrap();
+        }
+        let target = CompareTarget::ThreeWayFiles {
+            left,
+            middle,
+            right,
+        };
+
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            gpui_component::init(cx);
+            cx.set_global(Settings::default());
+            crate::actions::bind(cx);
+        });
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(
+                    WindowOptions {
+                        window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                            point(px(0.0), px(0.0)),
+                            size(px(crate::style::MIN_WINDOW_SIZE.0), px(600.0)),
+                        ))),
+                        ..Default::default()
+                    },
+                    move |window, cx| {
+                        let workspace =
+                            cx.new(|cx| Workspace::new_with_compare(target, window, cx));
+                        cx.new(|cx| gpui_component::Root::new(workspace, window, cx))
+                    },
+                )
+            })
+            .expect("open window");
+        let mut visual_cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual_cx.run_until_parked();
+        visual_cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+        });
+
+        let controls = visual_cx
+            .debug_bounds("compare-header-controls")
+            .expect("the header controls are painted");
+        let header = visual_cx
+            .debug_bounds("compare-header")
+            .expect("the header is painted");
+        assert!(
+            controls.right() <= header.right() && controls.left() >= header.left(),
+            "the controls have to stay visible at the minimum width: {controls:?} in {header:?}"
         );
     }
 }
