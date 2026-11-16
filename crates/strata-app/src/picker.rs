@@ -1865,7 +1865,8 @@ mod tests {
             std::path::MAIN_SEPARATOR
         );
         assert_eq!(
-            format_repo_path(Path::new("/Users/ada/work/strata"), Some(home), 56),
+            // Joined, not spelled with `/`: a Windows path uses its own separator.
+            format_repo_path(&home.join("work").join("strata"), Some(home), 56),
             expected_short
         );
         assert_eq!(format_repo_path(home, Some(home), 56), "~");
