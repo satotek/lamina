@@ -257,8 +257,8 @@ pub fn ghq_root(settings: &mut Settings, root: &str) {
     settings.tools.ghq.root = optional_text(root).map(PathBuf::from);
 }
 
-pub fn gh_enabled(settings: &mut Settings, enabled: bool) {
-    settings.tools.gh.enabled = enabled;
+pub fn pull_requests_enabled(settings: &mut Settings, enabled: bool) {
+    settings.tools.pull_requests.enabled = enabled;
 }
 
 pub fn external_avatars(settings: &mut Settings, load: bool) {

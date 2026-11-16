@@ -1064,7 +1064,7 @@ impl RepoView {
                                         },
                                     ))
                                     .when_some(
-                                        crate::github::file_item(
+                                        crate::forge::file_item(
                                             &menu_entity,
                                             commit,
                                             &orig_path,

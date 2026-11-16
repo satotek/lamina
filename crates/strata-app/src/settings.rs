@@ -381,7 +381,10 @@ pub struct Tools {
     /// `None` launches the platform's default shell.
     pub embedded_shell: Option<String>,
     pub ghq: GhqSettings,
-    pub gh: GhSettings,
+    /// Pull-request integration through the hosting service's CLI. Stored
+    /// under the old `gh` key so an existing settings file keeps its choice.
+    #[serde(rename = "gh", alias = "pull_requests")]
+    pub pull_requests: PullRequestSettings,
 }
 
 /// Optional ghq integration: the repository pickup in the picker and the
@@ -404,15 +407,15 @@ impl Default for GhqSettings {
     }
 }
 
-/// Optional GitHub CLI integration. The app never handles a token: `gh` keeps
-/// its own credentials.
+/// Optional pull-request integration. The app never handles a token: `gh` and
+/// `az` keep their own credentials.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
-pub struct GhSettings {
+pub struct PullRequestSettings {
     pub enabled: bool,
 }
 
-impl Default for GhSettings {
+impl Default for PullRequestSettings {
     fn default() -> Self {
         Self { enabled: true }
     }
@@ -706,6 +709,24 @@ mod tests {
             ImageDiffMode::SideBySide,
             "a file without the key takes the default"
         );
+    }
+
+    #[test]
+    fn the_old_gh_setting_key_still_turns_the_integration_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        std::fs::write(&path, r#"{"tools":{"gh":{"enabled":false}}}"#).unwrap();
+        assert!(!Settings::load(&path).tools.pull_requests.enabled);
+
+        let mut settings = Settings::default();
+        settings.tools.pull_requests.enabled = false;
+        settings.save(&path).unwrap();
+        let json = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            json.contains("\"gh\""),
+            "the stored key stays readable for older builds: {json}"
+        );
+        assert!(!json.contains("pull_requests"));
     }
 
     #[test]

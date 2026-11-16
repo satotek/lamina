@@ -1,19 +1,22 @@
 //! Pull-request status on branches, and the "Check out Pull Request…" dialog.
 //!
-//! One `gh pr list` call fills a per-repository cache, refreshed when the
-//! repository opens, after a successful fetch or push, and on demand. The
-//! branch rows, the branch switcher and the title-bar chip read the cache and
-//! never run anything themselves: the CLI call is a background task, so a slow
-//! network never stalls a frame.
+//! One CLI call (`gh pr list` on GitHub, `az repos pr list` on Azure DevOps)
+//! fills a per-repository cache, refreshed when the repository opens, after a
+//! successful fetch or push, and on demand. The branch rows, the branch
+//! switcher and the title-bar chip read the cache and never run anything
+//! themselves: the CLI call is a background task, so a slow network never
+//! stalls a frame.
 //!
 //! That call costs seconds on a repository with many pull requests, so only a
 //! refresh the user asked for, or one right after a push, always runs; the
 //! automatic ones give up when the cache is still fresh. See [`may_refresh`].
 //!
-//! Everything here is behind the existing gh setting and requires a GitHub
-//! remote `gh` is logged in to. When any of that is missing the cache stays
-//! empty and the badges simply do not appear: an optional integration must not
-//! turn a repository with no pull requests into an error screen.
+//! Everything here is behind the pull-request setting and requires a remote
+//! whose CLI is installed and signed in. When any of that is missing the cache
+//! stays empty and the badges simply do not appear: an optional integration
+//! must not turn a repository with no pull requests into an error screen.
+//! Bitbucket Cloud is links only in this stage, so its pull requests are not
+//! listed.
 //!
 //! Matching is deliberately conservative. A pull request shows on a branch
 //! when the branch's upstream (or the branch itself when it has none) is the
@@ -36,8 +39,9 @@ use gpui_component::ActiveTheme as _;
 use gpui_component::WindowExt as _;
 use gpui_component::input::{Input, InputEvent, InputState};
 use strata_core::UpstreamInfo;
-use strata_core::forge::{ChecksState, PullRequestState, PullRequestSummary, ReviewState};
-use strata_core::tools::GitHubRemote;
+use strata_core::forge::{
+    ChecksState, ForgeRemote, PullRequestState, PullRequestSummary, ReviewState,
+};
 
 use crate::data::Source;
 use crate::repo_view::RepoView;
@@ -61,7 +65,7 @@ const REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 actions!(
     strata,
     [
-        /// Asks `gh` for the repository's pull requests again.
+        /// Asks the host's CLI for the repository's pull requests again.
         RefreshPullRequests,
         /// Opens the dialog that checks out one of the cached pull requests.
         CheckoutPullRequest,
@@ -80,7 +84,7 @@ pub(crate) enum RefreshCause {
     /// The user asked: the command, or the checkout dialog with nothing to
     /// list.
     Explicit,
-    /// A push to the repository's GitHub remote just finished, so the branch
+    /// A push to the repository's forge remote just finished, so the branch
     /// may have gained or lost its pull request.
     AfterPush,
 }
@@ -125,15 +129,15 @@ pub(crate) struct PullRequests {
     /// The one automatic refresh has started, so opening the view does not ask
     /// again every frame.
     started: bool,
-    /// Whether the gh setting was on last time the settings changed, so
-    /// turning it off clears the badges and turning it back on asks again.
+    /// Whether the pull-request setting was on last time the settings changed,
+    /// so turning it off clears the badges and turning it back on asks again.
     enabled: bool,
     /// Incremented per request; a slower answer from an older request must not
     /// replace a newer one.
     generation: u64,
     /// When the last refresh finished, for the automatic throttle.
     last_finished: Option<Instant>,
-    /// A push to the GitHub remote is waiting for the refresh that follows it.
+    /// A push to the forge remote is waiting for the refresh that follows it.
     ///
     /// Only the push notification knows that the command which just finished
     /// was a push rather than a fetch, so it leaves this marker; the refresh
@@ -182,7 +186,7 @@ impl PullRequests {
             .filter(|pull_request| pull_request.state.is_open())
     }
 
-    /// Records that a push to the GitHub remote just finished.
+    /// Records that a push to the forge remote just finished.
     ///
     /// The push notification is built from a plain `&RepoView` and runs before
     /// the refresh it prompts, which is why the marker is interior mutable.
@@ -361,11 +365,11 @@ fn owner_of_remote(
     [&remote.fetch_url, &remote.push_url]
         .into_iter()
         .flatten()
-        .find_map(|url| GitHubRemote::parse(url, known_hosts))
-        .map(|remote| remote.owner)
+        .find_map(|url| ForgeRemote::parse(url, known_hosts))
+        .map(|remote| remote.owner().to_owned())
 }
 
-/// Whether the working tree would keep `gh pr checkout` from starting.
+/// Whether the working tree would keep a pull-request checkout from starting.
 ///
 /// A checkout can only be undone by the user, so a tracked change refuses it
 /// up front with a reason they can act on. Untracked files are left to git:
@@ -466,8 +470,8 @@ impl RepoView {
     /// Starts the one refresh a freshly opened repository gets.
     ///
     /// This runs from the first frames rather than from the constructor so it
-    /// can wait for tool detection: a view opened while `gh` is still being
-    /// discovered would otherwise record "no gh" for the rest of the session.
+    /// can wait for tool detection: a view opened while the CLI is still being
+    /// discovered would otherwise record "no CLI" for the rest of the session.
     pub(crate) fn start_pull_request_refresh(&mut self, cx: &mut Context<Self>) {
         if self.pull_requests.started || self.session.is_none() {
             return;
@@ -497,7 +501,8 @@ impl RepoView {
             .and_then(Tooling::gh)
             .map(|gh| gh.hosts.clone())
             .unwrap_or_default();
-        let primary_owner = crate::github::remote_for(self, cx).map(|remote| remote.owner);
+        let primary_owner =
+            crate::forge::remote_for(self, cx).map(|remote| remote.owner().to_owned());
         let map = branch_map(
             &self.pull_requests.items,
             &branches,
@@ -509,22 +514,23 @@ impl RepoView {
         self.pull_requests.set_by_branch(map);
     }
 
-    /// Asks `gh` for the repository's pull requests, off the UI thread.
+    /// Asks the host's CLI for the repository's pull requests, off the UI
+    /// thread.
     ///
-    /// A missing program, a logged-out account, a non-GitHub remote or the
+    /// A missing program, a logged-out account, an unsupported remote or the
     /// setting being off all leave the cache empty quietly: the badges are an
     /// optional convenience, not a prerequisite for the repository.
     ///
     /// `cause` decides whether the call is worth making now; the automatic one
     /// that would repeat a refresh made in the last minute does nothing.
     pub(crate) fn refresh_pull_requests(&mut self, cause: RefreshCause, cx: &mut Context<Self>) {
-        let Some(remote) = crate::github::remote_for(self, cx) else {
+        let Some(remote) = crate::forge::remote_for(self, cx) else {
             self.pull_requests.clear();
             self.recompute_pull_request_map(cx);
             cx.notify();
             return;
         };
-        let Ok(gh) = crate::github::gh_for(&remote.host, cx) else {
+        let Ok(cli) = crate::forge::cli_for(&remote, cx) else {
             self.pull_requests.clear();
             self.recompute_pull_request_map(cx);
             cx.notify();
@@ -549,7 +555,7 @@ impl RepoView {
         let generation = self.pull_requests.begin();
         self.notify_if_active(cx);
         let task = cx.background_executor().spawn(async move {
-            strata_core::forge::pull_requests_for_branches_with(&gh, &workdir)
+            cli.pull_requests_for_branches(&workdir)
                 .map_err(|error| error.to_string())
         });
         cx.spawn(async move |this, cx| {
@@ -566,12 +572,12 @@ impl RepoView {
     /// The "Refresh Pull Requests" command. Unlike the automatic refresh, this
     /// one says why it could not run.
     pub(crate) fn refresh_pull_requests_command(&mut self, cx: &mut Context<Self>) {
-        let Some(remote) = crate::github::remote_for(self, cx) else {
-            self.status_note = Some(t!("pr.needs_github").to_string());
+        let Some(remote) = crate::forge::remote_for(self, cx) else {
+            self.status_note = Some(t!("pr.needs_forge").to_string());
             cx.notify();
             return;
         };
-        if let Err(reason) = crate::github::gh_for(&remote.host, cx) {
+        if let Err(reason) = crate::forge::cli_for(&remote, cx) {
             self.status_note = Some(t!("pr.reason", reason = reason).to_string());
             cx.notify();
             return;
@@ -634,8 +640,8 @@ impl RepoView {
         window.defer(cx, move |window, cx| focus.focus(window, cx));
     }
 
-    /// Checks out pull request `number` through `gh`, as a tracked operation
-    /// whose outcome lands in the status line.
+    /// Checks out pull request `number` through the host's CLI, as a tracked
+    /// operation whose outcome lands in the status line.
     pub(crate) fn checkout_pull_request(&mut self, number: u64, cx: &mut Context<Self>) {
         if self.pull_requests.checkout_running {
             return;
@@ -645,13 +651,13 @@ impl RepoView {
             cx.notify();
             return;
         }
-        let Some(remote) = crate::github::remote_for(self, cx) else {
-            self.status_note = Some(t!("pr.needs_github").to_string());
+        let Some(remote) = crate::forge::remote_for(self, cx) else {
+            self.status_note = Some(t!("pr.needs_forge").to_string());
             cx.notify();
             return;
         };
-        let Ok(gh) = crate::github::gh_for(&remote.host, cx) else {
-            self.status_note = Some(t!("pr.gh_unavailable", number = number).to_string());
+        let Ok(cli) = crate::forge::cli_for(&remote, cx) else {
+            self.status_note = Some(t!("pr.integration_unavailable", number = number).to_string());
             cx.notify();
             return;
         };
@@ -662,9 +668,9 @@ impl RepoView {
         else {
             return;
         };
-        // `gh pr checkout` is `git fetch` plus a checkout: with local changes
-        // it can fail halfway through the files git touches, so the refusal
-        // here is the one case the user can act on before anything moves.
+        // A pull-request checkout fetches and switches: with local changes it
+        // can fail halfway through the files git touches, so the refusal here
+        // is the one case the user can act on before anything moves.
         if let Some(session) = &self.session
             && worktree_blocks_checkout(&session.snapshot().status)
         {
@@ -679,7 +685,7 @@ impl RepoView {
         cx.notify();
 
         let task = cx.background_executor().spawn(async move {
-            strata_core::forge::checkout_pull_request_with(&gh, &workdir, number)
+            cli.checkout_pull_request(&workdir, number)
                 .map_err(|error| error.to_string())
         });
         cx.spawn(async move |this, cx| {

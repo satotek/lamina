@@ -656,7 +656,7 @@ impl Announcement {
     /// one for the pushed branch, and the force-push offer for a rejected push.
     pub(crate) fn show(self, view: &RepoView, active: bool, cx: &mut Context<RepoView>) {
         let note = match self.pull_request_branch.as_deref() {
-            Some(branch) => crate::github::with_create_pr(self.note, view, branch, cx),
+            Some(branch) => crate::forge::with_create_pr(self.note, view, branch, cx),
             None => self.note,
         };
         let Some(window) = window_handle(cx) else {

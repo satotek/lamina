@@ -2272,7 +2272,13 @@ impl RepoView {
     /// changed, so a new context size or ignore-whitespace shows at once.
     fn settings_changed(&mut self, cx: &mut Context<Self>) {
         self.sync_autofetch(cx);
-        self.pull_requests_setting_changed(crate::settings::Settings::get(cx).tools.gh.enabled, cx);
+        self.pull_requests_setting_changed(
+            crate::settings::Settings::get(cx)
+                .tools
+                .pull_requests
+                .enabled,
+            cx,
+        );
         let show_signatures = crate::settings::Settings::get(cx)
             .history
             .show_commit_signatures;

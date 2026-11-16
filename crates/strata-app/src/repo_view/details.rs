@@ -1034,7 +1034,7 @@ impl RepoView {
                                             },
                                         ),
                                     );
-                                    if let Some(item) = crate::github::file_item(
+                                    if let Some(item) = crate::forge::file_item(
                                         &menu_entity,
                                         commit,
                                         &menu_path,

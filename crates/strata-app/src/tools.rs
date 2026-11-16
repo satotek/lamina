@@ -1,6 +1,6 @@
-//! Detection of the optional ghq and GitHub CLI installations.
+//! Detection of the optional ghq, GitHub CLI and Azure CLI installations.
 //!
-//! Both programs are looked up on the background executor, never on the UI
+//! The programs are looked up on the background executor, never on the UI
 //! thread, and the answer is kept in a global for the session. Detection runs
 //! at startup, when a tool's setting changes and when the settings window
 //! opens, so a program installed while Strata runs is found without a restart.
@@ -10,7 +10,7 @@
 use gpui::{App, Global};
 
 use strata_core::tools as core_tools;
-use strata_core::tools::{GhInfo, GhqInfo};
+use strata_core::tools::{AzInfo, GhInfo, GhqInfo};
 
 use crate::settings::Settings;
 
@@ -21,6 +21,8 @@ pub struct Tooling {
     pub(crate) ghq_error: Option<String>,
     pub(crate) gh: Option<GhInfo>,
     pub(crate) gh_error: Option<String>,
+    pub(crate) az: Option<AzInfo>,
+    pub(crate) az_error: Option<String>,
     /// Incremented on every pass so an older, slower answer cannot replace a
     /// newer one.
     generation: u64,
@@ -44,6 +46,10 @@ impl Tooling {
         self.gh.as_ref()
     }
 
+    pub fn az(&self) -> Option<&AzInfo> {
+        self.az.as_ref()
+    }
+
     /// Whether the last detection pass is still running.
     pub fn detecting(&self) -> bool {
         self.detecting
@@ -62,11 +68,28 @@ impl Tooling {
     /// logged-out install.
     pub fn gh_reason(&self) -> String {
         match (&self.gh, &self.gh_error, self.detecting) {
-            (Some(gh), _, _) if !gh.logged_in => t!("github.gh_not_logged_in").to_string(),
+            (Some(gh), _, _) if !gh.logged_in => t!("forge.gh_not_logged_in").to_string(),
             (Some(_), _, _) => String::new(),
             (None, Some(error), _) => error.clone(),
             (None, None, true) => t!("settings.tools.detecting_gh").to_string(),
             (None, None, false) => t!("settings.tools.gh_missing").to_string(),
+        }
+    }
+
+    /// Why az cannot answer pull-request questions right now.
+    ///
+    /// The extension is checked before the login because installing it is the
+    /// first step of the one setup sequence; a signed-out account is the other.
+    pub fn az_reason(&self) -> String {
+        match (&self.az, &self.az_error, self.detecting) {
+            (Some(az), _, _) if az.extension.is_none() => {
+                t!("forge.az_extension_missing").to_string()
+            }
+            (Some(az), _, _) if !az.logged_in => t!("forge.az_not_logged_in").to_string(),
+            (Some(_), _, _) => String::new(),
+            (None, Some(error), _) => error.clone(),
+            (None, None, true) => t!("settings.tools.detecting_az").to_string(),
+            (None, None, false) => t!("settings.tools.az_missing").to_string(),
         }
     }
 }
@@ -94,13 +117,15 @@ pub fn redetect(cx: &mut App) {
         // what tells "not installed" from "installed but unusable".
         let ghq_installed = core_tools::find_binary("ghq").is_some();
         let gh_installed = core_tools::find_binary("gh").is_some();
+        let az_installed = core_tools::find_az().is_some();
         (
             install_state(ghq_installed, core_tools::detect_ghq(root.as_deref())),
             install_state(gh_installed, core_tools::detect_gh()),
+            install_state(az_installed, core_tools::detect_az()),
         )
     });
     cx.spawn(async move |cx| {
-        let ((ghq, ghq_error), (gh, gh_error)) = task.await;
+        let ((ghq, ghq_error), (gh, gh_error), (az, az_error)) = task.await;
         cx.update_global::<Tooling, _>(|tooling, cx| {
             if tooling.generation != generation {
                 return;
@@ -110,6 +135,8 @@ pub fn redetect(cx: &mut App) {
             tooling.ghq_error = ghq_error;
             tooling.gh = gh;
             tooling.gh_error = gh_error;
+            tooling.az = az;
+            tooling.az_error = az_error;
             cx.refresh_windows();
         });
     })
@@ -149,6 +176,46 @@ mod tests {
             },
             logged_in,
         }
+    }
+
+    fn az(extension: bool, logged_in: bool) -> AzInfo {
+        AzInfo {
+            binary: PathBuf::from("/opt/homebrew/bin/az"),
+            version: Some("azure-cli 2.65.0".into()),
+            extension: extension.then(|| "1.0.0".into()),
+            logged_in,
+        }
+    }
+
+    #[test]
+    fn a_missing_azure_extension_names_the_command_that_installs_it() {
+        let tooling = Tooling {
+            az: Some(az(false, true)),
+            ..Tooling::default()
+        };
+        assert_eq!(
+            tooling.az_reason(),
+            "the azure-devops extension is missing: \
+             run az extension add --name azure-devops"
+        );
+    }
+
+    #[test]
+    fn a_signed_out_az_names_the_login_command() {
+        let tooling = Tooling {
+            az: Some(az(true, false)),
+            ..Tooling::default()
+        };
+        assert_eq!(tooling.az_reason(), "az is not logged in: run az login");
+    }
+
+    #[test]
+    fn a_usable_az_has_no_reason() {
+        let tooling = Tooling {
+            az: Some(az(true, true)),
+            ..Tooling::default()
+        };
+        assert_eq!(tooling.az_reason(), "");
     }
 
     #[test]

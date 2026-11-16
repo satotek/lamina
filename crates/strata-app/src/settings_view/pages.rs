@@ -516,15 +516,22 @@ fn tools(control: f32, design: &Design) -> SettingPage {
         ]),
     )
     .groups(
-        card(t!("settings.tools.github_cli").to_string(), design).items([
+        card(t!("settings.tools.pull_requests").to_string(), design).items([
             SettingItem::new(
-                t!("settings.tools.use_gh").to_string(),
-                tool_toggle(|settings| settings.tools.gh.enabled, change::gh_enabled),
+                t!("settings.tools.use_pull_requests").to_string(),
+                tool_toggle(
+                    |settings| settings.tools.pull_requests.enabled,
+                    change::pull_requests_enabled,
+                ),
             )
-            .description(t!("settings.tools.use_gh_description").to_string()),
+            .description(t!("settings.tools.use_pull_requests_description").to_string()),
             SettingItem::new(
-                t!("settings.tools.status").to_string(),
+                t!("settings.tools.github_status").to_string(),
                 SettingField::render(tool_status_row("redetect-gh", gh_status)),
+            ),
+            SettingItem::new(
+                t!("settings.tools.azure_status").to_string(),
+                SettingField::render(tool_status_row("redetect-az", az_status)),
             ),
         ]),
     )
@@ -1999,6 +2006,37 @@ fn gh_status(
             &design,
         ),
         None => status_text(tooling.gh_reason(), false, &design),
+    }
+}
+
+/// What `az` detection found: path, extension and whether an account is
+/// signed in.
+fn az_status(
+    _options: &gpui_component::setting::RenderOptions,
+    _window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let design = Design::new(cx.theme(), Settings::get(cx));
+    let Some(tooling) = Tooling::get(cx) else {
+        return status_text(t!("settings.tools.az_missing").to_string(), false, &design);
+    };
+    let usable = tooling.az_reason().is_empty();
+    match tooling.az() {
+        Some(info) => {
+            let version = info
+                .version
+                .clone()
+                .or_else(|| info.extension.clone())
+                .unwrap_or_else(|| t!("settings.tools.version_unknown").to_string());
+            let reason = tooling.az_reason();
+            let detail = if reason.is_empty() {
+                format!("{} · {version}", info.binary.display())
+            } else {
+                format!("{} · {version} · {reason}", info.binary.display())
+            };
+            status_text(detail, usable, &design)
+        }
+        None => status_text(tooling.az_reason(), false, &design),
     }
 }
 

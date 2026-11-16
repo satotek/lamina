@@ -1000,7 +1000,7 @@ pub(crate) fn commit_menu(
     let summary = target.summary;
     let tags = target.tags;
 
-    if let Some(item) = crate::github::commit_item(&entity, commit, cx) {
+    if let Some(item) = crate::forge::commit_item(&entity, commit, cx) {
         menu = menu.item(item);
     }
 

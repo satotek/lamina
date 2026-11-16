@@ -3124,7 +3124,7 @@ fn local_row(
                 cx,
             )
             .when_some(
-                crate::github::branch_items(&entity_menu, &branch, cx),
+                crate::forge::branch_items(&entity_menu, &branch, cx),
                 |menu, items| {
                     menu.separator()
                         .item(items.open)
@@ -3304,7 +3304,7 @@ fn remote_row(
                 }),
             )
             .when_some(
-                crate::github::remote_branch_item(&entity_menu, &remote, cx),
+                crate::forge::remote_branch_item(&entity_menu, &remote, cx),
                 |menu, item| menu.separator().item(item),
             )
         },
