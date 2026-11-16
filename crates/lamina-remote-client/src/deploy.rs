@@ -82,8 +82,10 @@ pub fn target_for(os: &str, arch: &str) -> Result<&'static str> {
     }
 }
 
-/// Uploads the helper when the remote side has no [`HELPER_OVERRIDE_ENV`],
-/// checks `--self-check`, and returns the remote path to execute.
+/// Makes sure the host has a helper for this build and returns the remote
+/// path to execute: the [`HELPER_OVERRIDE_ENV`] path when the remote side
+/// sets it, otherwise the cached copy, uploaded only when it is missing or
+/// fails `--self-check` for this protocol and build.
 pub fn install_helper(options: &InstallOptions) -> Result<String> {
     let askpass = ssh::start_askpass(options.askpass.as_ref(), options.askpass_program.as_deref())?;
     install_with(options, askpass.as_ref())
@@ -116,10 +118,16 @@ pub(crate) fn install_with(
         env!("CARGO_PKG_VERSION"),
     );
     let local = local_binary(options, target)?;
+    // The helper is tens of megabytes. A copy that already answers for this
+    // protocol and build is the one this app would upload, so a reconnect
+    // reuses it instead of sending it again.
+    if verify(options, askpass, &remote_path, false).is_ok() {
+        return Ok(remote_path);
+    }
     upload(options, askpass, &local, &remote_path)?;
     if verify(options, askpass, &remote_path, false).is_err() {
-        // One replacement covers a partial upload or a stale file. A second
-        // failure is reported as-is: retrying again will not change the binary.
+        // One replacement covers a partial upload. A second failure is
+        // reported as-is: retrying again will not change the binary.
         remove_remote(options, askpass, &remote_path)?;
         upload(options, askpass, &local, &remote_path)?;
         verify(options, askpass, &remote_path, false).map_err(|error| {
