@@ -34,6 +34,7 @@ mod branch_switcher;
 mod branches;
 mod clone_dialog;
 mod commands;
+mod compare;
 mod component_theme;
 mod conflicts;
 mod data;

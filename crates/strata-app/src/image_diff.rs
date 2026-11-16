@@ -26,13 +26,22 @@ use gpui::{
 };
 use gpui_component::Selectable as _;
 use strata_core::image::{ImageDiff, ImageKind, ImageSide};
-use strata_core::lfs::format_size;
+use strata_core::lfs::{LfsDiffSummary, format_size};
 use strata_core::session::DiffView;
 
 use crate::repo_view::RepoView;
 use crate::settings::{self, ImageDiffMode, Settings};
 use crate::style::Design;
 use crate::ui::{self, ButtonSize};
+
+/// Repaint callback for whichever entity hosts an image diff view.
+pub(crate) type Notify = Arc<dyn Fn(&mut App)>;
+
+pub(crate) fn notify_entity<T: 'static>(entity: Entity<T>) -> Notify {
+    Arc::new(move |cx| {
+        entity.update(cx, |_, cx| cx.notify());
+    })
+}
 
 /// The `Image` sources built so far, with the content they were built from.
 ///
@@ -99,14 +108,33 @@ pub(crate) fn body(
     cx: &App,
 ) -> Option<AnyElement> {
     let diff = view.image.as_ref()?;
+    body_for(
+        state,
+        diff,
+        view.lfs.as_ref(),
+        design,
+        notify_entity(entity),
+        cx,
+    )
+}
+
+/// The image body for any [`ImageDiff`], independent of a git repository.
+pub(crate) fn body_for(
+    state: &State,
+    diff: &ImageDiff,
+    lfs: Option<&LfsDiffSummary>,
+    design: &Design,
+    notify: Notify,
+    cx: &App,
+) -> Option<AnyElement> {
     if diff.kind == ImageKind::Svg && state.svg_text.get() {
         return None;
     }
     let mode = Settings::get(cx).diff.image_mode;
-    let missing = missing_object(view);
+    let missing = missing_object(lfs);
 
     let mut column = div().flex().flex_col().flex_1().min_h_0().w_full();
-    if let Some(summary) = view.lfs.clone() {
+    if let Some(summary) = lfs.cloned() {
         column = column.child(ui::lfs_card(summary, design));
     }
 
@@ -120,7 +148,7 @@ pub(crate) fn body(
     if let Some((label, side)) = single {
         return Some(
             column
-                .child(state.switcher(design, entity.clone(), cx, true))
+                .child(state.switcher(design, notify, cx, true))
                 .child(single_image(state, label, side, design, missing))
                 .into_any_element(),
         );
@@ -128,10 +156,10 @@ pub(crate) fn body(
 
     Some(
         column
-            .child(state.switcher(design, entity.clone(), cx, false))
+            .child(state.switcher(design, notify.clone(), cx, false))
             .child(match mode {
                 ImageDiffMode::SideBySide => side_by_side(state, diff, design, missing),
-                ImageDiffMode::Swipe => swipe(state, diff, design, missing, entity),
+                ImageDiffMode::Swipe => swipe(state, diff, design, missing, notify),
                 ImageDiffMode::OnionSkin => onion(state, diff, design, missing),
             })
             .into_any_element(),
@@ -145,7 +173,17 @@ pub(crate) fn svg_toggle(
     view: &DiffView,
     entity: Entity<RepoView>,
 ) -> Option<AnyElement> {
-    let diff = view.image.as_ref()?;
+    svg_toggle_for(state, view.image.as_ref(), notify_entity(entity))
+}
+
+/// The text/rendered switch for an SVG [`ImageDiff`], independent of a git
+/// repository.
+pub(crate) fn svg_toggle_for(
+    state: &State,
+    diff: Option<&ImageDiff>,
+    notify: Notify,
+) -> Option<AnyElement> {
+    let diff = diff?;
     if diff.kind != ImageKind::Svg {
         return None;
     }
@@ -162,19 +200,16 @@ pub(crate) fn svg_toggle(
                 t!("image_diff.show_drawing").to_string()
             })
             .on_click(move |_event, _window, cx| {
-                let cell = cell.clone();
-                entity.update(cx, |_this, cx| {
-                    cell.set(!cell.get());
-                    cx.notify();
-                });
+                cell.set(!cell.get());
+                notify(cx);
             })
             .into_any_element(),
     )
 }
 
 /// Whether the file's bytes are present but too large to hand to the view.
-fn missing_object(view: &DiffView) -> bool {
-    view.lfs.as_ref().is_some_and(|summary| {
+fn missing_object(lfs: Option<&LfsDiffSummary>) -> bool {
+    lfs.is_some_and(|summary| {
         summary.old.as_ref().is_some_and(|side| !side.present)
             || summary.new.as_ref().is_some_and(|side| !side.present)
     })
@@ -183,15 +218,8 @@ fn missing_object(view: &DiffView) -> bool {
 impl State {
     /// The mode and zoom controls. An added or deleted picture has no second
     /// side, so it only gets the zoom control.
-    fn switcher(
-        &self,
-        design: &Design,
-        entity: Entity<RepoView>,
-        cx: &App,
-        single: bool,
-    ) -> AnyElement {
+    fn switcher(&self, design: &Design, notify: Notify, cx: &App, single: bool) -> AnyElement {
         let mode = Settings::get(cx).diff.image_mode;
-        let settings_entity = entity.clone();
         let mut row = div()
             .flex()
             .items_center()
@@ -205,7 +233,7 @@ impl State {
         if !single {
             for option in ImageDiffMode::ALL {
                 let id = format!("image-mode-{}", option.id());
-                let entity = settings_entity.clone();
+                let notify = notify.clone();
                 row = row.child(
                     ui::button(id, option.label())
                         .size(ButtonSize::Tiny)
@@ -213,7 +241,7 @@ impl State {
                         .selected(mode == option)
                         .on_click(move |_event, _window, cx| {
                             settings::update(cx, |settings| settings.diff.image_mode = option);
-                            entity.update(cx, |_this, cx| cx.notify());
+                            notify(cx);
                         }),
                 );
             }
@@ -221,7 +249,7 @@ impl State {
         row = row.child(div().flex_1());
 
         if !single && mode == ImageDiffMode::OnionSkin {
-            row = row.child(self.opacity_slider(design, entity.clone()));
+            row = row.child(self.opacity_slider(design, notify.clone()));
         }
 
         let actual = self.actual.clone();
@@ -243,20 +271,16 @@ impl State {
                 t!("image_diff.actual_tooltip").to_string()
             })
             .on_click(move |_event, _window, cx| {
-                let actual = actual.clone();
-                entity.update(cx, |_this, cx| {
-                    actual.set(!actual.get());
-                    cx.notify();
-                });
+                actual.set(!actual.get());
+                notify(cx);
             }),
         );
         row.into_any_element()
     }
 
-    fn opacity_slider(&self, design: &Design, entity: Entity<RepoView>) -> AnyElement {
+    fn opacity_slider(&self, design: &Design, notify: Notify) -> AnyElement {
         let value = self.onion.get();
         let onion = self.onion.clone();
-        let drag_entity = entity.clone();
         div()
             .flex()
             .items_center()
@@ -284,7 +308,7 @@ impl State {
                     .on_drag_move(move |event: &DragMoveEvent<OnionDrag>, _window, cx| {
                         let _ = event.drag(cx);
                         onion.set(fraction_at(event.event.position.x, event.bounds));
-                        drag_entity.update(cx, |_this, cx| cx.notify());
+                        notify(cx);
                     })
                     .child(
                         div()
@@ -474,7 +498,7 @@ fn swipe(
     diff: &ImageDiff,
     design: &Design,
     missing: bool,
-    entity: Entity<RepoView>,
+    notify: Notify,
 ) -> AnyElement {
     let (Some(old), Some(new)) = (diff.old.as_ref(), diff.new.as_ref()) else {
         let (label, side) = match (&diff.old, &diff.new) {
@@ -498,7 +522,6 @@ fn swipe(
         .map(|size| f32::from(size.width) * fraction)
         .unwrap_or(0.0);
     let swipe_cell = state.swipe.clone();
-    let drag_entity = entity.clone();
 
     let mut area_element = div()
         .relative()
@@ -509,7 +532,7 @@ fn swipe(
         .on_drag_move(move |event: &DragMoveEvent<SwipeDrag>, _window, cx| {
             let _ = event.drag(cx);
             swipe_cell.set(fraction_at(event.event.position.x, event.bounds));
-            drag_entity.update(cx, |_this, cx| cx.notify());
+            notify(cx);
         })
         .on_children_prepainted({
             let area = area.clone();

@@ -649,10 +649,18 @@ pub fn font_fallbacks() -> FontFallbacks {
 /// A file decoded from a legacy encoding is worth labelling: the bytes on disk
 /// are not UTF-8, so editing them elsewhere has to use the same encoding.
 pub fn encoding_label(view: &strata_core::session::DiffView) -> Option<&'static str> {
-    let encoding = if view.new_encoding.is_utf8() {
-        view.old_encoding
+    encoding_label_for(view.old_encoding, view.new_encoding)
+}
+
+/// Returns the non-UTF-8 encoding label across two compared text files, if any.
+pub fn encoding_label_for(
+    old_encoding: strata_core::encoding::TextEncoding,
+    new_encoding: strata_core::encoding::TextEncoding,
+) -> Option<&'static str> {
+    let encoding = if new_encoding.is_utf8() {
+        old_encoding
     } else {
-        view.new_encoding
+        new_encoding
     };
     (!encoding.is_utf8()).then(|| encoding.label())
 }

@@ -28,6 +28,7 @@ use crate::actions::{
     ReopenClosedTab, SelectTab1, SelectTab2, SelectTab3, SelectTab4, SelectTab5, SelectTab6,
     SelectTab7, SelectTab8, SelectTab9, WORKSPACE,
 };
+use crate::compare::{CompareTarget, CompareView};
 use crate::debug_launch::{self, DebugDialog, DebugLaunch};
 use crate::picker::{Mode, OpenTarget, Picker};
 use crate::recent::{self, RecentRepositories};
@@ -122,12 +123,117 @@ struct RepoSlot {
     parents: NavigationStack,
 }
 
+/// One open standalone file/folder compare tab.
+struct CompareSlot {
+    view: Entity<CompareView>,
+    hint_path: Option<PathBuf>,
+}
+
+/// One open workspace tab (either a repository or a standalone compare view).
+enum TabSlot {
+    Repo(RepoSlot),
+    Compare(CompareSlot),
+}
+
+impl TabSlot {
+    fn as_repo(&self) -> Option<&RepoSlot> {
+        match self {
+            TabSlot::Repo(repo) => Some(repo),
+            TabSlot::Compare(_) => None,
+        }
+    }
+
+    fn repo_path(&self) -> Option<&Path> {
+        self.as_repo().and_then(|repo| repo.path.as_deref())
+    }
+
+    fn set_active(&self, active: bool, cx: &mut App) {
+        match self {
+            TabSlot::Repo(slot) => slot.view.update(cx, |view, cx| view.set_active(active, cx)),
+            TabSlot::Compare(slot) => slot.view.update(cx, |view, cx| view.set_active(active, cx)),
+        }
+    }
+
+    fn window_title(&self, cx: &App) -> String {
+        match self {
+            TabSlot::Repo(slot) => slot.view.read(cx).window_title().to_owned(),
+            TabSlot::Compare(slot) => slot.view.read(cx).window_title(),
+        }
+    }
+
+    fn view_focus(&self, cx: &App) -> gpui::FocusHandle {
+        match self {
+            TabSlot::Repo(slot) => slot.view.read(cx).view_focus(),
+            TabSlot::Compare(slot) => slot.view.read(cx).view_focus(),
+        }
+    }
+
+    fn notify_view(&self, cx: &mut App) {
+        match self {
+            TabSlot::Repo(slot) => slot.view.update(cx, |_, cx| cx.notify()),
+            TabSlot::Compare(slot) => slot.view.update(cx, |_, cx| cx.notify()),
+        }
+    }
+
+    fn render_element(&self) -> AnyElement {
+        match self {
+            TabSlot::Repo(slot) => slot.view.clone().into_any_element(),
+            TabSlot::Compare(slot) => slot.view.clone().into_any_element(),
+        }
+    }
+
+    fn tab_display_info(
+        &self,
+        is_active: bool,
+        active_name: Option<&str>,
+        active_busy: bool,
+        cx: &App,
+    ) -> (String, bool, Option<PathBuf>) {
+        match self {
+            TabSlot::Repo(slot) => {
+                let (label, busy) = if is_active {
+                    let label = active_name
+                        .map(str::to_owned)
+                        .or_else(|| slot.path.as_deref().map(recent::repository_name))
+                        .unwrap_or_else(|| t!("workspace.repository_tab").to_string());
+                    (label, active_busy)
+                } else {
+                    (
+                        slot_display_name(slot, cx),
+                        slot.view.read(cx).has_operation_in_progress(),
+                    )
+                };
+                (label, busy, slot.path.clone())
+            }
+            TabSlot::Compare(slot) => {
+                let (label, busy) = if is_active {
+                    (
+                        active_name
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| t!("compare.tab.prefix").to_string()),
+                        active_busy,
+                    )
+                } else {
+                    let view = slot.view.read(cx);
+                    (view.tab_title(), view.is_loading())
+                };
+                (label, busy, slot.hint_path.clone())
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn repo(&self) -> &RepoSlot {
+        self.as_repo().expect("expected repository tab slot")
+    }
+}
+
 /// The window's current content.
 enum Content {
     /// The welcome screen, shown when no repository was opened at startup.
     Welcome(Entity<Picker>),
-    /// One or more open repository tabs (always non-empty while active).
-    Tabs(TabDeck<RepoSlot>),
+    /// One or more open tabs (always non-empty while active).
+    Tabs(TabDeck<TabSlot>),
 }
 
 enum OpenDisposition {
@@ -237,16 +343,16 @@ impl Workspace {
                     view.set_debug_launch(debug.clone(), window, cx)
                 });
             }
-            slots.push(RepoSlot {
+            slots.push(TabSlot::Repo(RepoSlot {
                 view,
                 path,
                 parents: NavigationStack::default(),
-            });
+            }));
         }
 
         let deck = TabDeck::from_items(slots, clamped_active);
         if let Some(active_slot) = deck.active() {
-            let title = active_slot.view.read(cx).window_title().to_owned();
+            let title = active_slot.window_title(cx);
             window.set_window_title(&title);
         }
 
@@ -270,17 +376,51 @@ impl Workspace {
         if let Content::Tabs(deck) = &workspace.content {
             for (index, slot) in deck.items().iter().enumerate() {
                 if index != clamped_active
-                    && let Some(path) = slot.path.as_deref()
+                    && let Some(path) = slot.repo_path()
                 {
                     workspace.record_recent(path);
                 }
             }
-            if let Some(active_path) = deck.active().and_then(|slot| slot.path.as_deref()) {
+            if let Some(active_path) = deck.active().and_then(TabSlot::repo_path) {
                 workspace.record_recent(active_path);
             }
         }
         workspace.persist_session(cx);
         workspace
+    }
+
+    /// Creates a workspace showing a single standalone Compare tab.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn new_with_compare(
+        target: CompareTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let workspace_weak = cx.weak_entity();
+        let view = cx.new(|cx| CompareView::new(target, workspace_weak, cx));
+        let title = view.read(cx).window_title();
+        let hint_path = view.read(cx).hint_path().map(Path::to_path_buf);
+        window.set_window_title(&title);
+        let focus = view.read(cx).view_focus();
+        window.defer(cx, move |window, cx| focus.focus(window, cx));
+        let appearance = window
+            .observe_window_appearance(|window, cx| crate::settings::apply_theme(Some(window), cx));
+        let window_id = window.window_handle().window_id();
+        track_window_release(&cx.entity(), cx);
+
+        Self {
+            content: Content::Tabs(TabDeck::from_items(
+                vec![TabSlot::Compare(CompareSlot { view, hint_path })],
+                0,
+            )),
+            window_id,
+            closed_tabs: ClosedTabStack::default(),
+            _appearance: Some(appearance),
+            #[cfg(test)]
+            recent_dir: None,
+            #[cfg(test)]
+            launch_repo: Launch::open_with,
+        }
     }
 
     fn welcome(appearance: Subscription, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -306,7 +446,7 @@ impl Workspace {
     pub(crate) fn current_path(&self) -> Option<&Path> {
         match &self.content {
             Content::Welcome(_) => None,
-            Content::Tabs(deck) => deck.active().and_then(|slot| slot.path.as_deref()),
+            Content::Tabs(deck) => deck.active().and_then(TabSlot::repo_path),
         }
     }
 
@@ -321,7 +461,7 @@ impl Workspace {
         let Content::Tabs(deck) = &self.content else {
             return None;
         };
-        let slot = deck.active()?;
+        let slot = deck.active()?.as_repo()?;
         Some(slot_display_name(slot, cx))
     }
 
@@ -354,13 +494,13 @@ impl Workspace {
         let mut active = None;
         let raw_active = deck.active_index();
         for (index, slot) in deck.items().iter().enumerate() {
-            let Some(path) = &slot.path else {
+            let Some(path) = slot.repo_path() else {
                 continue;
             };
             if index == raw_active {
                 active = Some(tabs.len());
             }
-            tabs.push(path.clone());
+            tabs.push(path.to_path_buf());
         }
         if tabs.is_empty() {
             return None;
@@ -455,7 +595,7 @@ impl Workspace {
             if let Some(existing) = deck
                 .items()
                 .iter()
-                .position(|slot| slot.path.as_deref() == Some(canon.as_path()))
+                .position(|slot| slot.repo_path() == Some(canon.as_path()))
             {
                 let switched = self.activate_index(existing, window, cx);
                 self.record_recent(&canon);
@@ -484,15 +624,13 @@ impl Workspace {
 
             if let Content::Tabs(deck) = &mut self.content {
                 if let Some(active) = deck.active() {
-                    active
-                        .view
-                        .update(cx, |view, cx| view.set_active(false, cx));
+                    active.set_active(false, cx);
                 }
-                deck.open(RepoSlot {
+                deck.open(TabSlot::Repo(RepoSlot {
                     view,
                     path: slot_path.clone(),
                     parents: NavigationStack::default(),
-                });
+                }));
             }
             window.set_window_title(&title);
             if let Some(path) = &slot_path {
@@ -507,6 +645,43 @@ impl Workspace {
         // Welcome screen has no open tabs yet, so opening in a new tab creates
         // the first tab.
         self.open_path(&root, window, cx)
+    }
+
+    /// Opens the standalone Compare setup dialog over the workspace window.
+    pub(crate) fn open_compare_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        crate::compare::open_compare_dialog(cx.entity(), window, cx);
+    }
+
+    /// Opens a standalone file or folder comparison in a new workspace tab.
+    pub(crate) fn open_compare_target(
+        &mut self,
+        target: CompareTarget,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace = cx.weak_entity();
+        let view = cx.new(|cx| CompareView::new(target, workspace, cx));
+        let title = view.read(cx).window_title();
+        let hint_path = view.read(cx).hint_path().map(Path::to_path_buf);
+        let slot = TabSlot::Compare(CompareSlot { view, hint_path });
+
+        match &mut self.content {
+            Content::Welcome(_) => {
+                // Keep Workspace's appearance subscription because CompareView
+                // does not subscribe to window appearance on its own.
+                self.content = Content::Tabs(TabDeck::from_items(vec![slot], 0));
+            }
+            Content::Tabs(deck) => {
+                if let Some(active) = deck.active() {
+                    active.set_active(false, cx);
+                }
+                deck.open(slot);
+            }
+        }
+        window.set_window_title(&title);
+        self.persist_session(cx);
+        self.refresh_tab_strip(cx);
+        self.finish_navigation(window, cx);
     }
 
     /// Opens a submodule or linked worktree in the current tab, pushing the
@@ -535,6 +710,7 @@ impl Workspace {
         let target = match &self.content {
             Content::Tabs(deck) => deck
                 .active()
+                .and_then(TabSlot::as_repo)
                 .and_then(|slot| slot.parents.current().cloned()),
             Content::Welcome(_) => None,
         };
@@ -555,6 +731,7 @@ impl Workspace {
         let mut parents = match &self.content {
             Content::Tabs(deck) => deck
                 .active()
+                .and_then(TabSlot::as_repo)
                 .map(|slot| slot.parents.clone())
                 .unwrap_or_default(),
             Content::Welcome(_) => NavigationStack::default(),
@@ -599,6 +776,7 @@ impl Workspace {
                 let mut parents = match &self.content {
                     Content::Tabs(deck) => deck
                         .active()
+                        .and_then(TabSlot::as_repo)
                         .map(|slot| slot.parents.clone())
                         .unwrap_or_default(),
                     Content::Welcome(_) => NavigationStack::default(),
@@ -632,11 +810,11 @@ impl Workspace {
         let workspace = cx.weak_entity();
         let view = cx
             .new(|cx| RepoView::new_in_workspace(launch, Some(workspace), parent_name, window, cx));
-        let slot = RepoSlot {
+        let slot = TabSlot::Repo(RepoSlot {
             view,
             path: path.clone(),
             parents,
-        };
+        });
 
         self._appearance = None;
         match &mut self.content {
@@ -736,15 +914,11 @@ impl Workspace {
             return;
         };
         if let Some(old_slot) = deck.get(old_active) {
-            old_slot
-                .view
-                .update(cx, |view, cx| view.set_active(false, cx));
+            old_slot.set_active(false, cx);
         }
         if let Some(new_slot) = deck.get(new_active) {
-            let title = new_slot.view.update(cx, |view, cx| {
-                view.set_active(true, cx);
-                view.window_title().to_owned()
-            });
+            new_slot.set_active(true, cx);
+            let title = new_slot.window_title(cx);
             window.set_window_title(&title);
         }
     }
@@ -772,7 +946,11 @@ impl Workspace {
         };
         let old_active = deck.active_index();
         // Keep the position for "Reopen closed tab": closing drops the slot.
-        if let Some(path) = deck.get(index).and_then(|slot| slot.path.clone()) {
+        if let Some(path) = deck
+            .get(index)
+            .and_then(TabSlot::repo_path)
+            .map(Path::to_path_buf)
+        {
             self.closed_tabs.push(ClosedTab { path, index });
         }
         match deck.close(index) {
@@ -789,12 +967,10 @@ impl Workspace {
                 if index == old_active
                     && let Some(new_slot) = deck.get(new_active)
                 {
-                    let title = new_slot.view.update(cx, |view, cx| {
-                        view.set_active(true, cx);
-                        view.window_title().to_owned()
-                    });
+                    new_slot.set_active(true, cx);
+                    let title = new_slot.window_title(cx);
                     window.set_window_title(&title);
-                    let focus = new_slot.view.read(cx).view_focus();
+                    let focus = new_slot.view_focus(cx);
                     window.defer(cx, move |window, cx| focus.focus(window, cx));
                 }
                 self.persist_session(cx);
@@ -831,16 +1007,14 @@ impl Workspace {
             let view = cx.new(|cx| {
                 RepoView::new_in_workspace_active(launch, Some(workspace), None, true, window, cx)
             });
-            let slot = RepoSlot {
+            let slot = TabSlot::Repo(RepoSlot {
                 view,
                 path: path.clone(),
                 parents: NavigationStack::default(),
-            };
+            });
             let inserted = if let Content::Tabs(deck) = &mut self.content {
                 if let Some(active) = deck.active_mut() {
-                    active
-                        .view
-                        .update(cx, |view, cx| view.set_active(false, cx));
+                    active.set_active(false, cx);
                 }
                 deck.insert(closed.index, slot)
             } else {
@@ -859,7 +1033,7 @@ impl Workspace {
             if let Content::Tabs(deck) = &self.content
                 && let Some(slot) = deck.get(inserted)
             {
-                let focus = slot.view.read(cx).view_focus();
+                let focus = slot.view_focus(cx);
                 window.defer(cx, move |window, cx| focus.focus(window, cx));
             }
             self.finish_navigation(window, cx);
@@ -867,20 +1041,20 @@ impl Workspace {
         }
     }
 
-    /// Repaints the active repository view so the tab strip reflects changes
-    /// from background tabs (e.g. an operation starting or finishing) or tab
-    /// list updates without waking inactive tabs.
+    /// Repaints the active tab view so the tab strip reflects changes from
+    /// background tabs (e.g. an operation starting or finishing) or tab list
+    /// updates without waking inactive tabs.
     pub(crate) fn refresh_tab_strip(&self, cx: &mut Context<Self>) {
         if let Content::Tabs(deck) = &self.content
             && let Some(active) = deck.active()
         {
-            active.view.update(cx, |_, cx| cx.notify());
+            active.notify_view(cx);
         }
         cx.notify();
     }
 
-    /// Renders the tab strip when 2 or more repository tabs are open in this
-    /// window; returns `None` for 0 or 1 tabs so single-repo windows look identical.
+    /// Renders the tab strip when 2 or more tabs are open in this window;
+    /// returns `None` for 0 or 1 tabs so single-tab windows look identical.
     pub(crate) fn render_tab_strip(
         workspace: &Entity<Self>,
         active_name: Option<&str>,
@@ -904,18 +1078,8 @@ impl Workspace {
             .enumerate()
             .map(|(index, slot)| {
                 let is_active = index == active_index;
-                let (label, busy) = if is_active {
-                    let label = active_name
-                        .map(str::to_owned)
-                        .or_else(|| slot.path.as_deref().map(recent::repository_name))
-                        .unwrap_or_else(|| t!("workspace.repository_tab").to_string());
-                    (label, active_busy)
-                } else {
-                    (
-                        slot_display_name(slot, cx),
-                        slot.view.read(cx).has_operation_in_progress(),
-                    )
-                };
+                let (label, busy, hint_path) =
+                    slot.tab_display_info(is_active, active_name, active_busy, cx);
                 let select_ws = workspace_weak.clone();
                 let close_ws = workspace_weak.clone();
                 let reorder_ws = workspace_weak.clone();
@@ -941,8 +1105,8 @@ impl Workspace {
                                 .update(cx, |this, cx| this.reorder_tab(from, to, window, cx));
                         });
 
-                if let Some(path) = &slot.path {
-                    item = item.hint(path);
+                if let Some(path) = hint_path {
+                    item = item.hint(&path);
                 }
                 item
             })
@@ -972,7 +1136,7 @@ impl Workspace {
     /// The focus handle of whichever view fills the window.
     fn content_focus(&self, cx: &App) -> Option<gpui::FocusHandle> {
         match &self.content {
-            Content::Tabs(deck) => deck.active().map(|slot| slot.view.read(cx).view_focus()),
+            Content::Tabs(deck) => deck.active().map(|slot| slot.view_focus(cx)),
             Content::Welcome(view) => Some(view.read(cx).input_focus(cx)),
         }
     }
@@ -1084,7 +1248,7 @@ impl Render for Workspace {
         let content: AnyElement = match &self.content {
             Content::Welcome(view) => view.clone().into_any_element(),
             Content::Tabs(deck) => match deck.active() {
-                Some(slot) => slot.view.clone().into_any_element(),
+                Some(slot) => slot.render_element(),
                 None => div().into_any_element(),
             },
         };
@@ -1211,18 +1375,26 @@ fn on_workspace_released(window_id: WindowId, cx: &mut App) {
     }
 }
 
-/// Takes the slot's [`Session`] out and drops it on a background thread so
-/// closing or replacing a tab never blocks the UI thread on worker shutdown.
-fn detach_and_drop_slot(slot: RepoSlot, cx: &mut App) {
-    #[cfg(feature = "terminal")]
-    if let Some(terminal) = slot.view.update(cx, |view, _| {
-        view.terminal_open = false;
-        view.terminal.take()
-    }) {
-        terminal.update(cx, |panel, _| panel.close_all_sessions());
-    }
-    if let Some(session) = slot.view.update(cx, |view, _| view.detach_session()) {
-        crate::repo_view::drop_session_in_background(session);
+/// Takes the slot's [`Session`] out and drops it on a background thread (or
+/// cancels a running comparison) so closing or replacing a tab never blocks the
+/// UI thread on worker shutdown.
+fn detach_and_drop_slot(slot: TabSlot, cx: &mut App) {
+    match slot {
+        TabSlot::Repo(slot) => {
+            #[cfg(feature = "terminal")]
+            if let Some(terminal) = slot.view.update(cx, |view, _| {
+                view.terminal_open = false;
+                view.terminal.take()
+            }) {
+                terminal.update(cx, |panel, _| panel.close_all_sessions());
+            }
+            if let Some(session) = slot.view.update(cx, |view, _| view.detach_session()) {
+                crate::repo_view::drop_session_in_background(session);
+            }
+        }
+        TabSlot::Compare(slot) => {
+            slot.view.update(cx, |view, _| view.cancel());
+        }
     }
 }
 
@@ -1297,6 +1469,43 @@ pub(crate) fn open_tabs_window(
             let _ = handle.update(cx, |_, window, _| window.activate_window());
         }
         Err(error) => log::warn!("cannot open a repository window: {error}"),
+    }
+}
+
+/// Opens a standalone Compare window for `target`.
+#[allow(dead_code)]
+pub(crate) fn open_compare_window(target: CompareTarget, window_size: (f32, f32), cx: &mut App) {
+    let title = format!("{} — {}", t!("compare.tab.prefix"), target.title());
+    let bounds = Bounds::centered(None, size(px(window_size.0), px(window_size.1)), cx);
+    let min_size = size(
+        px(crate::style::MIN_WINDOW_SIZE.0),
+        px(crate::style::MIN_WINDOW_SIZE.1),
+    );
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        titlebar: Some(crate::style::window_titlebar(title)),
+        window_decorations: Some(WindowDecorations::Client),
+        window_min_size: Some(min_size),
+        focus: true,
+        app_id: Some("strata".to_owned()),
+        ..TitleBar::window_options()
+    };
+    #[cfg(target_os = "linux")]
+    let options = {
+        let mut options = options;
+        options.icon = crate::linux_window_icon();
+        options
+    };
+    let opened = cx.open_window(options, move |window, cx| {
+        crate::settings::apply_theme(Some(window), cx);
+        let content = cx.new(|cx| Workspace::new_with_compare(target, window, cx));
+        cx.new(|cx| Root::new(content, window, cx))
+    });
+    match opened {
+        Ok(handle) => {
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
+        }
+        Err(error) => log::warn!("cannot open a compare window: {error}"),
     }
 }
 
@@ -1509,7 +1718,7 @@ mod tests {
         let workspace = workspace_cell.borrow().clone().expect("workspace created");
         let first_view_weak = visual_cx.update(|_, cx| match &workspace.read(cx).content {
             Content::Tabs(deck) => {
-                let slot = deck.active().expect("active slot");
+                let slot = deck.active().expect("active slot").repo();
                 assert_eq!(slot.view.read(cx).parent_name(), None);
                 slot.view.downgrade()
             }
@@ -1536,7 +1745,7 @@ mod tests {
             assert_eq!(ws.current_path(), Some(worktree_canon.as_path()));
             match &ws.content {
                 Content::Tabs(deck) => {
-                    let slot = deck.active().expect("active slot");
+                    let slot = deck.active().expect("active slot").repo();
                     assert_eq!(slot.view.read(cx).parent_name(), Some("alpha-repo"));
                     assert_eq!(slot.parents.len(), 1);
                     slot.view.downgrade()
@@ -1582,7 +1791,7 @@ mod tests {
             assert_eq!(ws.current_path(), Some(main_canon.as_path()));
             match &ws.content {
                 Content::Tabs(deck) => {
-                    let slot = deck.active().expect("active slot");
+                    let slot = deck.active().expect("active slot").repo();
                     assert_eq!(slot.view.read(cx).parent_name(), None);
                     assert!(slot.parents.is_empty());
                 }
@@ -1609,7 +1818,7 @@ mod tests {
             assert_eq!(ws.current_path(), Some(unrelated_canon.as_path()));
             match &ws.content {
                 Content::Tabs(deck) => {
-                    let slot = deck.active().expect("active slot");
+                    let slot = deck.active().expect("active slot").repo();
                     assert_eq!(slot.view.read(cx).parent_name(), None);
                     assert!(slot.parents.is_empty());
                 }
@@ -1676,7 +1885,7 @@ mod tests {
         let alpha_weak = visual_cx.update(|_, cx| match &workspace.read(cx).content {
             Content::Tabs(deck) => {
                 assert_eq!(deck.len(), 1);
-                let slot = deck.active().expect("active slot");
+                let slot = deck.active().expect("active slot").repo();
                 assert!(slot.view.read(cx).is_active());
                 assert!(slot.view.read(cx).has_session());
                 slot.view.downgrade()
@@ -1704,7 +1913,7 @@ mod tests {
             assert!(!alpha_view.read(cx).is_active());
             assert!(alpha_view.read(cx).has_session());
 
-            let beta_slot = deck.active().expect("active slot");
+            let beta_slot = deck.active().expect("active slot").repo();
             assert!(beta_slot.view.read(cx).is_active());
             assert!(beta_slot.view.read(cx).has_session());
             beta_slot.view.downgrade()
@@ -1754,7 +1963,11 @@ mod tests {
             let Content::Tabs(deck) = &ws.content else {
                 panic!("expected repo tabs");
             };
-            deck.active().expect("active gamma slot").view.downgrade()
+            deck.active()
+                .expect("active gamma slot")
+                .repo()
+                .view
+                .downgrade()
         });
 
         // Cycle forward (wraps 2 -> 0) and backward (wraps 0 -> 2) via actions, then jump.
@@ -1807,7 +2020,7 @@ mod tests {
             let paths = deck
                 .items()
                 .iter()
-                .filter_map(|slot| slot.path.clone())
+                .filter_map(|slot| slot.repo_path().map(Path::to_path_buf))
                 .collect::<Vec<_>>();
             assert_eq!(
                 paths,
@@ -1905,6 +2118,127 @@ mod tests {
         }
     }
 
+    #[gpui::test]
+    fn compare_tab_opens_switches_and_drops_cleanly(cx: &mut gpui::TestAppContext) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let left_file = temp.path().join("left.txt");
+        let right_file = temp.path().join("right.txt");
+        std::fs::write(&left_file, "one\ntwo\n").unwrap();
+        std::fs::write(&right_file, "one\nthree\n").unwrap();
+
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            gpui_component::init(cx);
+            cx.set_global(Settings::default());
+            crate::actions::bind(cx);
+        });
+
+        let workspace_cell: std::rc::Rc<std::cell::RefCell<Option<Entity<Workspace>>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
+        let workspace_cell_init = workspace_cell.clone();
+        let target = CompareTarget::TwoWayFiles {
+            left: left_file,
+            right: right_file,
+        };
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), move |window, cx| {
+                    let workspace = cx.new(|cx| Workspace::new_with_compare(target, window, cx));
+                    *workspace_cell_init.borrow_mut() = Some(workspace.clone());
+                    cx.new(|cx| Root::new(workspace, window, cx))
+                })
+            })
+            .expect("open window");
+        let mut visual_cx = VisualTestContext::from_window(window.into(), cx);
+        visual_cx.run_until_parked();
+
+        let workspace = workspace_cell.borrow().clone().expect("workspace created");
+        let compare_weak = visual_cx.update(|_, cx| {
+            let ws = workspace.read(cx);
+            assert_eq!(ws.tab_count(), 1);
+            assert_eq!(ws.current_path(), None);
+            let Content::Tabs(deck) = &ws.content else {
+                panic!("expected compare tab");
+            };
+            let TabSlot::Compare(slot) = deck.active().expect("active slot") else {
+                panic!("expected compare slot");
+            };
+            assert!(!slot.view.read(cx).is_loading());
+            assert_eq!(slot.view.read(cx).tab_title(), "left.txt ↔ right.txt");
+            slot.view.downgrade()
+        });
+
+        let second_left = temp.path().join("second_left.txt");
+        let second_right = temp.path().join("second_right.txt");
+        std::fs::write(&second_left, "alpha\n").unwrap();
+        std::fs::write(&second_right, "beta\n").unwrap();
+        let second_target = CompareTarget::TwoWayFiles {
+            left: second_left,
+            right: second_right,
+        };
+        visual_cx.update(|window, cx| {
+            workspace.update(cx, |ws, cx| {
+                ws.open_compare_target(second_target, window, cx)
+            });
+        });
+        visual_cx.run_until_parked();
+
+        let second_weak = visual_cx.update(|_, cx| {
+            let ws = workspace.read(cx);
+            assert_eq!(ws.tab_count(), 2);
+            let Content::Tabs(deck) = &ws.content else {
+                panic!("expected tabs");
+            };
+            let TabSlot::Compare(slot) = deck.active().expect("active slot") else {
+                panic!("expected compare slot");
+            };
+            assert!(!slot.view.read(cx).is_loading());
+            assert_eq!(
+                slot.view.read(cx).tab_title(),
+                "second_left.txt ↔ second_right.txt"
+            );
+            slot.view.downgrade()
+        });
+
+        // Switch back to the first tab and verify active state updates.
+        visual_cx.update(|window, cx| {
+            workspace.update(cx, |ws, cx| ws.select_tab(0, window, cx));
+        });
+        visual_cx.run_until_parked();
+        visual_cx.update(|_, cx| {
+            let first = compare_weak.upgrade().expect("first compare alive");
+            let second = second_weak.upgrade().expect("second compare alive");
+            assert!(first.read(cx).is_active());
+            assert!(!second.read(cx).is_active());
+        });
+
+        // Close the inactive second compare tab and confirm it drops cleanly.
+        visual_cx.update(|window, cx| {
+            workspace.update(cx, |ws, cx| ws.close_tab(1, window, cx));
+        });
+        visual_cx.run_until_parked();
+        assert!(second_weak.upgrade().is_none());
+
+        // Close the last remaining compare tab via CloseTab action.
+        visual_cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            window.dispatch_action(Box::new(CloseTab), cx);
+        });
+        visual_cx.run_until_parked();
+        drop(visual_cx);
+        drop(workspace);
+        cx.run_until_parked();
+        cx.update(|cx| {
+            assert!(
+                cx.windows().is_empty(),
+                "closing the last compare tab should close the window"
+            );
+        });
+        cx.run_until_parked();
+        assert!(compare_weak.upgrade().is_none());
+    }
+
     #[cfg(all(not(windows), feature = "terminal"))]
     #[gpui::test]
     fn workspace_tabs_preserve_terminal_sessions_on_switch_and_kill_on_close(
@@ -1968,7 +2302,7 @@ mod tests {
             let Content::Tabs(deck) = &workspace.read(cx).content else {
                 panic!("expected repo tabs");
             };
-            let alpha_view = deck.active().expect("alpha active").view.clone();
+            let alpha_view = deck.active().expect("alpha active").repo().view.clone();
             alpha_view.update(cx, |view, cx| {
                 view.quiet_terminal = true;
                 view.toggle_terminal(window, cx);
@@ -2001,7 +2335,7 @@ mod tests {
             let Content::Tabs(deck) = &workspace.read(cx).content else {
                 panic!("expected repo tabs");
             };
-            let beta_view = deck.active().expect("beta active").view.clone();
+            let beta_view = deck.active().expect("beta active").repo().view.clone();
             beta_view.update(cx, |view, cx| {
                 view.quiet_terminal = true;
                 view.toggle_terminal(window, cx);
@@ -2031,8 +2365,8 @@ mod tests {
             let Content::Tabs(deck) = &workspace.read(cx).content else {
                 panic!("expected repo tabs");
             };
-            let alpha_view = &deck.items()[0].view;
-            let beta_view = &deck.items()[1].view;
+            let alpha_view = &deck.items()[0].repo().view;
+            let beta_view = &deck.items()[1].repo().view;
             assert_eq!(
                 alpha_view
                     .read(cx)

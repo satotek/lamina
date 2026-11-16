@@ -181,10 +181,22 @@ impl DiffContext {
 
     /// Applies one press on a gap bar; true when the rows must be rebuilt.
     pub fn expand(&mut self, gap: usize, action: GapAction, view: &DiffView) -> bool {
-        let Some(run) = view.gaps.get(gap).filter(|gap| gap.len > 0) else {
+        self.expand_parts(gap, action, &view.gaps, &view.old_text, &view.new_text)
+    }
+
+    /// Applies one press on a gap bar from standalone diff parts.
+    pub fn expand_parts(
+        &mut self,
+        gap: usize,
+        action: GapAction,
+        gaps: &[Gap],
+        old_text: &str,
+        new_text: &str,
+    ) -> bool {
+        let Some(run) = gaps.get(gap).filter(|gap| gap.len > 0) else {
             return false;
         };
-        if action == GapAction::All && !within_expand_cap(&view.old_text, &view.new_text) {
+        if action == GapAction::All && !within_expand_cap(old_text, new_text) {
             self.notice = Some(too_large());
             return false;
         }
@@ -199,13 +211,18 @@ impl DiffContext {
     /// A file past the cap keeps its diff and shows [`Self::notice`] instead:
     /// building every row of a multi-megabyte file would stall a frame.
     pub fn toggle_whole_file(&mut self, view: &DiffView) -> bool {
+        self.toggle_whole_file_parts(&view.old_text, &view.new_text)
+    }
+
+    /// Switches the whole-file view from standalone diff texts.
+    pub fn toggle_whole_file_parts(&mut self, old_text: &str, new_text: &str) -> bool {
         if self.expansion.is_whole_file() {
             self.expansion.set_whole_file(false);
             self.notice = None;
             self.revision = self.next_revision();
             return true;
         }
-        if !within_expand_cap(&view.old_text, &view.new_text) {
+        if !within_expand_cap(old_text, new_text) {
             self.notice = Some(too_large());
             return false;
         }
@@ -217,13 +234,18 @@ impl DiffContext {
 
     /// The rows this expansion shows for `view`.
     pub fn rows(&self, view: &DiffView) -> Vec<Row> {
-        flatten_expanded(
-            &view.diff,
-            &view.old_text,
-            &view.new_text,
-            &view.gaps,
-            &self.expansion,
-        )
+        self.rows_parts(&view.diff, &view.old_text, &view.new_text, &view.gaps)
+    }
+
+    /// The rows this expansion shows for standalone diff parts.
+    pub fn rows_parts(
+        &self,
+        diff: &FileDiff,
+        old_text: &str,
+        new_text: &str,
+        gaps: &[Gap],
+    ) -> Vec<Row> {
+        flatten_expanded(diff, old_text, new_text, gaps, &self.expansion)
     }
 }
 
@@ -579,6 +601,22 @@ pub fn render_row_with(
     unified_row(row, colors, style, highlights, options, false, None)
 }
 
+/// Syntax spans for the old and new sides of a rendered diff list.
+#[derive(Clone)]
+pub struct DiffHighlights {
+    pub old: Arc<Vec<LineHighlights>>,
+    pub new: Arc<Vec<LineHighlights>>,
+}
+
+impl DiffHighlights {
+    pub fn from_view(view: &DiffView) -> Self {
+        Self {
+            old: Arc::clone(&view.old_highlights),
+            new: Arc::clone(&view.new_highlights),
+        }
+    }
+}
+
 /// Renders a slice of diff rows for a stacked multi-file diff pane, honoring
 /// split vs unified layout, wrapping, syntax highlighting, and gap actions.
 ///
@@ -592,6 +630,7 @@ pub(crate) fn render_stacked_rows(
     style: &DiffStyle,
     on_gap: Option<&GapHandler>,
 ) -> Vec<AnyElement> {
+    let highlights = view.map(DiffHighlights::from_view);
     if style.split {
         let pairs = split_rows(rows);
         return pairs
@@ -604,7 +643,7 @@ pub(crate) fn render_stacked_rows(
                     rows,
                     colors,
                     style,
-                    view,
+                    highlights.as_ref(),
                     style.wrap,
                     split_role(&pairs, index),
                     on_gap,
@@ -619,12 +658,12 @@ pub(crate) fn render_stacked_rows(
                 gap_bar_scoped(Some(scope), *gap, *hidden, colors, style, on_gap)
             }
             _ => {
-                let highlights = line_highlights(row, view, style.syntax);
+                let spans = line_highlights(row, highlights.as_ref(), style.syntax);
                 unified_row(
                     row,
                     colors,
                     style,
-                    highlights,
+                    spans,
                     RowOptions {
                         inset: true,
                         ..RowOptions::default()
@@ -665,12 +704,27 @@ pub fn diff_list(list: DiffList<'_>, cx: &mut App) -> AnyElement {
         scroll,
         on_gap,
     } = list;
+    let highlights = view.as_deref().map(DiffHighlights::from_view);
+    diff_list_with_highlights(id, rows, highlights, colors, mono, scroll, on_gap, cx)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn diff_list_with_highlights(
+    id: &'static str,
+    rows: Rc<Vec<Row>>,
+    highlights: Option<DiffHighlights>,
+    colors: DiffColors,
+    mono: SharedString,
+    scroll: &UniformListScrollHandle,
+    on_gap: Option<GapHandler>,
+    cx: &mut App,
+) -> AnyElement {
     let style = DiffStyle::from_settings(cx, &mono);
     let (count, pairs) = list_items(&rows, style.split);
     let source = Rows {
         rows,
         pairs,
-        view,
+        highlights,
         colors,
         style,
         on_gap,
@@ -692,12 +746,29 @@ pub fn diff_list(list: DiffList<'_>, cx: &mut App) -> AnyElement {
     .into_any_element()
 }
 
+/// Returns the list item indices of hunk headers for next/previous change
+/// navigation, accounting for unified vs side-by-side pairing.
+pub fn hunk_scroll_targets(rows: &[Row], cx: &App) -> Vec<usize> {
+    if Settings::get(cx).diff.layout == DiffLayout::Split {
+        split_rows(rows)
+            .iter()
+            .enumerate()
+            .filter_map(|(index, pair)| matches!(pair, SplitRow::Header { .. }).then_some(index))
+            .collect()
+    } else {
+        rows.iter()
+            .enumerate()
+            .filter_map(|(index, row)| matches!(row, Row::HunkHeader { .. }).then_some(index))
+            .collect()
+    }
+}
+
 /// The rows of one diff and everything they need to be drawn, shared by the
 /// items of whichever list the layout asks for.
 struct Rows {
     rows: Rc<Vec<Row>>,
     pairs: Option<Rc<[SplitRow]>>,
-    view: Option<Arc<DiffView>>,
+    highlights: Option<DiffHighlights>,
     colors: DiffColors,
     style: DiffStyle,
     on_gap: Option<GapHandler>,
@@ -708,7 +779,7 @@ impl Rows {
         let Self {
             rows,
             pairs,
-            view,
+            highlights,
             colors,
             style,
             on_gap,
@@ -720,7 +791,7 @@ impl Rows {
                     rows,
                     colors,
                     style,
-                    view.as_deref(),
+                    highlights.as_ref(),
                     wrap,
                     split_role(pairs, index),
                     on_gap.as_ref(),
@@ -737,12 +808,12 @@ impl Rows {
         if let Row::Gap { gap, hidden } = row {
             return gap_bar(*gap, *hidden, colors, style, on_gap.as_ref());
         }
-        let highlights = line_highlights(row, view.as_deref(), style.syntax);
+        let spans = line_highlights(row, highlights.as_ref(), style.syntax);
         unified_row(
             row,
             colors,
             style,
-            highlights,
+            spans,
             RowOptions {
                 inset: true,
                 ..RowOptions::default()
@@ -937,36 +1008,36 @@ fn row_kind(kind: LineKind) -> u8 {
     }
 }
 
-/// The syntax spans of the line a row shows, from the view that produced it.
+/// The syntax spans of the line a row shows, from the highlights that produced it.
 fn line_highlights<'a>(
     row: &Row,
-    view: Option<&'a DiffView>,
+    highlights: Option<&'a DiffHighlights>,
     syntax: bool,
 ) -> Option<&'a LineHighlights> {
-    let view = view.filter(|_| syntax)?;
+    let highlights = highlights.filter(|_| syntax)?;
     let (Row::Line(line) | Row::Context(line)) = row else {
         return None;
     };
-    let (highlights, number) = match line.kind {
-        LineKind::Removed => (&view.old_highlights, line.old_lineno),
-        LineKind::Added => (&view.new_highlights, line.new_lineno),
-        LineKind::Context => (&view.new_highlights, line.new_lineno.or(line.old_lineno)),
+    let (spans, number) = match line.kind {
+        LineKind::Removed => (&highlights.old, line.old_lineno),
+        LineKind::Added => (&highlights.new, line.new_lineno),
+        LineKind::Context => (&highlights.new, line.new_lineno.or(line.old_lineno)),
     };
-    highlights.get(number?.checked_sub(1)? as usize)
+    spans.get(number?.checked_sub(1)? as usize)
 }
 
 fn side_highlights<'a>(
-    view: Option<&'a DiffView>,
+    highlights: Option<&'a DiffHighlights>,
     side: Side,
     line: &DiffLine,
     syntax: bool,
 ) -> Option<&'a LineHighlights> {
-    let view = view.filter(|_| syntax)?;
-    let (highlights, number) = match side {
-        Side::Old => (&view.old_highlights, line.old_lineno),
-        Side::New => (&view.new_highlights, line.new_lineno),
+    let highlights = highlights.filter(|_| syntax)?;
+    let (spans, number) = match side {
+        Side::Old => (&highlights.old, line.old_lineno),
+        Side::New => (&highlights.new, line.new_lineno),
     };
-    highlights.get(number?.checked_sub(1)? as usize)
+    spans.get(number?.checked_sub(1)? as usize)
 }
 
 fn unified_row(
@@ -1079,12 +1150,14 @@ fn split_row(
     rows: &[Row],
     colors: &DiffColors,
     style: &DiffStyle,
-    view: Option<&DiffView>,
+    highlights: Option<&DiffHighlights>,
     wrap: bool,
     role: Option<RowRole>,
     on_gap: Option<&GapHandler>,
 ) -> AnyElement {
-    split_row_scoped(None, pair, rows, colors, style, view, wrap, role, on_gap)
+    split_row_scoped(
+        None, pair, rows, colors, style, highlights, wrap, role, on_gap,
+    )
 }
 
 #[allow(
@@ -1097,7 +1170,7 @@ fn split_row_scoped(
     rows: &[Row],
     colors: &DiffColors,
     style: &DiffStyle,
-    view: Option<&DiffView>,
+    highlights: Option<&DiffHighlights>,
     wrap: bool,
     role: Option<RowRole>,
     on_gap: Option<&GapHandler>,
@@ -1121,10 +1194,10 @@ fn split_row_scoped(
         SplitRow::Lines { old, new } => {
             let old_line = old.and_then(|index| line_at(rows, index));
             let new_line = new.and_then(|index| line_at(rows, index));
-            let old_highlights =
-                old_line.and_then(|line| side_highlights(view, Side::Old, line, style.syntax));
-            let new_highlights =
-                new_line.and_then(|line| side_highlights(view, Side::New, line, style.syntax));
+            let old_highlights = old_line
+                .and_then(|line| side_highlights(highlights, Side::Old, line, style.syntax));
+            let new_highlights = new_line
+                .and_then(|line| side_highlights(highlights, Side::New, line, style.syntax));
             let tail = role == Some(RowRole::Tail);
             // Lines revealed out of a gap are not in a hunk card: they keep
             // the gutter and divider but none of the card's outline.
