@@ -223,12 +223,9 @@ impl RepoView {
     /// reflog is not one: running the command loads the rows first, and the
     /// handler says what happened once they arrive.
     ///
-    /// A remote tab can read the reflog. Restoring an entry is a write the
-    /// helper does not run, so the command stays closed there.
+    /// A remote tab uses the same gate. The helper runs the restore, so being
+    /// on another machine is not itself a reason to close the command.
     fn undo_blocked(&self) -> Option<String> {
-        if self.is_ssh() {
-            return Some(crate::remote_open::unavailable_reason());
-        }
         if self.session.is_none() {
             return Some(t!("remote.no_session").to_string());
         }
@@ -450,6 +447,11 @@ mod tests {
             "refresh cannot run until the tab is connected"
         );
         assert_eq!(
+            blocked_reason(&view, &mut vcx, "lamina::UndoLastAction").as_deref(),
+            Some(t!("remote.no_session").as_ref()),
+            "undo needs a session, which a disconnected tab does not have"
+        );
+        assert_eq!(
             blocked_reason(&view, &mut vcx, THREE_WAY_COMMITS).as_deref(),
             Some(t!("compare.no_repository").as_ref()),
             "a disconnected tab has no commits to compare"
@@ -539,6 +541,16 @@ mod tests {
             blocked_reason(&view, &mut vcx, "lamina::OpenGitConfig").as_deref(),
             Some(crate::remote_open::unavailable_reason().as_str()),
             "the config file is still only on the host"
+        );
+        assert_eq!(
+            blocked_reason(&view, &mut vcx, "lamina::UndoLastAction"),
+            None,
+            "undo runs on the helper; an empty reflog is not a block"
+        );
+        assert_eq!(
+            blocked_reason(&view, &mut vcx, "lamina::RedoLastAction"),
+            None,
+            "redo uses the same helper write as undo"
         );
 
         let _ = std::fs::remove_dir_all(&scratch);
