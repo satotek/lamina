@@ -725,13 +725,17 @@ impl RepoView {
     }
 
     /// Opens a repository-relative `path` in the editor, at `line` when known.
+    ///
+    /// A remote tab has no local checkout: the file is copied out of the
+    /// selected revision first and the editor opens that read-only copy.
     pub(crate) fn open_file_in_editor(
         &mut self,
         path: &str,
         line: Option<u32>,
         cx: &mut Context<Self>,
     ) {
-        if self.refuse_if_ssh(cx) {
+        if self.is_ssh() {
+            self.open_remote_copy_in_editor(path, line, cx);
             return;
         }
         let Some(dir) = self.work_dir() else {
