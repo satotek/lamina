@@ -753,9 +753,20 @@ impl Workspace {
     }
 
     /// The helper resolved `~`, so the tab and the recent list keep that path.
-    pub(crate) fn note_remote_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    /// Records where the remote tab owned by `view` lives. The connection can
+    /// finish while another tab is in front, so the slot is found by its view
+    /// rather than by which tab is active.
+    pub(crate) fn note_remote_path(
+        &mut self,
+        view: gpui::EntityId,
+        path: PathBuf,
+        cx: &mut Context<Self>,
+    ) {
         if let Content::Tabs(deck) = &mut self.content
-            && let Some(TabSlot::Repo(slot)) = deck.active_mut()
+            && let Some(slot) = deck.items_mut().iter_mut().find_map(|slot| match slot {
+                TabSlot::Repo(slot) if slot.view.entity_id() == view => Some(slot),
+                _ => None,
+            })
         {
             slot.path = Some(path.clone());
         }

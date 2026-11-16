@@ -257,7 +257,17 @@ impl RepoView {
         else {
             return;
         };
-        workspace.update(cx, |workspace, cx| workspace.note_remote_path(path, cx));
+        // This runs inside this view's own update, and redrawing the tab
+        // strip notifies the active tab's view, which is this one when the
+        // connection finishes in front. Updating the workspace here would
+        // lease this view a second time and panic, so wait until the current
+        // update has returned.
+        let view = cx.entity_id();
+        cx.defer(move |cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.note_remote_path(view, path, cx)
+            });
+        });
     }
 
     /// Leaves the loading page once the first history chunk is on screen.
