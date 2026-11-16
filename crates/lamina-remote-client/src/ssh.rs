@@ -404,10 +404,76 @@ pub(crate) fn ssh_argv(
     host: &str,
     remote_args: &[String],
 ) -> Vec<std::ffi::OsString> {
-    let mut argv = Vec::with_capacity(16 + remote_args.len());
+    let quoted: Vec<std::ffi::OsString> = remote_args
+        .iter()
+        .map(|arg| shell_quote(arg).into())
+        .collect();
+    ssh_argv_with(program, port, host, Tty::None, &quoted)
+}
+
+/// The local `ssh` argv for an interactive login shell in `repo_path`.
+///
+/// The connection half is the one [`ssh_argv`] gives the session, so a terminal
+/// reaches the host exactly the way the tab behind it does. It differs in
+/// asking for a tty and in the remote command, which arrives ready to run
+/// instead of as separate arguments to quote.
+pub fn terminal_argv(
+    program: &Path,
+    port: Option<u16>,
+    host: &str,
+    repo_path: &str,
+) -> Vec<std::ffi::OsString> {
+    ssh_argv_with(
+        program,
+        port,
+        host,
+        Tty::Interactive,
+        &[login_command(repo_path).into()],
+    )
+}
+
+/// The remote command a terminal runs: enter the repository and replace that
+/// shell with the host's own login shell, so job control and the prompt are the
+/// ones the user would get after typing `ssh` themselves.
+pub fn login_command(repo_path: &str) -> String {
+    format!("cd {} && exec \"$SHELL\" -l", cd_target(repo_path))
+}
+
+/// `~` and `~/rest` need the remote shell to expand the home directory, which
+/// only happens outside quotes. Everything else is single-quoted for it.
+fn cd_target(repo_path: &str) -> String {
+    if repo_path == "~" {
+        return "\"$HOME\"".to_owned();
+    }
+    match repo_path.strip_prefix("~/") {
+        Some(rest) => format!("\"$HOME\"/{}", shell_quote(rest)),
+        None => shell_quote(repo_path),
+    }
+}
+
+/// Whether the ssh process needs a remote pty. A shell needs one; the protocol
+/// transport must not have one, or the helper's stdout would carry terminal
+/// control sequences.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tty {
+    None,
+    Interactive,
+}
+
+fn ssh_argv_with(
+    program: &Path,
+    port: Option<u16>,
+    host: &str,
+    tty: Tty,
+    remote: &[std::ffi::OsString],
+) -> Vec<std::ffi::OsString> {
+    let mut argv = Vec::with_capacity(16 + remote.len());
     argv.push(program.as_os_str().to_os_string());
+    argv.push(match tty {
+        Tty::None => "-T".into(),
+        Tty::Interactive => "-t".into(),
+    });
     argv.extend([
-        "-T".into(),
         "-o".into(),
         format!("ConnectTimeout={}", CONNECT_TIMEOUT.as_secs()).into(),
         "-o".into(),
@@ -423,9 +489,7 @@ pub(crate) fn ssh_argv(
     }
     argv.push(host.into());
     argv.push("--".into());
-    for arg in remote_args {
-        argv.push(shell_quote(arg).into());
-    }
+    argv.extend(remote.iter().cloned());
     argv
 }
 
@@ -580,6 +644,90 @@ mod tests {
         assert!(!text.iter().any(|arg| arg == "-p"));
         assert_eq!(text[text.len() - 2], "'/srv/my repo'");
         assert_eq!(text[text.len() - 1], "'a'\\''b'");
+    }
+
+    /// Everything up to the remote command, minus the flag that decides whether
+    /// ssh allocates a tty.
+    fn connection_args(argv: &[std::ffi::OsString]) -> Vec<String> {
+        argv.iter()
+            .map(|part| part.to_string_lossy().into_owned())
+            .take_while(|arg| arg != "--")
+            .filter(|arg| arg != "-t" && arg != "-T")
+            .collect()
+    }
+
+    #[test]
+    fn the_terminal_reaches_the_host_the_way_the_session_does() {
+        let program = Path::new("ssh");
+        let session = ssh_argv(
+            program,
+            Some(2222),
+            "git@example.test",
+            &["/opt/lamina-remote".into(), "--stdio".into()],
+        );
+        let terminal = terminal_argv(program, Some(2222), "git@example.test", "/srv/repo");
+        assert_eq!(
+            connection_args(&session),
+            connection_args(&terminal),
+            "a terminal repeats the address, port and options of the session"
+        );
+        let shared = connection_args(&terminal);
+        assert_eq!(shared.last().map(String::as_str), Some("git@example.test"));
+        assert!(shared.iter().any(|arg| arg == "2222"));
+        assert!(shared.iter().any(|arg| arg == "ConnectTimeout=15"));
+
+        let terminal: Vec<String> = terminal
+            .iter()
+            .map(|part| part.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(terminal[1], "-t", "a shell needs a remote tty");
+        assert_eq!(
+            session[1].to_string_lossy(),
+            "-T",
+            "the protocol stream must stay free of terminal control sequences"
+        );
+    }
+
+    #[test]
+    fn the_login_command_quotes_the_repository_path() {
+        assert_eq!(
+            login_command("/srv/repo"),
+            "cd /srv/repo && exec \"$SHELL\" -l"
+        );
+        assert_eq!(
+            login_command("/srv/my repo"),
+            "cd '/srv/my repo' && exec \"$SHELL\" -l"
+        );
+        assert_eq!(
+            login_command("/srv/it's here"),
+            "cd '/srv/it'\\''s here' && exec \"$SHELL\" -l"
+        );
+        assert_eq!(
+            login_command("/srv/$HOME/`id`"),
+            "cd '/srv/$HOME/`id`' && exec \"$SHELL\" -l",
+            "a path is data, never a command the remote shell may expand"
+        );
+        assert_eq!(
+            login_command("~/my repo"),
+            "cd \"$HOME\"/'my repo' && exec \"$SHELL\" -l"
+        );
+        assert_eq!(login_command("~"), "cd \"$HOME\" && exec \"$SHELL\" -l");
+    }
+
+    #[test]
+    fn the_terminal_remote_command_is_one_argument() {
+        let argv = terminal_argv(Path::new("ssh"), None, "host", "/srv/my repo");
+        let text: Vec<String> = argv
+            .iter()
+            .map(|part| part.to_string_lossy().into_owned())
+            .collect();
+        assert!(!text.iter().any(|arg| arg == "-p"));
+        assert_eq!(text[text.len() - 2], "--");
+        assert_eq!(
+            text[text.len() - 1],
+            "cd '/srv/my repo' && exec \"$SHELL\" -l",
+            "sshd joins the arguments after `--` into one command line"
+        );
     }
 
     #[test]

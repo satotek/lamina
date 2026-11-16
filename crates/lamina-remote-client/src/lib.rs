@@ -22,7 +22,7 @@ mod ssh;
 pub use deploy::{HELPER_DIR_ENV, HELPER_OVERRIDE_ENV, InstallOptions, install_helper, target_for};
 pub use lamina_remote_protocol::is_supported_operation;
 pub use session::{CONNECTION_LOST, ClientConfig, RemoteSession, RemoteTarget, UNSUPPORTED};
-pub use ssh::{AskpassHandler, SshOptions};
+pub use ssh::{AskpassHandler, SshOptions, login_command, terminal_argv};
 
 #[cfg(test)]
 mod tests;
