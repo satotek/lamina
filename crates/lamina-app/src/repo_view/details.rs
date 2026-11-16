@@ -186,9 +186,6 @@ impl RepoView {
     /// Requests the selected commit's totals. The details pane keeps showing
     /// the selected file's counts until the answer arrives.
     pub(super) fn load_commit_stat(&mut self, commit: Option<Oid>, cx: &mut Context<Self>) {
-        if self.is_ssh() {
-            return;
-        }
         let previous = self.stat.begin(commit);
         if let (Some(session), Some(ticket)) = (self.session.as_ref(), previous) {
             session.cancel_query(ticket);
@@ -1021,9 +1018,8 @@ impl RepoView {
                                 menu = menu.item(
                                     PopupMenuItem::new(crate::ui::menu_label(
                                         t!("history.show_file_history").to_string(),
-                                        reason.as_deref(),
+                                        None::<&str>,
                                     ))
-                                    .disabled(ssh)
                                     .on_click(
                                         move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                                             let path = path.clone();
@@ -1039,9 +1035,8 @@ impl RepoView {
                                     menu = menu.item(
                                         PopupMenuItem::new(crate::ui::menu_label(
                                             t!("history.blame_at_commit").to_string(),
-                                            reason.as_deref(),
+                                            None::<&str>,
                                         ))
-                                        .disabled(ssh)
                                         .on_click(
                                             move |_: &ClickEvent,
                                                   window: &mut Window,

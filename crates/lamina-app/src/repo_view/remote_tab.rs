@@ -72,6 +72,9 @@ impl RepoView {
         // No local checkout, so the commit-graph offer and the config viewer
         // have nothing to key off.
         self.repository_key = None;
+        // The title-bar field is the same one a local tab uses. Creating it
+        // here means a connect that finishes later can search immediately.
+        self.search.init_input(window, cx);
         if self.active {
             self.publish_repository(cx);
         }

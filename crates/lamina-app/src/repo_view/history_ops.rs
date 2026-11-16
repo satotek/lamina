@@ -1435,11 +1435,12 @@ pub(crate) fn commit_menu(
         ));
     }
 
-    // Compare, worktrees and patch files are not on the helper. The remote
-    // reason wins over a merely busy repository, matching the tag entries.
+    // Two-way compare is a ticketed query. Creating a worktree and saving a
+    // patch still need this machine, so the remote reason wins over busy for
+    // those entries.
     let remote_reason = state.ssh.then(crate::remote_open::unavailable_reason);
     let busy_reason = state.busy().then(|| t!("branch.reason.busy").to_string());
-    let worktree_reason = remote_reason.clone().or(busy_reason);
+    let worktree_reason = remote_reason.or(busy_reason);
     let branch_blocked = state.blocked(HistoryAction::CreateBranch);
     let tag_blocked = state.blocked(HistoryAction::CreateTag);
     menu = menu.separator();
@@ -1499,7 +1500,6 @@ pub(crate) fn commit_menu(
         menu,
         commit,
         state.head,
-        remote_reason,
         shared.map(str::to_owned),
         entity,
         window,
@@ -1756,24 +1756,18 @@ fn reset_menu(
 }
 
 /// The "Compare" submenu: against HEAD and against the working tree.
-#[allow(clippy::too_many_arguments)]
 fn compare_menu(
     menu: PopupMenu,
     commit: Oid,
     head: Option<Oid>,
-    remote_reason: Option<String>,
     shared: Option<String>,
     entity: Entity<RepoView>,
     window: &mut Window,
     cx: &mut Context<PopupMenu>,
 ) -> PopupMenu {
     // A menu only opens with a session, so the repository is there.
-    // Compare queries are not on the helper, so the remote reason wins.
-    let head_blocked = remote_reason
-        .clone()
-        .or_else(|| super::compare::with_head_blocked(true, Some(commit), head));
-    let worktree_blocked =
-        remote_reason.or_else(|| super::compare::with_worktree_blocked(true, Some(commit)));
+    let head_blocked = super::compare::with_head_blocked(true, Some(commit), head);
+    let worktree_blocked = super::compare::with_worktree_blocked(true, Some(commit));
     menu.submenu(
         t!("history_ops.menu.compare").to_string(),
         window,
@@ -1841,12 +1835,7 @@ fn multi_commit_menu(
     // them all against, which the entry does not offer.
     if let [a, b] = multi.commits.as_slice() {
         // A menu only opens with a session, so the repository is there.
-        // Compare queries are not on the helper.
-        let blocked = if ssh {
-            Some(crate::remote_open::unavailable_reason())
-        } else {
-            super::compare::two_commit_blocked(true, &multi.commits)
-        };
+        let blocked = super::compare::two_commit_blocked(true, &multi.commits);
         let (a, b) = (*a, *b);
         menu = menu
             .item(
