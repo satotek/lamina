@@ -280,27 +280,66 @@ fn classify(error: &str) -> Failure {
     Failure::Other
 }
 
+/// git's line for a transport failure that says nothing about the cause; ssh
+/// printed the line above it, and that one names what actually went wrong.
+const GENERIC_REMOTE_FAILURE: &str = "could not read from remote repository";
+
+/// ssh's own explanations for a failed connection. git leaves them untagged
+/// above its generic fatal line, so the picker reaches back for them.
+const TRANSPORT_CAUSES: [&str; 9] = [
+    "permission denied",
+    "host key verification failed",
+    "could not resolve hostname",
+    "connection refused",
+    "connection timed out",
+    "no route to host",
+    "connection closed by",
+    "connection reset by",
+    "network is unreachable",
+];
+
 /// The one line of git's stderr worth reporting.
 ///
 /// Progress counters and `hint:` lines are noise in a notification. A push the
 /// remote refused names the branch and the reason on its `! [rejected]` line,
 /// which is more useful than the generic `error: failed to push some refs`;
 /// for everything else git names the problem on a `fatal:`/`error:` line.
+///
+/// An ssh failure is the exception: git reports it as `fatal: Could not read
+/// from remote repository`, which says nothing a person can act on. The cause
+/// (`Permission denied (publickey)`, a host key mismatch, DNS, a port that
+/// refuses connections) is the untagged line ssh printed above it.
 fn first_error_line(error: &str) -> String {
-    let lines = || {
-        error
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.is_empty() && !line.starts_with("remote:"))
-    };
+    let lines: Vec<&str> = error
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("remote:"))
+        .collect();
     for prefix in ["! [rejected]", "! [remote rejected]", "fatal:", "error:"] {
-        if let Some(line) = lines().find(|line| line.starts_with(prefix)) {
-            return squash(line);
+        if let Some(index) = lines.iter().position(|line| line.starts_with(prefix)) {
+            if lines[index]
+                .to_ascii_lowercase()
+                .contains(GENERIC_REMOTE_FAILURE)
+                && let Some(cause) = lines[..index]
+                    .iter()
+                    .rev()
+                    .find(|line| explains_transport(line))
+                    .copied()
+            {
+                return squash(cause);
+            }
+            return squash(lines[index]);
         }
     }
-    lines()
+    lines
+        .iter()
         .find(|line| !line.starts_with("hint:"))
-        .map_or_else(|| t!("remote.git_failed").to_string(), squash)
+        .map_or_else(|| t!("remote.git_failed").to_string(), |line| squash(line))
+}
+
+fn explains_transport(line: &str) -> bool {
+    let line = line.to_ascii_lowercase();
+    TRANSPORT_CAUSES.iter().any(|cause| line.contains(cause))
 }
 
 /// git pads the rejected-ref line into columns; a notification has one line.
@@ -1265,26 +1304,64 @@ mod tests {
     }
 
     #[test]
-    fn the_first_meaningful_error_line_is_the_one_reported() {
+    fn the_most_useful_error_line_is_the_one_reported() {
         let push = "To /tmp/origin.git\n ! [rejected]        main -> main (fetch first)\nerror: failed to push some refs to '/tmp/origin.git'\nhint: Updates were rejected because the remote contains work\nhint: See the 'Note about fast-forwards' section";
-        assert_eq!(
-            first_error_line(push),
-            "! [rejected] main -> main (fetch first)",
-            "the rejected-ref line names the branch and the reason"
-        );
-
-        let auth =
-            "remote: progress\nfatal: Authentication failed for 'https://example.com/repo.git'";
-        assert_eq!(
-            first_error_line(auth),
-            "fatal: Authentication failed for 'https://example.com/repo.git'"
-        );
-
-        assert_eq!(
-            first_error_line("  \n only chatter here \n"),
-            "only chatter here"
-        );
-        assert_eq!(first_error_line(""), "git failed");
+        let cases: &[(&str, &str)] = &[
+            (push, "! [rejected] main -> main (fetch first)"),
+            (
+                "remote: progress\nfatal: Authentication failed for 'https://example.com/repo.git'",
+                "fatal: Authentication failed for 'https://example.com/repo.git'",
+            ),
+            // `unable to access` already carries the cause git found.
+            (
+                "fatal: unable to access 'https://example.com/repo.git/': Could not resolve host: example.com",
+                "fatal: unable to access 'https://example.com/repo.git/': Could not resolve host: example.com",
+            ),
+            // ssh's cause arrives untagged above git's generic fatal line.
+            (
+                "azureuser@127.0.0.1: Permission denied (publickey,password).\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.",
+                "azureuser@127.0.0.1: Permission denied (publickey,password).",
+            ),
+            (
+                "Host key verification failed.\nfatal: Could not read from remote repository.",
+                "Host key verification failed.",
+            ),
+            (
+                "ssh: Could not resolve hostname nope.invalid: nodename nor servname provided, or not known\nfatal: Could not read from remote repository.",
+                "ssh: Could not resolve hostname nope.invalid: nodename nor servname provided, or not known",
+            ),
+            (
+                "ssh: connect to host 127.0.0.1 port 22: Connection refused\nfatal: Could not read from remote repository.",
+                "ssh: connect to host 127.0.0.1 port 22: Connection refused",
+            ),
+            (
+                "ssh: connect to host 10.0.0.1 port 22: Connection timed out\nfatal: Could not read from remote repository.",
+                "ssh: connect to host 10.0.0.1 port 22: Connection timed out",
+            ),
+            (
+                "ssh: connect to host 10.0.0.1 port 22: No route to host\nfatal: Could not read from remote repository.",
+                "ssh: connect to host 10.0.0.1 port 22: No route to host",
+            ),
+            (
+                "ssh_exchange_identification: Connection closed by remote host\nfatal: Could not read from remote repository.",
+                "ssh_exchange_identification: Connection closed by remote host",
+            ),
+            // Nothing above the generic line explains it: keep git's own words.
+            (
+                "fatal: Could not read from remote repository.",
+                "fatal: Could not read from remote repository.",
+            ),
+            ("  \n only chatter here \n", "only chatter here"),
+            ("hint: nothing but guidance", "git failed"),
+            ("", "git failed"),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(
+                first_error_line(error),
+                *expected,
+                "wrong line for this git output:\n{error}"
+            );
+        }
     }
 
     #[test]
