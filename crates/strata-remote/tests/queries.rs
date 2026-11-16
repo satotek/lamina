@@ -737,6 +737,73 @@ fn assert_three_way(repo: &TestRepo, remote: &RemoteSession, base: Oid, left: Oi
     );
 }
 
+/// Root, a mixed edit, a rename and a merge, so the count is not just "files
+/// in the commit" and still matches a first-parent walk.
+fn changed_count_fixture() -> (TestRepo, [Oid; 4]) {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "alpha\n");
+    repo.write("dir/b.txt", "beta\n");
+    repo.write("dir/sub/c.txt", "gamma\n");
+    let root = repo.commit("root");
+
+    repo.write("a.txt", "alpha updated\n");
+    repo.write("added.txt", "new\n");
+    repo.git(&["rm", "-q", "dir/b.txt"]);
+    let normal = repo.commit("modify add delete");
+
+    std::fs::create_dir_all(repo.path().join("moved")).expect("create moved");
+    repo.git(&["mv", "dir/sub/c.txt", "moved/c.txt"]);
+    let rename = repo.commit("rename file");
+
+    repo.git(&["checkout", "-q", "-b", "side", &normal.to_string()]);
+    repo.write("side1.txt", "side one\n");
+    repo.write("side2.txt", "side two\n");
+    repo.commit("side work");
+    repo.git(&["checkout", "-q", "main"]);
+    repo.git(&["merge", "-q", "--no-ff", "-m", "merge side", "side"]);
+    let merge = repo.head();
+    (repo, [root, normal, rename, merge])
+}
+
+fn assert_changed_counts(repo: &TestRepo, remote: &RemoteSession, commits: [Oid; 4]) {
+    let local = repo.open();
+    let reader = remote.reader();
+    for commit in commits {
+        assert_eq!(
+            local
+                .commit_changed_file_count(commit)
+                .expect("local count"),
+            reader
+                .commit_changed_file_count(commit)
+                .expect("remote count"),
+            "changed-file count diverged for {commit}"
+        );
+    }
+}
+
+#[test]
+fn changed_file_counts_match_a_local_repository() {
+    let (repo, commits) = changed_count_fixture();
+    let (remote, _events, server) = connect_in_process(&repo);
+    assert_changed_counts(&repo, &remote, commits);
+    drop(remote);
+    server
+        .join()
+        .expect("server thread")
+        .expect("serve returns cleanly");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_spawned_helper_matches_changed_file_counts() {
+    let (repo, commits) = changed_count_fixture();
+    let (remote, _events, mut child) = spawn_helper(&repo);
+    assert_changed_counts(&repo, &remote, commits);
+    drop(remote);
+    let status = child.wait().expect("wait for helper");
+    assert!(status.success(), "helper exited with {status}");
+}
+
 #[test]
 fn three_way_reads_match_a_local_repository() {
     let (repo, base, left, right) = three_way_fixture();

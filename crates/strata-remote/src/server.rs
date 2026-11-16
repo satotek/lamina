@@ -311,6 +311,7 @@ fn is_blocking_read(request: &Request) -> bool {
             | Request::ThreeWayRoles { .. }
             | Request::ThreeWaySideTree { .. }
             | Request::CompareSideBlob { .. }
+            | Request::CommitChangedFileCount { .. }
     )
 }
 
@@ -460,7 +461,8 @@ fn answer_control(shared: &Arc<ServerShared>, chunk: usize, request: Request) ->
         | Request::ThreeWayBlobs { .. }
         | Request::ThreeWayRoles { .. }
         | Request::ThreeWaySideTree { .. }
-        | Request::CompareSideBlob { .. } => {
+        | Request::CompareSideBlob { .. }
+        | Request::CommitChangedFileCount { .. } => {
             // `dispatch` sends these to a worker. Reaching here is a bug.
             Response::Error(RemoteError::other(
                 "internal error: a read was handled on the request loop",
@@ -717,6 +719,21 @@ fn answer_read(reader: &Arc<dyn strata_core::session::RepoReader>, request: Requ
             match reader.compare_side_blob(side, &path) {
                 Ok(data) => Response::CompareSideBlob { data },
                 Err(error) => Response::Error(remote_error(error)),
+            }
+        }
+        Request::CommitChangedFileCount { commit } => {
+            let result = proto::ObjectId::try_into(commit)
+                .map_err(protocol_error)
+                .and_then(|commit| {
+                    reader
+                        .commit_changed_file_count(commit)
+                        .map_err(remote_error)
+                });
+            match result {
+                Ok(count) => Response::CommitChangedFileCount {
+                    count: count as u64,
+                },
+                Err(error) => Response::Error(error),
             }
         }
         other => Response::Error(RemoteError::other(format!(

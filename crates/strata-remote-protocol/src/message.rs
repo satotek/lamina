@@ -147,6 +147,12 @@ pub enum Request {
         side: RepoCompareSideDto,
         path: String,
     },
+    /// Paths `commit` changed against its first parent. A root or a shallow
+    /// boundary is counted against the empty tree. This is not the ticketed
+    /// commit stat: it never sends blob bytes.
+    CommitChangedFileCount {
+        commit: ObjectId,
+    },
 }
 
 /// A direct answer to one [`Request`].
@@ -231,6 +237,11 @@ pub enum Response {
     },
     CompareSideBlob {
         data: Option<Vec<u8>>,
+    },
+    /// `count` is a host `usize`. It travels as `u64` so the width does not
+    /// depend on the machine that encoded it.
+    CommitChangedFileCount {
+        count: u64,
     },
 }
 

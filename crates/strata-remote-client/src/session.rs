@@ -1353,8 +1353,15 @@ impl RepoReader for RemoteReader {
         Err(Error::other(UNSUPPORTED))
     }
 
-    fn commit_changed_file_count(&self, _commit: Oid) -> Result<usize> {
-        Err(Error::other(UNSUPPORTED))
+    fn commit_changed_file_count(&self, commit: Oid) -> Result<usize> {
+        match self.call(Request::CommitChangedFileCount {
+            commit: object_id(commit),
+        })? {
+            Response::CommitChangedFileCount { count } => {
+                usize::try_from(count).map_err(|error| Error::other(error.to_string()))
+            }
+            other => Err(unexpected(other)),
+        }
     }
 
     fn branch_upstream_target(&self, _branch: &str) -> Result<Option<UpstreamTarget>> {
