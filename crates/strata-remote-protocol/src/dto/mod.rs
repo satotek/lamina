@@ -4,6 +4,7 @@
 //! are deliberately separate: deriving serde on the core types would freeze
 //! their public shape into the protocol.
 
+mod config;
 mod diff;
 mod graph;
 mod lfs;
@@ -12,6 +13,10 @@ mod query;
 mod repo;
 mod three_way;
 
+pub use config::{
+    ConfigChangeDto, ConfigEntryDto, ConfigFilePathsDto, ConfigIdentityDto, ConfigIncludeDto,
+    ConfigLayerDto, ConfigOriginDto, ConfigValueDto, GitConfigDto, IncludeConditionKindDto,
+};
 pub use diff::{
     DiffLineDto, DiffOptionsDto, DiffRequestDto, DiffViewDto, FileDiffDto, GapDto,
     HighlightKindDto, HighlightSpanDto, HunkDto, ImageDiffDto, ImageFormatDto, ImageKindDto,

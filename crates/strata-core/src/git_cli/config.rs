@@ -16,7 +16,7 @@ use std::hash::{Hash, Hasher};
 use std::io::{ErrorKind, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::diff::{DiffOptions, FileDiff, diff_text};
 use crate::repo::{ConfigLayer, validate_key_name, validate_value};
@@ -149,6 +149,54 @@ impl ConfigPreview {
     pub fn changed(&self) -> bool {
         self.before != self.after
     }
+
+    /// The stamp a later [`Git::config_apply_stamp`] must present.
+    ///
+    /// A remote helper returns this instead of the file. The app sends it
+    /// back with the write, and the helper compares it to the file it still
+    /// has. The app never opens that file itself.
+    pub fn stamp(&self) -> ConfigStamp {
+        self.stamp.to_public()
+    }
+
+    /// A preview whose texts were produced somewhere else.
+    ///
+    /// `stamp` is the one [`Self::stamp`] will hand back. Applying it still
+    /// belongs to the process that can see the file.
+    pub fn from_displayed(
+        write: ConfigWrite,
+        command: String,
+        before: String,
+        after: String,
+        stamp: ConfigStamp,
+    ) -> Self {
+        let diff = diff_text(
+            before.as_bytes(),
+            after.as_bytes(),
+            &DiffOptions {
+                context_lines: PREVIEW_CONTEXT,
+                ignore_whitespace: false,
+            },
+        );
+        Self {
+            write,
+            command,
+            before,
+            after,
+            diff,
+            stamp: FileStamp::from_public(&stamp),
+        }
+    }
+}
+
+/// What a preview recorded about the file, without a [`SystemTime`] that
+/// would not round-trip across a process boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigStamp {
+    pub len: u64,
+    pub hash: u64,
+    pub modified_secs: Option<u64>,
+    pub modified_nanos: Option<u32>,
 }
 
 /// What the preview saw, so a save can prove the file did not move under it.
@@ -172,6 +220,32 @@ impl FileStamp {
             modified,
             len: contents.len() as u64,
             hash: hasher.finish(),
+        }
+    }
+
+    fn to_public(&self) -> ConfigStamp {
+        let (modified_secs, modified_nanos) = self
+            .modified
+            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| (Some(duration.as_secs()), Some(duration.subsec_nanos())))
+            .unwrap_or((None, None));
+        ConfigStamp {
+            len: self.len,
+            hash: self.hash,
+            modified_secs,
+            modified_nanos,
+        }
+    }
+
+    fn from_public(stamp: &ConfigStamp) -> Self {
+        let modified = match (stamp.modified_secs, stamp.modified_nanos) {
+            (Some(secs), Some(nanos)) => Some(UNIX_EPOCH + Duration::new(secs, nanos)),
+            _ => None,
+        };
+        Self {
+            modified,
+            len: stamp.len,
+            hash: stamp.hash,
         }
     }
 }
@@ -238,6 +312,25 @@ impl Git {
         self.run_config(&args, write)
     }
 
+    /// Write `write` when the file still matches `expected`.
+    ///
+    /// The same command as [`Self::config_apply`]. The stamp comes from a
+    /// preview that may have run in this process earlier, so a caller that
+    /// does not hold the [`ConfigPreview`] can still refuse a file that
+    /// moved. The bytes are still written by `git config`, not by this
+    /// process.
+    pub fn config_apply_stamp(&self, write: &ConfigWrite, expected: &ConfigStamp) -> Result<()> {
+        write.validate()?;
+        if FileStamp::of(&write.target.path)?.to_public() != *expected {
+            return Err(Error::other(format!(
+                "{} changed since the preview; preview the write again",
+                write.target.path.display()
+            )));
+        }
+        let args = config_args(&write.target.path, write);
+        self.run_config(&args, write)
+    }
+
     /// Run one configuration command, treating "key not found" on an unset as
     /// success: the wanted state is already there.
     fn run_config(&self, args: &[String], write: &ConfigWrite) -> Result<()> {
@@ -254,6 +347,16 @@ impl Git {
         }
         Err(command_error(args, &output))
     }
+}
+
+/// Reads and writes configuration through whatever holds the files.
+///
+/// A local tab uses [`Git`] directly. A remote tab uses the helper, which
+/// runs the same `git config` commands on the host.
+pub trait GitConfigAccess: Send + Sync {
+    fn load_config(&self) -> Result<crate::repo::GitConfig>;
+    fn preview_config(&self, write: &ConfigWrite) -> Result<ConfigPreview>;
+    fn apply_config(&self, preview: &ConfigPreview) -> Result<()>;
 }
 
 /// The `git config --file <file> …` arguments for `write`.

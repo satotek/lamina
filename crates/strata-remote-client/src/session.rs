@@ -146,6 +146,10 @@ struct Inner {
     /// Operations whose `OperationFinished` has not arrived. A lost connection
     /// finishes each of them so the UI does not stay busy.
     inflight: Mutex<HashSet<OperationId>>,
+    /// Callers blocked on one operation's outcome. The UI follows events; a
+    /// caller that has to return a `Result` (the config editor's write) waits
+    /// here instead of reading the event stream.
+    operation_waiters: Mutex<HashMap<OperationId, Sender<Option<String>>>>,
     /// Queries whose terminal event has not arrived. Cancel removes the ticket
     /// before the cancel frame is written, so a late result is dropped. A lost
     /// connection fails each one that is still here.
@@ -259,6 +263,7 @@ impl RemoteSession {
             diff_streams: Mutex::new(HashMap::new()),
             operation_streams: Mutex::new(HashMap::new()),
             inflight: Mutex::new(HashSet::new()),
+            operation_waiters: Mutex::new(HashMap::new()),
             queries: Mutex::new(HashSet::new()),
             query_streams: Mutex::new(HashMap::new()),
             next_stream: AtomicU16::new(2),
@@ -555,6 +560,13 @@ impl Inner {
             let _park = lock(&self.park);
             self.wake.notify_all();
         }
+        // A caller blocked on a write has no other way to learn the link died.
+        let waiters = std::mem::take(&mut *lock(&self.operation_waiters));
+        for (id, waiter) in waiters {
+            if inflight.contains(&id) {
+                let _ = waiter.send(Some(message.clone()));
+            }
+        }
         // A drop already set `closing`: the app closed the session on purpose,
         // and a LoadFailed for that would look like the repository broke.
         if self.closing.load(Ordering::SeqCst) {
@@ -691,6 +703,9 @@ impl Inner {
     /// can both try; the second one finds the id already gone.
     fn finish_operation(&self, id: OperationId, error: Option<String>) {
         if lock(&self.inflight).remove(&id) {
+            if let Some(waiter) = lock(&self.operation_waiters).remove(&id) {
+                let _ = waiter.send(error.clone());
+            }
             (self.events)(SessionEvent::OperationFinished { id, error });
         }
     }
@@ -1079,6 +1094,12 @@ impl RepositorySession for RemoteSession {
             root: self.inner.root.clone(),
             log: Arc::new(CommandLog::new()),
         })
+    }
+
+    fn git_config_access(&self) -> Option<Arc<dyn strata_core::git_cli::GitConfigAccess>> {
+        Some(Arc::new(RemoteConfig {
+            inner: Arc::downgrade(&self.inner),
+        }))
     }
 
     fn snapshot(&self) -> Arc<RepoSnapshot> {
@@ -1610,6 +1631,105 @@ impl GitExtras for RemoteExtras {
 
     fn format_patch(&self, _commit: Oid) -> Result<Vec<u8>> {
         Err(Error::other(UNSUPPORTED))
+    }
+}
+
+/// The host's configuration, read and written by the helper.
+///
+/// The preview runs on the side that owns the file, so the app only ever holds
+/// texts and a stamp. The write is the same `Run` operation a local tab
+/// submits, which is what keeps one path for hooks and error reporting.
+struct RemoteConfig {
+    inner: std::sync::Weak<Inner>,
+}
+
+impl RemoteConfig {
+    fn session(&self) -> Result<Arc<Inner>> {
+        self.inner
+            .upgrade()
+            .ok_or_else(|| Error::other("the remote session was closed"))
+    }
+}
+
+impl strata_core::git_cli::GitConfigAccess for RemoteConfig {
+    fn load_config(&self) -> Result<strata_core::repo::GitConfig> {
+        match self.session()?.call(Request::GitConfig)? {
+            Response::GitConfig { config } => (*config)
+                .try_into()
+                .map_err(|error: proto::ProtocolError| Error::other(error.to_string())),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    fn preview_config(
+        &self,
+        write: &strata_core::git_cli::ConfigWrite,
+    ) -> Result<strata_core::git_cli::ConfigPreview> {
+        write.validate()?;
+        let path = write
+            .target
+            .path
+            .to_str()
+            .ok_or_else(|| Error::other("the config path is not unicode"))?
+            .to_owned();
+        let request = Request::PreviewGitConfig {
+            path,
+            layer: write.target.layer.into(),
+            key: write.key.clone(),
+            change: proto::ConfigChangeDto::from(&write.change),
+        };
+        match self.session()?.call(request)? {
+            Response::ConfigPreview {
+                command,
+                before,
+                after,
+                len,
+                hash,
+                modified_secs,
+                modified_nanos,
+            } => Ok(strata_core::git_cli::ConfigPreview::from_displayed(
+                write.clone(),
+                command,
+                before,
+                after,
+                strata_core::git_cli::ConfigStamp {
+                    len,
+                    hash,
+                    modified_secs,
+                    modified_nanos,
+                },
+            )),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    fn apply_config(&self, preview: &strata_core::git_cli::ConfigPreview) -> Result<()> {
+        let inner = self.session()?;
+        let stamp = preview.stamp();
+        let operation = Operation::WriteGitConfig {
+            path: preview.write.target.path.clone(),
+            layer: preview.write.target.layer,
+            key: preview.write.key.clone(),
+            change: preview.write.change.clone(),
+            len: stamp.len,
+            hash: stamp.hash,
+            modified_secs: stamp.modified_secs,
+            modified_nanos: stamp.modified_nanos,
+        };
+        let operation =
+            OperationDto::try_from(&operation).map_err(|error| Error::other(error.to_string()))?;
+        let id = OperationId(inner.next_operation.fetch_add(1, Ordering::SeqCst) + 1);
+        let (tx, rx) = mpsc::channel();
+        lock(&inner.operation_waiters).insert(id, tx);
+        if let Err(rejected) = inner.send_operation(id, operation) {
+            lock(&inner.operation_waiters).remove(&id);
+            return Err(rejected.error);
+        }
+        match rx.recv() {
+            Ok(None) => Ok(()),
+            Ok(Some(message)) => Err(Error::other(message)),
+            Err(_) => Err(inner.lost_error()),
+        }
     }
 }
 

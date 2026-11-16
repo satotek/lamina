@@ -970,3 +970,86 @@ fn duplex() -> (DuplexRead, DuplexWrite, DuplexRead, DuplexWrite) {
         DuplexWrite { tx: server_tx },
     )
 }
+
+#[test]
+fn a_config_write_only_names_a_file_the_helper_lists() {
+    use strata_core::git_cli::{
+        ConfigChange, ConfigPreview, ConfigStamp, ConfigTarget, ConfigWrite,
+    };
+    use strata_core::repo::ConfigLayer;
+
+    let repo = TestRepo::new();
+    identity(&repo);
+    repo.write("README.md", "one\n");
+    repo.commit("base");
+    let (remote, _events, server) = serve(&repo);
+    let access = remote.git_config_access().expect("config access");
+    let config = access.load_config().expect("load config");
+    let local = config.files.local.clone();
+
+    let write_for = |path: std::path::PathBuf| {
+        ConfigWrite::new(
+            ConfigTarget::new(path, ConfigLayer::Local),
+            "user.name",
+            ConfigChange::Set("Mallory".into()),
+        )
+    };
+    assert!(
+        access.preview_config(&write_for(local.clone())).is_ok(),
+        "the repository's own config file is writable"
+    );
+
+    let cases = [
+        (
+            repo.path().join("README.md"),
+            "not one this repository writes",
+        ),
+        (std::path::PathBuf::from("config"), "absolute"),
+        (std::path::PathBuf::from(""), "no target file"),
+        (std::path::PathBuf::from("/tmp/a\nb"), "control"),
+        (
+            std::path::PathBuf::from(format!(
+                "{}/../config",
+                local.parent().expect("config parent").display()
+            )),
+            "..",
+        ),
+    ];
+    for (path, needle) in cases {
+        let error = access
+            .preview_config(&write_for(path))
+            .expect_err("the path must be refused")
+            .to_string();
+        assert!(error.contains(needle), "expected {needle:?} in {error}");
+    }
+
+    // The save takes a separate path through `Run`, so it has to refuse an
+    // outside file as well. A hand-built preview is enough: the path check
+    // runs before the stamp is compared.
+    let preview = ConfigPreview::from_displayed(
+        write_for(repo.path().join("README.md")),
+        "git config".into(),
+        String::new(),
+        String::new(),
+        ConfigStamp {
+            len: 0,
+            hash: 0,
+            modified_secs: None,
+            modified_nanos: None,
+        },
+    );
+    let error = access
+        .apply_config(&preview)
+        .expect_err("the save must refuse the path")
+        .to_string();
+    assert!(error.contains("config file"), "{error}");
+    assert_eq!(
+        repo.git(&["config", "--local", "--get", "user.name"])
+            .trim(),
+        "Strata Test",
+        "a refused path leaves the config alone"
+    );
+
+    drop(remote);
+    server.join().expect("server thread");
+}

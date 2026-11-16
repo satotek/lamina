@@ -47,7 +47,7 @@ pub use compare::{CompareFile, CompareMode, Comparison};
 pub use config::{
     ConfigEntry, ConfigFilePaths, ConfigIdentity, ConfigInclude, ConfigLayer, ConfigOrigin,
     ConfigSources, ConfigValue, GitConfig, IncludeConditionKind, ValueRule, WELL_KNOWN_KEYS,
-    WellKnownKey, validate_key_name, validate_value, well_known_key,
+    WellKnownKey, require_writable_config_file, validate_key_name, validate_value, well_known_key,
 };
 pub use conflicts::MergeTool;
 pub use content_search::{

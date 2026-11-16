@@ -362,6 +362,15 @@ pub trait RepositorySession: Send {
     fn watches_filesystem(&self) -> bool {
         true
     }
+
+    /// Configuration reads and writes, when this session can reach the files.
+    ///
+    /// A local tab keeps using [`crate::git_cli::Git`] on its own path. A
+    /// remote tab returns the helper, so the window does not open a remote
+    /// path as if it were local.
+    fn git_config_access(&self) -> Option<Arc<dyn crate::git_cli::GitConfigAccess>> {
+        None
+    }
 }
 
 impl RepositorySession for Session {

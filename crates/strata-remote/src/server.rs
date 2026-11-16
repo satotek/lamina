@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 
+use strata_core::git_cli::{ConfigTarget, ConfigWrite, Git};
 use strata_core::session::{DiffTicket, QueryTicket, RepositorySession, Session, SessionEvent};
 use strata_remote_protocol::{
     self as proto, CommitDto, DiffRequestDto, DiffViewDto, Event, GraphRowDto, HeadDto, Message,
@@ -363,18 +364,32 @@ fn is_blocking_read(request: &Request) -> bool {
             | Request::ReadLfsObject { .. }
             | Request::LfsAvailable
             | Request::LfsLocks
+            | Request::GitConfig
+            | Request::PreviewGitConfig { .. }
     )
 }
 
-fn session_services(
-    shared: &ServerShared,
-) -> Result<
-    (
-        Arc<dyn strata_core::session::RepoReader>,
-        Arc<dyn strata_core::session::GitExtras>,
-    ),
-    Response,
-> {
+/// The path the helper resolves host-local configuration from.
+///
+/// A config path is relative to this checkout, so it comes from the reader
+/// and never from a request.
+fn repository_path(reader: &Arc<dyn strata_core::session::RepoReader>) -> PathBuf {
+    reader
+        .workdir()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| reader.git_dir().to_path_buf())
+}
+
+/// The two repository handles a blocking read needs.
+///
+/// Named because the pair appears in signatures and would otherwise read as
+/// one nested type.
+type SessionServices = (
+    Arc<dyn strata_core::session::RepoReader>,
+    Arc<dyn strata_core::session::GitExtras>,
+);
+
+fn session_services(shared: &ServerShared) -> Result<SessionServices, Response> {
     let guard = lock(&shared.session);
     match guard.as_ref() {
         Some(session) => Ok((session.reader(), session.git_extras())),
@@ -527,7 +542,9 @@ fn answer_control(shared: &Arc<ServerShared>, chunk: usize, request: Request) ->
         | Request::UsesLfs
         | Request::ReadLfsObject { .. }
         | Request::LfsAvailable
-        | Request::LfsLocks => {
+        | Request::LfsLocks
+        | Request::GitConfig
+        | Request::PreviewGitConfig { .. } => {
             // `dispatch` sends these to a worker. Reaching here is a bug.
             Response::Error(RemoteError::other(
                 "internal error: a read was handled on the request loop",
@@ -871,6 +888,48 @@ fn answer_read(
             },
             Err(error) => Response::Error(remote_error(error)),
         },
+        Request::GitConfig => {
+            let root = repository_path(reader);
+            match strata_core::repo::GitConfig::load(&root) {
+                Ok(config) => Response::GitConfig {
+                    config: Box::new(proto::GitConfigDto::from(&config)),
+                },
+                Err(error) => Response::Error(remote_error(error)),
+            }
+        }
+        Request::PreviewGitConfig {
+            path,
+            layer,
+            key,
+            change,
+        } => {
+            let root = repository_path(reader);
+            let layer: strata_core::repo::ConfigLayer = layer.into();
+            let change: strata_core::git_cli::ConfigChange = change.into();
+            let target = PathBuf::from(&path);
+            // The editor may only write a file this repository already reads.
+            // Without the check `git config --file` would create or edit
+            // whatever path a request named.
+            if let Err(error) = strata_core::repo::require_writable_config_file(&root, &target) {
+                return Response::Error(remote_error(error));
+            }
+            let write = ConfigWrite::new(ConfigTarget::new(target, layer), key, change);
+            match Git::new(root).config_preview(&write) {
+                Ok(preview) => {
+                    let stamp = preview.stamp();
+                    Response::ConfigPreview {
+                        command: preview.command,
+                        before: preview.before,
+                        after: preview.after,
+                        len: stamp.len,
+                        hash: stamp.hash,
+                        modified_secs: stamp.modified_secs,
+                        modified_nanos: stamp.modified_nanos,
+                    }
+                }
+                Err(error) => Response::Error(remote_error(error)),
+            }
+        }
         other => Response::Error(RemoteError::other(format!(
             "internal error: {other:?} is not a repository read"
         ))),

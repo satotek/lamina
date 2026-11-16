@@ -61,22 +61,20 @@ impl RepoView {
         })
     }
 
-    /// Commands that need this machine: the config file, a terminal, or an
-    /// editor. A remote tab can run the last two against the host through
-    /// `ssh`, but only while the connection is up.
+    /// Commands that need this machine: a terminal or an editor. A remote tab
+    /// can run both against the host through `ssh`, but only while the
+    /// connection is up. The config viewer needs no local checkout: a connected
+    /// tab reads and writes the host's files through the helper.
     fn block_local_machine_commands(&self, map: &mut AvailabilityMap) {
         if !self.is_ssh() {
             return;
         }
-        map.block(
-            "strata::OpenGitConfig",
-            Some(crate::remote_open::unavailable_reason()),
-        );
         let disconnected = if self.remote_connected() {
             None
         } else {
             Some(t!("title_bar.not_connected").to_string())
         };
+        map.block("strata::OpenGitConfig", disconnected.clone());
         map.block("strata::OpenInEditor", disconnected.clone());
         // Without the embedded terminal nothing can run `ssh` for the user, so
         // the external terminal stays closed on a remote tab in that build.
@@ -413,11 +411,10 @@ mod tests {
         });
         let view = window.root(cx).expect("the window's root view");
         let mut vcx = VisualTestContext::from_window(window.into(), cx);
-        let reason = crate::remote_open::unavailable_reason();
         assert_eq!(
             blocked_reason(&view, &mut vcx, "strata::OpenGitConfig").as_deref(),
-            Some(reason.as_str()),
-            "the config file lives on the host"
+            Some(t!("title_bar.not_connected").as_ref()),
+            "the config window needs the host's session"
         );
         #[cfg(feature = "terminal")]
         let terminal = Some(t!("title_bar.not_connected").to_string());
@@ -538,9 +535,9 @@ mod tests {
             None
         );
         assert_eq!(
-            blocked_reason(&view, &mut vcx, "strata::OpenGitConfig").as_deref(),
-            Some(crate::remote_open::unavailable_reason().as_str()),
-            "the config file is still only on the host"
+            blocked_reason(&view, &mut vcx, "strata::OpenGitConfig"),
+            None,
+            "a connected tab reads and writes the host's config"
         );
         assert_eq!(
             blocked_reason(&view, &mut vcx, "strata::UndoLastAction"),
