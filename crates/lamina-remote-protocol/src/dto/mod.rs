@@ -6,6 +6,7 @@
 
 mod diff;
 mod graph;
+mod operation;
 mod repo;
 
 pub use diff::{
@@ -15,6 +16,10 @@ pub use diff::{
 };
 pub use graph::{
     CommitChunkDto, GraphRowDto, HalfDto, PassThroughDto, SegmentDto, chunk_ids, rows_from_dto,
+};
+pub use operation::{
+    ConflictSideDto, OperationDto, RemoteBranchDto, ResetModeDto, UnsupportedOperation,
+    is_supported_operation,
 };
 pub use repo::{
     ChangeKindDto, CommitDto, ConflictEntryDto, ConflictKindDto, FileChangeDto, HeadDto, ObjectId,

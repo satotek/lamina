@@ -307,6 +307,20 @@ impl ContentHash {
         }
         Self(hash)
     }
+
+    /// The raw fingerprint, so a resolved file can be named on a wire that
+    /// does not carry the bytes the hash was computed from.
+    pub fn fingerprint(self) -> u64 {
+        self.0
+    }
+
+    /// Rebuild a fingerprint that arrived from elsewhere.
+    ///
+    /// This does not re-hash anything: the other side already did, and the
+    /// bytes may not be on this machine.
+    pub fn from_fingerprint(value: u64) -> Self {
+        Self(value)
+    }
 }
 
 /// A changed run of lines in one side.
