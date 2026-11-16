@@ -102,6 +102,31 @@ fn head_target(snapshot: &lamina_core::session::RepoSnapshot) -> lamina_core::Oi
 }
 
 #[test]
+fn reload_sees_a_file_written_outside_the_helper() {
+    let repo = TestRepo::new();
+    identity(&repo);
+    repo.write("README.md", "one\n");
+    repo.commit("initial");
+    let (remote, events, server) = serve(&repo);
+
+    // The helper only republishes what it is asked for. A file created after
+    // connect stays invisible until reload, which is what the app's refresh
+    // sends.
+    repo.write("extra.txt", "outside\n");
+    remote.reload();
+    wait_until(&remote, &events, |snapshot| {
+        snapshot
+            .status
+            .unstaged
+            .iter()
+            .any(|change| change.path == "extra.txt")
+    });
+
+    drop(remote);
+    server.join().expect("server thread");
+}
+
+#[test]
 fn a_commit_branch_stash_and_reset_round_trip() {
     let repo = TestRepo::new();
     identity(&repo);

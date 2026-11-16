@@ -23,9 +23,9 @@ use crate::actions::{
     self, ApplyPatch, CancelRunningOperation, CloseCompare, CompareBranchThreeWay,
     CompareCommitsThreeWay, ExtendSelectionNext, ExtendSelectionPrevious, GoToChild, GoToHead,
     GoToParent, GoToSecondParent, NavigateBack, NavigateForward, OpenInEditor, OpenTerminalHere,
-    RedoLastAction, SelectFirst, SelectLast, SelectNext, SelectPageDown, SelectPageUp,
-    SelectPrevious, StashChanges, SwitchBranch, ToggleDetailsMaximized, ToggleFrameStats,
-    ToggleSidebar, ToggleWholeFile, UndoLastAction,
+    RedoLastAction, RefreshWorkingTree, SelectFirst, SelectLast, SelectNext, SelectPageDown,
+    SelectPageUp, SelectPrevious, StashChanges, SwitchBranch, ToggleDetailsMaximized,
+    ToggleFrameStats, ToggleSidebar, ToggleWholeFile, UndoLastAction,
 };
 use crate::branches::CreateBranchFromHead;
 use crate::commands::RunCustomCommand;
@@ -140,6 +140,9 @@ impl Render for RepoView {
             )
             .on_action(cx.listener(|this, _: &CancelRunningOperation, _, cx| {
                 this.cancel_running_operation(cx);
+            }))
+            .on_action(cx.listener(|this, _: &RefreshWorkingTree, _, cx| {
+                this.refresh_working_tree(cx);
             }))
             .on_action(cx.listener(|this, _: &CreateBranchFromHead, window, cx| {
                 this.create_branch_from_head(window, cx)
