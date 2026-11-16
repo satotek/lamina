@@ -203,6 +203,23 @@ impl RepoView {
         if let Some(operation) = operation {
             bar = bar.child(operation);
         }
+        if let Some(quality) = self.connection_quality() {
+            let slow = quality.slow;
+            let mut chip = div()
+                .id("status-rtt")
+                .flex_none()
+                .text_color(if slow {
+                    design.remove_text
+                } else {
+                    design.remote_text
+                })
+                .child(quality.label);
+            if slow {
+                let tip = t!("status.ssh_slow_tooltip").to_string();
+                chip = chip.tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx));
+            }
+            bar = bar.child(chip);
+        }
         let is_error = error.is_some();
         let message = error.or(note);
         // A git error rarely fits the bar; the tooltip carries the whole text
