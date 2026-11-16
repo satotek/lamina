@@ -50,7 +50,11 @@ impl RepoView {
     ) {
         let name = tab_title(&launch.spec.host, &launch.spec.path);
         self.name = Some(name.clone());
-        self.title = crate::data::window_title(&name, None);
+        self.title = if launch.auto_connect {
+            crate::data::window_title(&name, None)
+        } else {
+            crate::data::disconnected_window_title(&name)
+        };
         window.set_window_title(&self.title);
         let auto_connect = launch.auto_connect;
         self.remote_tab = Some(RemoteTab {
@@ -601,6 +605,15 @@ mod tests {
             assert!(
                 view.remote_not_connected(),
                 "the title bar must not say loading"
+            );
+            let title = view.window_title();
+            assert!(
+                title.contains(t!("title_bar.not_connected").as_ref()),
+                "window title should match the branch chip, got {title}"
+            );
+            assert!(
+                !title.contains(&format!("({})", t!("title_bar.loading"))),
+                "a Connect placeholder is not still loading, got {title}"
             );
             assert!(view.is_ssh());
             assert_eq!(view.commit_count(), 0);

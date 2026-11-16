@@ -201,7 +201,12 @@ impl Launch {
             Launch::Error { path, .. } => format!("Lamina — {path}"),
             Launch::Remote(launch) => {
                 let name = crate::remote_open::tab_title(&launch.spec.host, &launch.spec.path);
-                data::window_title(&name, None)
+                // A restored tab is not loading; it is waiting for Connect.
+                if launch.auto_connect {
+                    data::window_title(&name, None)
+                } else {
+                    data::disconnected_window_title(&name)
+                }
             }
         }
     }
@@ -2787,8 +2792,16 @@ impl RepoView {
         let title = if self.fake.is_some() {
             t!("history.window_synthetic").to_string()
         } else if let Some(name) = &self.name {
-            let head: Option<HeadInfo> = self.source().and_then(|source| source.head().cloned());
-            data::window_title(name, head.as_ref())
+            // Runs every frame. A remote tab with no session has no head, and
+            // `window_title(_, None)` would keep saying "loading" after the
+            // branch chip has already switched to "not connected".
+            if self.remote_not_connected() {
+                data::disconnected_window_title(name)
+            } else {
+                let head: Option<HeadInfo> =
+                    self.source().and_then(|source| source.head().cloned());
+                data::window_title(name, head.as_ref())
+            }
         } else {
             t!("app.name").to_string()
         };
