@@ -417,7 +417,7 @@ mod tests {
         rust_i18n::set_locale("ja");
         assert_eq!(
             summary_text(&snap, Some(&merge_details)),
-            "マージ中: feature → main · 未解決 3"
+            "Merge 中: feature → main · 未解決 3"
         );
         rust_i18n::set_locale("en");
     }

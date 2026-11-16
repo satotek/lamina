@@ -397,7 +397,7 @@ mod tests {
         );
         assert_eq!(
             crate::i18n::lookup("ja", "activity.merge").as_deref(),
-            Some("マージ中…")
+            Some("Merge 中…")
         );
         assert_eq!(
             crate::i18n::lookup("en", "activity.working").as_deref(),
