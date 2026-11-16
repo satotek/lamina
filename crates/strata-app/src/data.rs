@@ -312,6 +312,20 @@ pub fn window_title(repo: &str, head: Option<&HeadInfo>) -> String {
     t!("app.window_title", repo = repo, branch = branch).to_string()
 }
 
+/// Window title for a remote tab that is not dialling and has no HEAD yet.
+///
+/// [`window_title`] with no head says "loading", which is what a local open
+/// still is. A restored remote tab is waiting for Connect, the same state the
+/// branch chip already calls "not connected".
+pub fn disconnected_window_title(repo: &str) -> String {
+    t!(
+        "app.window_title",
+        repo = repo,
+        branch = &*t!("title_bar.not_connected")
+    )
+    .to_string()
+}
+
 /// The widest graph row seen so far.
 ///
 /// History arrives in chunks, so the width only ever grows: each snapshot is
@@ -546,6 +560,10 @@ mod tests {
             "Strata — strata (detached)"
         );
         assert_eq!(window_title("strata", None), "Strata — strata (loading)");
+        assert_eq!(
+            disconnected_window_title("strata"),
+            "Strata — strata (not connected)"
+        );
     }
 
     #[test]
