@@ -104,6 +104,22 @@ impl CommitList {
         self.len == 0
     }
 
+    /// True when both lists are the same published history.
+    ///
+    /// A status refresh clones the list and keeps the chunks. A walk allocates
+    /// new ones, so a caller can tell a worktree update from a history reload
+    /// without comparing every commit.
+    pub fn same_chunks(&self, other: &CommitList) -> bool {
+        self.len == other.len
+            && self.complete == other.complete
+            && self.chunks.len() == other.chunks.len()
+            && self
+                .chunks
+                .iter()
+                .zip(&other.chunks)
+                .all(|(left, right)| Arc::ptr_eq(left, right))
+    }
+
     pub fn get(&self, index: usize) -> Option<(&CommitInfo, GraphRow<'_>)> {
         let chunk = self.chunks.get(index / COMMIT_CHUNK)?;
         let offset = index % COMMIT_CHUNK;
@@ -776,12 +792,24 @@ pub enum SessionEvent {
     SignaturesInvalidated,
 }
 
-/// How a session talks to `git`.
-#[derive(Debug, Clone, Default)]
+/// How a session talks to `git`, and whether it watches the worktree.
+#[derive(Debug, Clone)]
 pub struct SessionOptions {
     /// The `git` executable used for every write. `None` uses the `git` found
     /// on `PATH` when the session opened.
     pub git_executable: Option<PathBuf>,
+    /// Install a filesystem watcher. Off only after a watch failed to start:
+    /// the repository still opens, and the caller refreshes explicitly.
+    pub watch: bool,
+}
+
+impl Default for SessionOptions {
+    fn default() -> Self {
+        Self {
+            git_executable: None,
+            watch: true,
+        }
+    }
 }
 
 pub struct Session {
@@ -869,18 +897,25 @@ impl Session {
 
         // Start the watcher before the workers: a failure here must not leave
         // threads behind, and the callback only needs the channel senders.
-        let watcher = RepoWatcher::new(
-            shared.repo.workdir(),
-            shared.repo.git_dir(),
-            WATCH_DEBOUNCE,
-            {
-                let shared = Arc::clone(&shared);
-                let load = load_tx.clone();
-                let status = status_tx.clone();
-                let signature_cache = Arc::clone(&signature_cache);
-                move |changes| on_watch(&shared, &load, &status, &signature_cache, &changes)
-            },
-        )?;
+        // A host that cannot watch (inotify instance limit, no backend) still
+        // gets a session when the caller opted out, instead of refusing the
+        // repository.
+        let watcher = if options.watch {
+            Some(RepoWatcher::new(
+                shared.repo.workdir(),
+                shared.repo.git_dir(),
+                WATCH_DEBOUNCE,
+                {
+                    let shared = Arc::clone(&shared);
+                    let load = load_tx.clone();
+                    let status = status_tx.clone();
+                    let signature_cache = Arc::clone(&signature_cache);
+                    move |changes| on_watch(&shared, &load, &status, &signature_cache, &changes)
+                },
+            )?)
+        } else {
+            None
+        };
 
         let mut threads = Vec::with_capacity(7 + DIFF_WORKERS);
         threads.push(spawn("strata-session-history", {
@@ -950,7 +985,7 @@ impl Session {
                 signature_cache,
                 query_state,
             }),
-            watcher: Some(watcher),
+            watcher,
             threads,
         };
         session.reload();
@@ -960,6 +995,14 @@ impl Session {
     /// Latest published snapshot. Cheap; call it on every render.
     pub fn snapshot(&self) -> Arc<RepoSnapshot> {
         self.shared.snapshot()
+    }
+
+    /// Whether filesystem events from outside this session are delivered.
+    ///
+    /// False when the session was opened without a watcher. Callers then have
+    /// to [`reload`](Self::reload) to see edits made elsewhere.
+    pub fn watches_filesystem(&self) -> bool {
+        self.watcher.is_some()
     }
 
     /// Queues a mutation. The session refreshes affected state afterwards.

@@ -353,6 +353,15 @@ pub trait RepositorySession: Send {
     fn connection_rtt(&self) -> Option<Duration> {
         None
     }
+
+    /// Whether edits made outside this app show up on their own.
+    ///
+    /// A remote helper reports false when it could not install a filesystem
+    /// watch. The UI then keeps asking for a refresh instead of assuming the
+    /// snapshot is current.
+    fn watches_filesystem(&self) -> bool {
+        true
+    }
 }
 
 impl RepositorySession for Session {
@@ -476,5 +485,9 @@ impl RepositorySession for Session {
 
     fn hidden_refs(&self) -> Vec<String> {
         Session::hidden_refs(self)
+    }
+
+    fn watches_filesystem(&self) -> bool {
+        Session::watches_filesystem(self)
     }
 }

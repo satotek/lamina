@@ -163,7 +163,14 @@ impl Launch {
         on_event: impl Fn(SessionEvent) + Send + Sync + 'static,
         events: UnboundedReceiver<SessionEvent>,
     ) -> Self {
-        match Session::open_with(path, SessionOptions { git_executable }, on_event) {
+        match Session::open_with(
+            path,
+            SessionOptions {
+                git_executable,
+                ..SessionOptions::default()
+            },
+            on_event,
+        ) {
             Ok(session) => {
                 let session: Box<dyn RepositorySession> = Box::new(session);
                 let name = repo_name(session.as_ref());

@@ -164,6 +164,10 @@ pub enum Response {
         root: String,
         git_dir: String,
         bare: bool,
+        /// False when the helper could not watch the filesystem. Edits made
+        /// outside the app then stay invisible until the client asks for a
+        /// refresh.
+        watching: bool,
     },
     VersionMismatch {
         /// Protocol the helper speaks.
@@ -259,6 +263,14 @@ pub enum Event {
         rows: Vec<GraphRowDto>,
         /// True on the last append of this generation.
         complete: bool,
+    },
+    /// Non-commit fields after a watch that did not move history.
+    ///
+    /// The commit list already delivered stays. Sending it again would turn
+    /// every save into a full history transfer. A ref change still arrives as
+    /// [`Event::SnapshotReset`] plus appends.
+    SnapshotMeta {
+        snapshot: SnapshotDto,
     },
     DiffReady {
         ticket: u64,

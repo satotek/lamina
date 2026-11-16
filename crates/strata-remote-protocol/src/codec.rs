@@ -471,6 +471,7 @@ mod tests {
                 root: "/repo".into(),
                 git_dir: "/repo/.git".into(),
                 bare: false,
+                watching: true,
             },
             Response::VersionMismatch {
                 expected: 2,
@@ -595,6 +596,20 @@ mod tests {
                 event: crate::dto::QueryEvent::PathHistoryDone,
             },
             Event::SignaturesInvalidated,
+            Event::SnapshotMeta {
+                snapshot: crate::dto::SnapshotDto {
+                    generation: 4,
+                    head: None,
+                    refs: Vec::new(),
+                    upstreams: Vec::new(),
+                    stashes: Vec::new(),
+                    remotes: Vec::new(),
+                    status: crate::dto::WorktreeStatusDto::default(),
+                    state: crate::dto::RepoStateDto::Normal,
+                    conflicts: Vec::new(),
+                    busy: None,
+                },
+            },
         ];
         for event in events {
             let mut bytes = Vec::new();
@@ -616,6 +631,6 @@ mod tests {
     fn the_handshake_version_requires_a_current_helper() {
         // Deploy replaces a helper whose `--self-check` reports a different
         // protocol. Keeping the number here makes an accidental revert fail.
-        assert_eq!(crate::PROTOCOL_VERSION, 5);
+        assert_eq!(crate::PROTOCOL_VERSION, 6);
     }
 }
