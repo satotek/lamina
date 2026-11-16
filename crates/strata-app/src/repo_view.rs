@@ -559,8 +559,9 @@ pub struct RepoView {
     /// Notifies the view when the settings change, so sizes and colours that
     /// come from them take effect without a restart.
     _settings: Subscription,
-    /// Dropping this unregisters the focus observer. A remote tab reloads when
-    /// the window is focused again; without the subscription that never runs.
+    /// Dropping this unregisters the focus observer. A remote tab whose helper
+    /// could not watch the disk reloads when the window is focused again;
+    /// without the subscription that never runs.
     _activation: Subscription,
     /// When a remote tab last asked the helper for a fresh status. Focus
     /// refreshes are throttled against this; an explicit refresh updates it.
@@ -906,8 +907,7 @@ impl RepoView {
 
     fn sync_autofetch(&mut self, cx: &mut Context<Self>) {
         let should_run = self.active
-            && self.session.is_some()
-            && !self.is_ssh()
+            && self.autofetch_ready()
             && crate::settings::Settings::get(cx)
                 .behaviour
                 .auto_fetch_minutes

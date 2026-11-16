@@ -107,6 +107,21 @@ impl RepoView {
         self.status_clock.clear();
     }
 
+    /// The status line when nothing else is reporting. An unwatched remote
+    /// helper cannot see edits made outside the app, so the line says that a
+    /// refresh is required instead of claiming the tab is watching.
+    pub(super) fn idle_status(&self) -> String {
+        if self
+            .session
+            .as_ref()
+            .is_some_and(|session| !session.watches_filesystem())
+        {
+            t!("status.remote_unwatched").to_string()
+        } else {
+            t!("status.watching").to_string()
+        }
+    }
+
     pub(super) fn status_bar(&self, design: &Design) -> AnyElement {
         let command = self
             .last_command
@@ -229,11 +244,7 @@ impl RepoView {
                 } else {
                     design.muted
                 })
-                .child(
-                    error
-                        .or(note)
-                        .unwrap_or_else(|| t!("status.watching").to_string()),
-                ),
+                .child(error.or(note).unwrap_or_else(|| self.idle_status())),
         )
         .into_any_element()
     }
