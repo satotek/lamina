@@ -182,9 +182,6 @@ impl RepoView {
     }
 
     fn patch_blocked(&self) -> Option<String> {
-        if self.is_ssh() {
-            return Some(crate::remote_open::unavailable_reason());
-        }
         self.session
             .is_none()
             .then(|| t!("remote.no_session").to_string())
@@ -449,6 +446,11 @@ mod tests {
             "undo needs a session, which a disconnected tab does not have"
         );
         assert_eq!(
+            blocked_reason(&view, &mut vcx, "lamina::ApplyPatch"),
+            Some(t!("remote.no_session").to_string()),
+            "a patch needs the host's session"
+        );
+        assert_eq!(
             blocked_reason(&view, &mut vcx, THREE_WAY_COMMITS).as_deref(),
             Some(t!("compare.no_repository").as_ref()),
             "a disconnected tab has no commits to compare"
@@ -548,6 +550,11 @@ mod tests {
             blocked_reason(&view, &mut vcx, "lamina::RedoLastAction"),
             None,
             "redo uses the same helper write as undo"
+        );
+        assert_eq!(
+            blocked_reason(&view, &mut vcx, "lamina::ApplyPatch"),
+            None,
+            "a connected tab sends the patch bytes to the helper"
         );
 
         let _ = std::fs::remove_dir_all(&scratch);

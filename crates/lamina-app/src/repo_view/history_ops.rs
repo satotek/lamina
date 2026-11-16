@@ -1429,12 +1429,11 @@ pub(crate) fn commit_menu(
         ));
     }
 
-    // Saving a patch still writes a file on this machine, so the remote
-    // reason wins over busy for that entry. Creating a worktree runs on the
-    // helper, so it only waits out a busy repository.
-    let remote_reason = state.ssh.then(crate::remote_open::unavailable_reason);
+    // Saving a patch asks the helper for the bytes and writes the file here.
+    // Creating a worktree runs on the helper. Both only wait out a busy
+    // repository.
     let busy_reason = state.busy().then(|| t!("branch.reason.busy").to_string());
-    let patch_reason = remote_reason.or(busy_reason.clone());
+    let patch_reason = busy_reason.clone();
     let branch_blocked = state.blocked(HistoryAction::CreateBranch);
     let tag_blocked = state.blocked(HistoryAction::CreateTag);
     menu = menu.separator();
