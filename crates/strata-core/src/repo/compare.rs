@@ -178,7 +178,7 @@ impl Repo {
     }
 
     /// The best merge base of `a` and `b`, or `None` for unrelated histories.
-    fn merge_base(&self, a: Oid, b: Oid) -> Result<Option<Oid>> {
+    pub fn merge_base(&self, a: Oid, b: Oid) -> Result<Option<Oid>> {
         if a == b {
             return Ok(Some(a));
         }

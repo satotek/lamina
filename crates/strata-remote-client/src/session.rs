@@ -14,11 +14,12 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock};
 use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
+use strata_core::compare::ThreeWayTreeCompare;
 use strata_core::diff::DiffOptions;
 use strata_core::git_cli::CommandLog;
 use strata_core::lfs::{LfsInfo, LfsLock, LfsPointer};
 use strata_core::merge::ConflictStyle;
-use strata_core::repo::{MergeTool, SelectionRange, UpstreamTarget};
+use strata_core::repo::{MergeTool, SelectionRange, ThreeWayRoles, UpstreamTarget};
 use strata_core::session::{
     CommitList, CommitQuery, ContentSearchQuery, DiffRequest, DiffTicket, DiffView, GitExtras,
     HistoryScope, Operation, OperationId, QueryTicket, RepoLocation, RepoReader, RepoSnapshot,
@@ -1053,6 +1054,28 @@ impl RepoReader for RemoteReader {
     }
 
     fn resolve_commit(&self, _spec: &str) -> Result<Option<Oid>> {
+        Err(Error::other(UNSUPPORTED))
+    }
+
+    fn merge_base(&self, _a: Oid, _b: Oid) -> Result<Option<Oid>> {
+        Err(Error::other(UNSUPPORTED))
+    }
+
+    fn three_way_tree(&self, _left: Oid, _base: Oid, _right: Oid) -> Result<ThreeWayTreeCompare> {
+        Err(Error::other(UNSUPPORTED))
+    }
+
+    fn three_way_blobs(
+        &self,
+        _left: Oid,
+        _base: Oid,
+        _right: Oid,
+        _path: &str,
+    ) -> Result<[Option<Vec<u8>>; 3]> {
+        Err(Error::other(UNSUPPORTED))
+    }
+
+    fn three_way_roles(&self, _commits: [Oid; 3]) -> Result<ThreeWayRoles> {
         Err(Error::other(UNSUPPORTED))
     }
 }

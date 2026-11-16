@@ -33,6 +33,7 @@ mod signature;
 mod stat;
 mod status;
 mod submodules;
+mod three_way;
 mod tree;
 mod upstream;
 mod worktrees;
@@ -63,6 +64,7 @@ pub use signature::{
 };
 pub use status::{MAX_INCREMENTAL_PATHS, QuickStatus, quick_status};
 pub use submodules::{SubmoduleInfo, SubmoduleStatus};
+pub use three_way::ThreeWayRoles;
 pub use upstream::UpstreamTarget;
 pub use worktrees::WorktreeInfo;
 

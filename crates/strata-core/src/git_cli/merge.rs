@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-use crate::{Error, Result};
+use crate::{Error, Oid, Result};
 
 use super::{Git, checked_ref};
 
@@ -52,6 +52,37 @@ impl Git {
     pub fn merge_abort(&self) -> Result<()> {
         self.run(&["merge", "--abort"], None)?;
         Ok(())
+    }
+
+    /// The paths `git merge-tree --write-tree --name-only` reports as conflicts
+    /// for a merge of `ours` and `theirs`.
+    ///
+    /// The command writes the merged tree into the object database but updates
+    /// no ref and touches neither the index nor the working tree, so it is safe
+    /// to run for a preview. `None` means the installed git predates
+    /// `--write-tree` (2.38), or its `--name-only` option is unknown; callers
+    /// then fall back to their own classification instead of failing.
+    pub fn merge_tree_conflicts(&self, ours: Oid, theirs: Oid) -> Result<Option<Vec<String>>> {
+        if self.version()? < (2, 38, 0) {
+            return Ok(None);
+        }
+        let args = [
+            "-c".to_owned(),
+            // Paths come back as raw UTF-8, so they match the tree paths in
+            // the comparison.
+            "core.quotePath=false".to_owned(),
+            "merge-tree".to_owned(),
+            "--write-tree".to_owned(),
+            "--name-only".to_owned(),
+            ours.to_string(),
+            theirs.to_string(),
+        ];
+        let output = self.run_output(&args, None, true)?;
+        // Exit 1 is the expected answer for a conflicted merge.
+        if !matches!(output.status.code(), Some(0) | Some(1)) {
+            return Ok(None);
+        }
+        Ok(Some(parse_merge_tree_conflicts(&output.stdout)))
     }
 
     /// Take one side of a conflicted `path` and stage it.
@@ -237,6 +268,29 @@ fn is_mergetool_temp(name: &str, stem: &str) -> bool {
         })
 }
 
+/// Reads the conflicted file names from `git merge-tree --write-tree
+/// --name-only`'s stdout.
+///
+/// The first line is the merged tree's id, the file names follow, and a blank
+/// line ends that section before git's informational messages.
+fn parse_merge_tree_conflicts(stdout: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(stdout);
+    let mut lines = text.lines();
+    // The tree id is of no use to the caller.
+    if lines.next().is_none() {
+        return Vec::new();
+    }
+    let mut conflicts = Vec::new();
+    for line in lines {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            break;
+        }
+        conflicts.push(line.to_owned());
+    }
+    conflicts
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -244,7 +298,20 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{directory_names, is_mergetool_temp, remove_mergetool_leftovers};
+    use super::{
+        directory_names, is_mergetool_temp, parse_merge_tree_conflicts, remove_mergetool_leftovers,
+    };
+
+    #[test]
+    fn merge_tree_names_end_at_the_information_section() {
+        let output = b"1234567890abcdef\nsrc/a.txt\ndir with space/b.txt\n\nAuto-merging src/a.txt\nCONFLICT (content): Merge conflict in src/a.txt\n";
+        assert_eq!(
+            parse_merge_tree_conflicts(output),
+            vec!["src/a.txt", "dir with space/b.txt"]
+        );
+        assert!(parse_merge_tree_conflicts(b"1234567890abcdef\n").is_empty());
+        assert!(parse_merge_tree_conflicts(b"").is_empty());
+    }
 
     #[test]
     fn mergetool_temp_names_carry_the_stem_marker_and_pid() {

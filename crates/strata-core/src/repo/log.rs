@@ -143,6 +143,15 @@ impl Repo {
         Ok(commits)
     }
 
+    /// Committer timestamp of `commit`, in seconds since the epoch. Malformed
+    /// dates read as zero, the way the commit log treats them.
+    pub fn commit_time(&self, commit: Oid) -> Result<i64> {
+        let repo = self.local();
+        let commit = repo.find_commit(commit).map_err(Error::gix)?;
+        let committer = commit.committer().map_err(Error::gix)?;
+        Ok(committer.time().map_or(0, |time| time.seconds))
+    }
+
     /// Whether `ancestor` is reachable from `descendant`, as
     /// `git merge-base --is-ancestor` answers it. A commit is its own ancestor.
     pub fn is_ancestor(&self, ancestor: Oid, descendant: Oid) -> Result<bool> {

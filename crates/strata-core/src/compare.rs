@@ -27,7 +27,7 @@ use crate::encoding::{TextEncoding, decode_for_display};
 use crate::highlight::{Highlighter, LineHighlights, language_for_path};
 use crate::image::{self, ImageDiff, ImageKind, ImageSide};
 use crate::merge::{TextFile, ThreeWayRegionKind, align_three_way};
-use crate::{Error, Result};
+use crate::{Error, Oid, Result};
 
 /// Guard against reading arbitrarily huge non-image files into memory for a
 /// line-by-line text diff.
@@ -374,9 +374,11 @@ pub struct ThreeWayImageCompare {
 /// Result of a three-way file comparison.
 #[derive(Debug, Clone)]
 pub struct ThreeWayFileCompare {
-    pub left_path: PathBuf,
-    pub middle_path: PathBuf,
-    pub right_path: PathBuf,
+    /// The name each pane header shows. A filesystem compare uses the path; a
+    /// comparison of repository revisions uses the branch and short id.
+    pub left_name: String,
+    pub middle_name: String,
+    pub right_name: String,
     pub left_lines: Arc<Vec<String>>,
     pub middle_lines: Arc<Vec<String>>,
     pub right_lines: Arc<Vec<String>>,
@@ -428,6 +430,31 @@ pub fn compare_three_files(
     compare_three_optional_files(Some(left), Some(middle), Some(right), cancel)
 }
 
+/// One side of an in-memory three-way file comparison.
+#[derive(Debug, Clone)]
+pub struct ThreeWaySide {
+    /// Name shown for the side, such as a branch and short id.
+    pub name: String,
+    /// Path used for image detection and syntax highlighting, when `name` is
+    /// only a label.
+    pub path_hint: Option<String>,
+    pub bytes: Option<Vec<u8>>,
+}
+
+impl ThreeWaySide {
+    pub fn new(name: impl Into<String>, path_hint: Option<String>, bytes: Option<Vec<u8>>) -> Self {
+        Self {
+            name: name.into(),
+            path_hint,
+            bytes,
+        }
+    }
+
+    fn detection_path(&self) -> Option<&Path> {
+        self.path_hint.as_deref().map(Path::new)
+    }
+}
+
 /// Compares three optional file paths on disk. Returns `Ok(None)` if `cancel`
 /// is signalled.
 pub fn compare_three_optional_files(
@@ -440,9 +467,6 @@ pub fn compare_three_optional_files(
         return Ok(None);
     }
 
-    let left_path = left.map(Path::to_path_buf).unwrap_or_default();
-    let middle_path = middle.map(Path::to_path_buf).unwrap_or_default();
-    let right_path = right.map(Path::to_path_buf).unwrap_or_default();
     let image_kind = shared_image_kind(&[left, middle, right]);
 
     if image_kind == Some(ImageKind::Raster) {
@@ -459,9 +483,9 @@ pub fn compare_three_optional_files(
             return Ok(None);
         }
         return Ok(Some(ThreeWayFileCompare {
-            left_path,
-            middle_path,
-            right_path,
+            left_name: display_path(left),
+            middle_name: display_path(middle),
+            right_name: display_path(right),
             left_lines: Arc::new(Vec::new()),
             middle_lines: Arc::new(Vec::new()),
             right_lines: Arc::new(Vec::new()),
@@ -499,9 +523,9 @@ pub fn compare_three_optional_files(
 
     if left_too_large || middle_too_large || right_too_large {
         return Ok(Some(ThreeWayFileCompare {
-            left_path,
-            middle_path,
-            right_path,
+            left_name: display_path(left),
+            middle_name: display_path(middle),
+            right_name: display_path(right),
             left_lines: Arc::new(Vec::new()),
             middle_lines: Arc::new(Vec::new()),
             right_lines: Arc::new(Vec::new()),
@@ -519,52 +543,61 @@ pub fn compare_three_optional_files(
         }));
     }
 
-    Ok(compare_three_bytes(
-        &left_path,
-        left_bytes.as_deref(),
-        &middle_path,
-        middle_bytes.as_deref(),
-        &right_path,
-        right_bytes.as_deref(),
+    let side = |path: Option<&Path>, bytes: Option<Vec<u8>>| {
+        let name = display_path(path);
+        let hint = (!name.is_empty()).then(|| name.clone());
+        ThreeWaySide::new(name, hint, bytes)
+    };
+    Ok(compare_three_sides(
+        side(left, left_bytes),
+        side(middle, middle_bytes),
+        side(right, right_bytes),
         cancel,
     ))
 }
 
-/// Compares three in-memory byte slices (`left`, `middle`, `right`). Returns
-/// `None` if `cancel` is signalled.
-pub fn compare_three_bytes(
-    left_path: &Path,
-    left_bytes: Option<&[u8]>,
-    middle_path: &Path,
-    middle_bytes: Option<&[u8]>,
-    right_path: &Path,
-    right_bytes: Option<&[u8]>,
+/// Compares three in-memory sides. The names are what the panes show; the
+/// optional path hints drive image detection and syntax highlighting.
+///
+/// Returns `None` if `cancel` is signalled.
+pub fn compare_three_sides(
+    left: ThreeWaySide,
+    middle: ThreeWaySide,
+    right: ThreeWaySide,
     cancel: &AtomicBool,
 ) -> Option<ThreeWayFileCompare> {
     if is_cancelled(cancel) {
         return None;
     }
 
-    let left_hint = left_bytes.map(|_| left_path);
-    let middle_hint = middle_bytes.map(|_| middle_path);
-    let right_hint = right_bytes.map(|_| right_path);
-    let image_kind = shared_image_kind(&[left_hint, middle_hint, right_hint]);
+    let hints = [
+        left.detection_path(),
+        middle.detection_path(),
+        right.detection_path(),
+    ];
+    let image_kind = shared_image_kind(&hints);
 
     if image_kind == Some(ImageKind::Raster) {
-        let image_side = |bytes: Option<&[u8]>| {
-            bytes.map(|b| {
+        let image_side = |side: &ThreeWaySide| {
+            side.bytes.as_ref().map(|bytes| {
                 ImageSide::new(
                     ImageKind::Raster,
-                    Some(b.to_vec()),
-                    b.len() as u64,
+                    Some(bytes.clone()),
+                    bytes.len() as u64,
                     image::MAX_IMAGE_BYTES,
                 )
             })
         };
+        let images = ThreeWayImageCompare {
+            kind: ImageKind::Raster,
+            left: image_side(&left),
+            middle: image_side(&middle),
+            right: image_side(&right),
+        };
         return Some(ThreeWayFileCompare {
-            left_path: left_path.to_path_buf(),
-            middle_path: middle_path.to_path_buf(),
-            right_path: right_path.to_path_buf(),
+            left_name: left.name,
+            middle_name: middle.name,
+            right_name: right.name,
             left_lines: Arc::new(Vec::new()),
             middle_lines: Arc::new(Vec::new()),
             right_lines: Arc::new(Vec::new()),
@@ -578,18 +611,39 @@ pub fn compare_three_bytes(
             rows: Vec::new(),
             binary: true,
             too_large: false,
-            images: Some(ThreeWayImageCompare {
-                kind: ImageKind::Raster,
-                left: image_side(left_bytes),
-                middle: image_side(middle_bytes),
-                right: image_side(right_bytes),
-            }),
+            images: Some(images),
         });
     }
 
-    let left_raw = left_bytes.unwrap_or_default();
-    let middle_raw = middle_bytes.unwrap_or_default();
-    let right_raw = right_bytes.unwrap_or_default();
+    if [&left, &middle, &right]
+        .into_iter()
+        .filter_map(|side| side.bytes.as_ref())
+        .any(|bytes| bytes.len() > MAX_TEXT_COMPARE_BYTES)
+    {
+        return Some(ThreeWayFileCompare {
+            left_name: left.name,
+            middle_name: middle.name,
+            right_name: right.name,
+            left_lines: Arc::new(Vec::new()),
+            middle_lines: Arc::new(Vec::new()),
+            right_lines: Arc::new(Vec::new()),
+            left_highlights: Arc::new(Vec::new()),
+            middle_highlights: Arc::new(Vec::new()),
+            right_highlights: Arc::new(Vec::new()),
+            left_encoding: TextEncoding::UTF_8,
+            middle_encoding: TextEncoding::UTF_8,
+            right_encoding: TextEncoding::UTF_8,
+            regions: Vec::new(),
+            rows: Vec::new(),
+            binary: false,
+            too_large: true,
+            images: None,
+        });
+    }
+
+    let left_raw = left.bytes.as_deref().unwrap_or_default();
+    let middle_raw = middle.bytes.as_deref().unwrap_or_default();
+    let right_raw = right.bytes.as_deref().unwrap_or_default();
 
     let left_file = TextFile::parse(left_raw);
     let middle_file = TextFile::parse(middle_raw);
@@ -605,9 +659,9 @@ pub fn compare_three_bytes(
 
     if binary {
         return Some(ThreeWayFileCompare {
-            left_path: left_path.to_path_buf(),
-            middle_path: middle_path.to_path_buf(),
-            right_path: right_path.to_path_buf(),
+            left_name: left.name,
+            middle_name: middle.name,
+            right_name: right.name,
             left_lines: Arc::new(Vec::new()),
             middle_lines: Arc::new(Vec::new()),
             right_lines: Arc::new(Vec::new()),
@@ -672,55 +726,64 @@ pub fn compare_three_bytes(
         return None;
     }
 
+    let left_hint = left.detection_path();
+    let middle_hint = middle.detection_path();
+    let right_hint = right.detection_path();
     let mut highlighter = Highlighter::new();
-    let left_highlights = highlight_lines(
-        &mut highlighter,
-        left_path,
-        &left_file.lines,
-        left_file.trailing_newline,
-    );
+    let left_highlights = left_hint.map_or_else(Vec::new, |path| {
+        highlight_lines(
+            &mut highlighter,
+            path,
+            &left_file.lines,
+            left_file.trailing_newline,
+        )
+    });
     if is_cancelled(cancel) {
         return None;
     }
-    let middle_highlights = highlight_lines(
-        &mut highlighter,
-        middle_path,
-        &middle_file.lines,
-        middle_file.trailing_newline,
-    );
+    let middle_highlights = middle_hint.map_or_else(Vec::new, |path| {
+        highlight_lines(
+            &mut highlighter,
+            path,
+            &middle_file.lines,
+            middle_file.trailing_newline,
+        )
+    });
     if is_cancelled(cancel) {
         return None;
     }
-    let right_highlights = highlight_lines(
-        &mut highlighter,
-        right_path,
-        &right_file.lines,
-        right_file.trailing_newline,
-    );
+    let right_highlights = right_hint.map_or_else(Vec::new, |path| {
+        highlight_lines(
+            &mut highlighter,
+            path,
+            &right_file.lines,
+            right_file.trailing_newline,
+        )
+    });
 
     let images = image_kind.map(|kind| {
-        let svg_side = |bytes: Option<&[u8]>| {
-            bytes.map(|b| {
+        let svg_side = |side: &ThreeWaySide| {
+            side.bytes.as_ref().map(|bytes| {
                 ImageSide::new(
                     kind,
-                    Some(b.to_vec()),
-                    b.len() as u64,
+                    Some(bytes.clone()),
+                    bytes.len() as u64,
                     image::MAX_IMAGE_BYTES,
                 )
             })
         };
         ThreeWayImageCompare {
             kind,
-            left: svg_side(left_bytes),
-            middle: svg_side(middle_bytes),
-            right: svg_side(right_bytes),
+            left: svg_side(&left),
+            middle: svg_side(&middle),
+            right: svg_side(&right),
         }
     });
 
     Some(ThreeWayFileCompare {
-        left_path: left_path.to_path_buf(),
-        middle_path: middle_path.to_path_buf(),
-        right_path: right_path.to_path_buf(),
+        left_name: left.name,
+        middle_name: middle.name,
+        right_name: right.name,
         left_lines: Arc::new(left_file.lines),
         middle_lines: Arc::new(middle_file.lines),
         right_lines: Arc::new(right_file.lines),
@@ -738,6 +801,33 @@ pub fn compare_three_bytes(
     })
 }
 
+/// Compares three in-memory byte slices, named by the paths they would have on
+/// disk. Returns `None` if `cancel` is signalled.
+pub fn compare_three_bytes(
+    left_path: &Path,
+    left_bytes: Option<&[u8]>,
+    middle_path: &Path,
+    middle_bytes: Option<&[u8]>,
+    right_path: &Path,
+    right_bytes: Option<&[u8]>,
+    cancel: &AtomicBool,
+) -> Option<ThreeWayFileCompare> {
+    let side = |path: &Path, bytes: Option<&[u8]>| {
+        let name = path.display().to_string();
+        ThreeWaySide::new(name.clone(), Some(name), bytes.map(<[u8]>::to_vec))
+    };
+    compare_three_sides(
+        side(left_path, left_bytes),
+        side(middle_path, middle_bytes),
+        side(right_path, right_bytes),
+        cancel,
+    )
+}
+
+fn display_path(path: Option<&Path>) -> String {
+    path.map(|path| path.display().to_string())
+        .unwrap_or_default()
+}
 // ---------------------------------------------------------------------------
 // Folder compare (2 or 3 directories)
 // ---------------------------------------------------------------------------
@@ -813,7 +903,7 @@ pub struct FolderCompareCounts {
 }
 
 impl FolderCompareCounts {
-    fn record(&mut self, status: FolderEntryStatus) {
+    pub(crate) fn record(&mut self, status: FolderEntryStatus) {
         self.total += 1;
         match status {
             FolderEntryStatus::Identical => self.identical += 1,
@@ -832,6 +922,54 @@ pub struct FolderCompareResult {
     pub roots: Vec<PathBuf>,
     pub entries: Vec<FolderCompareEntry>,
     pub counts: FolderCompareCounts,
+}
+
+// ---------------------------------------------------------------------------
+// Repository revision three-way compare
+// ---------------------------------------------------------------------------
+
+/// How a path changed relative to the base tree when both sides are compared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ThreeWayTreeChange {
+    /// Only the left tree differs from the base.
+    LeftChanged,
+    /// Only the right tree differs from the base.
+    RightChanged,
+    /// Both sides changed and ended up with the same content.
+    BothAgree,
+    /// Both sides changed and disagree, so the path is a candidate conflict.
+    BothDisagree,
+}
+
+/// One file of a three-way comparison between repository trees.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThreeWayTreeEntry {
+    /// Forward-slash separated path relative to the repository root.
+    pub relative_path: String,
+    pub kind: FolderEntryKind,
+    /// Presence and equality across `[left, base, right]`, with the folder
+    /// compare's vocabulary.
+    pub status: FolderEntryStatus,
+    /// How the path changed relative to the base.
+    pub change: ThreeWayTreeChange,
+    /// `git merge-tree` reports a real merge conflict for this path.
+    pub conflicting: bool,
+    /// Metadata for `[left, base, right]`.
+    pub sides: Vec<Option<FolderSideInfo>>,
+}
+
+/// Output of comparing three repository trees.
+#[derive(Debug, Clone)]
+pub struct ThreeWayTreeCompare {
+    pub left: Oid,
+    pub base: Oid,
+    pub right: Oid,
+    pub entries: Vec<ThreeWayTreeEntry>,
+    pub counts: FolderCompareCounts,
+    /// `git merge-tree` was available and reported conflicts. When it is too
+    /// old the entries still carry the tree-diff classification, but no entry
+    /// is marked [`ThreeWayTreeEntry::conflicting`].
+    pub merge_tree_checked: bool,
 }
 
 /// Compares 2 or 3 directories recursively. Returns `Ok(None)` when cancelled.

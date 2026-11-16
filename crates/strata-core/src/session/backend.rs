@@ -8,10 +8,11 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::compare::ThreeWayTreeCompare;
 use crate::git_cli::{CommandLog, Git};
 use crate::lfs::{LfsInfo, LfsLock, LfsPointer, read_object};
 use crate::merge::ConflictStyle;
-use crate::repo::{CompareMode, MergeTool, Repo, SelectionRange, UpstreamTarget};
+use crate::repo::{CompareMode, MergeTool, Repo, SelectionRange, ThreeWayRoles, UpstreamTarget};
 use crate::session::{
     CommitQuery, ContentSearchQuery, DiffOptions, DiffRequest, DiffTicket, HistoryScope, Operation,
     OperationId, QueryTicket, RepoSnapshot, Session,
@@ -103,6 +104,23 @@ pub trait RepoReader: Send + Sync {
     fn branch_upstream_target(&self, branch: &str) -> Result<Option<UpstreamTarget>>;
     /// Resolves a revision spec (ref, tag, or object id) to its commit id.
     fn resolve_commit(&self, spec: &str) -> Result<Option<Oid>>;
+    /// The best merge base of two commits, or `None` for unrelated histories.
+    fn merge_base(&self, a: Oid, b: Oid) -> Result<Option<Oid>>;
+    /// Compares three trees: the entries either side changed relative to
+    /// `base`, classified by side and marked where they would really conflict.
+    fn three_way_tree(&self, left: Oid, base: Oid, right: Oid) -> Result<ThreeWayTreeCompare>;
+    /// The blob contents of `path` in `[left, base, right]`; `None` where the
+    /// path is absent.
+    fn three_way_blobs(
+        &self,
+        left: Oid,
+        base: Oid,
+        right: Oid,
+        path: &str,
+    ) -> Result<[Option<Vec<u8>>; 3]>;
+    /// The default roles for a three-commit comparison: the base in the
+    /// middle, the older remaining commit on the left.
+    fn three_way_roles(&self, commits: [Oid; 3]) -> Result<ThreeWayRoles>;
 }
 
 impl RepoReader for Repo {
@@ -209,6 +227,28 @@ impl RepoReader for Repo {
             Some(Err(err)) => Err(err),
             None => Ok(None),
         }
+    }
+
+    fn merge_base(&self, a: Oid, b: Oid) -> Result<Option<Oid>> {
+        Repo::merge_base(self, a, b)
+    }
+
+    fn three_way_tree(&self, left: Oid, base: Oid, right: Oid) -> Result<ThreeWayTreeCompare> {
+        Repo::three_way_tree(self, left, base, right)
+    }
+
+    fn three_way_blobs(
+        &self,
+        left: Oid,
+        base: Oid,
+        right: Oid,
+        path: &str,
+    ) -> Result<[Option<Vec<u8>>; 3]> {
+        Repo::three_way_blobs(self, left, base, right, path)
+    }
+
+    fn three_way_roles(&self, commits: [Oid; 3]) -> Result<ThreeWayRoles> {
+        Repo::three_way_roles(self, commits)
     }
 }
 
