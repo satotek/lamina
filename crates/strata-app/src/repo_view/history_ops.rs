@@ -1100,8 +1100,14 @@ pub(crate) fn commit_menu(
         .disabled(revert_blocked.is_some())
         .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
             let short = short.clone();
-            entity.update(cx, |view, cx| {
-                view.confirm_revert(commit, short, window, cx)
+            let entity = entity.clone();
+            // The context menu dismisses as this click returns and drops a
+            // dialog opened in the same turn. Cherry-pick has no dialog, so
+            // only Revert looked like a no-op.
+            window.defer(cx, move |window, cx| {
+                let _ = entity.update(cx, |view, cx| {
+                    view.confirm_revert(commit, short, window, cx);
+                });
             });
         })
     };
@@ -1745,13 +1751,22 @@ impl RepoView {
         cx: &mut Context<Self>,
     ) {
         let Some(state) = self.history_menu_state() else {
+            self.note_history_refusal(t!("remote.no_session").to_string(), cx);
             return;
         };
-        if state.blocked_for(HistoryAction::Revert, commit).is_some() {
+        if let Some(reason) = state.blocked_for(HistoryAction::Revert, commit) {
+            self.note_history_refusal(reason, cx);
             return;
         }
         let branch = state.branch_label();
         let detail = t!("history_ops.revert_detail", branch = branch, short = short).to_string();
+        // Skipping the dialog runs the revert in this update. `confirm` would
+        // call its callback immediately, and that callback updates this view
+        // again.
+        if !ui::should_ask(Settings::get(cx).behaviour.confirm_destructive, false) {
+            self.run_revert(commit, short, window, cx);
+            return;
+        }
         // Revert leaves its own commit behind and the reflog still has the
         // original, so OK is not painted as a destructive action.
         let mut confirm = ui::Confirm::new(
@@ -1762,12 +1777,30 @@ impl RepoView {
         confirm.danger = false;
         self.focus_root(window, cx);
         let entity = cx.weak_entity();
+        // `confirm`'s callback is `Fn`, so the short id is cloned per click
+        // instead of moved out of the capture.
         ui::confirm(window, cx, confirm, move |window, cx| {
-            let _ = entity.update(cx, |view, cx| {
-                let label = t!("history_ops.op.revert", short = short).to_string();
-                view.run_operation(Operation::Revert { commit }, label, window, cx);
-            });
+            let short = short.clone();
+            let _ = entity.update(cx, |view, cx| view.run_revert(commit, short, window, cx));
         });
+    }
+
+    fn run_revert(
+        &mut self,
+        commit: Oid,
+        short: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let label = t!("history_ops.op.revert", short = short).to_string();
+        self.run_operation(Operation::Revert { commit }, label, window, cx);
+    }
+
+    /// A menu action that cannot run still has to say why. Returning without
+    /// a note is what made Revert look like a no-op.
+    fn note_history_refusal(&mut self, reason: String, cx: &mut Context<Self>) {
+        self.status_note = Some(reason);
+        self.notify_if_active(cx);
     }
 
     /// Asks before moving the current branch back to `target`.
@@ -2504,6 +2537,10 @@ mod tests {
             state.blocked_for(HistoryAction::CherryPick, oid(2)),
             Some(t!("history_ops.reason.is_head").to_string())
         );
+        // Revert of another commit is on the wire. A silent menu click was a
+        // dialog that the closing menu discarded, not a remote block.
+        assert_eq!(state.blocked_for(HistoryAction::Revert, oid(1)), None);
+        assert_eq!(state.blocked_for(HistoryAction::CherryPick, oid(1)), None);
         assert_eq!(
             edit_blocked_on_line(&state, &[], None, EditAction::Reword).as_deref(),
             Some(reason.as_str())
