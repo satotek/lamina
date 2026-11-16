@@ -277,6 +277,12 @@ impl Design {
         self.avatar[avatar_index(email)]
     }
 
+    /// Deterministic accent colour for a repository avatar from the graph lane
+    /// palette, so the same repository keeps its badge colour across views.
+    pub fn repo_color(&self, name: &str) -> Hsla {
+        self.lane[lane_index(name)]
+    }
+
     /// The fill of a filled primary button.
     pub fn primary_button(&self) -> ButtonColors {
         ButtonColors::filled(self.accent, self.on_accent)
@@ -374,12 +380,20 @@ fn contrast_ratio(first: Hsla, second: Hsla) -> f32 {
 /// FNV-1a over the email, so every appearance gives an author the same colour
 /// without keeping state between frames.
 fn avatar_index(email: &str) -> usize {
+    fnv1a_index(email, AVATARS)
+}
+
+fn lane_index(name: &str) -> usize {
+    fnv1a_index(name, LANES)
+}
+
+fn fnv1a_index(text: &str, buckets: usize) -> usize {
     let mut hash: u32 = 0x811c_9dc5;
-    for byte in email.trim().to_lowercase().bytes() {
+    for byte in text.trim().to_lowercase().bytes() {
         hash ^= u32::from(byte);
         hash = hash.wrapping_mul(0x0100_0193);
     }
-    (hash as usize) % AVATARS
+    (hash as usize) % buckets
 }
 
 /// Up to two initials: the first letter of the first and last word. A single
@@ -393,6 +407,15 @@ pub fn initials(name: &str) -> String {
         (Some(first), None) => first.to_uppercase().collect(),
         (None, _) => "?".to_owned(),
     }
+}
+
+/// Single-character avatar label for a repository name.
+pub fn repo_initial(name: &str) -> String {
+    name.trim()
+        .chars()
+        .next()
+        .map(|ch| ch.to_uppercase().collect())
+        .unwrap_or_else(|| "?".to_owned())
 }
 
 /// "2 hours ago" for anything younger than a week, then a plain date.
@@ -705,6 +728,19 @@ mod tests {
         assert_eq!(initials("山田 太郎"), "山太");
         assert_eq!(initials("éclair noir"), "ÉN");
         assert_eq!(initials(""), "?");
+    }
+
+    #[test]
+    fn repo_avatars_pick_deterministic_lane_colours_and_single_initial() {
+        let design = Design::default();
+        let strata = design.repo_color("strata");
+        assert_eq!(strata, design.repo_color("  STRATA "));
+        assert!(design.lane.contains(&strata));
+
+        assert_eq!(repo_initial("strata"), "S");
+        assert_eq!(repo_initial("  strata-core"), "S");
+        assert_eq!(repo_initial("リポジトリ"), "リ");
+        assert_eq!(repo_initial("  "), "?");
     }
 
     #[test]

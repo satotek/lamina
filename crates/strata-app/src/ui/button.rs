@@ -9,12 +9,17 @@
 
 use std::rc::Rc;
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, FocusHandle, IntoElement, ParentElement as _,
-    RenderOnce, SharedString, StyleRefinement, Styled, Window,
+    AnyElement, App, ClickEvent, ElementId, FocusHandle, FontWeight, InteractiveElement as _,
+    IntoElement, ParentElement as _, RenderOnce, SharedString, StatefulInteractiveElement as _,
+    StyleRefinement, Styled, Window, div,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{Disableable as _, Icon, Selectable as _, Sizable as _, Size, StyledExt as _};
+use gpui_kit_assets::IconName;
+
+use crate::style::Design;
 
 /// What a button means, which decides its fill.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -274,5 +279,125 @@ impl RenderOnce for UiButton {
             button = button.on_click(move |event, window, cx| on_click(event, window, cx));
         }
         button.children(children).refine_style(&style)
+    }
+}
+
+/// A compact action tile with an accent icon, optional shortcut keycaps, and a
+/// label, used in equal-width grids such as the welcome screen.
+#[derive(IntoElement)]
+pub struct ActionTile {
+    id: ElementId,
+    icon: IconName,
+    label: SharedString,
+    keycaps: Vec<SharedString>,
+    primary: bool,
+    design: Design,
+    on_click: Option<ClickHandler>,
+}
+
+pub fn action_tile(
+    id: impl Into<ElementId>,
+    icon: IconName,
+    label: impl Into<SharedString>,
+    design: &Design,
+) -> ActionTile {
+    ActionTile {
+        id: id.into(),
+        icon,
+        label: label.into(),
+        keycaps: Vec::new(),
+        primary: false,
+        design: design.clone(),
+        on_click: None,
+    }
+}
+
+impl ActionTile {
+    pub fn primary(mut self, primary: bool) -> Self {
+        self.primary = primary;
+        self
+    }
+
+    pub fn keycaps(mut self, keycaps: Vec<SharedString>) -> Self {
+        self.keycaps = keycaps;
+        self
+    }
+
+    pub fn on_click(
+        mut self,
+        handler: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.on_click = Some(Rc::new(handler));
+        self
+    }
+}
+
+impl RenderOnce for ActionTile {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+        let design = &self.design;
+        let (bg, hover_bg, border, label_color) = if self.primary {
+            (
+                design.accent_soft,
+                design.selected,
+                design.accent.opacity(0.35),
+                design.accent_text,
+            )
+        } else {
+            (design.panel, design.field, design.border, design.text)
+        };
+        let keycap_color = if self.primary {
+            design.accent_text
+        } else {
+            design.muted
+        };
+
+        div()
+            .id(self.id)
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .justify_between()
+            .gap(design.px(8.0))
+            .px(design.px(10.0))
+            .py(design.px(9.0))
+            .rounded(design.px(8.0))
+            .border_1()
+            .border_color(border)
+            .bg(bg)
+            .cursor_pointer()
+            .hover(move |style| style.bg(hover_bg))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_1()
+                    .w_full()
+                    .child(
+                        Icon::new(self.icon)
+                            .with_size(design.px(15.0))
+                            .text_color(design.accent),
+                    )
+                    .when(!self.keycaps.is_empty(), |row| {
+                        row.child(
+                            div()
+                                .text_color(keycap_color)
+                                .child(super::badge::keycaps(self.keycaps, design)),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .truncate()
+                    .text_size(design.px(11.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(label_color)
+                    .child(self.label),
+            )
+            .when_some(self.on_click, |tile, on_click| {
+                tile.on_click(move |event, window, cx| on_click(event, window, cx))
+            })
     }
 }

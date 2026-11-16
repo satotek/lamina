@@ -187,7 +187,7 @@ use crate::menus::AboutStrata;
 use crate::palette::{PaletteDismiss, PaletteNext, PalettePrevious};
 use crate::picker::{
     OpenSelectedInNewTab, OpenSelectedRepository, PickerEscape, PickerNext, PickerPrevious,
-    TogglePathEntry,
+    RemoveSelectedRecent,
 };
 use crate::pull_requests::{CheckoutPullRequest, RefreshPullRequests};
 use crate::remote::{FetchRemotes, PullBranch, PushBranch};
@@ -1116,14 +1116,16 @@ pub static ACTIONS: &[ActionSpec] = &[
         [binding("escape", Some(PICKER_PAGE))]
     ),
     action!(
-        "strata::TogglePathEntry",
-        "Type a repository path",
+        "strata::RemoveSelectedRecent",
+        "Remove selected recent repository",
         Picker,
-        Some(PICKER_PAGE),
-        TogglePathEntry,
+        Some(PICKER_PAGE_LIST),
+        RemoveSelectedRecent,
         [
-            binding("secondary-l", Some(PICKER_PAGE)),
-            deferred("secondary-l", Some(PICKER_DIALOG))
+            binding("backspace", Some(PICKER_PAGE_LIST)),
+            binding("delete", Some(PICKER_PAGE_LIST)),
+            deferred("backspace", Some(PICKER_DIALOG_LIST)),
+            deferred("delete", Some(PICKER_DIALOG_LIST))
         ]
     ),
     // --- palette::bind ---------------------------------------------------
@@ -2177,12 +2179,18 @@ mod tests {
             ("enter", "OpenSelectedRepository", "PickerPage"),
             ("secondary-enter", "OpenSelectedInNewTab", "PickerPage"),
             ("escape", "PickerEscape", "PickerPage"),
-            ("secondary-l", "TogglePathEntry", "PickerPage"),
+            ("backspace", "RemoveSelectedRecent", "PickerPage && !Input"),
+            ("delete", "RemoveSelectedRecent", "PickerPage && !Input"),
             ("up", "PickerPrevious", "PickerDialog"),
             ("k", "PickerPrevious", "PickerDialog && !Input"),
             ("down", "PickerNext", "PickerDialog"),
             ("j", "PickerNext", "PickerDialog && !Input"),
-            ("secondary-l", "TogglePathEntry", "PickerDialog"),
+            (
+                "backspace",
+                "RemoveSelectedRecent",
+                "PickerDialog && !Input",
+            ),
+            ("delete", "RemoveSelectedRecent", "PickerDialog && !Input"),
             ("up", "PalettePrevious", "Palette > Input"),
             ("down", "PaletteNext", "Palette > Input"),
             ("escape", "PaletteDismiss", "Palette > Input"),

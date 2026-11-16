@@ -12,7 +12,10 @@ gpui_kit_assets::icon_assets!(
     ExtraIcons,
     [
         ClockArrowDown,
+        Download,
         FileSearch,
+        FolderInput,
+        FolderPlus,
         FolderTree,
         Keyboard,
         List,

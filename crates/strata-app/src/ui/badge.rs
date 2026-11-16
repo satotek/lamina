@@ -304,15 +304,22 @@ pub fn check_dot(state: ChecksState, design: &Design) -> Option<AnyElement> {
         ChecksState::Pending => design.tag_text,
         ChecksState::None => return None,
     };
-    Some(
-        div()
-            .flex_none()
-            .w(design.px(6.0))
-            .h(design.px(6.0))
-            .rounded_full()
-            .bg(color)
-            .into_any_element(),
-    )
+    Some(status_dot(color, design))
+}
+
+/// An amber indicator dot shown on a repository with uncommitted changes.
+pub fn dirty_dot(design: &Design) -> AnyElement {
+    status_dot(design.tag_text, design)
+}
+
+fn status_dot(color: Hsla, design: &Design) -> AnyElement {
+    div()
+        .flex_none()
+        .w(design.px(6.0))
+        .h(design.px(6.0))
+        .rounded_full()
+        .bg(color)
+        .into_any_element()
 }
 
 /// A small count, for a header or a title-bar badge.
@@ -377,6 +384,25 @@ pub fn avatar(text: impl Into<SharedString>, color: Hsla, size: f32) -> AnyEleme
         .bg(color)
         .text_color(gpui::rgb(0xffffff))
         .text_size(px(size * 0.5))
+        .font_weight(FontWeight::SEMIBOLD)
+        .child(text.into())
+        .into_any_element()
+}
+
+/// A 22 px rounded-square avatar carrying a repository's initial on a theme
+/// lane colour.
+pub fn repo_avatar(text: impl Into<SharedString>, color: Hsla, design: &Design) -> AnyElement {
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .justify_center()
+        .w(design.px(22.0))
+        .h(design.px(22.0))
+        .rounded(design.px(6.0))
+        .bg(color)
+        .text_color(design.on_accent)
+        .text_size(design.px(11.0))
         .font_weight(FontWeight::SEMIBOLD)
         .child(text.into())
         .into_any_element()

@@ -7,25 +7,31 @@
 //! [`Workspace`](crate::workspace::Workspace), which owns the content swap.
 //!
 //! The picker only reads files: `recent.json` through [`RecentRepositories`] and
-//! a cheap `gix` discovery to check a path. It runs no git commands.
+//! cheap `gix` reads (`quick_status` / discovery) on background threads. It runs
+//! no git commands.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, Context, Entity, FocusHandle, Focusable as _,
-    FontWeight, InteractiveElement, IntoElement, ParentElement, PathPromptOptions, Render,
-    ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled, Subscription,
-    UniformListScrollHandle, Window, actions, div, px, uniform_list,
+    FontWeight, InteractiveElement, IntoElement, KeyDownEvent, Keystroke, OperatingSystem,
+    ParentElement, PathPromptOptions, Render, ScrollStrategy, SharedString,
+    StatefulInteractiveElement as _, Styled, Subscription, UniformListScrollHandle, Window,
+    actions, div, px, uniform_list,
 };
 use gpui_component::WindowExt as _;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::PopupMenuItem;
-use gpui_component::{ActiveTheme as _, TitleBar};
-use strata_core::repo::Repo;
+use gpui_component::{ActiveTheme as _, Icon, Sizable as _, TitleBar};
+use gpui_kit_assets::IconName;
+use strata_core::repo::{QuickStatus, Repo};
 use strata_core::tools as core_tools;
+use strata_core::{HeadInfo, RefKind, RepoState};
 
+use crate::keymap;
 use crate::recent::{RecentRepositories, RecentRepository};
 use crate::scrollbar::WithScrollbar as _;
 use crate::settings::Settings;
@@ -37,23 +43,22 @@ use crate::workspace::Workspace;
 /// Welcome screen: the whole window, and the only keyboard focus.
 const PICKER_PAGE: &str = "PickerPage";
 /// The same list inside the repository dialog. `Enter` and `Escape` belong to
-/// the dialog there, so only list movement is bound to this context.
+/// the dialog there, so only list movement and deletion are bound to this context.
 const PICKER_DIALOG: &str = "PickerDialog";
 
-/// Height of one remembered repository: a name line over a path line.
-const ROW_HEIGHT: f32 = 38.0;
-/// How much of the list the dialog shows before it scrolls.
-const DIALOG_LIST_HEIGHT: f32 = 300.0;
-/// The welcome screen has the room for a little more.
-const PAGE_LIST_HEIGHT: f32 = 260.0;
-/// The ghq section is attached under the recent list, so it gets a shorter
-/// window onto its (possibly thousands of) repositories.
-const GHQ_LIST_HEIGHT: f32 = 200.0;
-
-#[cfg(target_os = "macos")]
-const MODIFIER: &str = "Cmd";
-#[cfg(not(target_os = "macos"))]
-const MODIFIER: &str = "Ctrl";
+/// Height of one remembered or ghq repository row: a name line over a path line.
+const ROW_HEIGHT: f32 = 44.0;
+/// How much of the recent list the dialog shows before it scrolls.
+const DIALOG_LIST_HEIGHT: f32 = 280.0;
+/// Maximum height of the recent list on the welcome screen before it scrolls.
+const PAGE_LIST_HEIGHT: f32 = 240.0;
+/// Maximum height of the expanded ghq list before it scrolls.
+const GHQ_LIST_HEIGHT: f32 = 180.0;
+/// Character budget for formatted repository paths before middle-ellipsising.
+const PATH_DISPLAY_MAX_CHARS: usize = 56;
+/// Maximum width of a branch chip inside a picker row so long branch names
+/// cannot crowd out the repository name.
+const BRANCH_CHIP_MAX_WIDTH: f32 = 110.0;
 
 actions!(
     strata,
@@ -66,10 +71,10 @@ actions!(
         OpenSelectedRepository,
         /// Opens the selected repository, or the typed path, in a new tab.
         OpenSelectedInNewTab,
-        /// Switches the text field between filtering and entering a path.
-        TogglePathEntry,
-        /// Leaves the typed-path field.
+        /// Returns focus from the search field to the picker list.
         PickerEscape,
+        /// Removes the selected recent repository from the recent list.
+        RemoveSelectedRecent,
     ]
 );
 
@@ -98,6 +103,15 @@ pub(crate) enum OpenTarget {
     NewTab,
 }
 
+/// Per-path background status read via `strata_core::repo::quick_status`.
+#[derive(Debug, Clone)]
+enum RepoQuickState {
+    Pending,
+    Loaded(QuickStatus),
+    NotFound,
+    Unavailable,
+}
+
 /// The ghq repositories the picker can open.
 ///
 /// The list is loaded on the background executor and filtered once per query
@@ -120,15 +134,17 @@ pub struct Picker {
     workspace: Entity<Workspace>,
     entity: Entity<Picker>,
     recents: RecentRepositories,
-    /// Filters the list, or holds the path to open while `path_mode` is on.
+    /// Cached per-path status for `recents`, populated off the UI thread.
+    quick_statuses: HashMap<PathBuf, RepoQuickState>,
+    /// Filters the list, or holds a filesystem path when the text looks like one.
     input: Entity<InputState>,
-    path_mode: bool,
-    /// Position in the filtered list, not an index into `recents`.
+    /// Position across the visible rows (recent, then expanded ghq).
     selected: usize,
     error: Option<String>,
     focus: FocusHandle,
     scroll: UniformListScrollHandle,
     ghq: GhqState,
+    ghq_expanded: bool,
     ghq_scroll: UniformListScrollHandle,
     ghq_generation: u64,
     _input_events: Subscription,
@@ -192,24 +208,26 @@ impl Picker {
             workspace,
             entity: cx.entity(),
             recents,
+            quick_statuses: HashMap::new(),
             input,
-            path_mode: false,
             selected: 0,
             error: None,
             focus,
             scroll: UniformListScrollHandle::default(),
             ghq: GhqState::default(),
+            ghq_expanded: false,
             ghq_scroll: UniformListScrollHandle::default(),
             ghq_generation: 0,
             _input_events,
             _tooling: tooling,
         };
+        picker.load_recent_statuses(cx);
         picker.reload_ghq(cx);
         picker
     }
 
     /// The picker's text field: the window focuses it so typing goes to the
-    /// filter (or the typed path) without a click.
+    /// filter (or typed path) without a click.
     pub(crate) fn input(&self) -> &Entity<InputState> {
         &self.input
     }
@@ -217,6 +235,37 @@ impl Picker {
     /// The focus handle of that field, for a view that only has the handle.
     pub(crate) fn input_focus(&self, cx: &App) -> FocusHandle {
         self.input.focus_handle(cx)
+    }
+
+    /// Reads cheap `QuickStatus` for each recent repository in the background so
+    /// row rendering never blocks on filesystem or repository inspection.
+    fn load_recent_statuses(&mut self, cx: &mut Context<Self>) {
+        for entry in self.recents.entries() {
+            let path = entry.path.clone();
+            if self.quick_statuses.contains_key(&path) {
+                continue;
+            }
+            self.quick_statuses
+                .insert(path.clone(), RepoQuickState::Pending);
+            let read_path = path.clone();
+            let task = cx.background_executor().spawn(async move {
+                if !read_path.exists() {
+                    return RepoQuickState::NotFound;
+                }
+                match strata_core::repo::quick_status(&read_path) {
+                    Ok(status) => RepoQuickState::Loaded(status),
+                    Err(_) => RepoQuickState::Unavailable,
+                }
+            });
+            cx.spawn(async move |this, cx| {
+                let state = task.await;
+                let _ = this.update(cx, |picker, cx| {
+                    picker.quick_statuses.insert(path, state);
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
     }
 
     /// Loads `ghq list -p` off the UI thread. Re-runs whenever detection
@@ -284,11 +333,7 @@ impl Picker {
             self.ghq.filtered = Rc::default();
             return;
         }
-        let query = if self.path_mode {
-            String::new()
-        } else {
-            self.input.read(cx).value().to_string()
-        };
+        let query = self.input.read(cx).value().to_string();
         let labels: Vec<String> = self
             .ghq
             .paths
@@ -307,19 +352,30 @@ impl Picker {
         self.ghq.filtered = Rc::new(crate::palette::rank(&candidates, &query));
     }
 
-    /// The repositories the list shows: `recents` filtered by the text field,
-    /// or all of them while the field is being used to type a path.
-    fn filtered(&self, cx: &App) -> Vec<usize> {
-        let query = if self.path_mode {
-            String::new()
+    fn has_query(&self, cx: &App) -> bool {
+        !self.input.read(cx).value().trim().is_empty()
+    }
+
+    fn ghq_rows_expanded(&self, cx: &App) -> bool {
+        self.ghq.visible && (self.ghq_expanded || self.has_query(cx))
+    }
+
+    fn visible_ghq_count(&self, cx: &App) -> usize {
+        if self.ghq_rows_expanded(cx) {
+            self.ghq.filtered.len()
         } else {
-            self.input.read(cx).value().to_string()
-        };
+            0
+        }
+    }
+
+    /// The recent repositories matching the search field.
+    fn filtered(&self, cx: &App) -> Vec<usize> {
+        let query = self.input.read(cx).value().to_string();
         filter_indices(self.recents.entries(), &query)
     }
 
     fn row_count(&self, cx: &App) -> usize {
-        self.filtered(cx).len() + self.ghq.filtered.len()
+        self.filtered(cx).len() + self.visible_ghq_count(cx)
     }
 
     fn selected_path(&self, cx: &App) -> Option<PathBuf> {
@@ -328,6 +384,9 @@ impl Picker {
             let index = *recents.get(self.selected)?;
             return self.recents.get(index).map(|entry| entry.path.clone());
         }
+        if !self.ghq_rows_expanded(cx) {
+            return None;
+        }
         let position = self.selected - recents.len();
         let index = *self.ghq.filtered.get(position)?;
         self.ghq.paths.get(index).cloned()
@@ -335,7 +394,7 @@ impl Picker {
 
     fn step(&mut self, delta: isize, cx: &mut Context<Self>) {
         let recents = self.filtered(cx).len();
-        let len = recents + self.ghq.filtered.len();
+        let len = recents + self.visible_ghq_count(cx);
         if len == 0 {
             return;
         }
@@ -358,12 +417,9 @@ impl Picker {
         window: &mut Window,
         cx: &mut App,
     ) -> Result<(), String> {
-        let path = if self.path_mode {
-            let text = self.input.read(cx).value().trim().to_owned();
-            if text.is_empty() {
-                return Err(t!("picker.path_hint").to_string());
-            }
-            PathBuf::from(text)
+        let raw = self.input.read(cx).value().to_string();
+        let path = if looks_like_path(&raw) {
+            expand_home_path(&raw, home_dir().as_deref())
         } else {
             self.selected_path(cx)
                 .ok_or_else(|| t!("picker.choose_first").to_string())?
@@ -585,7 +641,6 @@ impl Picker {
                 };
                 let _ = handle.update(cx, |_, window, cx| {
                     let _ = weak.update(cx, |picker, cx| {
-                        picker.path_mode = false;
                         match picker.open_path_in(path, target, window, cx) {
                             Ok(()) => {}
                             Err(message) => {
@@ -600,16 +655,24 @@ impl Picker {
             Ok(Ok(None)) => {}
             Ok(Err(error)) => {
                 let _ = weak.update(cx, |picker, cx| {
-                    picker.error = Some(format!(
-                        "The system file chooser could not be opened: {error}. \
-                         Use “Type a path…” instead."
-                    ));
+                    picker.error = Some(t!("picker.err.chooser_failed", error = error).to_string());
                     cx.notify();
                 });
             }
             Err(_) => {}
         })
         .detach();
+    }
+
+    /// Focuses the unified search-or-path field and seeds `~/` for path entry.
+    fn focus_path_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.error = None;
+        let focus = self.input.focus_handle(cx);
+        self.input.update(cx, |state, cx| {
+            state.set_value("~/", window, cx);
+        });
+        window.focus(&focus, cx);
+        cx.notify();
     }
 
     /// Forgets one row of the filtered list and saves the shorter list.
@@ -629,41 +692,25 @@ impl Picker {
         cx.notify();
     }
 
-    fn toggle_path_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.path_mode = !self.path_mode;
-        self.error = None;
-        let placeholder = if self.path_mode {
-            t!("picker.placeholder.path").to_string()
-        } else {
-            t!("picker.filter").to_string()
-        };
-        let focus = self.input.focus_handle(cx);
-        self.input.update(cx, |state, cx| {
-            state.set_value("", window, cx);
-            state.set_placeholder(placeholder, window, cx);
-        });
-        window.focus(&focus, cx);
-        self.selected = 0;
-        self.refresh_ghq_filter(cx);
-        cx.notify();
-    }
-
-    fn leave_path_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.path_mode {
-            self.toggle_path_entry(window, cx);
+    fn remove_selected(&mut self, cx: &mut Context<Self>) {
+        let recents_len = self.filtered(cx).len();
+        if self.selected < recents_len {
+            self.remove(self.selected, cx);
         }
-        self.focus.focus(window, cx);
     }
 
     fn body(&self, cx: &App, design: &Design) -> AnyElement {
         let filtered = self.filtered(cx);
         let selected = self.selected;
         let entries = self.recents.clone();
+        let quick_statuses = self.quick_statuses.clone();
         let list_entity = self.entity.clone();
         let list_design = design.clone();
         let target = self.target;
         let mode = self.mode;
         let now = crate::recent::now_seconds();
+        let home = Rc::new(home_dir());
+        let recent_home = Rc::clone(&home);
         let recent_count = filtered.len();
         let filtered = Rc::new(filtered);
         let list_id = match self.mode {
@@ -676,6 +723,8 @@ impl Picker {
         let ghq_count = ghq_filtered.len();
         let ghq_selected = selected.checked_sub(recent_count);
         let ghq_visible = self.ghq.visible;
+        let has_query = self.has_query(cx);
+        let ghq_expanded = self.ghq_rows_expanded(cx);
         let ghq_loading = self.ghq.loading;
         let ghq_error = self.ghq.error.clone();
         let ghq_id = match self.mode {
@@ -683,50 +732,26 @@ impl Picker {
             Mode::Dialog => "picker-ghq-dialog",
         };
 
-        let mut column = div().flex().flex_col().gap_2().w_full();
+        let mut column = div()
+            .flex()
+            .flex_col()
+            .gap(design.px(10.0))
+            .w_full()
+            .min_h_0()
+            .flex_shrink(1.0);
+
         if self.mode == Mode::Page {
             column = column
-                .child(
-                    div()
-                        .text_size(design.px(22.0))
-                        .font_weight(FontWeight::BOLD)
-                        .child(t!("app.name").to_string()),
-                )
-                .child(
-                    div()
-                        .text_size(design.px(12.0))
-                        .text_color(design.muted)
-                        .child(t!("picker.tagline").to_string()),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .pt_1()
-                        .child(open_native_button(&self.entity, self.mode))
-                        .child(clone_button(&self.entity, self.mode))
-                        .child(init_button(&self.entity, self.mode))
-                        .child(path_toggle_button(&self.entity, self.mode, self.path_mode)),
-                );
+                .child(brand_block(design))
+                .child(self.search_field(cx, design))
+                .child(self.action_tiles(cx, design));
+        } else {
+            column = column.child(self.search_field(cx, design));
         }
 
-        column = column.child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    // A filled field, like the main window's search, so the
-                    // picker's input reads as the same control.
-                    Input::new(&self.input).bg(design.field),
-                )
-                // The dialog's footer carries the chooser button; the path
-                // toggle belongs next to the field it switches either way.
-                .when(self.mode == Mode::Dialog, |row| {
-                    row.child(path_toggle_button(&self.entity, self.mode, self.path_mode))
-                }),
-        );
+        if let Some(error) = &self.error {
+            column = column.child(ui::banner(ui::BannerKind::Danger, error.clone(), design));
+        }
 
         column = column.child(
             div().flex().items_center().justify_between().pt_1().child(
@@ -741,18 +766,10 @@ impl Picker {
             ),
         );
 
-        if let Some(error) = &self.error {
-            column = column.child(div().max_w(design.px(520.0)).child(ui::banner(
-                ui::BannerKind::Danger,
-                error.clone(),
-                design,
-            )));
-        }
-
         if recent_count == 0 {
             column = column.child(
                 div()
-                    .pt_2()
+                    .py_1()
                     .text_size(design.px(11.5))
                     .text_color(design.muted)
                     .child(if self.recents.is_empty() {
@@ -762,10 +779,11 @@ impl Picker {
                     }),
             );
         } else {
-            let height = match self.mode {
+            let max_height = match self.mode {
                 Mode::Page => PAGE_LIST_HEIGHT,
                 Mode::Dialog => DIALOG_LIST_HEIGHT,
             };
+            let list_height = ((recent_count as f32) * ROW_HEIGHT).min(max_height);
             let list = uniform_list(list_id, recent_count, move |range, _window, _cx| {
                 range
                     .map(|position| {
@@ -773,11 +791,14 @@ impl Picker {
                         let Some(entry) = entries.get(index) else {
                             return div().into_any_element();
                         };
+                        let status = quick_statuses.get(&entry.path).cloned();
                         recent_row(
                             mode,
                             target,
                             position,
                             entry,
+                            status.as_ref(),
+                            recent_home.as_deref(),
                             position == selected,
                             now,
                             list_entity.clone(),
@@ -788,191 +809,372 @@ impl Picker {
             })
             .track_scroll(&self.scroll)
             .with_scrollbar(&self.scroll)
-            .h(design.px(height))
+            .flex_shrink(1.0)
+            .min_h(design.px(ROW_HEIGHT.min(list_height)))
+            .h(design.px(list_height))
             .w_full();
             column = column.child(list);
         }
 
         if ghq_visible {
-            column = column.child(
-                div().flex().items_center().justify_between().pt_1().child(
+            if !ghq_expanded {
+                let expand_entity = self.entity.clone();
+                let mut collapsed = div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .pt_1()
+                    .h(design.px(24.0))
+                    .child(
+                        div()
+                            .text_size(px(design.tiny()))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(design.muted)
+                            .child(if ghq_loading && ghq_paths.is_empty() {
+                                t!("picker.loading_ghq").to_string()
+                            } else {
+                                t!("picker.ghq.collapsed", count = ghq_paths.len()).to_string()
+                            }),
+                    );
+                if ghq_error.is_none() && !ghq_paths.is_empty() {
+                    collapsed = collapsed.child(
+                        div()
+                            .id(format!("picker-ghq-show-all-{mode:?}"))
+                            .cursor_pointer()
+                            .text_size(px(design.tiny()))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(design.accent_text)
+                            .hover(|style| style.underline())
+                            .on_click(move |_, _, cx| {
+                                expand_entity.update(cx, |picker, cx| {
+                                    picker.ghq_expanded = true;
+                                    cx.notify();
+                                });
+                            })
+                            .child(t!("picker.ghq.show_all").to_string()),
+                    );
+                }
+                column = column.child(collapsed);
+                if let Some(error) = ghq_error {
+                    column = column.child(ui::banner(
+                        ui::BannerKind::Danger,
+                        t!("picker.ghq_failed", error = error).to_string(),
+                        design,
+                    ));
+                }
+            } else {
+                let mut header =
                     ui::section_header("picker-ghq", t!("picker.section.ghq").to_string(), design)
                         .count(ghq_paths.len())
                         .px(px(0.0))
-                        .h(design.px(20.0)),
-                ),
-            );
-            if ghq_loading && ghq_paths.is_empty() {
-                column = column.child(
-                    div()
-                        .text_size(design.px(11.5))
-                        .text_color(design.muted)
-                        .child(t!("picker.loading_ghq").to_string()),
-                );
-            } else if let Some(error) = ghq_error {
-                column = column.child(div().max_w(design.px(520.0)).child(ui::banner(
-                    ui::BannerKind::Danger,
-                    t!("picker.ghq_failed", error = error).to_string(),
-                    design,
-                )));
-            } else if ghq_count == 0 {
-                column = column.child(
-                    div()
-                        .text_size(design.px(11.5))
-                        .text_color(design.muted)
-                        .child(if ghq_paths.is_empty() {
-                            t!("picker.empty.ghq").to_string()
-                        } else {
-                            t!("picker.empty.ghq_filter").to_string()
-                        }),
-                );
-            } else {
-                let entity = self.entity.clone();
-                let row_design = design.clone();
-                let paths = Rc::clone(&ghq_paths);
-                let indices = Rc::clone(&ghq_filtered);
-                let list = uniform_list(ghq_id, ghq_count, move |range, _window, _cx| {
-                    range
-                        .map(|position| {
-                            let index = indices[position];
-                            let Some(path) = paths.get(index) else {
-                                return div().into_any_element();
-                            };
-                            ghq_row(
-                                mode,
-                                target,
-                                position,
-                                path,
-                                ghq_selected == Some(position),
-                                entity.clone(),
-                                &row_design,
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .track_scroll(&self.ghq_scroll)
-                .with_scrollbar(&self.ghq_scroll)
-                .h(design.px(GHQ_LIST_HEIGHT))
-                .w_full();
-                column = column.child(list);
+                        .h(design.px(20.0));
+                if !has_query {
+                    let toggle_entity = self.entity.clone();
+                    header = header.disclosure(true).on_click(move |_, cx| {
+                        toggle_entity.update(cx, |picker, cx| {
+                            picker.ghq_expanded = false;
+                            let recents_len = picker.filtered(cx).len();
+                            picker.selected = picker.selected.min(recents_len.saturating_sub(1));
+                            cx.notify();
+                        });
+                    });
+                }
+                column = column.child(div().pt_1().child(header));
+
+                if ghq_loading && ghq_paths.is_empty() {
+                    column = column.child(
+                        div()
+                            .text_size(design.px(11.5))
+                            .text_color(design.muted)
+                            .child(t!("picker.loading_ghq").to_string()),
+                    );
+                } else if let Some(error) = ghq_error {
+                    column = column.child(ui::banner(
+                        ui::BannerKind::Danger,
+                        t!("picker.ghq_failed", error = error).to_string(),
+                        design,
+                    ));
+                } else if ghq_count == 0 {
+                    column = column.child(
+                        div()
+                            .text_size(design.px(11.5))
+                            .text_color(design.muted)
+                            .child(if ghq_paths.is_empty() {
+                                t!("picker.empty.ghq").to_string()
+                            } else {
+                                t!("picker.empty.ghq_filter").to_string()
+                            }),
+                    );
+                } else {
+                    let entity = self.entity.clone();
+                    let row_design = design.clone();
+                    let paths = Rc::clone(&ghq_paths);
+                    let indices = Rc::clone(&ghq_filtered);
+                    let ghq_home = Rc::clone(&home);
+                    let ghq_height = ((ghq_count as f32) * ROW_HEIGHT).min(GHQ_LIST_HEIGHT);
+                    let list = uniform_list(ghq_id, ghq_count, move |range, _window, _cx| {
+                        range
+                            .map(|position| {
+                                let index = indices[position];
+                                let Some(path) = paths.get(index) else {
+                                    return div().into_any_element();
+                                };
+                                ghq_row(
+                                    mode,
+                                    target,
+                                    position,
+                                    path,
+                                    ghq_home.as_deref(),
+                                    ghq_selected == Some(position),
+                                    entity.clone(),
+                                    &row_design,
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                    .track_scroll(&self.ghq_scroll)
+                    .with_scrollbar(&self.ghq_scroll)
+                    .flex_shrink(1.0)
+                    .min_h(design.px(ROW_HEIGHT.min(ghq_height)))
+                    .h(design.px(ghq_height))
+                    .w_full();
+                    column = column.child(list);
+                }
             }
         }
 
         if self.mode == Mode::Page {
-            column = column.child(
-                div()
-                    .pt_1()
-                    .text_size(design.px(10.5))
-                    .text_color(design.muted)
-                    .child(t!(
-                        "picker.hint",
-                        tab = MODIFIER,
-                        open = MODIFIER,
-                        path = MODIFIER
-                    )),
-            );
+            column = column.child(footer_hints(cx.platform_info().os, design));
         }
 
         div()
-            .w(design.px(560.0))
+            .w_full()
+            .when(self.mode == Mode::Page, |body| body.max_w(design.px(560.0)))
             .flex()
             .flex_col()
+            .min_h_0()
+            .flex_shrink(1.0)
             .child(column)
+            .into_any_element()
+    }
+
+    fn search_field(&self, cx: &App, design: &Design) -> AnyElement {
+        let input_focus = self.input.focus_handle(cx);
+        div()
+            .id(format!("picker-search-field-{:?}", self.mode))
+            .flex()
+            .items_center()
+            .gap(design.px(8.0))
+            .w_full()
+            .h(design.px(34.0))
+            .px(design.px(10.0))
+            .rounded(design.px(8.0))
+            .bg(design.field)
+            .border_1()
+            .border_color(design.border)
+            .cursor_text()
+            .on_click(move |_, window, cx| {
+                window.focus(&input_focus, cx);
+            })
+            .child(
+                Icon::new(IconName::Search)
+                    .with_size(design.px(14.0))
+                    .text_color(design.muted),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .child(Input::new(&self.input).appearance(false).bordered(false)),
+            )
+            .into_any_element()
+    }
+
+    fn action_tiles(&self, cx: &App, design: &Design) -> AnyElement {
+        let open_caps = action_shortcut_caps("OpenRepository", cx);
+        let open_entity = self.entity.clone();
+        let clone_entity = self.entity.clone();
+        let init_entity = self.entity.clone();
+        let path_entity = self.entity.clone();
+
+        div()
+            .flex()
+            .items_stretch()
+            .gap(design.px(8.0))
+            .w_full()
+            .child(
+                ui::action_tile(
+                    format!("picker-tile-open-{:?}", self.mode),
+                    IconName::FolderOpen,
+                    t!("picker.tile.open").to_string(),
+                    design,
+                )
+                .primary(true)
+                .keycaps(open_caps)
+                .on_click(move |_, window, cx| {
+                    open_entity.update(cx, |picker, cx| picker.open_native(window, cx));
+                }),
+            )
+            .child(
+                ui::action_tile(
+                    format!("picker-tile-clone-{:?}", self.mode),
+                    IconName::Download,
+                    t!("picker.tile.clone").to_string(),
+                    design,
+                )
+                .on_click(move |_, window, cx| {
+                    clone_entity.update(cx, |picker, cx| picker.open_clone(window, cx));
+                }),
+            )
+            .child(
+                ui::action_tile(
+                    format!("picker-tile-new-{:?}", self.mode),
+                    IconName::FolderPlus,
+                    t!("picker.tile.new").to_string(),
+                    design,
+                )
+                .on_click(move |_, window, cx| {
+                    init_entity.update(cx, |picker, cx| picker.open_init(window, cx));
+                }),
+            )
+            .child(
+                ui::action_tile(
+                    format!("picker-tile-path-{:?}", self.mode),
+                    IconName::FolderInput,
+                    t!("picker.tile.path").to_string(),
+                    design,
+                )
+                .on_click(move |_, window, cx| {
+                    path_entity.update(cx, |picker, cx| picker.focus_path_entry(window, cx));
+                }),
+            )
             .into_any_element()
     }
 }
 
-/// The system chooser button. Element ids carry the mode because the welcome
-/// screen and the dialog can be on screen at the same time.
-fn open_native_button(entity: &Entity<Picker>, mode: Mode) -> ui::UiButton {
-    let entity = entity.clone();
-    ui::button(
-        format!("picker-open-native-{mode:?}"),
-        t!("picker.open_repository").to_string() + "…",
-    )
-    .on_click(move |_, window, cx| {
-        entity.update(cx, |picker, cx| picker.open_native(window, cx));
-    })
+fn brand_block(design: &Design) -> AnyElement {
+    div()
+        .flex()
+        .items_center()
+        .gap(design.px(12.0))
+        .pb(design.px(4.0))
+        .child(crate::style::app_mark(design.scale(32.0)))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .gap(design.px(4.0))
+                .child(crate::style::wordmark(design.scale(13.0), design.text))
+                .child(
+                    div()
+                        .text_size(design.px(12.0))
+                        .text_color(design.muted)
+                        .child(t!("picker.subtitle").to_string()),
+                ),
+        )
+        .into_any_element()
 }
 
-/// A button that starts a clone, keeping the picker's target.
-fn clone_button(entity: &Entity<Picker>, mode: Mode) -> ui::UiButton {
-    let entity = entity.clone();
-    ui::button(
-        format!("picker-clone-{mode:?}"),
-        t!("picker.clone").to_string(),
-    )
-    .kind(ui::ButtonKind::Normal)
-    .on_click(move |_, window, cx| {
-        entity.update(cx, |picker, cx| picker.open_clone(window, cx));
-    })
-}
-
-/// A button that creates a new repository, keeping the picker's target.
-fn init_button(entity: &Entity<Picker>, mode: Mode) -> ui::UiButton {
-    let entity = entity.clone();
-    ui::button(
-        format!("picker-init-{mode:?}"),
-        t!("picker.new").to_string(),
-    )
-    .kind(ui::ButtonKind::Normal)
-    .on_click(move |_, window, cx| {
-        entity.update(cx, |picker, cx| picker.open_init(window, cx));
-    })
-}
-
-/// Switches the text field between filtering the list and taking a path.
-fn path_toggle_button(entity: &Entity<Picker>, mode: Mode, path_mode: bool) -> ui::UiButton {
-    let entity = entity.clone();
-    let label: SharedString = if path_mode {
-        t!("picker.use_recent").to_string().into()
-    } else {
-        t!("picker.type_path").to_string().into()
-    };
-    ui::button(format!("picker-toggle-path-{mode:?}"), label)
-        .ghost()
-        .on_click(move |_, window, cx| {
-            entity.update(cx, |picker, cx| picker.toggle_path_entry(window, cx));
+fn action_shortcut_caps(action: &str, cx: &App) -> Vec<SharedString> {
+    let os = cx.platform_info().os;
+    let default_state = keymap::KeymapState::default();
+    let state = cx
+        .try_global::<keymap::KeymapState>()
+        .unwrap_or(&default_state);
+    keymap::resolve(action)
+        .and_then(|spec| {
+            keymap::effective_keystrokes(state, spec, os)
+                .into_iter()
+                .next()
         })
+        .map(|keystroke| {
+            ui::shortcut_caps(&keystroke, os)
+                .into_iter()
+                .map(SharedString::from)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
-/// Row rendering shared by the page and the dialog.
-#[allow(clippy::too_many_arguments)]
-fn recent_row(
-    mode: Mode,
-    default_target: OpenTarget,
-    position: usize,
-    entry: &RecentRepository,
-    selected: bool,
-    now: u64,
-    entity: Entity<Picker>,
-    design: &Design,
-) -> AnyElement {
-    let group = format!("recent-{mode:?}-{position}");
-    let name = entry.name();
-    let path = entry.path.display().to_string();
-    let opened = opened_label(entry.opened_at, now);
+fn keystroke_caps(spec: &str, os: OperatingSystem) -> Vec<SharedString> {
+    Keystroke::parse_with_os(spec, os)
+        .map(|keystroke| {
+            ui::shortcut_caps(&keystroke, os)
+                .into_iter()
+                .map(SharedString::from)
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
-    let open_entity = entity.clone();
-    let open = div()
-        .id(("recent-open", position))
+fn footer_hints(os: OperatingSystem, design: &Design) -> AnyElement {
+    let item = |caps: Vec<SharedString>, label: String| {
+        div()
+            .flex()
+            .items_center()
+            .gap(design.px(5.0))
+            .child(ui::keycaps(caps, design))
+            .child(div().text_color(design.muted).child(label))
+    };
+
+    div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .gap_x(design.px(14.0))
+        .gap_y(design.px(4.0))
+        .pt_1()
+        .text_size(design.px(10.5))
+        .text_color(design.muted)
+        .child(item(
+            vec!["↑".into(), "↓".into()],
+            t!("picker.hint.select").to_string(),
+        ))
+        .child(item(
+            keystroke_caps("enter", os),
+            t!("picker.hint.open").to_string(),
+        ))
+        .child(item(
+            keystroke_caps("secondary-enter", os),
+            t!("picker.hint.new_tab").to_string(),
+        ))
+        .child(item(
+            keystroke_caps("backspace", os),
+            t!("picker.hint.remove").to_string(),
+        ))
+        .into_any_element()
+}
+
+/// Shared row chrome for recent and ghq repositories.
+#[allow(clippy::too_many_arguments)]
+fn repo_row_shell(
+    open_id: (&'static str, usize),
+    group: String,
+    name: String,
+    formatted_path: String,
+    selected: bool,
+    trailing: Vec<AnyElement>,
+    remove_button: Option<AnyElement>,
+    on_open: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    design: &Design,
+) -> gpui::Stateful<gpui::Div> {
+    let avatar = ui::repo_avatar(
+        crate::style::repo_initial(&name),
+        design.repo_color(&name),
+        design,
+    );
+
+    let mut open = div()
+        .id(open_id)
         .flex()
         .flex_1()
         .min_w_0()
         .h_full()
         .items_center()
-        .gap_2()
+        .gap(design.px(10.0))
         .cursor_pointer()
-        .on_click(move |event, window, cx| {
-            let target = if event.modifiers().secondary(cx) {
-                OpenTarget::NewTab
-            } else {
-                default_target
-            };
-            open_entity.update(cx, |picker, cx| {
-                picker.open_row_in(position, target, window, cx);
-            });
-        })
+        .on_click(on_open)
+        .child(avatar)
         .child(
             div()
                 .flex()
@@ -982,7 +1184,8 @@ fn recent_row(
                 .child(
                     div()
                         .truncate()
-                        .text_size(design.px(12.0))
+                        .text_size(design.px(12.5))
+                        .font_weight(FontWeight::SEMIBOLD)
                         .text_color(design.text)
                         .child(name),
                 )
@@ -991,16 +1194,123 @@ fn recent_row(
                         .truncate()
                         .text_size(design.px(10.5))
                         .text_color(design.muted)
-                        .child(path),
+                        .child(formatted_path),
                 ),
-        )
-        .child(
-            div()
-                .flex_none()
-                .text_size(design.px(10.5))
-                .text_color(design.muted)
-                .child(opened),
         );
+
+    if !trailing.is_empty() {
+        open = open.child(
+            div()
+                .flex()
+                .flex_none()
+                .items_center()
+                .gap(design.px(6.0))
+                .children(trailing),
+        );
+    }
+
+    div()
+        .id(SharedString::from(group.clone()))
+        .group(group)
+        .flex()
+        .items_center()
+        .gap(design.px(6.0))
+        .h(design.px(ROW_HEIGHT))
+        .w_full()
+        .px(design.px(8.0))
+        .rounded(design.px(7.0))
+        .when(selected, |row| row.bg(design.accent_soft))
+        .when(!selected, |row| row.hover(|style| style.bg(design.field)))
+        .child(open)
+        .when_some(remove_button, |row, button| row.child(button))
+}
+
+fn repo_state_label(state: RepoState) -> String {
+    match state {
+        RepoState::Normal => String::new(),
+        RepoState::Merging => t!("progress.merging").to_string(),
+        RepoState::Rebasing => t!("progress.rebasing").to_string(),
+        RepoState::CherryPicking => t!("progress.cherry_picking").to_string(),
+        RepoState::Reverting => t!("progress.reverting").to_string(),
+        RepoState::ApplyingPatches => t!("progress.applying_patches").to_string(),
+        RepoState::Bisecting => t!("progress.bisecting").to_string(),
+    }
+}
+
+/// Row rendering shared by the page and the dialog.
+#[allow(clippy::too_many_arguments)]
+fn recent_row(
+    mode: Mode,
+    default_target: OpenTarget,
+    position: usize,
+    entry: &RecentRepository,
+    quick_status: Option<&RepoQuickState>,
+    home: Option<&Path>,
+    selected: bool,
+    now: u64,
+    entity: Entity<Picker>,
+    design: &Design,
+) -> AnyElement {
+    let group = format!("recent-{mode:?}-{position}");
+    let name = entry.name();
+    let formatted_path = format_repo_path(&entry.path, home, PATH_DISPLAY_MAX_CHARS);
+    let opened = opened_label(entry.opened_at, now);
+
+    let mut trailing: Vec<AnyElement> = Vec::new();
+    match quick_status {
+        Some(RepoQuickState::NotFound) => {
+            trailing.push(ui::status_badge(
+                t!("picker.status.not_found").to_string(),
+                ui::BadgeTone::Neutral,
+                design,
+            ));
+        }
+        Some(RepoQuickState::Loaded(status)) => {
+            if status.state != RepoState::Normal {
+                trailing.push(ui::status_badge(
+                    repo_state_label(status.state),
+                    ui::BadgeTone::Warning,
+                    design,
+                ));
+            }
+            if status.dirty {
+                trailing.push(ui::dirty_dot(design));
+            }
+            if let Some(head) = &status.head {
+                match head {
+                    HeadInfo::Branch { short_name, .. } => {
+                        trailing.push(
+                            ui::ref_chip(
+                                ("recent-branch", position),
+                                RefKind::LocalBranch,
+                                false,
+                                short_name.clone(),
+                                design.scale(BRANCH_CHIP_MAX_WIDTH),
+                                design,
+                            )
+                            .into_any_element(),
+                        );
+                    }
+                    HeadInfo::Detached { target } => {
+                        trailing.push(ui::status_badge(
+                            target.to_hex_with_len(7).to_string(),
+                            ui::BadgeTone::Neutral,
+                            design,
+                        ));
+                    }
+                }
+            }
+        }
+        Some(RepoQuickState::Pending | RepoQuickState::Unavailable) | None => {}
+    }
+    trailing.push(
+        div()
+            .flex_none()
+            .text_size(design.px(10.5))
+            .text_color(design.muted)
+            .child(opened)
+            .into_any_element(),
+    );
 
     let remove_entity = entity.clone();
     let remove = div()
@@ -1018,23 +1328,30 @@ fn recent_row(
         .on_click(move |_, _, cx| {
             remove_entity.update(cx, |picker, cx| picker.remove(position, cx));
         })
-        .child("×");
+        .child("×")
+        .into_any_element();
 
-    let mut row = div()
-        .group(group)
-        .flex()
-        .items_center()
-        .gap_2()
-        .h(design.px(ROW_HEIGHT))
-        .w_full()
-        .px_2()
-        .rounded_sm()
-        .hover(|style| style.bg(design.row_selected))
-        .child(open)
-        .child(remove);
-    if selected {
-        row = row.bg(design.row_selected);
-    }
+    let open_entity = entity.clone();
+    let row = repo_row_shell(
+        ("recent-open", position),
+        group,
+        name,
+        formatted_path,
+        selected,
+        trailing,
+        Some(remove),
+        move |event, window, cx| {
+            let target = if event.modifiers().secondary(cx) {
+                OpenTarget::NewTab
+            } else {
+                default_target
+            };
+            open_entity.update(cx, |picker, cx| {
+                picker.open_row_in(position, target, window, cx);
+            });
+        },
+        design,
+    );
 
     let menu_id: SharedString = format!("recent-menu-{mode:?}-{position}").into();
     let menu_entity = entity;
@@ -1091,28 +1408,25 @@ fn ghq_row(
     default_target: OpenTarget,
     position: usize,
     path: &Path,
+    home: Option<&Path>,
     selected: bool,
     entity: Entity<Picker>,
     design: &Design,
 ) -> AnyElement {
     let group = format!("ghq-{mode:?}-{position}");
-    let name = path
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string());
-    let path_label = path.display().to_string();
+    let name = crate::recent::repository_name(path);
+    let formatted_path = format_repo_path(path, home, PATH_DISPLAY_MAX_CHARS);
 
     let open_entity = entity.clone();
-    let open = div()
-        .id(("ghq-open", position))
-        .flex()
-        .flex_1()
-        .min_w_0()
-        .h_full()
-        .items_center()
-        .gap_2()
-        .cursor_pointer()
-        .on_click(move |event, window, cx| {
+    let row = repo_row_shell(
+        ("ghq-open", position),
+        group,
+        name,
+        formatted_path,
+        selected,
+        Vec::new(),
+        None,
+        move |event, window, cx| {
             let target = if event.modifiers().secondary(cx) {
                 OpenTarget::NewTab
             } else {
@@ -1121,43 +1435,9 @@ fn ghq_row(
             open_entity.update(cx, |picker, cx| {
                 picker.open_ghq_row_in(position, target, window, cx);
             });
-        })
-        .child(
-            div()
-                .flex()
-                .flex_col()
-                .flex_1()
-                .min_w_0()
-                .child(
-                    div()
-                        .truncate()
-                        .text_size(design.px(12.0))
-                        .text_color(design.text)
-                        .child(name),
-                )
-                .child(
-                    div()
-                        .truncate()
-                        .text_size(design.px(10.5))
-                        .text_color(design.muted)
-                        .child(path_label),
-                ),
-        );
-
-    let mut row = div()
-        .group(group)
-        .flex()
-        .items_center()
-        .gap_2()
-        .h(design.px(ROW_HEIGHT))
-        .w_full()
-        .px_2()
-        .rounded_sm()
-        .hover(|style| style.bg(design.row_selected))
-        .child(open);
-    if selected {
-        row = row.bg(design.row_selected);
-    }
+        },
+        design,
+    );
 
     let menu_id: SharedString = format!("ghq-menu-{mode:?}-{position}").into();
     let menu_entity = entity;
@@ -1204,6 +1484,27 @@ impl Render for Picker {
         let design = Design::new(cx.theme(), Settings::get(cx));
         let body = self.body(cx, &design);
 
+        let handle_backspace_delete = cx.listener(|this, event: &KeyDownEvent, window, cx| {
+            let key = event.keystroke.key.as_str();
+            let mods = event.keystroke.modifiers;
+            // While the filter field is focused with text, Backspace/Delete
+            // edits the query as usual; when empty, it removes the selected
+            // recent row without forcing the user to press Escape first.
+            if !event.is_held
+                && (key == "backspace" || key == "delete")
+                && !mods.control
+                && !mods.alt
+                && !mods.platform
+                && !mods.shift
+                && !mods.function
+                && this.input.focus_handle(cx).is_focused(window)
+                && this.input.read(cx).value().is_empty()
+            {
+                this.remove_selected(cx);
+                cx.stop_propagation();
+            }
+        });
+
         match self.mode {
             Mode::Page => div()
                 .size_full()
@@ -1213,6 +1514,7 @@ impl Render for Picker {
                 .text_color(design.text)
                 .track_focus(&self.focus)
                 .key_context(PICKER_PAGE)
+                .capture_key_down(handle_backspace_delete)
                 .on_action(cx.listener(|this, _: &PickerPrevious, _, cx| this.step(-1, cx)))
                 .on_action(cx.listener(|this, _: &PickerNext, _, cx| this.step(1, cx)))
                 .on_action(cx.listener(|this, _: &OpenSelectedRepository, window, cx| {
@@ -1221,11 +1523,11 @@ impl Render for Picker {
                 .on_action(cx.listener(|this, _: &OpenSelectedInNewTab, window, cx| {
                     this.open_selected_in(OpenTarget::NewTab, window, cx);
                 }))
-                .on_action(cx.listener(|this, _: &TogglePathEntry, window, cx| {
-                    this.toggle_path_entry(window, cx);
-                }))
                 .on_action(cx.listener(|this, _: &PickerEscape, window, cx| {
-                    this.leave_path_entry(window, cx);
+                    this.focus.focus(window, cx);
+                }))
+                .on_action(cx.listener(|this, _: &RemoveSelectedRecent, _, cx| {
+                    this.remove_selected(cx);
                 }))
                 .child(
                     // The same 44 px chrome strip as the main window, so the
@@ -1265,12 +1567,23 @@ impl Render for Picker {
                 .child(
                     div()
                         .flex()
+                        .flex_col()
                         .flex_1()
                         .min_h_0()
+                        .w_full()
                         .items_center()
-                        .justify_center()
-                        .p_6()
-                        .child(body),
+                        .px(design.px(24.0))
+                        // Anchor ~15-20% from the top on tall windows while
+                        // letting short windows collapse to keep header, list
+                        // and footer usable.
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_h(design.px(12.0))
+                                .max_h(design.px(120.0)),
+                        )
+                        .child(body)
+                        .child(div().flex_1().min_h(design.px(12.0))),
                 )
                 .into_any_element(),
             Mode::Dialog => {
@@ -1284,10 +1597,11 @@ impl Render for Picker {
                     .w_full()
                     .track_focus(&self.focus)
                     .key_context(PICKER_DIALOG)
+                    .capture_key_down(handle_backspace_delete)
                     .on_action(cx.listener(|this, _: &PickerPrevious, _, cx| this.step(-1, cx)))
                     .on_action(cx.listener(|this, _: &PickerNext, _, cx| this.step(1, cx)))
-                    .on_action(cx.listener(|this, _: &TogglePathEntry, window, cx| {
-                        this.toggle_path_entry(window, cx);
+                    .on_action(cx.listener(|this, _: &RemoveSelectedRecent, _, cx| {
+                        this.remove_selected(cx);
                     }))
                     .child(
                         div()
@@ -1301,6 +1615,85 @@ impl Render for Picker {
             }
         }
     }
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+/// Whether `text` looks like a filesystem path rather than a repository filter.
+pub(crate) fn looks_like_path(text: &str) -> bool {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    trimmed.starts_with('/')
+        || trimmed.starts_with('~')
+        || trimmed.starts_with('.')
+        || trimmed.starts_with("\\\\")
+        || is_windows_drive_path(trimmed)
+}
+
+fn is_windows_drive_path(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+}
+
+/// Expands a leading `~`, `~/...`, or `~\...` against `home`.
+pub(crate) fn expand_home_path(text: &str, home: Option<&Path>) -> PathBuf {
+    let trimmed = text.trim();
+    if let Some(home) = home {
+        if trimmed == "~" {
+            return home.to_path_buf();
+        }
+        if let Some(rest) = trimmed
+            .strip_prefix("~/")
+            .or_else(|| trimmed.strip_prefix("~\\"))
+        {
+            return home.join(rest);
+        }
+    }
+    PathBuf::from(trimmed)
+}
+
+/// Shortens `home` to `~` and middle-ellipsises long paths so the repo folder
+/// and leading root stay readable in narrow rows.
+pub(crate) fn format_repo_path(path: &Path, home: Option<&Path>, max_chars: usize) -> String {
+    let shortened = match home {
+        Some(home) if path == home => "~".to_owned(),
+        Some(home) => match path.strip_prefix(home) {
+            Ok(rel) => format!("~{}{}", std::path::MAIN_SEPARATOR, rel.display()),
+            Err(_) => path.display().to_string(),
+        },
+        None => path.display().to_string(),
+    };
+    middle_ellipsis(&shortened, max_chars)
+}
+
+fn middle_ellipsis(text: &str, max_chars: usize) -> String {
+    let count = text.chars().count();
+    if count <= max_chars || max_chars < 5 {
+        return text.to_owned();
+    }
+    let keep = max_chars - 1;
+    let head = keep * 2 / 5;
+    let tail = keep - head;
+    let prefix: String = text.chars().take(head).collect();
+    let suffix: String = text
+        .chars()
+        .rev()
+        .take(tail)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("{prefix}…{suffix}")
 }
 
 /// Indices of the entries whose name or path contains `query`, ignoring case.
@@ -1410,6 +1803,61 @@ mod tests {
             .status()
             .expect("git runs");
         assert!(status.success(), "git {args:?} failed");
+    }
+
+    #[test]
+    fn path_detection_recognizes_paths_and_ignores_repo_queries() {
+        assert!(looks_like_path("/work/strata"));
+        assert!(looks_like_path("  ~/work/strata  "));
+        assert!(looks_like_path("~"));
+        assert!(looks_like_path("./repo"));
+        assert!(looks_like_path("../repo"));
+        assert!(looks_like_path(r"C:\work\strata"));
+        assert!(looks_like_path("C:/work/strata"));
+        assert!(looks_like_path(r"\\server\share\repo"));
+
+        assert!(!looks_like_path(""));
+        assert!(!looks_like_path("   "));
+        assert!(!looks_like_path("strata"));
+        assert!(!looks_like_path("work/strata"));
+    }
+
+    #[test]
+    fn home_expansion_and_path_formatting_handle_tilde_and_ellipsis() {
+        let home = Path::new("/Users/ada");
+        assert_eq!(
+            expand_home_path("~", Some(home)),
+            PathBuf::from("/Users/ada")
+        );
+        assert_eq!(
+            expand_home_path("~/work/strata", Some(home)),
+            PathBuf::from("/Users/ada/work/strata")
+        );
+        assert_eq!(
+            expand_home_path("/tmp/other", Some(home)),
+            PathBuf::from("/tmp/other")
+        );
+
+        let expected_short = format!(
+            "~{}work{}strata",
+            std::path::MAIN_SEPARATOR,
+            std::path::MAIN_SEPARATOR
+        );
+        assert_eq!(
+            format_repo_path(Path::new("/Users/ada/work/strata"), Some(home), 56),
+            expected_short
+        );
+        assert_eq!(format_repo_path(home, Some(home), 56), "~");
+
+        let long = format_repo_path(
+            Path::new("/Users/ada/projects/organizations/deeply/nested/workspace/strata"),
+            Some(home),
+            24,
+        );
+        assert_eq!(long.chars().count(), 24);
+        assert!(long.contains('…'));
+        assert!(long.starts_with('~'));
+        assert!(long.ends_with("strata"));
     }
 
     #[test]
