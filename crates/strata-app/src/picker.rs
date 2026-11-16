@@ -816,7 +816,10 @@ impl Picker {
             column = column.child(list);
         }
 
-        if ghq_visible {
+        // With nothing under the ghq root the section would only be a lone
+        // label; it comes back while loading or to report a failure.
+        let ghq_worth_showing = ghq_loading || ghq_error.is_some() || !ghq_paths.is_empty();
+        if ghq_visible && ghq_worth_showing {
             if !ghq_expanded {
                 let expand_entity = self.entity.clone();
                 let mut collapsed = div()
@@ -987,6 +990,24 @@ impl Picker {
                     .min_w_0()
                     .child(Input::new(&self.input).appearance(false).bordered(false)),
             )
+            // A path is not a filter, so the list below stays as it was; the
+            // keycap says what Enter will do instead.
+            .when(looks_like_path(&self.input.read(cx).value()), |field| {
+                field.child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .gap(design.px(6.0))
+                        .text_size(px(design.tiny()))
+                        .text_color(design.muted)
+                        .child(t!("picker.path_enter").to_string())
+                        .child(ui::keycaps(
+                            keystroke_caps("enter", cx.platform_info().os),
+                            design,
+                        )),
+                )
+            })
             .into_any_element()
     }
 

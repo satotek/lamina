@@ -1052,6 +1052,7 @@ impl Workspace {
                 })
                 .child(
                     crate::ui::button("picker-dialog-cancel", t!("common.cancel").to_string())
+                        .kind(crate::ui::ButtonKind::Normal)
                         .size(crate::ui::ButtonSize::Medium)
                         .on_click(|_, window, cx| window.close_dialog(cx)),
                 );
