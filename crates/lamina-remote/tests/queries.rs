@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
+use lamina_core::compare::{RepoCompareSide, ThreeWayTreeChange, ThreeWayTreeCompare};
 use lamina_core::session::{
     CommitQuery, CompareMode, ContentSearchMode, ContentSearchQuery, QueryTicket, RepoSnapshot,
     RepositorySession, Session, SessionEvent,
@@ -636,6 +637,127 @@ fn an_in_process_helper_reports_merge_details() {
         .join()
         .expect("server thread")
         .expect("serve returns cleanly");
+}
+
+/// Two diverged branches plus an uncommitted edit, so every three-way side
+/// (commit, index, worktree) has something the other does not.
+fn three_way_fixture() -> (TestRepo, Oid, Oid, Oid) {
+    let repo = TestRepo::new();
+    repo.write("file.txt", "base\n");
+    let base = repo.commit("base");
+    repo.git(&["checkout", "-q", "-b", "left"]);
+    repo.write("file.txt", "left\n");
+    repo.write("only-left.txt", "left\n");
+    let left = repo.commit("left");
+    repo.git(&["checkout", "-q", "main"]);
+    repo.write("file.txt", "right\n");
+    repo.write("only-right.txt", "right\n");
+    let right = repo.commit("right");
+    repo.write("file.txt", "worktree\n");
+    (repo, base, left, right)
+}
+
+fn assert_same_tree(local: &ThreeWayTreeCompare, remote: &ThreeWayTreeCompare) {
+    assert_eq!(local.left, remote.left);
+    assert_eq!(local.base, remote.base);
+    assert_eq!(local.right, remote.right);
+    assert_eq!(local.entries, remote.entries);
+    assert_eq!(local.counts, remote.counts);
+    assert_eq!(local.merge_tree_checked, remote.merge_tree_checked);
+}
+
+fn assert_three_way(repo: &TestRepo, remote: &RemoteSession, base: Oid, left: Oid, right: Oid) {
+    let local = repo.open();
+    let reader = remote.reader();
+    assert_eq!(
+        local.merge_base(left, right).expect("local merge base"),
+        Some(base)
+    );
+    assert_eq!(
+        reader.merge_base(left, right).expect("remote merge base"),
+        Some(base)
+    );
+
+    let roles = [right, left, base];
+    assert_eq!(
+        local.three_way_roles(roles).expect("local roles"),
+        reader.three_way_roles(roles).expect("remote roles")
+    );
+
+    let local_tree = local.three_way_tree(left, base, right).expect("local tree");
+    assert!(
+        local_tree.entries.iter().any(|entry| {
+            entry.relative_path == "file.txt" && entry.change == ThreeWayTreeChange::BothDisagree
+        }),
+        "the diverged file should disagree: {:?}",
+        local_tree.entries
+    );
+    assert_same_tree(
+        &local_tree,
+        &reader
+            .three_way_tree(left, base, right)
+            .expect("remote tree"),
+    );
+    assert_eq!(
+        local
+            .three_way_blobs(left, base, right, "file.txt")
+            .expect("local blobs"),
+        reader
+            .three_way_blobs(left, base, right, "file.txt")
+            .expect("remote blobs")
+    );
+
+    let sides = [
+        RepoCompareSide::Commit(left),
+        RepoCompareSide::Index,
+        RepoCompareSide::Worktree,
+    ];
+    assert_same_tree(
+        &local.three_way_side_tree(sides).expect("local sides"),
+        &reader.three_way_side_tree(sides).expect("remote sides"),
+    );
+    assert_eq!(
+        local
+            .compare_side_blob(RepoCompareSide::Worktree, "file.txt")
+            .expect("local worktree blob"),
+        Some(b"worktree\n".to_vec())
+    );
+    assert_eq!(
+        reader
+            .compare_side_blob(RepoCompareSide::Worktree, "file.txt")
+            .expect("remote worktree blob"),
+        Some(b"worktree\n".to_vec())
+    );
+    let escaped = reader
+        .compare_side_blob(RepoCompareSide::Worktree, "../outside.txt")
+        .expect_err("a worktree blob must not leave the repository");
+    assert!(
+        escaped.to_string().contains("worktree"),
+        "unexpected error: {escaped}"
+    );
+}
+
+#[test]
+fn three_way_reads_match_a_local_repository() {
+    let (repo, base, left, right) = three_way_fixture();
+    let (remote, _events, server) = connect_in_process(&repo);
+    assert_three_way(&repo, &remote, base, left, right);
+    drop(remote);
+    server
+        .join()
+        .expect("server thread")
+        .expect("serve returns cleanly");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_spawned_helper_matches_three_way_reads() {
+    let (repo, base, left, right) = three_way_fixture();
+    let (remote, _events, mut child) = spawn_helper(&repo);
+    assert_three_way(&repo, &remote, base, left, right);
+    drop(remote);
+    let status = child.wait().expect("wait for helper");
+    assert!(status.success(), "helper exited with {status}");
 }
 
 #[cfg(unix)]
