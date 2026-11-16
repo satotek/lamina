@@ -30,7 +30,7 @@ use strata_core::{
 };
 use strata_remote_protocol::{
     self as proto, DiffOptionsDto, DiffRequestDto, ErrorKind, Event, Message, ObjectId,
-    OperationDto, RemoteError, Request, Response, rows_from_dto,
+    OperationDto, QueryRequest, RemoteError, Request, Response, rows_from_dto,
 };
 
 /// Returned by every operation this slice does not carry over the wire.
@@ -126,6 +126,12 @@ struct OpRejected {
     reported: bool,
 }
 
+struct QueryRejected {
+    error: Error,
+    /// [`Inner::fail`] already emitted `QueryFailed` for this ticket.
+    reported: bool,
+}
+
 struct Inner {
     writer: Mutex<Option<Box<dyn Write + Send>>>,
     pending: Mutex<HashMap<u16, Sender<Response>>>,
@@ -138,6 +144,13 @@ struct Inner {
     /// Operations whose `OperationFinished` has not arrived. A lost connection
     /// finishes each of them so the UI does not stay busy.
     inflight: Mutex<HashSet<OperationId>>,
+    /// Queries whose terminal event has not arrived. Cancel removes the ticket
+    /// before the cancel frame is written, so a late result is dropped. A lost
+    /// connection fails each one that is still here.
+    queries: Mutex<HashSet<QueryTicket>>,
+    /// Query requests do not wait. The stream id is how an `Error` response
+    /// finds the ticket to fail.
+    query_streams: Mutex<HashMap<u16, QueryTicket>>,
     next_stream: AtomicU16,
     snapshot: RwLock<Arc<RepoSnapshot>>,
     /// Bumped under `park` so a waiter cannot miss the wakeup for a chunk.
@@ -145,6 +158,7 @@ struct Inner {
     events: Box<dyn Fn(SessionEvent) + Send + Sync>,
     next_ticket: AtomicU64,
     next_operation: AtomicU64,
+    next_query: AtomicU64,
     git_dir: PathBuf,
     root: PathBuf,
     hidden_refs: Mutex<Vec<String>>,
@@ -233,12 +247,15 @@ impl RemoteSession {
             diff_streams: Mutex::new(HashMap::new()),
             operation_streams: Mutex::new(HashMap::new()),
             inflight: Mutex::new(HashSet::new()),
+            queries: Mutex::new(HashSet::new()),
+            query_streams: Mutex::new(HashMap::new()),
             next_stream: AtomicU16::new(2),
             snapshot: RwLock::new(Arc::new(empty_snapshot())),
             snapshot_note: AtomicU64::new(0),
             events: Box::new(on_event),
             next_ticket: AtomicU64::new(0),
             next_operation: AtomicU64::new(0),
+            next_query: AtomicU64::new(0),
             git_dir: PathBuf::from(&ack.git_dir),
             root: PathBuf::from(&ack.root),
             hidden_refs: Mutex::new(Vec::new()),
@@ -311,14 +328,6 @@ impl RemoteSession {
 
     fn emit(&self, event: SessionEvent) {
         (self.inner.events)(event);
-    }
-
-    fn unsupported_query(&self) -> QueryTicket {
-        self.emit(SessionEvent::QueryFailed {
-            ticket: QueryTicket(0),
-            error: UNSUPPORTED.to_owned(),
-        });
-        QueryTicket(0)
     }
 
     /// Stop a mutation that was started with [`RepositorySession::run`].
@@ -511,6 +520,8 @@ impl Inner {
         let diffs = std::mem::take(&mut *lock(&self.diff_streams));
         let _operations = std::mem::take(&mut *lock(&self.operation_streams));
         let inflight = std::mem::take(&mut *lock(&self.inflight));
+        let queries = std::mem::take(&mut *lock(&self.queries));
+        let _query_streams = std::mem::take(&mut *lock(&self.query_streams));
         {
             let _park = lock(&self.park);
             self.wake.notify_all();
@@ -535,6 +546,12 @@ impl Inner {
                 error: Some(message.clone()),
             });
         }
+        for ticket in queries {
+            (self.events)(SessionEvent::QueryFailed {
+                ticket,
+                error: message.clone(),
+            });
+        }
     }
 
     fn ensure_open(&self) -> Result<()> {
@@ -555,7 +572,8 @@ impl Inner {
             let pending = lock(&self.pending).contains_key(&id);
             let diff = lock(&self.diff_streams).contains_key(&id);
             let operation = lock(&self.operation_streams).contains_key(&id);
-            if !pending && !diff && !operation {
+            let query = lock(&self.query_streams).contains_key(&id);
+            if !pending && !diff && !operation && !query {
                 return Ok(id);
             }
         }
@@ -681,6 +699,15 @@ impl Inner {
                     && let Response::Error(error) = response
                 {
                     self.finish_operation(id, Some(error.message));
+                    return;
+                }
+                // `Ok` means later events carry the ticket. An `Error` is the
+                // outcome: the helper rejected the query before it started.
+                // The remove runs for both, so a stream id is not leaked.
+                if let Some(ticket) = lock(&self.query_streams).remove(&frame.stream)
+                    && let Response::Error(error) = response
+                {
+                    self.fail_query(ticket, error.message);
                 }
             }
             Message::Event(event) => self.apply_event(event),
@@ -787,7 +814,82 @@ impl Inner {
                     secret,
                 });
             }
+            Event::Query { ticket, event } => {
+                let ticket = QueryTicket(ticket);
+                // A cancel removes the ticket before its frame is written, so
+                // a result that already left the helper is not delivered.
+                let terminal = event.is_terminal();
+                match event.into_session(ticket) {
+                    Ok(session_event) => {
+                        let deliver = {
+                            let mut outstanding = lock(&self.queries);
+                            if !outstanding.contains(&ticket) {
+                                false
+                            } else if terminal {
+                                outstanding.remove(&ticket);
+                                true
+                            } else {
+                                true
+                            }
+                        };
+                        if deliver {
+                            (self.events)(session_event);
+                        }
+                    }
+                    Err(error) => self.fail_query(ticket, error.to_string()),
+                }
+            }
+            Event::SignaturesInvalidated => {
+                (self.events)(SessionEvent::SignaturesInvalidated);
+            }
         }
+    }
+
+    /// Emit `QueryFailed` once. The helper's error and a lost connection can
+    /// both try; the second one finds the ticket already gone.
+    fn fail_query(&self, ticket: QueryTicket, error: String) {
+        if lock(&self.queries).remove(&ticket) {
+            (self.events)(SessionEvent::QueryFailed { ticket, error });
+        }
+    }
+
+    fn request_query(&self, query: QueryRequest) -> QueryTicket {
+        let ticket = QueryTicket(self.next_query.fetch_add(1, Ordering::SeqCst) + 1);
+        let rejected = (|| -> Result<(), QueryRejected> {
+            self.ensure_open().map_err(|error| QueryRejected {
+                error,
+                reported: false,
+            })?;
+            let stream = self.alloc_stream().map_err(|error| QueryRejected {
+                error,
+                reported: false,
+            })?;
+            lock(&self.query_streams).insert(stream, ticket);
+            lock(&self.queries).insert(ticket);
+            if let Err(error) = self.write_message(
+                stream,
+                &Message::Request(Request::Query {
+                    ticket: ticket.0,
+                    query,
+                }),
+            ) {
+                lock(&self.query_streams).remove(&stream);
+                // `fail` takes the whole set and emits. If the ticket is still
+                // here, that did not happen and the caller has to fail it.
+                let reported = !lock(&self.queries).remove(&ticket);
+                return Err(QueryRejected { error, reported });
+            }
+            Ok(())
+        })();
+        if let Err(rejected) = rejected
+            && !rejected.reported
+        {
+            (self.events)(SessionEvent::QueryFailed {
+                ticket,
+                error: rejected.error.to_string(),
+            });
+        }
+        ticket
     }
 
     fn note_snapshot(&self) {
@@ -938,64 +1040,94 @@ impl RepositorySession for RemoteSession {
             .send_detached(Request::CancelDiff { ticket: ticket.0 });
     }
 
-    fn search_commits(&self, _query: CommitQuery) -> QueryTicket {
-        self.unsupported_query()
+    fn search_commits(&self, query: CommitQuery) -> QueryTicket {
+        self.inner
+            .request_query(QueryRequest::Search((&query).into()))
     }
 
-    fn path_history(&self, _path: String) -> QueryTicket {
-        self.unsupported_query()
+    fn path_history(&self, path: String) -> QueryTicket {
+        self.inner.request_query(QueryRequest::Path { path })
     }
 
-    fn path_history_streaming(&self, _path: String) -> QueryTicket {
-        self.unsupported_query()
+    fn path_history_streaming(&self, path: String) -> QueryTicket {
+        self.inner
+            .request_query(QueryRequest::StreamingPath { path })
     }
 
-    fn request_commit_stat(&self, _commit: Oid) -> QueryTicket {
-        self.unsupported_query()
+    fn request_commit_stat(&self, commit: Oid) -> QueryTicket {
+        self.inner
+            .request_query(QueryRequest::CommitStat(ObjectId::from(commit)))
     }
 
     fn request_compare(
         &self,
-        _a: Oid,
-        _b: Oid,
-        _mode: strata_core::session::CompareMode,
+        a: Oid,
+        b: Oid,
+        mode: strata_core::session::CompareMode,
     ) -> QueryTicket {
-        self.unsupported_query()
+        self.inner.request_query(QueryRequest::Compare {
+            a: ObjectId::from(a),
+            b: ObjectId::from(b),
+            mode: mode.into(),
+        })
     }
 
-    fn request_compare_from(&self, _base: Option<Oid>, _head: Oid) -> QueryTicket {
-        self.unsupported_query()
+    fn request_compare_from(&self, base: Option<Oid>, head: Oid) -> QueryTicket {
+        self.inner.request_query(QueryRequest::CompareFrom {
+            base: base.map(ObjectId::from),
+            head: ObjectId::from(head),
+        })
     }
 
-    fn request_compare_with_worktree(&self, _base: Oid) -> QueryTicket {
-        self.unsupported_query()
+    fn request_compare_with_worktree(&self, base: Oid) -> QueryTicket {
+        self.inner.request_query(QueryRequest::CompareWorktree {
+            base: ObjectId::from(base),
+        })
     }
 
     fn request_submodules_and_worktrees(&self) -> QueryTicket {
-        self.unsupported_query()
+        self.inner
+            .request_query(QueryRequest::SubmodulesAndWorktrees)
     }
 
-    fn request_reflog(&self, _limit: usize) -> QueryTicket {
-        self.unsupported_query()
+    fn request_reflog(&self, limit: usize) -> QueryTicket {
+        self.inner.request_query(QueryRequest::Reflog {
+            limit: limit as u64,
+        })
     }
 
     fn request_in_progress_details(&self) -> QueryTicket {
-        self.unsupported_query()
+        self.inner.request_query(QueryRequest::InProgressDetails)
     }
 
-    fn request_blame(&self, _commit: Oid, _path: String) -> QueryTicket {
-        self.unsupported_query()
+    fn request_blame(&self, commit: Oid, path: String) -> QueryTicket {
+        self.inner.request_query(QueryRequest::Blame {
+            commit: ObjectId::from(commit),
+            path,
+        })
     }
 
-    fn content_search_streaming(&self, _query: ContentSearchQuery) -> QueryTicket {
-        self.unsupported_query()
+    fn content_search_streaming(&self, query: ContentSearchQuery) -> QueryTicket {
+        self.inner
+            .request_query(QueryRequest::ContentSearch((&query).into()))
     }
 
-    fn request_commit_signatures(&self, _commits: Vec<Oid>) -> QueryTicket {
-        self.unsupported_query()
+    fn request_commit_signatures(&self, commits: Vec<Oid>) -> QueryTicket {
+        self.inner.request_query(QueryRequest::Signatures {
+            commits: commits.into_iter().map(ObjectId::from).collect(),
+        })
     }
 
-    fn cancel_query(&self, _ticket: QueryTicket) {}
+    fn cancel_query(&self, ticket: QueryTicket) {
+        // Forget the ticket before the cancel frame is written. A result that
+        // already left the helper is then dropped instead of landing after
+        // the caller gave up.
+        if lock(&self.inner.queries).remove(&ticket) {
+            let _ = self
+                .inner
+                .send_detached(Request::CancelQuery { ticket: ticket.0 });
+        }
+    }
 
     fn reload(&self) {
         if let Err(error) = self.inner.send_detached(Request::Reload) {

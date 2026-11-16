@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::dto::{
     CommitDto, DiffOptionsDto, DiffRequestDto, DiffViewDto, FileChangeDto, GraphRowDto, HeadDto,
-    ObjectId, OperationDto, SnapshotDto, TreeEntryDto,
+    ObjectId, OperationDto, QueryEvent, QueryRequest, SnapshotDto, TreeEntryDto,
 };
 
 /// A message the app sends to the helper.
@@ -90,6 +90,18 @@ pub enum Request {
     },
     /// The message git prepared for an in-progress merge, when there is one.
     MergeMessage,
+    /// Run a background query on the helper's session. Results arrive as
+    /// [`Event::Query`] carrying the same `ticket`. The ticket is the client's,
+    /// so a streaming batch and the event that ends it name one job.
+    Query {
+        ticket: u64,
+        query: QueryRequest,
+    },
+    /// Stop the helper-side query for `ticket`. A result that was already
+    /// queued may still arrive; the client drops it.
+    CancelQuery {
+        ticket: u64,
+    },
 }
 
 /// A direct answer to one [`Request`].
@@ -195,6 +207,15 @@ pub enum Event {
         prompt: String,
         secret: bool,
     },
+    /// A result of [`Request::Query`]. `ticket` is the client's id. Streaming
+    /// queries send several of these; the last one is terminal.
+    Query {
+        ticket: u64,
+        event: QueryEvent,
+    },
+    /// The helper cleared its signature cache. Visible commits should be
+    /// requested again. This is not ticketed: it follows a reload, not a query.
+    SignaturesInvalidated,
 }
 
 /// Coarse classification of a remote failure, so the client can keep the

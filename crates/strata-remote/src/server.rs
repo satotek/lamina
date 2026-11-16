@@ -6,8 +6,9 @@
 //!
 //! Snapshot frames are large and numerous. They wait on a bounded queue so a
 //! slow app applies backpressure to the history walk instead of the helper
-//! buffering the whole repository. Responses, pings and diff events skip that
-//! queue: a read has to stay answerable while history is still streaming.
+//! buffering the whole repository. Responses, pings, diffs and query events
+//! skip that queue: a read has to stay answerable while history is still
+//! streaming, and a cancel has to reach a query that is still running.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
@@ -16,10 +17,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 
-use strata_core::session::{DiffTicket, RepositorySession, Session, SessionEvent};
+use strata_core::session::{DiffTicket, QueryTicket, RepositorySession, Session, SessionEvent};
 use strata_remote_protocol::{
     self as proto, CommitDto, DiffRequestDto, DiffViewDto, Event, GraphRowDto, HeadDto, Message,
-    PROTOCOL_VERSION, RemoteError, Request, Response, SnapshotDto,
+    PROTOCOL_VERSION, QueryEvent, QueryRequest, RemoteError, Request, Response, SnapshotDto,
 };
 
 /// Number of commits per snapshot frame. Large enough to keep round trips rare,
@@ -54,6 +55,12 @@ struct ServerShared {
     outbox: Arc<Outbox>,
     /// Maps between the client's diff tickets and the local session's tickets.
     diff_routes: Mutex<DiffRoutes>,
+    /// Maps between the client's query tickets and the local session's tickets.
+    ///
+    /// A missing entry means the client cancelled or the query already ended.
+    /// Events that arrive after that are dropped, including ones the worker
+    /// had already produced.
+    query_routes: Mutex<QueryRoutes>,
     /// One snapshot publish at a time, so two generations cannot interleave
     /// their chunks on the wire.
     snapshot_publish: Mutex<()>,
@@ -67,6 +74,12 @@ struct ServerShared {
 struct DiffRoutes {
     local_to_client: HashMap<DiffTicket, u64>,
     client_to_local: HashMap<u64, DiffTicket>,
+}
+
+#[derive(Default)]
+struct QueryRoutes {
+    local_to_client: HashMap<QueryTicket, u64>,
+    client_to_local: HashMap<u64, QueryTicket>,
 }
 
 /// Responses and other small control frames, kept ahead of snapshot chunks.
@@ -184,6 +197,7 @@ fn serve_chunked(
         session: Mutex::new(None),
         outbox,
         diff_routes: Mutex::new(DiffRoutes::default()),
+        query_routes: Mutex::new(QueryRoutes::default()),
         snapshot_publish: Mutex::new(()),
         subscribed: AtomicBool::new(false),
         workers: Mutex::new(Vec::new()),
@@ -251,8 +265,8 @@ fn dispatch(shared: &Arc<ServerShared>, stream: u16, chunk: usize, request: Requ
                 return;
             }
         };
-        // The request loop has to stay free for Ping and CancelDiff. A blob
-        // read can take longer than the client's idle timeout.
+        // The request loop has to stay free for Ping, CancelDiff and CancelQuery.
+        // A blob read can take longer than the client's idle timeout.
         let task = Arc::clone(shared);
         // A failed spawn used to drop the request, and the client waited until
         // its own timeout. Answer on this thread instead.
@@ -393,6 +407,30 @@ fn answer_control(shared: &Arc<ServerShared>, chunk: usize, request: Request) ->
             if let Some(local) = routes.client_to_local.remove(&ticket) {
                 routes.local_to_client.remove(&local);
                 session.cancel_diff(local);
+            }
+            Response::Ok
+        }
+        Request::Query { ticket, query } => {
+            // The mapping is installed under the lock the callback also takes,
+            // so a query that finishes immediately cannot report an unknown
+            // ticket and vanish. The lock is taken before the session call for
+            // the same reason.
+            let mut routes = lock(&shared.query_routes);
+            let local = match start_query(session, query) {
+                Ok(local) => local,
+                Err(error) => return Some(Response::Error(protocol_error(error))),
+            };
+            routes.local_to_client.insert(local, ticket);
+            routes.client_to_local.insert(ticket, local);
+            Response::Ok
+        }
+        Request::CancelQuery { ticket } => {
+            // Drop the route before cancelling. A result the worker emits
+            // after this finds no ticket and is not forwarded.
+            let mut routes = lock(&shared.query_routes);
+            if let Some(local) = routes.client_to_local.remove(&ticket) {
+                routes.local_to_client.remove(&local);
+                session.cancel_query(local);
             }
             Response::Ok
         }
@@ -618,9 +656,93 @@ fn on_session_event(shared: &Arc<ServerShared>, chunk: usize, event: SessionEven
                 }),
             );
         }
-        // Queries stay on the client. Nothing here asks for them.
-        _ => {}
+        SessionEvent::SignaturesInvalidated => {
+            // Unticketed: a reload clears the helper's cache, and the client
+            // has to drop badges it already drew.
+            push_high(shared, 0, &Message::Event(Event::SignaturesInvalidated));
+        }
+        // The command log and the commit-graph offer stay on the helper. A
+        // remote tab has no local checkout to write the graph into.
+        other => {
+            if let Some((local, body)) = proto::query_from_session(other) {
+                let terminal = body.is_terminal();
+                forward_query(shared, local, body, terminal);
+            }
+        }
     }
+}
+
+fn start_query(
+    session: &Session,
+    query: QueryRequest,
+) -> Result<QueryTicket, proto::ProtocolError> {
+    use strata_core::Oid;
+    let object = |id| Oid::try_from(id);
+    Ok(match query {
+        QueryRequest::Search(query) => session.search_commits(query.into()),
+        QueryRequest::Path { path } => session.path_history(path),
+        QueryRequest::StreamingPath { path } => session.path_history_streaming(path),
+        QueryRequest::CommitStat(commit) => session.request_commit_stat(object(commit)?),
+        QueryRequest::Compare { a, b, mode } => {
+            session.request_compare(object(a)?, object(b)?, mode.into())
+        }
+        QueryRequest::CompareFrom { base, head } => {
+            session.request_compare_from(base.map(object).transpose()?, object(head)?)
+        }
+        QueryRequest::CompareWorktree { base } => {
+            session.request_compare_with_worktree(object(base)?)
+        }
+        QueryRequest::SubmodulesAndWorktrees => session.request_submodules_and_worktrees(),
+        QueryRequest::Reflog { limit } => {
+            let limit = usize::try_from(limit)
+                .map_err(|_| proto::ProtocolError::Malformed("reflog limit does not fit"))?;
+            session.request_reflog(limit)
+        }
+        QueryRequest::InProgressDetails => session.request_in_progress_details(),
+        QueryRequest::Blame { commit, path } => session.request_blame(object(commit)?, path),
+        QueryRequest::ContentSearch(query) => session.content_search_streaming(query.into()),
+        QueryRequest::Signatures { commits } => {
+            let commits = commits
+                .into_iter()
+                .map(object)
+                .collect::<Result<Vec<_>, _>>()?;
+            session.request_commit_signatures(commits)
+        }
+    })
+}
+
+fn forward_query(
+    shared: &Arc<ServerShared>,
+    local: QueryTicket,
+    event: QueryEvent,
+    terminal: bool,
+) {
+    let client = if terminal {
+        forget_query(shared, local)
+    } else {
+        lock(&shared.query_routes)
+            .local_to_client
+            .get(&local)
+            .copied()
+    };
+    let Some(client) = client else {
+        return;
+    };
+    push_high(
+        shared,
+        0,
+        &Message::Event(Event::Query {
+            ticket: client,
+            event,
+        }),
+    );
+}
+
+fn forget_query(shared: &ServerShared, ticket: QueryTicket) -> Option<u64> {
+    let mut routes = lock(&shared.query_routes);
+    let client = routes.local_to_client.remove(&ticket)?;
+    routes.client_to_local.remove(&client);
+    Some(client)
 }
 
 fn forget_diff(shared: &ServerShared, ticket: DiffTicket) -> Option<u64> {

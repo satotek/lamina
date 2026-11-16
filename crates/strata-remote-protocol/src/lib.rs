@@ -30,4 +30,9 @@ pub use message::{ErrorKind, Event, Message, RemoteError, Request, Response};
 /// Version 3 adds detached checkout (`Operation::CheckoutCommit`). The
 /// existing checkout keeps a trailing `--`, which would turn an object id
 /// into a pathspec, so the new operation is its own request.
-pub const PROTOCOL_VERSION: u32 = 3;
+///
+/// Version 4 adds ticketed queries (blame, history, search, compare, reflog,
+/// signatures and the rest of the session's background reads). A cancel and a
+/// dropped helper use the same ticket route as diffs: late results are
+/// ignored, and an outstanding ticket expires with an error.
+pub const PROTOCOL_VERSION: u32 = 4;

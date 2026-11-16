@@ -1,7 +1,7 @@
 //! Headless repository helper used by the app over a byte stream.
 //!
 //! The protocol lives in `strata-remote-protocol`; this crate opens a local
-//! session and forwards the parts the first remote slice needs.
+//! session and forwards snapshots, diffs, writes and ticketed queries.
 
 mod server;
 

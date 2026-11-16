@@ -8,11 +8,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use strata_core::Oid;
-use strata_core::session::{DiffRequest, DiffTicket, RepositorySession, SessionEvent};
+use strata_core::session::{DiffRequest, DiffTicket, QueryTicket, RepositorySession, SessionEvent};
 use strata_remote_protocol::{
-    self as proto, CommitDto, DiffRequestDto, DiffViewDto, Event, FileDiffDto, GraphRowDto,
-    HeadDto, HighlightKindDto, HighlightSpanDto, Message, ObjectId, RepoStateDto, Request,
-    Response, SnapshotDto, SpanDto, WorktreeStatusDto,
+    self as proto, CommitDto, CommitStatDto, DiffRequestDto, DiffViewDto, Event, FileDiffDto,
+    GraphRowDto, HeadDto, HighlightKindDto, HighlightSpanDto, Message, ObjectId, QueryEvent,
+    RepoStateDto, Request, Response, SnapshotDto, SpanDto, WorktreeStatusDto,
 };
 
 use crate::{CONNECTION_LOST, ClientConfig, RemoteSession, RemoteTarget};
@@ -516,4 +516,171 @@ fn missed_pings_report_a_lost_connection_and_keep_the_snapshot() {
     assert!(error.to_string().contains(CONNECTION_LOST), "{error}");
     drop(hold_tx);
     peer.join().expect("peer");
+}
+
+#[test]
+fn a_cancelled_streaming_query_drops_a_late_result() {
+    let (client_read, client_write, mut peer_read, mut peer_write) = pipe();
+    let peer = thread::spawn(move || {
+        hello(&mut peer_read, &mut peer_write);
+        accept_subscribe(&mut peer_read, &mut peer_write);
+        let (_, id) = oid_pair(4);
+        send_chunk(&mut peer_write, id, true);
+
+        let (stream, request) = next_request(&mut peer_read, &mut peer_write).expect("query");
+        assert!(
+            matches!(request, Request::Query { .. }),
+            "expected a query, got {request:?}"
+        );
+        let Request::Query { ticket, .. } = request else {
+            unreachable!("matched above");
+        };
+        write_msg(&mut peer_write, stream, &Message::Response(Response::Ok));
+
+        let (cancel_stream, request) =
+            next_request(&mut peer_read, &mut peer_write).expect("cancel");
+        assert!(
+            matches!(request, Request::CancelQuery { ticket: cancelled } if cancelled == ticket),
+            "expected a cancel for {ticket}, got {request:?}"
+        );
+        write_msg(
+            &mut peer_write,
+            cancel_stream,
+            &Message::Response(Response::Ok),
+        );
+        // Already on the wire when the client gave up. It must not surface.
+        write_msg(
+            &mut peer_write,
+            0,
+            &Message::Event(Event::Query {
+                ticket,
+                event: QueryEvent::PathHistoryDone,
+            }),
+        );
+
+        let (stat_stream, request) = next_request(&mut peer_read, &mut peer_write).expect("stat");
+        let Request::Query {
+            ticket: stat_ticket,
+            ..
+        } = request
+        else {
+            panic!("expected a follow-up query, got {request:?}");
+        };
+        write_msg(
+            &mut peer_write,
+            stat_stream,
+            &Message::Response(Response::Ok),
+        );
+        write_msg(
+            &mut peer_write,
+            0,
+            &Message::Event(Event::Query {
+                ticket: stat_ticket,
+                event: QueryEvent::CommitStat(CommitStatDto {
+                    files: Vec::new(),
+                    added: 0,
+                    removed: 0,
+                }),
+            }),
+        );
+    });
+
+    let (tx, rx) = mpsc::channel();
+    let session = RemoteSession::connect(
+        client_read,
+        client_write,
+        RemoteTarget::new("scripted"),
+        move |event| {
+            let _ = tx.send(event);
+        },
+    )
+    .expect("connect");
+    let cancelled = session.path_history_streaming("README.md".into());
+    session.cancel_query(cancelled);
+    let (oid, _) = oid_pair(4);
+    let stat = session.request_commit_stat(oid);
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(remaining) {
+            Ok(SessionEvent::CommitStatReady { ticket, .. }) if ticket == stat => break,
+            Ok(event) if query_ticket(&event) == Some(cancelled) => {
+                panic!("cancelled query delivered {event:?}");
+            }
+            Ok(_) => {}
+            Err(error) => panic!("follow-up stat did not arrive: {error}"),
+        }
+    }
+    peer.join().expect("peer");
+}
+
+#[test]
+fn a_dropped_helper_expires_an_outstanding_query() {
+    let (client_read, client_write, mut peer_read, mut peer_write) = pipe();
+    let peer = thread::spawn(move || {
+        hello(&mut peer_read, &mut peer_write);
+        accept_subscribe(&mut peer_read, &mut peer_write);
+        let (_, id) = oid_pair(6);
+        send_chunk(&mut peer_write, id, true);
+
+        let (stream, request) = next_request(&mut peer_read, &mut peer_write).expect("query");
+        assert!(matches!(request, Request::Query { .. }), "{request:?}");
+        write_msg(&mut peer_write, stream, &Message::Response(Response::Ok));
+        // Dropping the write end is the helper going away with the ticket open.
+    });
+
+    let (tx, rx) = mpsc::channel();
+    let session = RemoteSession::connect(
+        client_read,
+        client_write,
+        RemoteTarget::new("scripted"),
+        move |event| {
+            let _ = tx.send(event);
+        },
+    )
+    .expect("connect");
+    let ticket = session.path_history_streaming("README.md".into());
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(remaining) {
+            Ok(SessionEvent::QueryFailed {
+                ticket: failed,
+                error,
+            }) if failed == ticket => {
+                assert!(
+                    error.contains(CONNECTION_LOST),
+                    "outstanding ticket should expire with the connection: {error}"
+                );
+                break;
+            }
+            Ok(_) => {}
+            Err(error) => panic!("query was not expired: {error}"),
+        }
+    }
+    peer.join().expect("peer");
+}
+
+fn query_ticket(event: &SessionEvent) -> Option<QueryTicket> {
+    Some(match event {
+        SessionEvent::QueryReady { ticket, .. }
+        | SessionEvent::CommitStatReady { ticket, .. }
+        | SessionEvent::CompareReady { ticket, .. }
+        | SessionEvent::BlameProgress { ticket, .. }
+        | SessionEvent::BlameReady { ticket, .. }
+        | SessionEvent::QueryFailed { ticket, .. }
+        | SessionEvent::PathHistoryBatch { ticket, .. }
+        | SessionEvent::PathHistoryDone { ticket }
+        | SessionEvent::ContentSearchBatch { ticket, .. }
+        | SessionEvent::ContentSearchProgress { ticket, .. }
+        | SessionEvent::ContentSearchDone { ticket, .. }
+        | SessionEvent::SubmodulesAndWorktreesReady { ticket, .. }
+        | SessionEvent::ReflogReady { ticket, .. }
+        | SessionEvent::InProgressDetailsReady { ticket, .. }
+        | SessionEvent::CommitSignaturesDetected { ticket, .. }
+        | SessionEvent::CommitSignaturesReady { ticket, .. } => *ticket,
+        _ => return None,
+    })
 }
