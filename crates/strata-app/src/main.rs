@@ -26,6 +26,7 @@ extern crate rust_i18n;
 
 rust_i18n::i18n!("locales", fallback = "en");
 
+mod about;
 mod actions;
 mod activity;
 mod assets;
@@ -149,6 +150,7 @@ fn main() {
         search::bind(cx);
         picker::bind(cx);
         palette::bind(cx);
+        about::bind(cx);
         zoom::bind(cx);
         shortcuts::bind(cx);
         menus::bind(cx);

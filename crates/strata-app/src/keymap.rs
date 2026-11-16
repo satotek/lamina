@@ -164,6 +164,7 @@ macro_rules! action {
     };
 }
 
+use crate::about::{ABOUT_VIEW, CloseAbout};
 use crate::actions::{
     ApplyPatch, CloneRepository, CloseCompare, CloseTab, CompareBranchThreeWay,
     CompareCommitsThreeWay, ExtendSelectionNext, ExtendSelectionPrevious, GoToChild, GoToHead,
@@ -1200,7 +1201,17 @@ pub static ACTIONS: &[ActionSpec] = &[
         Application,
         None,
         AboutStrata,
-        []
+        [],
+        42,
+        false
+    ),
+    action!(
+        "strata_about::CloseAbout",
+        "Close About",
+        Application,
+        Some(ABOUT_VIEW),
+        CloseAbout,
+        [binding("escape", Some(ABOUT_VIEW))]
     ),
     action!(
         "strata::ZoomIn",
@@ -2269,6 +2280,7 @@ mod tests {
             ("down", "PaletteNext", "Palette > Input"),
             ("escape", "PaletteDismiss", "Palette > Input"),
             // The application menu, the zoom and the shortcut sheet.
+            ("escape", "CloseAbout", "AboutView"),
             ("secondary-=", "ZoomIn", ""),
             ("secondary-+", "ZoomIn", ""),
             ("secondary--", "ZoomOut", ""),
@@ -2360,7 +2372,7 @@ mod tests {
             }
         }
         // Every built-in palette entry has a registry row.
-        let expected_count = if cfg!(feature = "terminal") { 52 } else { 51 };
+        let expected_count = if cfg!(feature = "terminal") { 53 } else { 52 };
         assert_eq!(orders.len(), expected_count);
     }
 

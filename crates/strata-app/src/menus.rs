@@ -18,19 +18,16 @@
 //! input actions with their OS selectors, so a focused text field keeps its
 //! native editing menu entries.
 
-use gpui::{App, KeyBinding, Menu, MenuItem, OsAction, ParentElement as _, Window, actions};
-use gpui_component::WindowExt as _;
-use gpui_component::dialog::DialogFooter;
+use gpui::{App, KeyBinding, Menu, MenuItem, OsAction, Window, actions};
 use gpui_component::input::{Copy, Cut, Paste, SelectAll};
 
 use crate::keymap::{self, ActionSpec};
-use crate::ui::{ButtonKind, ButtonSize, button};
 
 actions!(
     strata,
     [
-        /// Shows the dialog that names the application and its version. It is
-        /// reachable from the application menu only.
+        /// Opens the About window: the version, the build revision, the
+        /// licences and the third-party notices.
         AboutStrata,
     ]
 );
@@ -204,16 +201,6 @@ pub fn bind(cx: &mut App) {
     cx.on_action(|_: &ZoomWindow, cx: &mut App| {
         with_active_window(cx, |window| window.zoom_window());
     });
-    cx.on_action(|_: &AboutStrata, cx: &mut App| {
-        let Some(handle) = cx.active_window() else {
-            return;
-        };
-        // Opening a dialog from inside the menu's dispatch would borrow the
-        // window the dispatch is already running in.
-        cx.defer(move |cx| {
-            let _ = handle.update(cx, |_, window, cx| about(window, cx));
-        });
-    });
 }
 
 /// Runs `f` on the focused window. Deferred because a menu item dispatches
@@ -242,10 +229,19 @@ pub fn menus() -> Vec<Menu> {
 }
 
 fn items(kind: MenuKind) -> Vec<MenuItem> {
+    items_for(kind, cfg!(target_os = "macos"))
+}
+
+/// One menu's items for a platform, built without an `App` so a test can read
+/// it. macOS keeps About in the application menu; the other platforms put it
+/// under Help, where their menu guidelines expect it.
+fn items_for(kind: MenuKind, macos: bool) -> Vec<MenuItem> {
     let mut items = Vec::new();
     let mut section = None;
-    let platform = cfg!(target_os = "macos");
     for placement in PLACEMENTS.iter().filter(|item| item.menu == kind) {
+        if !macos && kind == MenuKind::Strata && placement.action == "AboutStrata" {
+            continue;
+        }
         let Some(spec) = keymap::resolve(placement.action) else {
             debug_assert!(placement.optional, "{} is missing", placement.action);
             continue;
@@ -256,7 +252,7 @@ fn items(kind: MenuKind) -> Vec<MenuItem> {
         section = Some(placement.section);
         items.push(action_item(spec));
     }
-    if platform && kind == MenuKind::Strata {
+    if macos && kind == MenuKind::Strata {
         // macOS puts Hide between Settings and Quit; Quit is the last section.
         let quit = items
             .iter()
@@ -270,7 +266,7 @@ fn items(kind: MenuKind) -> Vec<MenuItem> {
         let at = quit.map_or(items.len(), |index| index + 1);
         items.splice(at..at, hide);
     }
-    if platform && kind == MenuKind::Window {
+    if macos && kind == MenuKind::Window {
         let mut window = vec![
             MenuItem::action(t!("menu.window.minimize").to_string(), MinimizeWindow),
             MenuItem::action(t!("menu.window.zoom").to_string(), ZoomWindow),
@@ -295,6 +291,15 @@ fn items(kind: MenuKind) -> Vec<MenuItem> {
             ),
         ]);
     }
+    if !macos
+        && kind == MenuKind::Help
+        && let Some(spec) = keymap::resolve("AboutStrata")
+    {
+        if !items.is_empty() {
+            items.push(MenuItem::separator());
+        }
+        items.push(action_item(spec));
+    }
     items
 }
 
@@ -310,23 +315,6 @@ fn action_item(spec: &'static ActionSpec) -> MenuItem {
         checked: false,
         disabled: false,
     }
-}
-
-/// Names the application and its version.
-fn about(window: &mut Window, cx: &mut App) {
-    window.open_alert_dialog(cx, move |dialog, _, _| {
-        dialog
-            .title(t!("about.title").to_string())
-            .description(t!("about.description", version = env!("CARGO_PKG_VERSION")).to_string())
-            .footer(
-                DialogFooter::new().child(
-                    button("about-close", t!("common.close").to_string())
-                        .kind(ButtonKind::Normal)
-                        .size(ButtonSize::Medium)
-                        .on_click(|_, window, cx| window.close_dialog(cx)),
-                ),
-            )
-    });
 }
 
 #[cfg(test)]
@@ -447,6 +435,25 @@ mod tests {
             .collect();
         let expected: Vec<String> = MenuKind::ALL.into_iter().map(|kind| kind.title()).collect();
         assert_eq!(titles, expected);
+    }
+
+    fn has_about(items: &[MenuItem]) -> bool {
+        items.iter().any(|item| {
+            matches!(
+                item,
+                MenuItem::Action { action, .. }
+                    if action.as_any().is::<AboutStrata>()
+            )
+        })
+    }
+
+    #[test]
+    fn about_sits_in_the_application_menu_on_macos_and_under_help_elsewhere() {
+        assert!(has_about(&items_for(MenuKind::Strata, true)));
+        assert!(!has_about(&items_for(MenuKind::Help, true)));
+
+        assert!(!has_about(&items_for(MenuKind::Strata, false)));
+        assert!(has_about(&items_for(MenuKind::Help, false)));
     }
 
     #[test]
