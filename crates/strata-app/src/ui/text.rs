@@ -35,6 +35,25 @@ pub fn empty_state(text: impl Into<SharedString>, design: &Design) -> Div {
     message(text, design.muted, design)
 }
 
+/// A pane that is still loading: a spinner beside a short label, centred where
+/// the contents will appear. Long loads (a large history's first page, a big
+/// diff) show this instead of leaving the pane blank.
+pub fn loading_state(text: impl Into<SharedString>, design: &Design) -> Div {
+    div()
+        .flex()
+        .flex_1()
+        .min_h_0()
+        .items_center()
+        .justify_center()
+        .gap(design.px(8.0))
+        .p_4()
+        .text_size(design.px(12.0))
+        .text_color(design.muted)
+        .bg(design.background)
+        .child(super::spinner("pane-loading-spinner", design, 14.0))
+        .child(text.into())
+}
+
 /// The heading above a group of rows: a small caps label, an optional count
 /// and whatever the group lets the user do.
 ///

@@ -13,10 +13,12 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, ClickEvent, ElementId, FocusHandle, FontWeight, InteractiveElement as _,
     IntoElement, ParentElement as _, RenderOnce, SharedString, StatefulInteractiveElement as _,
-    StyleRefinement, Styled, Window, div,
+    StyleRefinement, Styled, Window, div, px,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::{Disableable as _, Icon, Selectable as _, Sizable as _, Size, StyledExt as _};
+use gpui_component::{
+    ActiveTheme as _, Disableable as _, Icon, Selectable as _, Sizable as _, Size, StyledExt as _,
+};
 use gpui_kit_assets::IconName;
 
 use crate::style::Design;
@@ -62,6 +64,9 @@ pub struct UiButton {
     kind: ButtonKind,
     size: ButtonSize,
     disabled: bool,
+    /// The button ran the command that is still in flight: its icon becomes a
+    /// spinner and it refuses further clicks until the operation reports back.
+    loading: bool,
     /// The button is selected in a set, as a toggle would be.
     selected: bool,
     /// Accessible toggle state (`aria-pressed`), for buttons that stay latched.
@@ -113,6 +118,7 @@ impl UiButton {
             kind: ButtonKind::default(),
             size: ButtonSize::default(),
             disabled: false,
+            loading: false,
             selected: false,
             toggled: false,
             open: false,
@@ -156,6 +162,13 @@ impl UiButton {
 
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    /// The action this button started has not finished. The button stays
+    /// disabled and shows a spinner in place of its icon.
+    pub fn loading(mut self, loading: bool) -> Self {
+        self.loading = loading;
         self
     }
 
@@ -223,7 +236,7 @@ impl gpui_component::Selectable for UiButton {
 }
 
 impl RenderOnce for UiButton {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let Self {
             id,
             label,
@@ -231,6 +244,7 @@ impl RenderOnce for UiButton {
             kind,
             size,
             disabled,
+            loading,
             selected,
             toggled,
             open,
@@ -241,6 +255,8 @@ impl RenderOnce for UiButton {
             style,
         } = self;
 
+        let has_icon = icon.is_some();
+        let spinner_id = ElementId::Name(format!("{id}·loading").into());
         let mut button = Button::new(id);
         let labelled = label.is_some();
         if let Some(label) = label {
@@ -263,7 +279,10 @@ impl RenderOnce for UiButton {
         if let Some(focus) = focus {
             button = button.track_focus(&focus);
         }
-        button = button.disabled(disabled);
+        // Loading is a disabled state of its own: the command has already been
+        // submitted, so a second click would be a second operation.
+        button = button.disabled(disabled || loading);
+        button = button.loading(loading);
         button = button.selected(selected);
         button = button.toggled(toggled);
         button = button.open(open);
@@ -278,6 +297,29 @@ impl RenderOnce for UiButton {
         if let Some(on_click) = on_click {
             button = button.on_click(move |event, window, cx| on_click(event, window, cx));
         }
+        let children = if loading && !has_icon {
+            // A label-only button has no icon slot for the component to swap,
+            // so the spinner goes in front of the label's row instead.
+            let color = match kind {
+                ButtonKind::Primary => cx.theme().button_primary_foreground,
+                ButtonKind::Danger => cx.theme().button_danger_foreground,
+                ButtonKind::Normal => cx.theme().button_foreground,
+                ButtonKind::Ghost => cx.theme().foreground,
+            };
+            let diameter = match size {
+                ButtonSize::Tiny => px(11.0),
+                ButtonSize::Small => px(12.0),
+                ButtonSize::Medium => px(14.0),
+            };
+            let mut children = children;
+            children.insert(
+                0,
+                crate::ui::Spinner::fixed(spinner_id, diameter, color).into_any_element(),
+            );
+            children
+        } else {
+            children
+        };
         button.children(children).refine_style(&style)
     }
 }

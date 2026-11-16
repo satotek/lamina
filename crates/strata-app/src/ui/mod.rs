@@ -24,6 +24,7 @@ mod menu;
 mod rail;
 mod row;
 mod signature;
+mod spinner;
 mod split;
 mod swatch;
 mod tab;
@@ -52,6 +53,7 @@ pub use menu::{context_menu, menu_label};
 pub use rail::{RAIL_WIDTH, rail, rail_item};
 pub use row::{RowState, RowTipExt, list_row, row_surface};
 pub use signature::{CommitSignatureState, signature_badge, signature_details};
+pub use spinner::{Spinner, spinner};
 pub use split::{SplitExtent, clamp_fraction, split_handle, split_pixels};
 pub use swatch::{swatch_label, swatch_label_with_tag, swatch_strip};
 pub use tab::{tab, tab_strip};
@@ -61,4 +63,4 @@ pub use terminal_grid::{
     ime_cursor_bounds, measure_cell_size, pixel_to_viewport_cell, terminal_theme,
     terminal_viewport,
 };
-pub use text::{empty_state, message, section_header};
+pub use text::{empty_state, loading_state, message, section_header};
