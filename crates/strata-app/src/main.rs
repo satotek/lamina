@@ -59,6 +59,7 @@ mod picker;
 mod pull_requests;
 mod recent;
 mod remote;
+mod remote_open;
 mod repo_view;
 mod scrollbar;
 mod search;

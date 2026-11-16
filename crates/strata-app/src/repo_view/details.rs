@@ -186,6 +186,9 @@ impl RepoView {
     /// Requests the selected commit's totals. The details pane keeps showing
     /// the selected file's counts until the answer arrives.
     pub(super) fn load_commit_stat(&mut self, commit: Option<Oid>, cx: &mut Context<Self>) {
+        if self.is_ssh() {
+            return;
+        }
         let previous = self.stat.begin(commit);
         if let (Some(session), Some(ticket)) = (self.session.as_ref(), previous) {
             session.cancel_query(ticket);
@@ -986,12 +989,22 @@ impl RepoView {
                             trigger,
                             move |menu, window, cx| {
                                 let variables = menu_entity.read(cx).custom_variables();
+                                let ssh = menu_entity.read(cx).is_ssh();
+                                let reason = ssh.then(crate::remote_open::unavailable_reason);
                                 let entity = menu_entity.clone();
                                 let path = menu_path.clone();
                                 let present = in_working_tree(menu_work_dir.as_deref(), &path);
+                                let editor_label = if let Some(reason) = reason.as_deref() {
+                                    crate::ui::menu_label(
+                                        t!("history.open_in_editor").to_string(),
+                                        Some(reason),
+                                    )
+                                } else {
+                                    editor_entry_label(at_head, present)
+                                };
                                 let mut menu = menu.item(
-                                    PopupMenuItem::new(editor_entry_label(at_head, present))
-                                        .disabled(!present)
+                                    PopupMenuItem::new(editor_label)
+                                        .disabled(ssh || !present)
                                         .on_click(
                                             move |_: &ClickEvent,
                                                   _window: &mut Window,
@@ -1006,24 +1019,30 @@ impl RepoView {
                                 let entity = menu_entity.clone();
                                 let path = menu_path.clone();
                                 menu = menu.item(
-                                    PopupMenuItem::new(t!("history.show_file_history").to_string())
-                                        .on_click(
-                                            move |_: &ClickEvent,
-                                                  window: &mut Window,
-                                                  cx: &mut App| {
-                                                let path = path.clone();
-                                                entity.update(cx, |this, cx| {
-                                                    this.open_file_history(path, window, cx);
-                                                });
-                                            },
-                                        ),
+                                    PopupMenuItem::new(crate::ui::menu_label(
+                                        t!("history.show_file_history").to_string(),
+                                        reason.as_deref(),
+                                    ))
+                                    .disabled(ssh)
+                                    .on_click(
+                                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                                            let path = path.clone();
+                                            entity.update(cx, |this, cx| {
+                                                this.open_file_history(path, window, cx);
+                                            });
+                                        },
+                                    ),
                                 );
                                 if let Some(commit) = blame_commit {
                                     let entity = menu_entity.clone();
                                     let path = menu_path.clone();
                                     menu = menu.item(
-                                        PopupMenuItem::new(t!("history.blame_at_commit").to_string())
-                                            .on_click(
+                                        PopupMenuItem::new(crate::ui::menu_label(
+                                            t!("history.blame_at_commit").to_string(),
+                                            reason.as_deref(),
+                                        ))
+                                        .disabled(ssh)
+                                        .on_click(
                                             move |_: &ClickEvent,
                                                   window: &mut Window,
                                                   cx: &mut App| {
@@ -1034,13 +1053,15 @@ impl RepoView {
                                             },
                                         ),
                                     );
-                                    if let Some(item) = crate::github::file_item(
-                                        &menu_entity,
-                                        commit,
-                                        &menu_path,
-                                        None,
-                                        cx,
-                                    ) {
+                                    if !ssh
+                                        && let Some(item) = crate::github::file_item(
+                                            &menu_entity,
+                                            commit,
+                                            &menu_path,
+                                            None,
+                                            cx,
+                                        )
+                                    {
                                         menu = menu.item(item);
                                     }
                                 }

@@ -34,3 +34,54 @@ strata_arch() {
     *) echo "${1:-$(uname -m)}" ;;
     esac
 }
+
+# Linux musl triples the app knows how to upload. Keep this in step with
+# `target_for` in crates/strata-remote-client/src/deploy.rs.
+strata_remote_targets() {
+    printf '%s\n' x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+}
+
+# Prints the directory of prebuilt `strata-remote-<target>` binaries, or
+# nothing when this package should ship without them. `REMOTE_HELPERS` forces
+# a directory. Otherwise an existing `remote-helpers/` at the repository root
+# is used, which is where the release workflow downloads the helper artifact.
+strata_remote_helper_dir() {
+    root=$1
+    if [ -n "${REMOTE_HELPERS:-}" ]; then
+        case $REMOTE_HELPERS in
+        /*) printf '%s\n' "$REMOTE_HELPERS" ;;
+        *) printf '%s\n' "$root/$REMOTE_HELPERS" ;;
+        esac
+        return 0
+    fi
+    if [ -d "$root/remote-helpers" ]; then
+        printf '%s\n' "$root/remote-helpers"
+    fi
+}
+
+# Copies both musl helpers into $2 and marks them executable. Fails when the
+# directory is missing a target, so a release archive cannot ship half a pair.
+strata_install_remote_helpers() {
+    src=$1
+    dest=$2
+    if [ ! -d "$src" ]; then
+        echo "remote helper directory does not exist: $src" >&2
+        return 1
+    fi
+    mkdir -p "$dest"
+    chmod 755 "$dest"
+    missing=0
+    for target in $(strata_remote_targets); do
+        helper=$src/strata-remote-$target
+        if [ ! -f "$helper" ]; then
+            echo "missing remote helper $helper" >&2
+            missing=1
+            continue
+        fi
+        cp "$helper" "$dest/strata-remote-$target"
+        chmod 755 "$dest/strata-remote-$target"
+    done
+    if [ "$missing" = 1 ]; then
+        return 1
+    fi
+}

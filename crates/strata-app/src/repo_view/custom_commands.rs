@@ -71,6 +71,9 @@ impl RepoView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.refuse_if_ssh(cx) {
+            return;
+        }
         let Some(command) = commands::CommandState::get(cx).commands.get(index).cloned() else {
             return;
         };

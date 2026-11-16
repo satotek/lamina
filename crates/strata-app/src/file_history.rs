@@ -260,7 +260,7 @@ impl RepoView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.session.is_none() {
+        if self.refuse_if_ssh(cx) || self.session.is_none() {
             return;
         }
         // The file history replaces the history pane, so the reflog has to
@@ -463,6 +463,9 @@ impl RepoView {
     /// Append-only snapshot publishes during the initial history walk leave the
     /// path-history walk running uninterrupted.
     pub(crate) fn file_history_on_snapshot(&mut self, cx: &mut Context<Self>) {
+        if self.is_ssh() {
+            return;
+        }
         let Some(session) = self.session.as_ref() else {
             return;
         };

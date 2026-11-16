@@ -25,9 +25,9 @@ use gpui_component::{Root, TitleBar, WindowExt as _};
 use strata_core::compare::ThreeWayCompareMode;
 
 use crate::actions::{
-    CloneRepository, CloseTab, NewRepository, NewTab, NextTab, OpenCompare, OpenRepository,
-    PreviousTab, ReopenClosedTab, SelectTab1, SelectTab2, SelectTab3, SelectTab4, SelectTab5,
-    SelectTab6, SelectTab7, SelectTab8, SelectTab9, WORKSPACE,
+    CloneRepository, CloseTab, NewRepository, NewTab, NextTab, OpenCompare, OpenRemoteRepository,
+    OpenRepository, PreviousTab, ReopenClosedTab, SelectTab1, SelectTab2, SelectTab3, SelectTab4,
+    SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9, WORKSPACE,
 };
 use crate::compare::{
     CompareRevision, CompareTarget, CompareView, DialogRevision, RepoThreeWayFileSource,
@@ -246,6 +246,13 @@ enum OpenDisposition {
     /// Child repository (submodule or linked worktree): push the current
     /// repository onto the parent stack before switching.
     PushParent,
+}
+
+/// Where a remote repository opens inside this window.
+enum RemotePlace {
+    Replace,
+    NewTab,
+    At(usize),
 }
 
 pub struct Workspace {
@@ -635,6 +642,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        if let Some(spec) = crate::remote_open::parse_stored_strict(path)? {
+            return self.open_remote(spec, true, None, window, cx);
+        }
         let root = crate::picker::resolve_repository(path)?;
         if !is_current(self.current_path(), &root) {
             self.switch_repository(&root, OpenDisposition::Replace, window, cx)?;
@@ -651,6 +661,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Result<(), String> {
+        if let Some(spec) = crate::remote_open::parse_stored_strict(path)? {
+            return self.open_remote_in_new_tab(spec, true, None, window, cx);
+        }
         let root = crate::picker::resolve_repository(path)?;
         let canon = canonical(root.clone());
 
@@ -711,6 +724,153 @@ impl Workspace {
         // Welcome screen has no open tabs yet, so opening in a new tab creates
         // the first tab.
         self.open_path(&root, window, cx)
+    }
+
+    /// Opens a remote repository in the active tab, the same way Open does.
+    pub(crate) fn open_remote(
+        &mut self,
+        spec: crate::remote_open::RemoteSpec,
+        auto_connect: bool,
+        ssh: Option<crate::remote_open::SshOverride>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        self.place_remote(spec, auto_connect, ssh, RemotePlace::Replace, window, cx);
+        Ok(())
+    }
+
+    /// Opens a remote repository in a new tab, or activates one already open.
+    pub(crate) fn open_remote_in_new_tab(
+        &mut self,
+        spec: crate::remote_open::RemoteSpec,
+        auto_connect: bool,
+        ssh: Option<crate::remote_open::SshOverride>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<(), String> {
+        self.place_remote(spec, auto_connect, ssh, RemotePlace::NewTab, window, cx);
+        Ok(())
+    }
+
+    /// The helper resolved `~`, so the tab and the recent list keep that path.
+    pub(crate) fn note_remote_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        if let Content::Tabs(deck) = &mut self.content
+            && let Some(TabSlot::Repo(slot)) = deck.active_mut()
+        {
+            slot.path = Some(path.clone());
+        }
+        self.record_recent(&path);
+        self.persist_session(cx);
+        self.refresh_tab_strip(cx);
+    }
+
+    fn place_remote(
+        &mut self,
+        spec: crate::remote_open::RemoteSpec,
+        auto_connect: bool,
+        ssh: Option<crate::remote_open::SshOverride>,
+        place: RemotePlace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let stored = spec.stored_path();
+        if let Some(index) = self.remote_tab_index(&stored) {
+            let switched = self.activate_index(index, window, cx);
+            if auto_connect
+                && let Content::Tabs(deck) = &self.content
+                && let Some(slot) = deck.get(index).and_then(TabSlot::as_repo)
+            {
+                slot.view
+                    .update(cx, |view, cx| view.ensure_remote_connect(cx));
+            }
+            if switched {
+                self.persist_session(cx);
+            }
+            self.record_recent(&stored);
+            self.finish_navigation(window, cx);
+            return;
+        }
+        let launch = Launch::Remote(crate::remote_open::RemoteLaunch {
+            spec,
+            auto_connect,
+            ssh,
+        });
+        match place {
+            RemotePlace::Replace => {
+                self.install_repo(launch, NavigationStack::default(), window, cx);
+                self.finish_navigation(window, cx);
+            }
+            RemotePlace::NewTab if !matches!(self.content, Content::Tabs(_)) => {
+                self.install_repo(launch, NavigationStack::default(), window, cx);
+                self.finish_navigation(window, cx);
+            }
+            RemotePlace::NewTab => self.open_prepared_tab(launch, None, window, cx),
+            RemotePlace::At(index) => self.open_prepared_tab(launch, Some(index), window, cx),
+        }
+    }
+
+    fn remote_tab_index(&self, stored: &Path) -> Option<usize> {
+        let Content::Tabs(deck) = &self.content else {
+            return None;
+        };
+        let wanted = stored.to_string_lossy();
+        deck.items().iter().position(|slot| {
+            slot.repo_path()
+                .is_some_and(|path| path.to_string_lossy() == wanted)
+        })
+    }
+
+    /// Adds a launch that is already built. `at` inserts at that index, which
+    /// is how a closed remote tab returns to the place it left.
+    fn open_prepared_tab(
+        &mut self,
+        launch: Launch,
+        at: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let path = repo_path(&launch);
+        let title = launch.title();
+        let workspace = cx.weak_entity();
+        let view = cx.new(|cx| {
+            RepoView::new_in_workspace_active(launch, Some(workspace), None, true, window, cx)
+        });
+        let slot = TabSlot::Repo(RepoSlot {
+            view,
+            path: path.clone(),
+            parents: NavigationStack::default(),
+        });
+        let inserted = match &mut self.content {
+            Content::Welcome(_) => {
+                self.content = Content::Tabs(TabDeck::from_items(vec![slot], 0));
+                0
+            }
+            Content::Tabs(deck) => {
+                if let Some(active) = deck.active_mut() {
+                    active.set_active(false, cx);
+                }
+                match at {
+                    Some(index) => deck.insert(index, slot),
+                    None => {
+                        deck.open(slot);
+                        deck.active_index()
+                    }
+                }
+            }
+        };
+        window.set_window_title(&title);
+        if let Some(path) = &path {
+            self.record_recent(path);
+        }
+        self.persist_session(cx);
+        self.refresh_tab_strip(cx);
+        if let Content::Tabs(deck) = &self.content
+            && let Some(slot) = deck.get(inserted)
+        {
+            let focus = slot.view_focus(cx);
+            window.defer(cx, move |window, cx| focus.focus(window, cx));
+        }
+        self.finish_navigation(window, cx);
     }
 
     /// Opens the standalone Compare setup dialog over the workspace window.
@@ -1277,7 +1437,14 @@ impl Workspace {
     /// are skipped newest first, so the shortcut still finds the tab the user
     /// means after a folder was deleted or moved.
     pub(crate) fn reopen_closed_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        while let Some(closed) = self.closed_tabs.pop_existing(|path| path.is_dir()) {
+        while let Some(closed) = self
+            .closed_tabs
+            .pop_existing(|path| crate::remote_open::is_stored_remote(path) || path.is_dir())
+        {
+            if let Some(spec) = crate::remote_open::parse_stored(&closed.path) {
+                self.place_remote(spec, true, None, RemotePlace::At(closed.index), window, cx);
+                return;
+            }
             let launch = self.open_launch(&closed.path, cx);
             if let Launch::Error { error, .. } = &launch {
                 log::warn!("cannot reopen {}: {error}", closed.path.display());
@@ -1389,6 +1556,9 @@ impl Workspace {
                         });
 
                 if let Some(path) = hint_path {
+                    if crate::remote_open::is_stored_remote(&path) {
+                        item = item.badge(t!("remote_repo.badge"));
+                    }
                     item = item.hint(&path);
                 }
                 item
@@ -1540,6 +1710,9 @@ impl Render for Workspace {
             .key_context(WORKSPACE)
             .on_action(cx.listener(|this, _: &OpenRepository, window, cx| {
                 this.open_picker_for(OpenTarget::Current, window, cx);
+            }))
+            .on_action(cx.listener(|_this, _: &OpenRemoteRepository, window, cx| {
+                crate::remote_open::open_dialog(cx.entity(), window, cx);
             }))
             .on_action(cx.listener(|_, _: &CloneRepository, window, cx| {
                 crate::clone_dialog::open_clone(cx.entity(), OpenTarget::Current, window, cx);
@@ -1695,6 +1868,21 @@ fn slot_display_name(slot: &RepoSlot, cx: &App) -> String {
 
 /// Opens `root` in a new Strata window.
 pub(crate) fn open_new_window(root: PathBuf, cx: &mut App) {
+    if let Some(spec) = crate::remote_open::parse_stored(&root) {
+        let launch = Launch::Remote(crate::remote_open::RemoteLaunch {
+            spec,
+            auto_connect: true,
+            ssh: None,
+        });
+        open_tabs_window(
+            vec![launch],
+            0,
+            DebugLaunch::default(),
+            DEFAULT_WINDOW_SIZE,
+            cx,
+        );
+        return;
+    }
     let launch = Launch::open_with(&root, Settings::get(cx).behaviour.git_executable.clone());
     if let Launch::Error { error, .. } = &launch {
         log::warn!("cannot open {}: {error}", root.display());
@@ -1807,19 +1995,30 @@ pub(crate) fn restored_windows(cx: &App) -> Vec<RestoredWindow> {
     }
     let git_executable = Settings::get(cx).behaviour.git_executable.clone();
     let session = SavedSession::load_default();
-    let resolved = session.resolve_windows(|path| path.is_dir());
+    let resolved =
+        session.resolve_windows(|path| crate::remote_open::is_stored_remote(path) || path.is_dir());
 
     let mut windows = Vec::new();
     for saved in resolved {
         let mut launches = Vec::with_capacity(saved.tabs.len());
         let mut active = None;
         for (index, path) in saved.tabs.iter().enumerate() {
-            if let launch @ Launch::Repo { .. } = Launch::open_with(path, git_executable.clone()) {
-                if index == saved.active {
-                    active = Some(launches.len());
+            let launch = if let Some(spec) = crate::remote_open::parse_stored(path) {
+                Launch::Remote(crate::remote_open::RemoteLaunch {
+                    spec,
+                    auto_connect: false,
+                    ssh: None,
+                })
+            } else {
+                match Launch::open_with(path, git_executable.clone()) {
+                    launch @ Launch::Repo { .. } => launch,
+                    _ => continue,
                 }
-                launches.push(launch);
+            };
+            if index == saved.active {
+                active = Some(launches.len());
             }
+            launches.push(launch);
         }
         if !launches.is_empty() {
             windows.push(RestoredWindow {
@@ -1833,29 +2032,44 @@ pub(crate) fn restored_windows(cx: &App) -> Vec<RestoredWindow> {
     }
 
     let recents = RecentRepositories::load_default();
-    if let Some(path) = recents.most_recent()
-        && let launch @ Launch::Repo { .. } = Launch::open_with(path, git_executable)
-    {
-        windows.push(RestoredWindow {
-            tabs: vec![launch],
-            active: 0,
-        });
+    if let Some(path) = recents.most_recent() {
+        if let Some(spec) = crate::remote_open::parse_stored(path) {
+            windows.push(RestoredWindow {
+                tabs: vec![Launch::Remote(crate::remote_open::RemoteLaunch {
+                    spec,
+                    auto_connect: false,
+                    ssh: None,
+                })],
+                active: 0,
+            });
+        } else if let launch @ Launch::Repo { .. } = Launch::open_with(path, git_executable) {
+            windows.push(RestoredWindow {
+                tabs: vec![launch],
+                active: 0,
+            });
+        }
     }
     windows
 }
 
 /// The repository a launch ended up showing, as the working-tree root.
 fn repo_path(launch: &Launch) -> Option<PathBuf> {
-    let Launch::Repo { session, .. } = launch else {
-        return None;
-    };
-    session
-        .location()
-        .local_path()
-        .map(|path| canonical(path.to_path_buf()))
+    match launch {
+        Launch::Repo { session, .. } => match session.location() {
+            strata_core::session::RepoLocation::Local(path) => Some(canonical(path.to_path_buf())),
+            strata_core::session::RepoLocation::Ssh { host, port, path } => Some(PathBuf::from(
+                crate::remote_open::ssh_uri(&host, port, &path),
+            )),
+        },
+        Launch::Remote(launch) => Some(launch.spec.stored_path()),
+        Launch::Fake { .. } | Launch::Error { .. } => None,
+    }
 }
 
 fn canonical(path: PathBuf) -> PathBuf {
+    if path.to_string_lossy().starts_with("ssh://") {
+        return path;
+    }
     strata_core::fs_path::canonicalize(&path)
 }
 
