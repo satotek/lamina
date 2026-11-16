@@ -172,6 +172,7 @@ impl Launch {
             SessionOptions {
                 git_executable,
                 proxy,
+                ..SessionOptions::default()
             },
             on_event,
         ) {

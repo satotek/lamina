@@ -125,7 +125,7 @@ impl RepoWatcher {
             // is the only place that may take its time.
             let _ = tx.send(Wake::Event(event));
         })
-        .map_err(|err| Error::other(format!("failed to create filesystem watcher: {err}")))?;
+        .map_err(|err| Error::Watch(format!("failed to create filesystem watcher: {err}")))?;
 
         // A recursive watch of the worktree already covers a git dir inside it.
         // Watching both would only duplicate every git-dir event.
@@ -140,7 +140,7 @@ impl RepoWatcher {
             watcher
                 .watch(&root, RecursiveMode::Recursive)
                 .map_err(|err| {
-                    Error::other(format!("failed to watch `{}`: {err}", root.display()))
+                    Error::Watch(format!("failed to watch `{}`: {err}", root.display()))
                 })?;
         }
 
@@ -155,7 +155,7 @@ impl RepoWatcher {
         let worker = thread::Builder::new()
             .name("lamina-repo-watcher".into())
             .spawn(move || run(rx, watch, on_change))
-            .map_err(|err| Error::other(format!("failed to start watcher thread: {err}")))?;
+            .map_err(|err| Error::Watch(format!("failed to start watcher thread: {err}")))?;
 
         Ok(Self {
             watcher: Some(watcher),

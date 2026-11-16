@@ -32,6 +32,13 @@ const SNAPSHOT_CHUNK: usize = 1024;
 /// while the first was still queued.
 const SNAPSHOT_QUEUE: usize = 1;
 
+/// A watch update this size or smaller skips the snapshot queue.
+///
+/// A ping has to stay answerable while history streams. One modest status
+/// frame does not hold it up; a status large enough to matter waits with the
+/// snapshot frames instead of growing the control queue.
+const SMALL_EVENT: usize = 64 * 1024;
+
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// Identifies the helper build in `--self-check` and in error reports.
@@ -67,6 +74,12 @@ struct ServerShared {
     /// Snapshot frames stay off the wire until the client asks. The walk may
     /// already have published into the local session by then.
     subscribed: AtomicBool,
+    /// False when no filesystem watch could be installed. The client then
+    /// refreshes explicitly instead of waiting for events that will not come.
+    watching: AtomicBool,
+    /// Commit chunks last sent in full. A later snapshot that still shares
+    /// them is a worktree update and does not retransmit history.
+    last_history: Mutex<Option<lamina_core::session::CommitList>>,
     workers: Mutex<Vec<JoinHandle<()>>>,
 }
 
@@ -200,14 +213,45 @@ fn serve_chunked(
         query_routes: Mutex::new(QueryRoutes::default()),
         snapshot_publish: Mutex::new(()),
         subscribed: AtomicBool::new(false),
+        watching: AtomicBool::new(false),
+        last_history: Mutex::new(None),
         workers: Mutex::new(Vec::new()),
     });
 
     let callback_shared = Arc::clone(&shared);
     let chunk_size = chunk.max(1);
-    let session = Session::open(&root, move |event| {
+    let on_event: Arc<dyn Fn(SessionEvent) + Send + Sync> = Arc::new(move |event| {
         on_session_event(&callback_shared, chunk_size, event);
-    })?;
+    });
+    let open = |watch: bool| {
+        let on_event = Arc::clone(&on_event);
+        Session::open_with(
+            &root,
+            lamina_core::session::SessionOptions {
+                watch,
+                ..lamina_core::session::SessionOptions::default()
+            },
+            move |event| on_event(event),
+        )
+    };
+    // `LAMINA_REMOTE_NO_WATCH` skips the attempt. Tests use it to prove the
+    // degraded path; an operator can use it when the host must not take a
+    // watch. A failed install takes the same path: polling would be a second
+    // refresh policy, so the repository stays open and the app is told that
+    // outside edits need a refresh.
+    let (session, watching) = if std::env::var_os("LAMINA_REMOTE_NO_WATCH").is_none() {
+        match open(true) {
+            Ok(session) => (session, true),
+            Err(lamina_core::Error::Watch(reason)) => {
+                eprintln!("lamina-remote: {reason}; changes outside the app need a refresh");
+                (open(false)?, false)
+            }
+            Err(error) => return Err(error.into()),
+        }
+    } else {
+        (open(false)?, false)
+    };
+    shared.watching.store(watching, Ordering::SeqCst);
     *lock(&shared.session) = Some(Arc::new(session));
 
     while let Some(frame) = proto::read_frame(&mut reader)? {
@@ -369,6 +413,7 @@ fn answer_control(shared: &Arc<ServerShared>, chunk: usize, request: Request) ->
                 root,
                 git_dir: reader.git_dir().display().to_string(),
                 bare: reader.workdir().is_none(),
+                watching: shared.watching.load(Ordering::SeqCst),
             }
         }
         Request::Ping { nonce } => Response::Pong { nonce },
@@ -978,6 +1023,13 @@ fn publish_current(shared: &Arc<ServerShared>, chunk: usize) {
     if !shared.subscribed.load(Ordering::SeqCst) {
         return;
     }
+    // Held across the whole send so a status update cannot land between a
+    // reset and its appends. The snapshot is read under that lock: an event
+    // that queued behind a newer publish forwards the newer snapshot.
+    let _publish = lock(&shared.snapshot_publish);
+    if !shared.subscribed.load(Ordering::SeqCst) {
+        return;
+    }
     let snapshot = {
         let guard = lock(&shared.session);
         guard.as_ref().map(|session| session.snapshot())
@@ -985,11 +1037,35 @@ fn publish_current(shared: &Arc<ServerShared>, chunk: usize) {
     let Some(snapshot) = snapshot else {
         return;
     };
-    let _publish = lock(&shared.snapshot_publish);
-    if !shared.subscribed.load(Ordering::SeqCst) {
+    let history_same = lock(&shared.last_history)
+        .as_ref()
+        .is_some_and(|previous| previous.same_chunks(&snapshot.commits));
+    if history_same {
+        let _ = push_meta(shared, &snapshot);
         return;
     }
-    push_snapshot(shared, &snapshot, chunk);
+    if push_snapshot(shared, &snapshot, chunk) {
+        *lock(&shared.last_history) = Some(snapshot.commits.clone());
+    }
+}
+
+/// A worktree or config update. History stays where the client already has it.
+fn push_meta(shared: &Arc<ServerShared>, snapshot: &lamina_core::session::RepoSnapshot) -> bool {
+    let message = Message::Event(Event::SnapshotMeta {
+        snapshot: SnapshotDto::from(snapshot),
+    });
+    let mut frame = Vec::new();
+    if let Err(error) = proto::write_frame(&mut frame, 0, &message) {
+        eprintln!("lamina-remote: failed to encode event: {error}");
+        return false;
+    }
+    // Large statuses wait on the snapshot queue so they cannot pile up ahead
+    // of a ping. Small ones do not need that backpressure.
+    if frame.len() <= SMALL_EVENT {
+        shared.outbox.push_high(frame)
+    } else {
+        shared.outbox.push_low(frame)
+    }
 }
 
 /// Publishes a snapshot as one reset followed by commit chunks.
@@ -997,7 +1073,7 @@ fn push_snapshot(
     shared: &Arc<ServerShared>,
     snapshot: &lamina_core::session::RepoSnapshot,
     chunk: usize,
-) {
+) -> bool {
     if !push_low(
         shared,
         0,
@@ -1005,7 +1081,7 @@ fn push_snapshot(
             snapshot: SnapshotDto::from(snapshot),
         }),
     ) {
-        return;
+        return false;
     }
 
     let generation = snapshot.generation;
@@ -1035,14 +1111,14 @@ fn push_snapshot(
                 complete: finished && start >= total,
             }),
         ) {
-            return;
+            return false;
         }
     }
 
     if total == 0 {
         // An empty history still needs a terminator so the client knows the
         // snapshot is complete.
-        push_low(
+        return push_low(
             shared,
             0,
             &Message::Event(Event::SnapshotAppend {
@@ -1053,6 +1129,7 @@ fn push_snapshot(
             }),
         );
     }
+    true
 }
 
 fn push_high(shared: &Arc<ServerShared>, stream: u16, message: &Message) -> bool {

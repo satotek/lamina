@@ -44,4 +44,11 @@ pub use message::{ErrorKind, Event, Message, RemoteError, Request, Response};
 /// changed-file count walks trees against the first parent and stays separate
 /// from the ticketed commit stat, so scrolling history does not inflate blobs.
 /// An older helper fails the handshake, which is what makes the app replace it.
-pub const PROTOCOL_VERSION: u32 = 5;
+///
+/// Version 6 tells the app whether the helper is watching the worktree
+/// ([`message::Response::HelloAck`]) and carries worktree updates that do not
+/// replace the commit list ([`message::Event::SnapshotMeta`]). A helper that
+/// cannot install a watch still serves the repository; the app refreshes it
+/// explicitly. An older helper fails the handshake, which is what makes the
+/// app replace it.
+pub const PROTOCOL_VERSION: u32 = 6;

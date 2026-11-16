@@ -118,6 +118,8 @@ pub struct RemoteSession {
     /// still exists when the disconnect hook kills it.
     #[allow(dead_code)]
     retain: Option<Box<dyn Send>>,
+    /// From the handshake. False means the helper is not watching the disk.
+    watching: bool,
 }
 
 struct OpRejected {
@@ -192,6 +194,7 @@ struct Inner {
 struct HelloAck {
     root: String,
     git_dir: String,
+    watching: bool,
 }
 
 impl RemoteSession {
@@ -325,6 +328,7 @@ impl RemoteSession {
                 path: ack.root,
             },
             retain: attach.retain,
+            watching: ack.watching,
         };
         session.finish_connect()?;
         Ok(session)
@@ -385,8 +389,20 @@ fn handshake(reader: &mut impl Read, writer: &mut impl Write) -> Result<(HelloAc
             continue;
         }
         match frame.message {
-            Message::Response(Response::HelloAck { root, git_dir, .. }) => {
-                return Ok((HelloAck { root, git_dir }, early));
+            Message::Response(Response::HelloAck {
+                root,
+                git_dir,
+                watching,
+                ..
+            }) => {
+                return Ok((
+                    HelloAck {
+                        root,
+                        git_dir,
+                        watching,
+                    },
+                    early,
+                ));
             }
             Message::Response(Response::VersionMismatch { expected, got }) => {
                 return Err(Error::other(format!(
@@ -811,6 +827,33 @@ impl Inner {
                 self.note_snapshot();
                 (self.events)(SessionEvent::SnapshotUpdated { generation });
             }
+            Event::SnapshotMeta { snapshot } => match RepoSnapshot::try_from(snapshot) {
+                Ok(incoming) => {
+                    // The commit list is not in this frame. Replacing it would
+                    // blank history until a later append that is not coming.
+                    let mut guard = write(&self.snapshot);
+                    let mut next = RepoSnapshot::clone(&guard);
+                    next.generation = incoming.generation;
+                    next.head = incoming.head;
+                    next.refs = incoming.refs;
+                    next.refs_by_commit = incoming.refs_by_commit;
+                    next.status = incoming.status;
+                    next.stashes = incoming.stashes;
+                    next.upstreams = incoming.upstreams;
+                    next.remotes = incoming.remotes;
+                    next.state = incoming.state;
+                    next.conflicts = incoming.conflicts;
+                    next.busy = incoming.busy;
+                    let generation = next.generation;
+                    *guard = Arc::new(next);
+                    drop(guard);
+                    self.note_snapshot();
+                    (self.events)(SessionEvent::SnapshotUpdated { generation });
+                }
+                Err(error) => (self.events)(SessionEvent::LoadFailed {
+                    error: error.to_string(),
+                }),
+            },
             Event::DiffReady { ticket, view } => match DiffView::try_from(*view) {
                 Ok(view) => (self.events)(SessionEvent::DiffReady {
                     ticket: DiffTicket(ticket),
@@ -1005,6 +1048,10 @@ impl Inner {
 impl RepositorySession for RemoteSession {
     fn location(&self) -> RepoLocation {
         self.location.clone()
+    }
+
+    fn watches_filesystem(&self) -> bool {
+        self.watching
     }
 
     fn connection_rtt(&self) -> Option<Duration> {
