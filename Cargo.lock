@@ -7758,7 +7758,7 @@ checksum = "d08889ec5408683408db66ad89e0e1f93dff55c73a4ccc71c427d5b277ee47e6"
 
 [[package]]
 name = "strata-app"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "env_logger",
  "futures",
@@ -7780,7 +7780,7 @@ dependencies = [
 
 [[package]]
 name = "strata-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chardetng",
  "encoding_rs",
@@ -7816,7 +7816,7 @@ dependencies = [
 
 [[package]]
 name = "strata-term"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "flate2",
  "futures",
