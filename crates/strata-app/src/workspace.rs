@@ -1007,7 +1007,10 @@ impl Workspace {
             let init_footer_picker = picker.clone();
             let new_tab_footer_picker = picker.clone();
             let confirm_picker = picker.clone();
+            // Five buttons outgrow the dialog in longer languages; they wrap
+            // onto a second row instead of spilling past its left edge.
             let footer = DialogFooter::new()
+                .flex_wrap()
                 .child(
                     crate::ui::button(
                         "picker-dialog-open",
@@ -1042,6 +1045,7 @@ impl Workspace {
                             "picker-dialog-open-new-tab",
                             t!("workspace.open_new_tab_ellipsis").to_string(),
                         )
+                        .kind(crate::ui::ButtonKind::Normal)
                         .size(crate::ui::ButtonSize::Medium)
                         .on_click(move |_, window, cx| {
                             new_tab_footer_picker.update(cx, |picker, cx| {
