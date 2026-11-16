@@ -176,6 +176,7 @@ fn hello(reader: &mut impl Read, writer: &mut impl Write) {
             root: "/repo".into(),
             git_dir: "/repo/.git".into(),
             bare: false,
+            watching: true,
         }),
     );
 }
