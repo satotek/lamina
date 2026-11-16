@@ -454,6 +454,7 @@ mod tests {
                 side: crate::dto::RepoCompareSideDto::Worktree,
                 path: "file.txt".into(),
             },
+            Request::CommitChangedFileCount { commit: oid },
         ];
         for request in requests {
             let mut bytes = Vec::new();
@@ -548,6 +549,7 @@ mod tests {
             Response::CompareSideBlob {
                 data: Some(b"worktree\n".to_vec()),
             },
+            Response::CommitChangedFileCount { count: 3 },
         ];
         for response in responses {
             let mut bytes = Vec::new();
