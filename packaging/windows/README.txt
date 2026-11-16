@@ -13,6 +13,9 @@ directly, so Git for Windows has to be installed and on PATH.
 
 Settings live in %APPDATA%\Strata.
 
+Opening a repository over SSH uses the Linux helper binaries in
+remote-helpers\ next to strata.exe. Leave that folder beside the executable.
+
 This build is not code signed, so Windows SmartScreen may ask for confirmation
 the first time it runs.
 
