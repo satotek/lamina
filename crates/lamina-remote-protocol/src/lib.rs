@@ -36,10 +36,12 @@ pub use message::{ErrorKind, Event, Message, RemoteError, Request, Response};
 /// dropped helper use the same ticket route as diffs: late results are
 /// ignored, and an outstanding ticket expires with an error.
 ///
-/// Version 5 adds the reads a conflict editor and a three-way compare need.
-/// Conflict reads are the index stages, the worktree bytes and
-/// `merge.conflictStyle`; the writes were already operations. Three-way reads
-/// are the merge base, the roles of three commits, and the tree and blob
-/// contents of commits, the index and the worktree. An older helper fails the
-/// handshake, which is what makes the app replace it.
+/// Version 5 adds the reads a conflict editor, a three-way compare, and the
+/// per-commit changed-file count need. Conflict reads are the index stages,
+/// the worktree bytes and `merge.conflictStyle`; the writes were already
+/// operations. Three-way reads are the merge base, the roles of three commits,
+/// and the tree and blob contents of commits, the index and the worktree. The
+/// changed-file count walks trees against the first parent and stays separate
+/// from the ticketed commit stat, so scrolling history does not inflate blobs.
+/// An older helper fails the handshake, which is what makes the app replace it.
 pub const PROTOCOL_VERSION: u32 = 5;
