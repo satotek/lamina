@@ -471,12 +471,20 @@ fn run(
     title: &str,
 ) -> (Finished, CommandRecord) {
     let started_at = SystemTime::now();
-    let output = std::process::Command::new(program)
+    let mut command = std::process::Command::new(program);
+    command
         .args(args)
         .current_dir(dir)
         .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(Stdio::null())
-        .output();
+        .stdin(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        // CREATE_NO_WINDOW: the output is captured, so a console window
+        // would only flash over the app.
+        command.creation_flags(0x0800_0000);
+    }
+    let output = command.output();
     let duration = started_at.elapsed().unwrap_or_default();
     match output {
         Ok(output) => {

@@ -191,6 +191,7 @@ fn default_terminal(dir: &Path) -> Result<(), String> {
             command
                 .args(["/c", "start", "cmd", "/K", "cd", "/d"])
                 .arg(dir);
+            hide_console(&mut command);
             spawn_detached(command, "terminal")
         }
     }
@@ -245,7 +246,17 @@ fn default_editor(path: &Path) -> Result<(), String> {
     // empty title keeps the path from being swallowed as one.
     let mut command = Command::new("cmd");
     command.args(["/c", "start", ""]).arg(path);
+    hide_console(&mut command);
     spawn_detached(command, "editor")
+}
+
+/// Keeps the `cmd /c start` wrapper's own console from flashing up; `start`
+/// still gives the program it launches a window of its own.
+#[cfg(target_os = "windows")]
+fn hide_console(command: &mut Command) {
+    use std::os::windows::process::CommandExt as _;
+    // CREATE_NO_WINDOW
+    command.creation_flags(0x0800_0000);
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]

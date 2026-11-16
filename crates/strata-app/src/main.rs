@@ -13,6 +13,12 @@
 //! open a repository from the system chooser or pick one from the recent list.
 //! A path that is not a repository keeps the error screen instead of exiting.
 
+// A console-subsystem executable makes Windows open a console window next to
+// the app on every launch. Debug builds keep it for their log output. git's
+// askpass calls still work: the pipes git hands the child are inherited
+// whichever subsystem the executable declares.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 // The interface catalogue. `t!` resolves the module-level `_rust_i18n_t` this
 // macro generates, which is why both statements live at the crate root.
 #[macro_use]
