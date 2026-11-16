@@ -587,6 +587,134 @@ fn resolve_with_content_rejects_a_symlink_that_leaves_the_worktree() {
     server.join().expect("server thread");
 }
 
+#[test]
+fn worktree_and_submodule_paths_that_escape_are_rejected() {
+    let repo = TestRepo::new();
+    identity(&repo);
+    repo.write("README.md", "one\n");
+    let head = repo.commit("base");
+    let before = repo.git(&["worktree", "list", "--porcelain"]);
+    let (remote, events, server) = serve(&repo);
+
+    let escape = if cfg!(windows) {
+        std::path::PathBuf::from(r"C:\tmp\..\Windows")
+    } else {
+        std::path::PathBuf::from("/tmp/../etc")
+    };
+    let control = if cfg!(windows) {
+        std::path::PathBuf::from("C:\\temp\\a\nb")
+    } else {
+        std::path::PathBuf::from("/tmp/a\nb")
+    };
+    let cases = [
+        (
+            Operation::WorktreeAdd {
+                path: std::path::PathBuf::from("relative-worktree"),
+                branch: None,
+                new_branch: Some("topic".into()),
+                commit: Some(head),
+            },
+            "absolute",
+        ),
+        (
+            Operation::WorktreeAdd {
+                path: escape,
+                branch: None,
+                new_branch: Some("topic".into()),
+                commit: Some(head),
+            },
+            "..",
+        ),
+        (
+            Operation::WorktreeAdd {
+                path: std::path::PathBuf::from(""),
+                branch: None,
+                new_branch: Some("topic".into()),
+                commit: Some(head),
+            },
+            "empty",
+        ),
+        (
+            Operation::WorktreeAdd {
+                path: control.clone(),
+                branch: None,
+                new_branch: Some("topic".into()),
+                commit: Some(head),
+            },
+            "control",
+        ),
+        (
+            Operation::WorktreeRemove {
+                path: std::path::PathBuf::from("relative-worktree"),
+                force: false,
+            },
+            "absolute",
+        ),
+        (
+            Operation::WorktreeRemove {
+                path: control,
+                force: true,
+            },
+            "control",
+        ),
+        (
+            Operation::SubmoduleUpdate {
+                paths: vec!["..".into()],
+                init: false,
+            },
+            "worktree",
+        ),
+        (
+            Operation::SubmoduleUpdate {
+                paths: vec!["../outside".into()],
+                init: false,
+            },
+            "worktree",
+        ),
+        (
+            Operation::SubmoduleUpdate {
+                paths: vec![".git/config".into()],
+                init: true,
+            },
+            ".git",
+        ),
+        (
+            Operation::SubmoduleUpdate {
+                paths: vec![String::new()],
+                init: false,
+            },
+            "empty",
+        ),
+        (
+            Operation::SubmoduleUpdate {
+                paths: vec!["libs/../secret".into()],
+                init: false,
+            },
+            "worktree",
+        ),
+        (
+            Operation::SubmoduleUpdate {
+                paths: vec!["libs/a\nb".into()],
+                init: false,
+            },
+            "control",
+        ),
+    ];
+    for (operation, needle) in cases {
+        let id = remote.run(operation);
+        let (error, _) = wait_finished(&events, id);
+        let error = error.expect("the helper must reject the path");
+        assert!(error.contains(needle), "expected {needle:?} in {error}");
+    }
+    drop(remote);
+    server.join().expect("server thread");
+    assert_eq!(
+        repo.git(&["worktree", "list", "--porcelain"]),
+        before,
+        "a rejected path must not create a worktree"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn a_stdio_helper_resolves_a_conflict_like_a_local_session() {

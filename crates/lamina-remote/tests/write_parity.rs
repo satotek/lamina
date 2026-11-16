@@ -204,3 +204,197 @@ fn undo_of_a_chosen_reflog_entry_matches_a_local_session() {
     assert_eq!(local_repo.head(), local_entry.old_id);
     helper.close();
 }
+
+fn sibling(repo: &TestRepo, name: &str) -> std::path::PathBuf {
+    repo.path()
+        .parent()
+        .expect("the repository sits in a temp dir")
+        .join(name)
+}
+
+/// Worktree list with this machine's temp directory replaced, so two twins
+/// can be compared even though their absolute paths differ.
+fn worktree_list(repo: &TestRepo) -> String {
+    let parent = repo
+        .path()
+        .parent()
+        .expect("parent")
+        .to_string_lossy()
+        .into_owned();
+    repo.git(&["worktree", "list", "--porcelain"])
+        .replace(&parent, "$PARENT")
+}
+
+#[test]
+fn adding_removing_and_pruning_a_worktree_matches_a_local_session() {
+    let local_repo = two_commits();
+    let remote_repo = two_commits();
+    let local_head = local_repo.head();
+    let remote_head = remote_repo.head();
+    assert_eq!(local_head, remote_head);
+
+    let (local, local_events) = open_local(&local_repo);
+    let helper = Helper::spawn(&remote_repo);
+
+    run_local(
+        &local,
+        &local_events,
+        Operation::WorktreeAdd {
+            path: sibling(&local_repo, "topic"),
+            branch: None,
+            new_branch: Some("topic".into()),
+            commit: Some(local_head),
+        },
+    );
+    run_remote(
+        &helper,
+        Operation::WorktreeAdd {
+            path: sibling(&remote_repo, "topic"),
+            branch: None,
+            new_branch: Some("topic".into()),
+            commit: Some(remote_head),
+        },
+    );
+    assert_eq!(worktree_list(&local_repo), worktree_list(&remote_repo));
+    assert_eq!(
+        local_repo.git(&["rev-parse", "topic"]),
+        remote_repo.git(&["rev-parse", "topic"])
+    );
+
+    run_local(
+        &local,
+        &local_events,
+        Operation::WorktreeRemove {
+            path: sibling(&local_repo, "topic"),
+            force: false,
+        },
+    );
+    run_remote(
+        &helper,
+        Operation::WorktreeRemove {
+            path: sibling(&remote_repo, "topic"),
+            force: false,
+        },
+    );
+    assert_eq!(worktree_list(&local_repo), worktree_list(&remote_repo));
+    assert!(
+        !local_repo
+            .git(&["worktree", "list", "--porcelain"])
+            .contains("topic"),
+        "remove drops the linked worktree"
+    );
+
+    // Prune drops a registration whose directory is already gone.
+    let local_gone = sibling(&local_repo, "gone");
+    let remote_gone = sibling(&remote_repo, "gone");
+    let local_gone_text = local_gone.to_string_lossy();
+    let remote_gone_text = remote_gone.to_string_lossy();
+    let local_spec = local_head.to_string();
+    let remote_spec = remote_head.to_string();
+    local_repo.git(&[
+        "worktree",
+        "add",
+        "--detach",
+        "--",
+        local_gone_text.as_ref(),
+        &local_spec,
+    ]);
+    remote_repo.git(&[
+        "worktree",
+        "add",
+        "--detach",
+        "--",
+        remote_gone_text.as_ref(),
+        &remote_spec,
+    ]);
+    std::fs::remove_dir_all(&local_gone).expect("delete local checkout");
+    std::fs::remove_dir_all(&remote_gone).expect("delete remote checkout");
+    run_local(&local, &local_events, Operation::WorktreePrune);
+    run_remote(&helper, Operation::WorktreePrune);
+    assert_eq!(worktree_list(&local_repo), worktree_list(&remote_repo));
+    assert!(
+        !local_repo
+            .git(&["worktree", "list", "--porcelain"])
+            .contains("gone")
+    );
+
+    helper.close();
+}
+
+/// A superproject whose submodule checkout is one commit behind the gitlink.
+///
+/// The objects are already in the submodule, so the update does not have to
+/// clone over `file://`. That transport is refused unless the invoking git
+/// command opts in, and the helper runs plain git.
+fn superproject() -> (TestRepo, TestRepo) {
+    let library = TestRepo::new();
+    library.write("lib.txt", "lib\n");
+    let first = library.commit("lib");
+    let repo = TestRepo::new();
+    repo.write("README.md", "super\n");
+    repo.commit("super");
+    let url = format!("file://{}", library.path().display());
+    repo.git(&[
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "--",
+        &url,
+        "libs/demo",
+    ]);
+    repo.commit("add demo");
+    library.write("lib.txt", "lib2\n");
+    library.commit("lib2");
+    repo.git(&[
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "update",
+        "--remote",
+        "--",
+        "libs/demo",
+    ]);
+    repo.commit("bump demo");
+    let first = first.to_string();
+    repo.git(&["-C", "libs/demo", "checkout", "-q", &first]);
+    (repo, library)
+}
+
+fn submodule_checkout(repo: &TestRepo) -> String {
+    format!(
+        "{}{}",
+        repo.git(&["-C", "libs/demo", "rev-parse", "HEAD"]),
+        repo.git(&["submodule", "status"])
+    )
+}
+
+#[test]
+fn updating_a_submodule_matches_a_local_session() {
+    let (local_repo, _local_library) = superproject();
+    let (remote_repo, _remote_library) = superproject();
+    assert_eq!(
+        submodule_checkout(&local_repo),
+        submodule_checkout(&remote_repo),
+        "twins start one commit behind the same gitlink"
+    );
+
+    let (local, local_events) = open_local(&local_repo);
+    let helper = Helper::spawn(&remote_repo);
+    let update = Operation::SubmoduleUpdate {
+        paths: vec!["libs/demo".into()],
+        init: true,
+    };
+    run_local(&local, &local_events, update.clone());
+    run_remote(&helper, update);
+    assert_eq!(
+        submodule_checkout(&local_repo),
+        submodule_checkout(&remote_repo)
+    );
+    assert_eq!(
+        local_repo.git(&["-C", "libs/demo", "rev-parse", "HEAD"]),
+        local_repo.git(&["rev-parse", "HEAD:libs/demo"]),
+        "update checks out the recorded commit"
+    );
+    helper.close();
+}
