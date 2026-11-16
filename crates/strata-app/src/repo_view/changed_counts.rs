@@ -292,7 +292,7 @@ impl RepoView {
         self.changed_counts.inflight_set = batch.iter().copied().collect();
         self.changed_counts.inflight_cancel = Some(cancel);
 
-        let repo = session.repo().clone();
+        let repo = session.reader();
         self.changed_counts.inflight_task = Some(cx.spawn(async move |this, cx| {
             let computed = cx
                 .background_executor()

@@ -12,6 +12,8 @@
 //! `edit_dialog` but returns the text to the plan instead of running a single
 //! reword, which is why it is not reused as is.
 
+use std::sync::Arc;
+
 use gpui::prelude::*;
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable as _, IntoElement, KeyDownEvent, ParentElement,
@@ -22,8 +24,7 @@ use gpui_component::WindowExt as _;
 use gpui_component::dialog::DialogFooter;
 use gpui_component::input::{InputEvent, Textarea, TextareaState};
 use strata_core::Oid;
-use strata_core::repo::Repo;
-use strata_core::session::Operation;
+use strata_core::session::{Operation, RepoReader};
 
 use super::RepoView;
 use super::history_ops::{HistoryAction, PendingSelection};
@@ -47,7 +48,7 @@ pub(super) struct RebaseRequest {
     pub(super) commits: Vec<(Oid, String)>,
     /// Remote-tracking branches that already contain part of the range.
     pub(super) pushed: Vec<String>,
-    pub(super) repo: Repo,
+    pub(super) repo: Arc<dyn RepoReader>,
 }
 
 /// Opens the dialog for `request`.
@@ -132,7 +133,7 @@ impl Render for DraggedRow {
 struct RebaseDialog {
     /// Weak: the dialog outlives a `RepoView` the workspace has replaced.
     view: WeakEntity<RepoView>,
-    repo: Repo,
+    repo: Arc<dyn RepoReader>,
     onto: Oid,
     /// HEAD when the dialog opened; the rewrite replaces it.
     head: Oid,

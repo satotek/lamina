@@ -23,7 +23,7 @@ use gpui::{
 use gpui_kit_assets::IconName;
 use strata_core::encoding::{TextEncoding, decode_for_display};
 use strata_core::highlight::{Highlighter, LineHighlights, language_for_path};
-use strata_core::lfs::{LfsInfo, LfsPointer, format_size, read_object, short_label};
+use strata_core::lfs::{LfsInfo, LfsPointer, format_size, short_label};
 use strata_core::{Oid, TreeEntry, TreeEntryKind};
 
 use super::RepoView;
@@ -523,7 +523,7 @@ impl RepoView {
             return;
         };
         let dir = self.tree.dir.clone();
-        let repo = session.repo().clone();
+        let repo = session.reader();
         cx.spawn(async move |this, cx| {
             let read = cx
                 .background_executor()
@@ -562,7 +562,7 @@ impl RepoView {
         let (Some(commit), Some(session)) = (self.tree.commit(), self.session.as_ref()) else {
             return;
         };
-        let repo = session.repo().clone();
+        let repo = session.reader();
         let highlighter = Arc::clone(&self.tree.highlighter);
         let tab_width = usize::from(Settings::get(cx).appearance.tab_width.clamp(1, 8));
         let read_path = path.clone();
@@ -574,7 +574,8 @@ impl RepoView {
                         .blob_at(commit, &read_path)
                         .map_err(|error| error.to_string())?;
                     if let Some(pointer) = LfsPointer::parse(&bytes) {
-                        match read_object(repo.common_dir(), &pointer, MAX_FILE_BYTES)
+                        match repo
+                            .read_lfs_object(&pointer, MAX_FILE_BYTES)
                             .map_err(|error| error.to_string())?
                         {
                             Some(real) => bytes = real,

@@ -58,8 +58,8 @@ use strata_core::git_cli::CommandRecord;
 use strata_core::lfs::{LfsInfo, LfsLock};
 use strata_core::repo::{SubmoduleInfo, WorktreeInfo};
 use strata_core::session::{
-    DiffOptions, DiffRequest, DiffTicket, DiffView, Operation, OperationId, QueryTicket, Session,
-    SessionEvent, SessionOptions,
+    DiffOptions, DiffRequest, DiffTicket, DiffView, Operation, OperationId, QueryTicket,
+    RepoLocation, RepoReader, RepositorySession, Session, SessionEvent, SessionOptions,
 };
 use strata_core::{FileChange, HeadInfo, Oid, RefKind};
 
@@ -97,9 +97,7 @@ pub enum Launch {
     Fake { repo: Rc<FakeRepo> },
     /// A real repository, already loading in the background.
     Repo {
-        // Boxed: on macOS a Session is large enough that the other variants
-        // would carry its size for nothing.
-        session: Box<Session>,
+        session: Box<dyn RepositorySession>,
         name: String,
         title: String,
         events: UnboundedReceiver<SessionEvent>,
@@ -133,27 +131,16 @@ impl Launch {
     /// settings; a repository keeps the binary it was opened with.
     pub fn open_with(path: &Path, git_executable: Option<PathBuf>) -> Self {
         let (sender, events) = mpsc::unbounded();
-        match Session::open_with(path, SessionOptions { git_executable }, move |event| {
-            // A closed receiver only means the window is gone; the session is
-            // shutting down anyway.
-            let _ = sender.unbounded_send(event);
-        }) {
-            Ok(session) => {
-                let name = repo_name(&session);
-                let head = session.repo().head().ok();
-                let title = data::window_title(&name, head.as_ref());
-                Self::Repo {
-                    session: Box::new(session),
-                    name,
-                    title,
-                    events,
-                }
-            }
-            Err(error) => Self::Error {
-                path: display_path(path),
-                error: error.to_string(),
+        Self::open_local(
+            path,
+            git_executable,
+            move |event| {
+                // A closed receiver only means the window is gone; the session is
+                // shutting down anyway.
+                let _ = sender.unbounded_send(event);
             },
-        }
+            events,
+        )
     }
 
     /// Test helper: opens a real [`Session`] whose background workers do not
@@ -161,13 +148,23 @@ impl Launch {
     #[cfg(test)]
     pub(crate) fn open_quiet(path: &Path, git_executable: Option<PathBuf>) -> Self {
         let (_, events) = mpsc::unbounded();
-        match Session::open_with(path, SessionOptions { git_executable }, |_| {}) {
+        Self::open_local(path, git_executable, |_| {}, events)
+    }
+
+    fn open_local(
+        path: &Path,
+        git_executable: Option<PathBuf>,
+        on_event: impl Fn(SessionEvent) + Send + Sync + 'static,
+        events: UnboundedReceiver<SessionEvent>,
+    ) -> Self {
+        match Session::open_with(path, SessionOptions { git_executable }, on_event) {
             Ok(session) => {
-                let name = repo_name(&session);
-                let head = session.repo().head().ok();
+                let session: Box<dyn RepositorySession> = Box::new(session);
+                let name = repo_name(session.as_ref());
+                let head = session.reader().head().ok();
                 let title = data::window_title(&name, head.as_ref());
                 Self::Repo {
-                    session: Box::new(session),
+                    session,
                     name,
                     title,
                     events,
@@ -191,17 +188,16 @@ impl Launch {
 
 /// `<dir>` for the window title: the working tree root, or the git dir for a
 /// bare repository.
-fn repo_name(session: &Session) -> String {
-    let repo = session.repo();
-    let path = repo
-        .workdir()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| repo.git_dir().to_path_buf());
-    // Opening `.` yields a relative workdir with no file name of its own.
-    let path = strata_core::fs_path::canonicalize(&path);
-    path.file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| display_path(&path))
+fn repo_name(session: &dyn RepositorySession) -> String {
+    match session.location() {
+        RepoLocation::Local(path) => {
+            // Opening `.` yields a relative workdir with no file name of its own.
+            let path = strata_core::fs_path::canonicalize(&path);
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| display_path(&path))
+        }
+    }
 }
 
 fn display_path(path: &Path) -> String {
@@ -356,7 +352,7 @@ pub(crate) fn history_diff_options(cx: &App) -> DiffOptions {
 }
 
 pub struct RepoView {
-    pub(crate) session: Option<Session>,
+    pub(crate) session: Option<Box<dyn RepositorySession>>,
     fake: Option<Rc<FakeRepo>>,
     error: Option<(String, String)>,
     name: Option<String>,
@@ -554,7 +550,7 @@ pub struct RepoView {
 /// point: a walk checks between commits, but a status refresh or a diff runs to
 /// completion. Joining them on the UI thread would freeze the window for as
 /// long as that git work takes.
-pub(crate) fn drop_session_in_background(session: Session) {
+pub(crate) fn drop_session_in_background(session: Box<dyn RepositorySession>) {
     drop_in_background(session);
 }
 
@@ -770,8 +766,8 @@ impl RepoView {
                         }
                     }
                 }));
-                view.repository_key = Some(commit_graph::repository_key(session.repo()));
-                view.session = Some(*session);
+                view.repository_key = commit_graph::repository_key(&session.location());
+                view.session = Some(session);
                 if let Some(key) = view.repository_key.clone() {
                     view.hidden_refs = crate::settings::Settings::get(cx).history.hidden_refs(&key);
                 }
@@ -863,12 +859,10 @@ impl RepoView {
         let Some(session) = &self.session else {
             return;
         };
-        let repo = session.repo();
-        let path = repo
-            .workdir()
-            .unwrap_or_else(|| repo.git_dir())
-            .to_path_buf();
-        crate::git_config_view::set_repository(path, session.git().log_handle(), cx);
+        let Some(path) = session.location().local_path().map(Path::to_path_buf) else {
+            return;
+        };
+        crate::git_config_view::set_repository(path, session.git_extras().log_handle(), cx);
     }
 
     pub(crate) fn set_active(&mut self, active: bool, cx: &mut Context<Self>) {
@@ -950,13 +944,13 @@ impl RepoView {
     /// The workspace calls this when it replaces the view: a late event from
     /// the old session must not reach the window any more, where its
     /// notification or dialog would land over the new repository.
-    pub(crate) fn detach_session(&mut self) -> Option<Session> {
+    pub(crate) fn detach_session(&mut self) -> Option<Box<dyn RepositorySession>> {
         self.autofetch = None;
         self.cancel_file_history();
         self.discard_blame();
         self.cancel_diff();
         self.drop_selection_diff();
-        self.uncommitted_diff.cancel_all(self.session.as_ref());
+        self.uncommitted_diff.cancel_all(self.session.as_deref());
         self.files_epoch = self.files_epoch.wrapping_add(1);
         self.tree.close();
         let worktree_diff = self.worktree.cancel_diff();
@@ -999,7 +993,7 @@ impl RepoView {
         self.work_dir().or_else(|| {
             self.session
                 .as_ref()
-                .map(|s| s.repo().git_dir().to_path_buf())
+                .map(|s| s.reader().git_dir().to_path_buf())
         })
     }
 
@@ -1788,7 +1782,7 @@ impl RepoView {
                 return;
             }
             self.uncommitted_selected = false;
-            self.uncommitted_diff.cancel_all(self.session.as_ref());
+            self.uncommitted_diff.cancel_all(self.session.as_deref());
         }
         let Some(source) = self.source() else {
             return;
@@ -1858,7 +1852,7 @@ impl RepoView {
         self.branches.clear_revealed();
         self.branches.clear_selected_extra();
         self.uncommitted_selected = false;
-        self.uncommitted_diff.cancel_all(self.session.as_ref());
+        self.uncommitted_diff.cancel_all(self.session.as_deref());
         self.selected = index;
         self.selection_commit = commit;
         // The reveal mark belongs to the ref the sidebar showed, not to
@@ -1985,7 +1979,7 @@ impl RepoView {
         };
         // `commit_changes` is a gix read; the repo handle is cheap to clone and
         // safe off the UI thread.
-        let repo = session.repo().clone();
+        let repo = session.reader();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -2053,7 +2047,7 @@ impl RepoView {
         }
         self.worktree_lfs_epoch = self.worktree_lfs_epoch.wrapping_add(1);
         let epoch = self.worktree_lfs_epoch;
-        let repo = session.repo().clone();
+        let repo = session.reader();
         cx.spawn(async move |this, cx| {
             let map = cx
                 .background_executor()
@@ -2093,7 +2087,7 @@ impl RepoView {
             return;
         };
         self.lfs_locks_loaded = true;
-        let git = session.git().clone();
+        let git = session.git_extras();
         cx.spawn(async move |this, cx| {
             let (available, locks) = cx
                 .background_executor()
@@ -2128,8 +2122,8 @@ impl RepoView {
         let Some(session) = &self.session else {
             return;
         };
-        let git = session.git().clone();
-        let repo = session.repo().clone();
+        let git = session.git_extras();
+        let repo = session.reader();
         cx.spawn(async move |this, cx| {
             let missing = cx
                 .background_executor()
@@ -2217,7 +2211,7 @@ impl RepoView {
             .show_uncommitted_changes;
         if !show_uncommitted && self.uncommitted_selected {
             self.uncommitted_selected = false;
-            self.uncommitted_diff.cancel_all(self.session.as_ref());
+            self.uncommitted_diff.cancel_all(self.session.as_deref());
             self.sync_selection(cx);
         }
         if !self.active {
@@ -2653,7 +2647,7 @@ impl RepoView {
                     rev,
                     RevSlot::Select(index),
                     &snapshot,
-                    session.repo().clone(),
+                    session.reader(),
                     window,
                     cx,
                 ) {
@@ -2666,7 +2660,7 @@ impl RepoView {
                 target.rev(),
                 RevSlot::Tree,
                 &snapshot,
-                session.repo().clone(),
+                session.reader(),
                 window,
                 cx,
             )
@@ -2678,7 +2672,7 @@ impl RepoView {
                 &target.rev,
                 RevSlot::Blame,
                 &snapshot,
-                session.repo().clone(),
+                session.reader(),
                 window,
                 cx,
             )
@@ -2941,7 +2935,7 @@ impl DebugLaunchRunner {
         rev: &str,
         which: RevSlot,
         snapshot: &strata_core::session::RepoSnapshot,
-        repo: strata_core::repo::Repo,
+        repo: Arc<dyn RepoReader>,
         window: &mut Window,
         cx: &mut Context<RepoView>,
     ) -> bool {
@@ -2970,15 +2964,12 @@ impl DebugLaunchRunner {
                         let resolved = cx
                             .background_executor()
                             .spawn(async move {
-                                let mut walk = repo
-                                    .walk_commits_from_refs(std::slice::from_ref(&rev_owned))
-                                    .map_err(|err| err.to_string())?;
-                                match walk.next() {
-                                    Some(Ok(commit)) => Ok(commit.id),
-                                    Some(Err(err)) => Err(err.to_string()),
-                                    None => Err(format!(
+                                match repo.resolve_commit(&rev_owned) {
+                                    Ok(Some(id)) => Ok(id),
+                                    Ok(None) => Err(format!(
                                         "revision '{rev_owned}' did not resolve to a commit"
                                     )),
+                                    Err(err) => Err(err.to_string()),
                                 }
                             })
                             .await;

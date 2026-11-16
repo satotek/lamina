@@ -22,7 +22,6 @@ use gpui::{
 };
 use gpui_component::dialog::DialogFooter;
 use gpui_component::{Root, TitleBar, WindowExt as _};
-use strata_core::session::Session;
 
 use crate::actions::{
     CloneRepository, CloseTab, NewRepository, NewTab, NextTab, OpenRepository, PreviousTab,
@@ -1354,14 +1353,10 @@ fn repo_path(launch: &Launch) -> Option<PathBuf> {
     let Launch::Repo { session, .. } = launch else {
         return None;
     };
-    Some(canonical(worktree_root(session)))
-}
-
-fn worktree_root(session: &Session) -> PathBuf {
-    let repo = session.repo();
-    repo.workdir()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| repo.git_dir().to_path_buf())
+    session
+        .location()
+        .local_path()
+        .map(|path| canonical(path.to_path_buf()))
 }
 
 fn canonical(path: PathBuf) -> PathBuf {

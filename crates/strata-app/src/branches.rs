@@ -3951,7 +3951,7 @@ impl RepoView {
             .as_ref()
             .and_then(|session| {
                 session
-                    .repo()
+                    .reader()
                     .branch_upstream_target(&branch)
                     .ok()
                     .flatten()
@@ -4348,7 +4348,7 @@ impl RepoView {
         };
         let target_tip = tip(RefKind::LocalBranch, target)?;
         let source_tip = tip(RefKind::RemoteBranch, source)?;
-        session.repo().is_ancestor(target_tip, source_tip).ok()
+        session.reader().is_ancestor(target_tip, source_tip).ok()
     }
 }
 

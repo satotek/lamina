@@ -154,7 +154,7 @@ impl RepoView {
     fn replay_range(&self, onto: Oid) -> Option<(Vec<Oid>, bool)> {
         let session = self.session.as_ref()?;
         let head = head_target(session.snapshot().head.as_ref())?;
-        let repo = session.repo();
+        let repo = session.reader();
         let commits = repo.commits_between(onto, head).ok()?;
         let up_to_date = repo.is_ancestor(onto, head).ok()?;
         Some((commits, up_to_date))

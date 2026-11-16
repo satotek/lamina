@@ -158,7 +158,7 @@ impl RepoView {
         // The focused single commit's files and totals must not stand in while
         // the range is planned.
         self.reset_commit_pane();
-        let Some(repo) = self.session.as_ref().map(|session| session.repo().clone()) else {
+        let Some(repo) = self.session.as_ref().map(|session| session.reader()) else {
             return;
         };
         cx.spawn(async move |this, cx| {

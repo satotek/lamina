@@ -206,7 +206,7 @@ impl RepoView {
         let workdir = self
             .session
             .as_ref()
-            .and_then(|session| session.repo().workdir().map(std::path::Path::to_path_buf));
+            .and_then(|session| session.reader().workdir().map(std::path::Path::to_path_buf));
         let extras = self.extras(workdir.as_deref());
         for summary in self.branches.sections(&data, &extras, design) {
             let section = summary.section;
@@ -407,7 +407,7 @@ impl RepoView {
         let workdir = self
             .session
             .as_ref()
-            .and_then(|session| session.repo().workdir().map(std::path::Path::to_path_buf));
+            .and_then(|session| session.reader().workdir().map(std::path::Path::to_path_buf));
         let extras = self.extras(workdir.as_deref());
         self.branches.render(
             data,

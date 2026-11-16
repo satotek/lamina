@@ -652,7 +652,7 @@ impl RepoView {
     /// The working tree root, or `None` for the synthetic benchmark and the
     /// error screen, which have no directory to open.
     pub(super) fn work_dir(&self) -> Option<PathBuf> {
-        let path = self.session.as_ref()?.repo().workdir()?.to_path_buf();
+        let path = self.session.as_ref()?.reader().workdir()?.to_path_buf();
         Some(strata_core::fs_path::canonicalize(&path))
     }
 

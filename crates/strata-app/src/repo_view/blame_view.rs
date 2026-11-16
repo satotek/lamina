@@ -726,7 +726,7 @@ impl RepoView {
         let Some(session) = self.session.as_ref() else {
             return;
         };
-        let repo = session.repo().clone();
+        let repo = session.reader();
         cx.spawn(async move |this, cx| {
             let parents = cx
                 .background_executor()

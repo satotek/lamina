@@ -101,7 +101,7 @@ impl RepoView {
             self.report_custom_command_error(t!("commands.no_repository").to_string(), cx);
             return;
         };
-        let log = session.git().log_handle();
+        let log = session.git_extras().log_handle();
         let view = cx.entity().downgrade();
         let title = command.spec.title.clone();
         let detail = commands::display_line(&argv);

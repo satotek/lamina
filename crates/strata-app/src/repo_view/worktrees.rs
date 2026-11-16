@@ -146,7 +146,7 @@ impl RepoView {
         let workdir = self
             .session
             .as_ref()
-            .and_then(|session| session.repo().workdir().map(Path::to_path_buf));
+            .and_then(|session| session.reader().workdir().map(Path::to_path_buf));
         resolve_repo_relative(workdir.as_deref(), path)
     }
 
@@ -393,7 +393,7 @@ impl RepoView {
         }
         self.session
             .as_ref()
-            .and_then(|session| session.repo().workdir().map(Path::to_path_buf))
+            .and_then(|session| session.reader().workdir().map(Path::to_path_buf))
             .unwrap_or_else(|| PathBuf::from("."))
     }
 }

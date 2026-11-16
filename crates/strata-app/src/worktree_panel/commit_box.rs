@@ -5,7 +5,7 @@ use gpui::prelude::*;
 use gpui::{AnyElement, Context, Entity, FontWeight, IntoElement, ParentElement, Styled, div, px};
 use gpui_component::input::Textarea;
 use strata_core::HeadInfo;
-use strata_core::session::{RepoSnapshot, Session};
+use strata_core::session::{RepoSnapshot, RepositorySession};
 
 use super::{Colors, PendingKind, WorktreePanel};
 use crate::repo_view::RepoView;
@@ -217,7 +217,7 @@ fn summary_hint(message: &str, limit: u32) -> Option<String> {
 ///
 /// A single object read through gix, so it stays on the UI thread instead of
 /// adding a session round trip for every amend toggle.
-pub(super) fn previous_message(session: &Session) -> Option<String> {
+pub(super) fn previous_message(session: &dyn RepositorySession) -> Option<String> {
     let head = match session.snapshot().head.as_ref()? {
         HeadInfo::Branch {
             target: Some(target),
@@ -226,7 +226,7 @@ pub(super) fn previous_message(session: &Session) -> Option<String> {
         HeadInfo::Detached { target } => *target,
         HeadInfo::Branch { target: None, .. } => return None,
     };
-    session.repo().commit_message(head).ok()
+    session.reader().commit_message(head).ok()
 }
 
 #[cfg(test)]

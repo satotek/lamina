@@ -29,7 +29,8 @@ use strata_core::lfs::{LfsInfo, LfsLock};
 use strata_core::patch::LineSelection;
 use strata_core::repo::InProgressDetails;
 use strata_core::session::{
-    ConflictSide, DiffRequest, DiffTicket, DiffView, Operation, OperationId, RepoSnapshot, Session,
+    ConflictSide, DiffRequest, DiffTicket, DiffView, Operation, OperationId, RepoSnapshot,
+    RepositorySession,
 };
 use strata_core::{ChangeKind, FileChange, RepoState, WorktreeStatus};
 
@@ -528,7 +529,7 @@ impl WorktreePanel {
 
     /// Offers git's prepared message once per merge, the way `git commit`
     /// opens the editor with it.
-    fn sync_merge_message(&mut self, session: &Session, state: RepoState) {
+    fn sync_merge_message(&mut self, session: &dyn RepositorySession, state: RepoState) {
         if state != RepoState::Merging {
             self.merge_prefilled = false;
             self.withdraw_merge_message = self.offered_merge_message.take();
@@ -539,7 +540,7 @@ impl WorktreePanel {
         }
         self.merge_prefilled = true;
         // One small file read; cheaper than a round trip through a worker.
-        if let Ok(Some(message)) = session.repo().merge_message() {
+        if let Ok(Some(message)) = session.reader().merge_message() {
             self.offered_merge_message = Some(message.clone());
             self.prefill = Some(message);
         }
@@ -772,7 +773,12 @@ impl WorktreePanel {
         self.diff.cancel()
     }
 
-    fn run(&mut self, session: &Session, kind: PendingKind, operation: Operation) -> OperationId {
+    fn run(
+        &mut self,
+        session: &dyn RepositorySession,
+        kind: PendingKind,
+        operation: Operation,
+    ) -> OperationId {
         let id = session.run(operation);
         self.pending = Some((id, kind));
         self.dirty = true;
@@ -825,7 +831,7 @@ impl RepoView {
             return;
         };
         let activity = ActivityKind::of(&operation);
-        let id = self.worktree.run(session, kind, operation);
+        let id = self.worktree.run(session.as_ref(), kind, operation);
         self.activity.begin(id, activity, cx);
     }
 
@@ -839,7 +845,8 @@ impl RepoView {
             let snapshot = session.snapshot();
             self.worktree.conflicts.observe(&snapshot);
             self.worktree.reconcile(&snapshot);
-            self.worktree.sync_merge_message(session, snapshot.state);
+            self.worktree
+                .sync_merge_message(session.as_ref(), snapshot.state);
         }
         self.worktree.ensure_input(window, cx);
         self.request_worktree_diff(cx);
@@ -904,7 +911,8 @@ impl RepoView {
         if snapshot.busy.is_some() {
             return;
         }
-        self.worktree.sync_merge_message(session, snapshot.state);
+        self.worktree
+            .sync_merge_message(session.as_ref(), snapshot.state);
         self.worktree.conflicts.observe(&snapshot);
         let moved = self.worktree.reconcile(&snapshot);
         let needs_view = match self.worktree.selected.as_ref() {
@@ -1525,7 +1533,7 @@ impl RepoView {
     }
 
     pub(crate) fn toggle_amend(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let previous = self.session.as_ref().and_then(previous_message);
+        let previous = self.session.as_deref().and_then(previous_message);
         let amend = !self.worktree.amend;
         self.worktree.set_amend(amend, previous, window, cx);
     }

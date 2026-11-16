@@ -28,8 +28,7 @@ use strata_core::git_cli::{
     MoveDirection, RebaseAction, RebaseStep, drop_commit, move_commit, reword_commit,
     squash_commit_into_parent,
 };
-use strata_core::repo::Repo;
-use strata_core::session::{Operation, RepoSnapshot, ResetMode, Session};
+use strata_core::session::{Operation, RepoReader, RepoSnapshot, RepositorySession, ResetMode};
 use strata_core::{ChangeKind, Error, HeadInfo, Oid, RefKind, RepoState, Result, WorktreeStatus};
 
 use super::RepoView;
@@ -311,12 +310,12 @@ fn snapshot_parents(snapshot: &RepoSnapshot, id: Oid) -> Option<Vec<Oid>> {
 
 /// Every commit HEAD can reach, capped like the remote check: a menu only needs
 /// to know whether any selected commit is already on the branch.
-fn head_reachable_set(session: &Session) -> HashSet<Oid> {
+fn head_reachable_set(session: &dyn RepositorySession) -> HashSet<Oid> {
     let snapshot = session.snapshot();
     let Some(head) = head_target(snapshot.head.as_ref()) else {
         return HashSet::new();
     };
-    let repo = session.repo().clone();
+    let repo = session.reader();
     let mut reachable = HashSet::new();
     let mut stack = vec![head];
     while let Some(id) = stack.pop() {
@@ -346,14 +345,14 @@ pub(crate) struct EditContext {
     /// Remote-tracking refs, as `(short name, tip)`.
     remotes: Vec<(String, Oid)>,
     snapshot: Arc<RepoSnapshot>,
-    repo: Repo,
+    repo: Arc<dyn RepoReader>,
 }
 
 impl EditContext {
-    fn read(session: &Session, commit: Oid) -> Option<Self> {
+    fn read(session: &dyn RepositorySession, commit: Oid) -> Option<Self> {
         let snapshot = session.snapshot();
         let head = head_target(snapshot.head.as_ref())?;
-        let repo = session.repo().clone();
+        let repo = session.reader();
         let (line, distance) =
             walk_first_parents(head, commit, |id| snapshot_parents(&snapshot, id))
                 .or_else(|| walk_first_parents(head, commit, |id| repo.parents(id).ok()))
@@ -1493,7 +1492,7 @@ impl RepoView {
         let reachable = self
             .session
             .as_ref()
-            .map(head_reachable_set)
+            .map(|session| head_reachable_set(session.as_ref()))
             .unwrap_or_default();
         let mut commits = Vec::new();
         let mut copy = Vec::new();
@@ -1827,7 +1826,7 @@ impl RepoView {
 
     /// What the edit entries may do to `commit`, or `None` without a session.
     fn edit_context(&self, commit: Oid) -> Option<EditContext> {
-        EditContext::read(self.session.as_ref()?, commit)
+        EditContext::read(self.session.as_deref()?, commit)
     }
 
     /// Remote-tracking branches that already contain one of `commits`.
@@ -1908,7 +1907,7 @@ impl RepoView {
         let Some(session) = self.session.as_ref() else {
             return;
         };
-        let message = match session.repo().commit_message(commit) {
+        let message = match session.reader().commit_message(commit) {
             Ok(message) => message,
             Err(error) => {
                 self.status_error = Some(

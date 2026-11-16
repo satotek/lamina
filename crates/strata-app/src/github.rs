@@ -298,7 +298,7 @@ fn workdir(entity: &Entity<RepoView>, cx: &App) -> Option<PathBuf> {
         .read(cx)
         .session
         .as_ref()
-        .map(|session| session.git().workdir().to_path_buf())
+        .map(|session| session.git_extras().workdir().to_path_buf())
 }
 
 fn create_pull_request(

@@ -29,7 +29,7 @@ impl RepoView {
         let Some(session) = self.session.as_ref() else {
             return;
         };
-        let git = session.git().clone();
+        let git = session.git_extras();
         let directory = self.work_dir().unwrap_or_else(|| PathBuf::from("."));
         let suggested = format!("{short}.patch");
         let receiver = cx.prompt_for_new_path(&directory, Some(&suggested));

@@ -4,14 +4,13 @@
 //! expensive. This module renders the one banner that asks about it and runs the
 //! write only after the user clicks Write.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use gpui::{
     AnyElement, App, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
     Styled as _, div,
 };
-use strata_core::repo::Repo;
-use strata_core::session::Operation;
+use strata_core::session::{Operation, RepoLocation};
 
 use super::RepoView;
 use crate::settings::{self, Settings};
@@ -19,12 +18,10 @@ use crate::style::Design;
 
 /// The key a repository's "Don't ask" answer is stored under: its working-tree
 /// root, canonical when the path can be resolved.
-pub(super) fn repository_key(repo: &Repo) -> PathBuf {
-    let path = repo
-        .workdir()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| repo.git_dir().to_path_buf());
-    strata_core::fs_path::canonicalize(&path)
+pub(super) fn repository_key(location: &RepoLocation) -> Option<PathBuf> {
+    location
+        .local_path()
+        .map(strata_core::fs_path::canonicalize)
 }
 
 impl RepoView {

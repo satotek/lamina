@@ -173,7 +173,7 @@ impl RepoView {
 
     /// The working-tree root, resolved the way the editor opener resolves it.
     fn worktree_root(&self) -> Option<PathBuf> {
-        let root = self.session.as_ref()?.repo().workdir()?.to_path_buf();
+        let root = self.session.as_ref()?.reader().workdir()?.to_path_buf();
         Some(strata_core::fs_path::canonicalize(&root))
     }
 }

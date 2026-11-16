@@ -1022,7 +1022,7 @@ impl RepoView {
         let Some(session) = self.session.as_ref() else {
             return;
         };
-        let repo = session.repo().clone();
+        let repo = session.reader();
         let kind = session
             .snapshot()
             .conflicts
@@ -1371,7 +1371,7 @@ impl RepoView {
         let Some(session) = self.session.as_ref() else {
             return;
         };
-        let repo = session.repo().clone();
+        let repo = session.reader();
         let read_path = path.clone();
         cx.spawn(async move |this, cx| {
             let markers = cx

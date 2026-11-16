@@ -18,7 +18,9 @@ use gpui::{
 use gpui_component::scroll::Scrollbar;
 use gpui_kit_assets::IconName;
 use strata_core::diff::GapAction;
-use strata_core::session::{DiffOptions, DiffRequest, DiffTicket, DiffView, RepoSnapshot, Session};
+use strata_core::session::{
+    DiffOptions, DiffRequest, DiffTicket, DiffView, RepoSnapshot, RepositorySession,
+};
 use strata_core::{ChangeKind, ConflictKind};
 
 use super::RepoView;
@@ -254,7 +256,7 @@ impl UncommittedDiffState {
         snapshot: &RepoSnapshot,
         options: DiffOptions,
         zoom: f32,
-        session: Option<&Session>,
+        session: Option<&dyn RepositorySession>,
     ) {
         let new_sections = build_sections(snapshot);
         let zoom_changed = (self.zoom - zoom).abs() > 1e-4;
@@ -309,7 +311,7 @@ impl UncommittedDiffState {
         }
     }
 
-    pub(crate) fn cancel_all(&mut self, session: Option<&Session>) {
+    pub(crate) fn cancel_all(&mut self, session: Option<&dyn RepositorySession>) {
         if let Some(session) = session {
             for ticket in self.in_flight.keys().copied() {
                 session.cancel_diff(ticket);
@@ -392,7 +394,7 @@ impl UncommittedDiffState {
         true
     }
 
-    fn flush_requests(&mut self, session: &Session, smoke: bool) {
+    fn flush_requests(&mut self, session: &dyn RepositorySession, smoke: bool) {
         let indices: Vec<usize> = self.pending_indices.borrow_mut().drain(..).collect();
         if smoke || indices.is_empty() || self.sections.is_empty() {
             return;
@@ -582,7 +584,7 @@ impl RepoView {
         let options = super::history_diff_options(cx);
         let zoom = crate::settings::Settings::get(cx).appearance.zoom();
         self.uncommitted_diff
-            .sync(&snapshot, options, zoom, Some(session));
+            .sync(&snapshot, options, zoom, Some(session.as_ref()));
     }
 
     pub(super) fn flush_uncommitted_diff_requests(&mut self, cx: &mut Context<Self>) {
@@ -593,7 +595,8 @@ impl RepoView {
         let Some(session) = self.session.as_ref() else {
             return;
         };
-        self.uncommitted_diff.flush_requests(session, self.smoke);
+        self.uncommitted_diff
+            .flush_requests(session.as_ref(), self.smoke);
         cx.notify();
     }
 
