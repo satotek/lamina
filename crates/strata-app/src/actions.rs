@@ -134,6 +134,9 @@ actions!(
         /// `RepoView`. Escape reaches it through search dismiss, because that
         /// binding already owns the key.
         CancelRunningOperation,
+        /// Asks the session for a fresh status. A remote tab has no watcher
+        /// yet, so this is how the working tree catches up. Handled on `RepoView`.
+        RefreshWorkingTree,
     ]
 );
 

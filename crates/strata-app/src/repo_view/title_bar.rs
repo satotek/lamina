@@ -133,6 +133,21 @@ impl RepoView {
                     design,
                 ))
             })
+            .when(self.is_ssh() && self.session.is_some(), |chip| {
+                // Inside the repository chip so the title-bar width math, which
+                // reserves the action row and not this chip, stays as it is.
+                let entity = self.entity();
+                chip.child(
+                    crate::ui::icon_button("remote-refresh", IconName::RefreshCw)
+                        .ghost()
+                        .size(crate::ui::ButtonSize::Tiny)
+                        .tooltip(t!("action.refresh_working_tree").to_string())
+                        .on_click(move |_, _, cx| {
+                            cx.stop_propagation();
+                            entity.update(cx, |view, cx| view.refresh_working_tree(cx));
+                        }),
+                )
+            })
             .child(
                 div()
                     .max_w(px(fit.repository_width))

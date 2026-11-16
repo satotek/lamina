@@ -552,6 +552,12 @@ pub struct RepoView {
     /// Notifies the view when the settings change, so sizes and colours that
     /// come from them take effect without a restart.
     _settings: Subscription,
+    /// Dropping this unregisters the focus observer. A remote tab reloads when
+    /// the window is focused again; without the subscription that never runs.
+    _activation: Subscription,
+    /// When a remote tab last asked the helper for a fresh status. Focus
+    /// refreshes are throttled against this; an explicit refresh updates it.
+    last_remote_refresh: Option<Instant>,
     /// Held so the event loop is cancelled with the view.
     _bridge: Option<Task<()>>,
     /// False while this repository sits in an inactive tab: session watcher
@@ -641,6 +647,11 @@ impl RepoView {
         let settings = cx.observe_global::<crate::settings::Settings>(|this, cx| {
             this.settings_changed(cx);
             this.notify_if_active(cx);
+        });
+        // The callback already runs inside this view's update. Updating the
+        // entity again from here would panic.
+        let activation = cx.observe_window_activation(window, |this, window, cx| {
+            this.on_window_activated(window, cx);
         });
         let smoke = std::env::var_os("STRATA_SMOKE").is_some();
         let title = launch.title();
@@ -739,6 +750,8 @@ impl RepoView {
             debug_launch: None,
             _appearance: appearance,
             _settings: settings,
+            _activation: activation,
+            last_remote_refresh: None,
             _bridge: None,
             active,
             pending_sync: false,

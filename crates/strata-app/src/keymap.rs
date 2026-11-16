@@ -171,9 +171,9 @@ use crate::actions::{
     GoToChild, GoToHead, GoToParent, GoToSecondParent, NavigateBack, NavigateForward,
     NewRepository, NewTab, NextTab, OpenCompare, OpenGitConfig, OpenInEditor, OpenRemoteRepository,
     OpenRepository, OpenSettings, OpenTerminalHere, PreviousTab, Quit, REPO_VIEW, REPO_VIEW_LIST,
-    RedoLastAction, ReopenClosedTab, SelectFirst, SelectLast, SelectNext, SelectPageDown,
-    SelectPageUp, SelectPrevious, SelectTab1, SelectTab2, SelectTab3, SelectTab4, SelectTab5,
-    SelectTab6, SelectTab7, SelectTab8, SelectTab9, StashChanges, SwitchBranch,
+    RedoLastAction, RefreshWorkingTree, ReopenClosedTab, SelectFirst, SelectLast, SelectNext,
+    SelectPageDown, SelectPageUp, SelectPrevious, SelectTab1, SelectTab2, SelectTab3, SelectTab4,
+    SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9, StashChanges, SwitchBranch,
     ToggleDetailsMaximized, ToggleFrameStats, TogglePalette, ToggleSidebar, ToggleWholeFile,
     UndoLastAction, WORKSPACE,
 };
@@ -740,6 +740,16 @@ pub static ACTIONS: &[ActionSpec] = &[
         CancelRunningOperation,
         [],
         55,
+        true
+    ),
+    action!(
+        "strata::RefreshWorkingTree",
+        "Refresh working tree",
+        Actions,
+        Some(REPO_VIEW),
+        RefreshWorkingTree,
+        [binding("f5", Some(REPO_VIEW))],
+        56,
         true
     ),
     #[cfg(feature = "terminal")]
@@ -2226,6 +2236,7 @@ mod tests {
             ("secondary-shift-p", "TogglePalette", ""),
             ("f1", "TogglePalette", ""),
             ("secondary-q", "Quit", ""),
+            ("f5", "RefreshWorkingTree", "RepoView"),
             #[cfg(feature = "terminal")]
             ("ctrl-`", "ToggleTerminal", "RepoView"),
             ("escape", "CloseSettings", "SettingsView"),
@@ -2393,7 +2404,7 @@ mod tests {
             }
         }
         // Every built-in palette entry has a registry row.
-        let expected_count = if cfg!(feature = "terminal") { 55 } else { 54 };
+        let expected_count = if cfg!(feature = "terminal") { 56 } else { 55 };
         assert_eq!(orders.len(), expected_count);
     }
 
