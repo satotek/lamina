@@ -683,6 +683,21 @@ impl Workspace {
         self.finish_navigation(window, cx);
     }
 
+    /// Re-applies the active tab's title after its view changed its own title,
+    /// such as a compare tab drilling into a file from a folder comparison.
+    pub(crate) fn refresh_window_title(&self, window: &mut Window, cx: &App) {
+        if let Some(title) = self.active_window_title(cx) {
+            window.set_window_title(&title);
+        }
+    }
+
+    fn active_window_title(&self, cx: &App) -> Option<String> {
+        match &self.content {
+            Content::Welcome(_) => None,
+            Content::Tabs(deck) => deck.active().map(|slot| slot.window_title(cx)),
+        }
+    }
+
     /// Opens a submodule or linked worktree in the current tab, pushing the
     /// current repository onto that tab's navigation stack so the user can return
     /// to it.
@@ -2272,6 +2287,88 @@ mod tests {
                 "OpenCompare action should open the Compare dialog"
             );
             window.close_dialog(cx);
+        });
+    }
+
+    #[gpui::test]
+    fn drilling_into_a_folder_entry_retitles_the_compare_window(cx: &mut gpui::TestAppContext) {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let left_dir = temp.path().join("left");
+        let right_dir = temp.path().join("right");
+        std::fs::create_dir(&left_dir).unwrap();
+        std::fs::create_dir(&right_dir).unwrap();
+        std::fs::write(left_dir.join("diff.txt"), "one\n").unwrap();
+        std::fs::write(right_dir.join("diff.txt"), "two\n").unwrap();
+
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            gpui_component::init(cx);
+            cx.set_global(Settings::default());
+            crate::actions::bind(cx);
+        });
+
+        let workspace_cell: std::rc::Rc<std::cell::RefCell<Option<Entity<Workspace>>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
+        let workspace_cell_init = workspace_cell.clone();
+        let target = CompareTarget::TwoWayFolders {
+            left: left_dir,
+            right: right_dir,
+        };
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), move |window, cx| {
+                    let workspace = cx.new(|cx| Workspace::new_with_compare(target, window, cx));
+                    *workspace_cell_init.borrow_mut() = Some(workspace.clone());
+                    cx.new(|cx| Root::new(workspace, window, cx))
+                })
+            })
+            .expect("open window");
+        let mut visual_cx = VisualTestContext::from_window(window.into(), cx);
+        visual_cx.run_until_parked();
+
+        let workspace = workspace_cell.borrow().clone().expect("workspace created");
+        let compare = visual_cx.update(|_, cx| {
+            let ws = workspace.read(cx);
+            assert_eq!(
+                ws.active_window_title(cx).as_deref(),
+                Some("Compare — left ↔ right")
+            );
+            let Content::Tabs(deck) = &ws.content else {
+                panic!("expected compare tab");
+            };
+            let TabSlot::Compare(slot) = deck.active().expect("active slot") else {
+                panic!("expected compare slot");
+            };
+            slot.view.clone()
+        });
+
+        visual_cx.update(|window, cx| {
+            compare.update(cx, |view, cx| view.open_folder_entry(0, window, cx));
+        });
+        visual_cx.run_until_parked();
+
+        visual_cx.update(|_, cx| {
+            let ws = workspace.read(cx);
+            assert_eq!(
+                ws.active_window_title(cx).as_deref(),
+                Some("Compare — diff.txt — left ↔ right"),
+                "drilling into a file has to retitle the window"
+            );
+        });
+
+        visual_cx.update(|window, cx| {
+            compare.update(cx, |view, cx| view.back_to_folder(window, cx));
+        });
+        visual_cx.run_until_parked();
+
+        visual_cx.update(|_, cx| {
+            let ws = workspace.read(cx);
+            assert_eq!(
+                ws.active_window_title(cx).as_deref(),
+                Some("Compare — left ↔ right"),
+                "Back has to restore the folder title"
+            );
         });
     }
 

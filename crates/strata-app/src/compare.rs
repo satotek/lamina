@@ -814,7 +814,12 @@ impl CompareView {
         self.selected_folder_entry = None;
     }
 
-    fn open_folder_entry(&mut self, entry_index: usize, cx: &mut Context<Self>) {
+    pub(crate) fn open_folder_entry(
+        &mut self,
+        entry_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(folder) = self.folder_cache.as_ref() else {
             return;
         };
@@ -847,9 +852,10 @@ impl CompareView {
         };
         self.drilled_relative_path = Some(rel);
         self.start_job(job, cx);
+        self.sync_window_title(window, cx);
     }
 
-    fn back_to_folder(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn back_to_folder(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(cached) = self.folder_cache.clone() else {
             return;
         };
@@ -861,6 +867,7 @@ impl CompareView {
         self.state = CompareState::Folder(cached);
         self.rebuild_folder_filter();
         self.refresh_workspace_tab_strip(cx);
+        self.sync_window_title(window, cx);
         cx.notify();
     }
 
@@ -872,7 +879,7 @@ impl CompareView {
         self.start_target(&target, cx);
     }
 
-    fn reload(&mut self, cx: &mut Context<Self>) {
+    fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(rel) = self.drilled_relative_path.clone()
             && let Some(folder) = self.folder_cache.as_ref()
             && let Some(entry_idx) = folder
@@ -880,11 +887,30 @@ impl CompareView {
                 .iter()
                 .position(|entry| entry.relative_path == rel)
         {
-            self.open_folder_entry(entry_idx, cx);
+            self.open_folder_entry(entry_idx, window, cx);
             return;
         }
         let target = self.root_target.clone();
         self.start_target(&target, cx);
+    }
+
+    /// Re-applies this tab's window title after drilling into a file or going
+    /// back, through the workspace so an inactive tab never replaces it.
+    ///
+    /// Deferred: the workspace reads this view's title, which it cannot do
+    /// while the drill-in update still holds it.
+    fn sync_window_title(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.active {
+            return;
+        }
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        window.defer(cx, move |window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.refresh_window_title(window, cx);
+            });
+        });
     }
 
     fn expand_two_way_gap(&mut self, gap: usize, action: GapAction, cx: &mut Context<Self>) {
@@ -994,7 +1020,11 @@ impl CompareView {
                             .ghost()
                             .size(ButtonSize::Small)
                             .icon(IconName::ArrowLeft)
-                            .on_click(cx.listener(|this, _, _, cx| this.back_to_folder(cx))),
+                            .on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.back_to_folder(window, cx);
+                                },
+                            )),
                         )
                     })
                     .child(
@@ -1031,7 +1061,7 @@ impl CompareView {
                             .ghost()
                             .size(ButtonSize::Small)
                             .tooltip(t!("compare.refresh").to_string())
-                            .on_click(cx.listener(|this, _, _, cx| this.reload(cx))),
+                            .on_click(cx.listener(|this, _, window, cx| this.reload(window, cx))),
                     )
                     .child(
                         ui::button("compare-new", t!("compare.new_compare").to_string())
@@ -2009,8 +2039,8 @@ fn render_folder_row(
     .child(ui::status_badge(status_label, status_tone, design));
 
     if clickable {
-        row = row.cursor_pointer().on_click(move |_, _window, cx| {
-            let _ = entity.update(cx, |view, cx| view.open_folder_entry(entry_idx, cx));
+        row = row.cursor_pointer().on_click(move |_, window, cx| {
+            let _ = entity.update(cx, |view, cx| view.open_folder_entry(entry_idx, window, cx));
         });
     }
 
