@@ -631,3 +631,92 @@ fn a_config_read_preview_and_write_match_a_local_access() {
     assert_eq!(value.layer, ConfigLayer::Local);
     helper.close();
 }
+
+/// A patch that adds one file, so applying it does not depend on the twins'
+/// working trees.
+const NEW_FILE_PATCH: &[u8] = b"diff --git a/added.txt b/added.txt
+new file mode 100644
+index 0000000..ce01362
+--- /dev/null
++++ b/added.txt
+@@ -0,0 +1 @@
++hello
+";
+
+#[test]
+fn applying_a_patch_matches_a_local_session() {
+    let local_repo = two_commits();
+    let remote_repo = two_commits();
+    let (local, local_events) = open_local(&local_repo);
+    let helper = Helper::spawn(&remote_repo);
+
+    run_local(
+        &local,
+        &local_events,
+        Operation::ApplyPatch {
+            patch: NEW_FILE_PATCH.to_vec(),
+        },
+    );
+    run_remote(
+        &helper,
+        Operation::ApplyPatch {
+            patch: NEW_FILE_PATCH.to_vec(),
+        },
+    );
+    let read = |repo: &TestRepo| {
+        std::fs::read_to_string(repo.path().join("added.txt")).expect("the patched file")
+    };
+    assert_eq!(
+        read(&local_repo),
+        read(&remote_repo),
+        "both working trees got the patched file"
+    );
+    assert_eq!(
+        repository_state(&local_repo),
+        repository_state(&remote_repo)
+    );
+
+    // Garbage is refused on both sides.
+    let local_error = run_outcome_local(
+        &local,
+        &local_events,
+        Operation::ApplyPatch {
+            patch: b"not a patch\n".to_vec(),
+        },
+    );
+    let remote_error = run_outcome_remote(
+        &helper,
+        Operation::ApplyPatch {
+            patch: b"not a patch\n".to_vec(),
+        },
+    );
+    assert!(local_error.is_some(), "local git refuses the bytes");
+    assert!(remote_error.is_some(), "the helper refuses them too");
+    helper.close();
+}
+
+#[test]
+fn saving_a_commit_as_a_patch_returns_the_same_bytes() {
+    let local_repo = two_commits();
+    let remote_repo = two_commits();
+    let commit = local_repo.head();
+    assert_eq!(commit, remote_repo.head());
+
+    let (local, _local_events) = open_local(&local_repo);
+    let helper = Helper::spawn(&remote_repo);
+    let local_patch = local
+        .git_extras()
+        .format_patch(commit)
+        .expect("local format-patch");
+    let remote_patch = helper
+        .session
+        .git_extras()
+        .format_patch(commit)
+        .expect("remote format-patch");
+    assert_eq!(local_patch, remote_patch);
+    assert!(
+        String::from_utf8_lossy(&remote_patch).contains("README.md"),
+        "the patch names the file the commit changed"
+    );
+    helper.close();
+}

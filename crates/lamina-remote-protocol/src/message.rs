@@ -180,6 +180,12 @@ pub enum Request {
     LfsAvailable,
     /// Locks `git lfs locks --json` reports.
     LfsLocks,
+    /// `git format-patch -1` for one commit, as bytes.
+    ///
+    /// The file is written on this machine; only the patch crosses the wire.
+    FormatPatch {
+        commit: ObjectId,
+    },
     /// The configuration the repository sees, including global files on the host.
     GitConfig,
     /// Run one config change against a temporary copy of `path`.
@@ -300,6 +306,9 @@ pub enum Response {
     },
     LfsLocks {
         locks: Vec<crate::dto::LfsLockDto>,
+    },
+    FormatPatch {
+        patch: Vec<u8>,
     },
     GitConfig {
         config: Box<crate::dto::GitConfigDto>,

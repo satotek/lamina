@@ -26,15 +26,21 @@ impl RepoView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // `format-patch` is not on the helper.
-        if self.refuse_if_ssh(cx) {
-            return;
-        }
+        // The helper produces the bytes; the file is saved here.
         let Some(session) = self.session.as_ref() else {
             return;
         };
         let git = session.git_extras();
-        let directory = self.work_dir().unwrap_or_else(|| PathBuf::from("."));
+        // The suggested folder has to exist here. A remote root is a path on
+        // the host, so the dialog starts from the home directory instead.
+        let directory = if self.is_ssh() {
+            std::env::var_os("HOME")
+                .or_else(|| std::env::var_os("USERPROFILE"))
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("."))
+        } else {
+            self.work_dir().unwrap_or_else(|| PathBuf::from("."))
+        };
         let suggested = format!("{short}.patch");
         let receiver = cx.prompt_for_new_path(&directory, Some(&suggested));
         cx.spawn(async move |this, cx| {
@@ -82,7 +88,7 @@ impl RepoView {
 
     /// "Apply patch…": chooses a `*.patch`/`*.diff` file and applies it.
     pub(crate) fn open_apply_patch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.refuse_if_ssh(cx) || self.session.is_none() || self.is_busy() {
+        if self.session.is_none() || self.is_busy() {
             return;
         }
         let receiver = cx.prompt_for_paths(PathPromptOptions {

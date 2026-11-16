@@ -265,6 +265,10 @@ pub enum OperationDto {
     },
     /// `git worktree prune`.
     WorktreePrune,
+    /// `git apply` on bytes the window already read.
+    ApplyPatch {
+        patch: Vec<u8>,
+    },
     /// `git lfs track`. `path` is a pattern or a worktree path.
     LfsTrack {
         path: String,
@@ -475,6 +479,9 @@ impl TryFrom<&lamina_core::session::Operation> for OperationDto {
                 force: *force,
             },
             Operation::WorktreePrune => Self::WorktreePrune,
+            Operation::ApplyPatch { patch } => Self::ApplyPatch {
+                patch: patch.clone(),
+            },
             Operation::LfsTrack { path } => Self::LfsTrack { path: path.clone() },
             Operation::LfsLock { path } => Self::LfsLock { path: path.clone() },
             Operation::LfsUnlock { path } => Self::LfsUnlock { path: path.clone() },
@@ -505,7 +512,6 @@ impl TryFrom<&lamina_core::session::Operation> for OperationDto {
             | Operation::RemoveRemote { .. }
             | Operation::OpenMergetool { .. }
             | Operation::RebaseEdit { .. }
-            | Operation::ApplyPatch { .. }
             | Operation::CreateTag { .. }
             | Operation::DeleteTag { .. }
             | Operation::RewordAcrossMerges { .. }
@@ -682,6 +688,7 @@ impl TryFrom<OperationDto> for lamina_core::session::Operation {
                 force,
             },
             OperationDto::WorktreePrune => Operation::WorktreePrune,
+            OperationDto::ApplyPatch { patch } => Operation::ApplyPatch { patch },
             OperationDto::LfsTrack { path } => Operation::LfsTrack { path },
             OperationDto::LfsLock { path } => Operation::LfsLock { path },
             OperationDto::LfsUnlock { path } => Operation::LfsUnlock { path },
@@ -948,6 +955,9 @@ mod tests {
                 force: true,
             },
             Operation::WorktreePrune,
+            Operation::ApplyPatch {
+                patch: b"diff --git a/x b/x\n".to_vec(),
+            },
             Operation::LfsTrack {
                 path: "*.bin".into(),
             },
@@ -987,7 +997,6 @@ mod tests {
                 fetch: false,
             },
             Operation::OpenMergetool { path: "a".into() },
-            Operation::ApplyPatch { patch: vec![1] },
             Operation::CreateTag {
                 name: "v1".into(),
                 target: commit,
