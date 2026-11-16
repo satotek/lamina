@@ -12,7 +12,7 @@ use gpui::{
     Anchor, AnyElement, App, AppContext as _, Context, ElementId, Entity, FocusHandle, Focusable,
     Hsla, InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions, Render,
     ScrollHandle, ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled,
-    Subscription, UniformListScrollHandle, WeakEntity, Window, div, px, uniform_list,
+    Subscription, UniformListScrollHandle, WeakEntity, Window, div, px, relative, uniform_list,
 };
 use gpui_component::Selectable as _;
 use gpui_component::dialog::DialogFooter;
@@ -29,7 +29,7 @@ use strata_core::compare::{
     compare_three_optional_files, compare_three_sides, compare_two_bytes,
     compare_two_optional_files, compare_two_repo_sides,
 };
-use strata_core::diff::{DiffOptions, GapAction};
+use strata_core::diff::{DiffOptions, GapAction, line_count};
 use strata_core::image::ImageKind;
 use strata_core::lfs::format_size;
 use strata_core::session::RepoReader;
@@ -2313,7 +2313,7 @@ impl CompareView {
                     .min_w_0()
                     .truncate()
                     .text_color(design.text)
-                    .child(match names {
+                    .child(match names.as_ref() {
                         Some([left, right]) => format!(
                             "{}  ↔  {}  ·  {}",
                             left,
@@ -2377,6 +2377,46 @@ impl CompareView {
                 )
             });
 
+        // A repository comparison names its sides; a filesystem one shows the
+        // paths in the row above instead and has no roles to head a pane with.
+        let pictures = res
+            .image
+            .as_ref()
+            .is_some_and(|image| image.kind == ImageKind::Raster);
+        let state = |present: bool, lines: usize| {
+            if pictures {
+                PaneState::picture(present, None)
+            } else {
+                PaneState::new(present, lines, None)
+            }
+        };
+        let pane_headers = names.as_ref().map(|[left, right]| {
+            div()
+                .flex()
+                .w_full()
+                .h(design.px(28.0))
+                .flex_none()
+                .bg(design.panel)
+                .border_b_1()
+                .border_color(design.border)
+                .child(pane_header(
+                    0,
+                    t!("compare.side.left").to_string(),
+                    left,
+                    &state(res.present[0], line_count(&res.left_text) as usize),
+                    design,
+                    true,
+                ))
+                .child(pane_header(
+                    1,
+                    t!("compare.side.right").to_string(),
+                    right,
+                    &state(res.present[1], line_count(&res.right_text) as usize),
+                    design,
+                    false,
+                ))
+        });
+
         let body: AnyElement = if res.too_large {
             ui::empty_state(t!("compare.file_too_large").to_string(), design).into_any_element()
         } else if let Some(image) = res.image.as_ref()
@@ -2410,6 +2450,27 @@ impl CompareView {
             )
         };
 
+        // A side with no file has no rows of its own; the message says so
+        // over that half of the body. Image and binary bodies draw their own
+        // state, so they are left alone.
+        let overlays = names.is_some() && !res.too_large && res.image.is_none() && !res.diff.binary;
+        let mut body_area = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .relative()
+            .child(body);
+        if overlays {
+            for side in 0..2 {
+                if !res.present[side] {
+                    body_area =
+                        body_area.child(missing_pane_overlay(side as f32 / 2.0, 1.0 / 2.0, design));
+                }
+            }
+        }
+
         div()
             .flex()
             .flex_col()
@@ -2417,10 +2478,11 @@ impl CompareView {
             .min_h_0()
             .w_full()
             .child(subheader)
+            .when_some(pane_headers, |col, headers| col.child(headers))
             .when_some(self.diff_context.notice(), |col, notice| {
                 col.child(ui::banner(ui::BannerKind::Info, notice.to_owned(), design))
             })
-            .child(body)
+            .child(body_area)
             .into_any_element()
     }
 
@@ -2566,6 +2628,34 @@ impl CompareView {
                 )
             });
 
+        // A history walk can follow a rename, so each side may know the file
+        // under a different path. The right side's path is the one the view is
+        // titled with; a side holding any other path says where it came from.
+        let revision_paths = match &self.root {
+            CompareRoot::RevisionFile(source) => Some(&source.paths),
+            _ => None,
+        };
+        let renamed_from = |side: usize| -> Option<String> {
+            let paths = revision_paths?;
+            (paths[side] != paths[2] && !paths[side].is_empty()).then(|| paths[side].clone())
+        };
+        let pictures = res
+            .images
+            .as_ref()
+            .is_some_and(|images| images.kind == ImageKind::Raster);
+        let state = |side: usize, lines: usize| {
+            if pictures {
+                PaneState::picture(res.present[side], renamed_from(side))
+            } else {
+                PaneState::new(res.present[side], lines, renamed_from(side))
+            }
+        };
+        let states = [
+            state(0, res.left_lines.len()),
+            state(1, res.middle_lines.len()),
+            state(2, res.right_lines.len()),
+        ];
+
         let pane_headers = div()
             .flex()
             .w_full()
@@ -2574,24 +2664,30 @@ impl CompareView {
             .bg(design.panel)
             .border_b_1()
             .border_color(design.border)
-            .child(three_way_pane_header(
+            .child(pane_header(
+                0,
                 t!("compare.side.left").to_string(),
                 &res.left_name,
+                &states[0],
                 design,
                 true,
             ))
-            .child(three_way_pane_header(
+            .child(pane_header(
+                1,
                 match mode {
                     ThreeWayCompareMode::MiddleBase => t!("compare.side.middle_base").to_string(),
                     ThreeWayCompareMode::NoBase => t!("compare.side.middle").to_string(),
                 },
                 &res.middle_name,
+                &states[1],
                 design,
                 true,
             ))
-            .child(three_way_pane_header(
+            .child(pane_header(
+                2,
                 t!("compare.side.right").to_string(),
                 &res.right_name,
+                &states[2],
                 design,
                 false,
             ));
@@ -2661,6 +2757,26 @@ impl CompareView {
                 .into_any_element()
         };
 
+        // A side with no file has only filler rows; the message says why,
+        // centred over that pane's column. Image panes draw their own missing
+        // state.
+        let mut body_area = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .relative()
+            .child(body);
+        if !show_images {
+            for side in 0..3 {
+                if !res.present[side] {
+                    body_area =
+                        body_area.child(missing_pane_overlay(side as f32 / 3.0, 1.0 / 3.0, design));
+                }
+            }
+        }
+
         div()
             .flex()
             .flex_col()
@@ -2669,7 +2785,7 @@ impl CompareView {
             .w_full()
             .child(subheader)
             .child(pane_headers)
-            .child(body)
+            .child(body_area)
             .when(show_h_scrollbar, |col| {
                 col.child(ui::h_scrollbar(
                     "compare-3way-hscroll",
@@ -3242,15 +3358,60 @@ fn display_name_or_missing(name: &str) -> String {
     }
 }
 
-fn three_way_pane_header(
+/// The short state a pane header carries beside the side's name.
+#[derive(Clone)]
+struct PaneState {
+    /// The line count, or "File missing".
+    text: String,
+    /// The side has no file at all, so its pane is filler only.
+    missing: bool,
+    /// The path this side held before a rename, when it differs from the path
+    /// the comparison is named for.
+    renamed_from: Option<String>,
+}
+
+impl PaneState {
+    fn new(present: bool, lines: usize, renamed_from: Option<String>) -> Self {
+        Self {
+            text: if present {
+                t!(
+                    &crate::i18n::count_key("compare.pane.lines", lines),
+                    count = lines
+                )
+                .to_string()
+            } else {
+                t!("compare.pane.missing").to_string()
+            },
+            missing: !present,
+            renamed_from,
+        }
+    }
+
+    /// A side drawn as a picture has no line count to report.
+    fn picture(present: bool, renamed_from: Option<String>) -> Self {
+        Self {
+            text: if present {
+                String::new()
+            } else {
+                t!("compare.pane.missing").to_string()
+            },
+            missing: !present,
+            renamed_from,
+        }
+    }
+}
+
+fn pane_header(
+    side: usize,
     role: String,
     name: &str,
+    state: &PaneState,
     design: &Design,
     border_right: bool,
 ) -> AnyElement {
     let tooltip_text: SharedString = name.to_owned().into();
     div()
-        .id(SharedString::from(format!("compare-3way-hdr-{role}")))
+        .id(("compare-pane-header", side))
         .flex()
         .items_center()
         .gap_1p5()
@@ -3277,9 +3438,54 @@ fn three_way_pane_header(
                 .text_color(design.muted)
                 .child(display_name_or_missing(name)),
         )
+        .child(
+            div()
+                .flex_none()
+                .text_color(if state.missing {
+                    design.tag_text
+                } else {
+                    design.muted
+                })
+                .child(state.text.clone()),
+        )
+        .when_some(state.renamed_from.clone(), |cell, path| {
+            cell.child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_color(design.muted)
+                    .child(t!("compare.pane.renamed_from", path = path).to_string()),
+            )
+        })
         .when(!name.is_empty(), |cell| {
             cell.tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx))
         })
+        .into_any_element()
+}
+
+/// A muted message centred over the column of a side that has no file.
+///
+/// It is drawn over the filler rows so the pane says why it is empty instead
+/// of leaving three columns of hatch to interpret.
+fn missing_pane_overlay(left: f32, width: f32, design: &Design) -> AnyElement {
+    div()
+        .absolute()
+        .top_0()
+        .bottom_0()
+        .left(relative(left))
+        .w(relative(width))
+        .flex()
+        .items_center()
+        .justify_center()
+        .px(design.px(16.0))
+        .child(
+            div()
+                .text_size(design.px(12.0))
+                .text_color(design.muted)
+                .text_center()
+                .child(t!("compare.pane.no_file").to_string()),
+        )
         .into_any_element()
 }
 
@@ -4319,6 +4525,26 @@ mod tests {
         assert_eq!(fit_1x.back_label, fit_15x.back_label);
         assert_eq!(fit_1x.new_compare_label, fit_15x.new_compare_label);
         assert!((fit_15x.used() - fit_1x.used() * 1.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_pane_state_says_a_missing_side_before_any_line_count() {
+        let one = PaneState::new(true, 1, None);
+        assert!(!one.missing);
+        assert_eq!(
+            one.text,
+            t!("compare.pane.lines.one", count = 1).to_string()
+        );
+        let many = PaneState::new(true, 4, None);
+        assert_eq!(
+            many.text,
+            t!("compare.pane.lines.other", count = 4).to_string()
+        );
+
+        let missing = PaneState::new(false, 0, Some("old/name.txt".to_owned()));
+        assert!(missing.missing);
+        assert_eq!(missing.text, t!("compare.pane.missing").to_string());
+        assert_eq!(missing.renamed_from.as_deref(), Some("old/name.txt"));
     }
 
     #[test]

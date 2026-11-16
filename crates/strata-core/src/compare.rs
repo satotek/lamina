@@ -49,6 +49,8 @@ const HASH_CHUNK_BYTES: usize = 64 * 1024;
 pub struct TwoWayFileCompare {
     pub left_path: PathBuf,
     pub right_path: PathBuf,
+    /// Whether each side exists at all, as opposed to being an empty file.
+    pub present: [bool; 2],
     pub diff: FileDiff,
     pub left_highlights: Arc<Vec<LineHighlights>>,
     pub right_highlights: Arc<Vec<LineHighlights>>,
@@ -101,6 +103,7 @@ pub fn compare_two_optional_files(
         return Ok(Some(TwoWayFileCompare {
             left_path,
             right_path,
+            present: [left.is_some(), right.is_some()],
             diff: FileDiff {
                 hunks: Vec::new(),
                 binary: true,
@@ -134,6 +137,7 @@ pub fn compare_two_optional_files(
         return Ok(Some(TwoWayFileCompare {
             left_path,
             right_path,
+            present: [left.is_some(), right.is_some()],
             diff: FileDiff {
                 hunks: Vec::new(),
                 binary: false,
@@ -198,6 +202,7 @@ pub fn compare_two_bytes(
         return Some(TwoWayFileCompare {
             left_path: left_path.to_path_buf(),
             right_path: right_path.to_path_buf(),
+            present: [left_bytes.is_some(), right_bytes.is_some()],
             diff: FileDiff {
                 hunks: Vec::new(),
                 binary: true,
@@ -230,6 +235,7 @@ pub fn compare_two_bytes(
         return Some(TwoWayFileCompare {
             left_path: left_path.to_path_buf(),
             right_path: right_path.to_path_buf(),
+            present: [left_bytes.is_some(), right_bytes.is_some()],
             diff: FileDiff {
                 hunks: Vec::new(),
                 binary: true,
@@ -292,6 +298,7 @@ pub fn compare_two_bytes(
     Some(TwoWayFileCompare {
         left_path: left_path.to_path_buf(),
         right_path: right_path.to_path_buf(),
+        present: [left_present, right_present],
         diff: file_diff,
         left_highlights: Arc::new(left_highlights),
         right_highlights: Arc::new(right_highlights),
@@ -439,6 +446,8 @@ pub struct ThreeWayFileCompare {
     pub left_name: String,
     pub middle_name: String,
     pub right_name: String,
+    /// Whether each side exists at all, as opposed to being an empty file.
+    pub present: [bool; 3],
     pub left_lines: Arc<Vec<String>>,
     pub middle_lines: Arc<Vec<String>>,
     pub right_lines: Arc<Vec<String>>,
@@ -566,6 +575,7 @@ pub fn compare_three_optional_files(
             left_name: display_path(left),
             middle_name: display_path(middle),
             right_name: display_path(right),
+            present: [left.is_some(), middle.is_some(), right.is_some()],
             left_lines: Arc::new(Vec::new()),
             middle_lines: Arc::new(Vec::new()),
             right_lines: Arc::new(Vec::new()),
@@ -606,6 +616,7 @@ pub fn compare_three_optional_files(
             left_name: display_path(left),
             middle_name: display_path(middle),
             right_name: display_path(right),
+            present: [left.is_some(), middle.is_some(), right.is_some()],
             left_lines: Arc::new(Vec::new()),
             middle_lines: Arc::new(Vec::new()),
             right_lines: Arc::new(Vec::new()),
@@ -634,6 +645,15 @@ pub fn compare_three_optional_files(
         side(right, right_bytes),
         cancel,
     ))
+}
+
+/// Which of the three sides exist, as the pane headers report it.
+fn presence(left: &ThreeWaySide, middle: &ThreeWaySide, right: &ThreeWaySide) -> [bool; 3] {
+    [
+        left.bytes.is_some(),
+        middle.bytes.is_some(),
+        right.bytes.is_some(),
+    ]
 }
 
 /// Compares three in-memory sides. The names are what the panes show; the
@@ -675,6 +695,7 @@ pub fn compare_three_sides(
             right: image_side(&right),
         };
         return Some(ThreeWayFileCompare {
+            present: presence(&left, &middle, &right),
             left_name: left.name,
             middle_name: middle.name,
             right_name: right.name,
@@ -701,6 +722,7 @@ pub fn compare_three_sides(
         .any(|bytes| bytes.len() > MAX_TEXT_COMPARE_BYTES)
     {
         return Some(ThreeWayFileCompare {
+            present: presence(&left, &middle, &right),
             left_name: left.name,
             middle_name: middle.name,
             right_name: right.name,
@@ -739,6 +761,7 @@ pub fn compare_three_sides(
 
     if binary {
         return Some(ThreeWayFileCompare {
+            present: presence(&left, &middle, &right),
             left_name: left.name,
             middle_name: middle.name,
             right_name: right.name,
@@ -861,6 +884,7 @@ pub fn compare_three_sides(
     });
 
     Some(ThreeWayFileCompare {
+        present: presence(&left, &middle, &right),
         left_name: left.name,
         middle_name: middle.name,
         right_name: right.name,
