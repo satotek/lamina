@@ -86,20 +86,34 @@ fn step(cx: &mut App, direction: isize) {
     report(cx);
 }
 
-/// Writes the zoom onto the theme the component library draws from.
+/// Writes the zoom and the font choices onto the theme the component library
+/// draws from.
 ///
 /// The early return keeps a window opening (and the appearance callback) from
-/// rebuilding every window's token set for a value that has not changed.
+/// rebuilding every window's token set for values that have not changed.
 pub fn apply(cx: &mut App) {
-    let zoom = Settings::get(cx).appearance.zoom();
+    let settings = Settings::get(cx);
+    let zoom = settings.appearance.zoom();
     let font = px(BASE_FONT_SIZE * zoom);
     let mono = px(BASE_MONO_FONT_SIZE * zoom);
-    if cx.theme().font_size == font && cx.theme().mono_font_size == mono {
+    // The component library's `Root` paints every window, its dialogs and its
+    // widgets with `Theme::font_family`, so the setting has to land there for
+    // the interface font to reach beyond the app's own panes.
+    let ui_font = crate::fonts::ui_font_family(settings, cx);
+    let mono_font = crate::fonts::code_font_family(settings, cx);
+    let theme = cx.theme();
+    if theme.font_size == font
+        && theme.mono_font_size == mono
+        && theme.font_family == ui_font
+        && theme.mono_font_family == mono_font
+    {
         return;
     }
     Theme::update(cx, |theme| {
         theme.font_size = font;
         theme.mono_font_size = mono;
+        theme.font_family = ui_font;
+        theme.mono_font_family = mono_font;
     });
 }
 

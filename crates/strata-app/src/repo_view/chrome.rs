@@ -178,9 +178,9 @@ impl Render for RepoView {
             .on_action(cx.listener(|this, _: &GoToHead, window, cx| {
                 this.graph_move(navigation::GraphMove::Head, window, cx);
             }));
-        if let Some(font) = &design.ui_font {
-            root = root.font_family(font.clone());
-        }
+        // The theme's UI family, applied from the settings by `zoom::apply`,
+        // reaches this root through gpui-component's `Root`; a context menu
+        // paints outside that tree and asks `Design` for the same family.
         root.text_style().font_fallbacks = Some(style::font_fallbacks());
         root = root.child(self.header(&design, window));
         if let Some(workspace) = self.workspace.as_ref().and_then(|ws| ws.upgrade())

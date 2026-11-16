@@ -91,12 +91,11 @@ pub struct Design {
     pub terminal_selection: Hsla,
     #[cfg(feature = "terminal")]
     pub terminal_ansi: [Hsla; 16],
-    /// UI font family, when the user picked one.
-    pub ui_font: Option<SharedString>,
-    /// The family UI text draws with: [`Self::ui_font`] when the user picked
-    /// one, the theme's UI font otherwise. Parts that repaint text outside the
-    /// row that owns it — a context menu — need the resolved value, because
-    /// they cannot inherit the default from the window root.
+    /// The family UI text draws with: the theme's UI font, which
+    /// [`crate::fonts::ui_font_family`] writes from the settings whenever the
+    /// theme is applied. Parts that repaint text outside the row that owns it —
+    /// a context menu — need the resolved value, because they cannot inherit
+    /// the default from the window root.
     pub ui_font_family: SharedString,
     /// `history.date_format`.
     pub date_format: DateFormat,
@@ -195,16 +194,7 @@ impl Design {
             terminal_selection: palette.terminal_selection,
             #[cfg(feature = "terminal")]
             terminal_ansi: palette.terminal_ansi,
-            ui_font: settings
-                .appearance
-                .ui_font
-                .as_deref()
-                .map(SharedString::from),
-            ui_font_family: settings
-                .appearance
-                .ui_font
-                .as_deref()
-                .map_or(fallback_ui, SharedString::from),
+            ui_font_family: fallback_ui,
             date_format: settings.history.date_format,
             show_remote_branches: settings.history.show_remote_branches,
             show_tags: settings.history.show_tags,
@@ -222,11 +212,9 @@ impl Design {
                 .clamp(CODE_FONT_MIN, CODE_FONT_MAX)
                 * zoom,
             zoom,
-            mono: settings
-                .appearance
-                .code_font
-                .as_deref()
-                .map_or(fallback_mono, SharedString::from),
+            // The theme carries the family the app applies from the settings
+            // (see `crate::fonts`), already checked against the installed set.
+            mono: fallback_mono,
             lane: palette.lane,
             avatar: palette.avatar,
         }

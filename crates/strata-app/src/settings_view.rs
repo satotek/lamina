@@ -214,7 +214,7 @@ impl Render for SettingsView {
             .border_r_1()
             .border_color(design.border);
 
-        v_flex()
+        let mut root = v_flex()
             .size_full()
             .key_context(SETTINGS_VIEW)
             .track_focus(&self.focus)
@@ -235,6 +235,10 @@ impl Render for SettingsView {
                         .pages(pages::pages(window.viewport_size().width.into(), &design)),
                 ),
             )
-            .child(self.footer(&design))
+            .child(self.footer(&design));
+        // This window is a root of its own, so the CJK chain has to be set
+        // here as well as on the main window's.
+        root.text_style().font_fallbacks = Some(style::font_fallbacks());
+        root
     }
 }

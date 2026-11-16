@@ -1105,7 +1105,7 @@ impl Render for GitConfigView {
             .as_ref()
             .map(|config| self.identity(config, &design, cx));
 
-        v_flex()
+        let mut root = v_flex()
             .size_full()
             .key_context(VIEW)
             .track_focus(&self.focus)
@@ -1155,7 +1155,9 @@ impl Render for GitConfigView {
                             .flex_none()
                             .child(t!("git_config.keys_count", count = entries.len()).to_string()),
                     ),
-            )
+            );
+        root.text_style().font_fallbacks = Some(crate::style::font_fallbacks());
+        root
     }
 }
 

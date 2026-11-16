@@ -161,6 +161,7 @@ fn appearance(control: f32, design: &Design) -> SettingPage {
                     control,
                     |settings| settings.appearance.ui_font.clone(),
                     change::ui_font,
+                    true,
                 ),
             )
             .description(t!("settings.fonts.interface_description").to_string()),
@@ -182,6 +183,7 @@ fn appearance(control: f32, design: &Design) -> SettingPage {
                     control,
                     |settings| settings.appearance.code_font.clone(),
                     change::code_font,
+                    true,
                 ),
             )
             .description(t!("settings.fonts.code_description").to_string()),
@@ -520,6 +522,7 @@ fn tools(control: f32, design: &Design) -> SettingPage {
                             .map(|root| root.display().to_string())
                     },
                     change::ghq_root,
+                    false,
                 ),
             )
             .description(t!("settings.tools.root_override_description").to_string()),
@@ -586,6 +589,7 @@ fn tools(control: f32, design: &Design) -> SettingPage {
                     control,
                     |settings| settings.tools.editor.clone(),
                     change::editor,
+                    false,
                 ),
             )
             .description(t!("settings.tools.editor_description").to_string()),
@@ -597,6 +601,7 @@ fn tools(control: f32, design: &Design) -> SettingPage {
                     control,
                     |settings| settings.tools.terminal.clone(),
                     change::terminal,
+                    false,
                 ),
             )
             .description(t!("settings.tools.terminal_description").to_string()),
@@ -611,6 +616,7 @@ fn tools(control: f32, design: &Design) -> SettingPage {
                     control,
                     |settings| settings.tools.embedded_shell.clone(),
                     change::embedded_shell,
+                    false,
                 ),
             )
             .description(t!("settings.tools.embedded_shell_description").to_string()),
@@ -1653,11 +1659,20 @@ fn text_field(
     control: f32,
     get: fn(&Settings) -> Option<String>,
     set: fn(&mut Settings, &str),
+    applies_fonts: bool,
 ) -> SettingField<SharedString> {
     let placeholder = placeholder.into();
     SettingField::render(move |options, window, cx| {
         let key = field_key(options, "text");
-        let state = text_state(key.clone(), placeholder.clone(), get, set, window, cx);
+        let state = text_state(
+            key.clone(),
+            placeholder.clone(),
+            get,
+            set,
+            applies_fonts,
+            window,
+            cx,
+        );
         let input = state.read(cx).input.clone();
 
         let mut field = v_flex().gap_1().w(px(control)).child(
@@ -1681,6 +1696,9 @@ fn text_field(
                         input.update(cx, |input, cx| {
                             input.set_value(*suggestion, window, cx);
                         });
+                        if applies_fonts {
+                            crate::zoom::apply(cx);
+                        }
                         cx.refresh_windows();
                     })
                 }),
@@ -1710,6 +1728,7 @@ fn git_field(control: f32) -> SettingField<SharedString> {
             "/usr/bin/git".into(),
             get,
             change::git_executable,
+            false,
             window,
             cx,
         );
@@ -1919,6 +1938,7 @@ fn text_state(
     placeholder: SharedString,
     get: fn(&Settings) -> Option<String>,
     set: fn(&mut Settings, &str),
+    applies_fonts: bool,
     window: &mut Window,
     cx: &mut App,
 ) -> Entity<TextField> {
@@ -1935,6 +1955,11 @@ fn text_state(
                 if matches!(event, InputEvent::Change) {
                     let value = input.read(cx).value().to_string();
                     settings::update(cx, |settings| set(settings, &value));
+                    // The font choices live on the component theme, so they are
+                    // applied on every keystroke rather than only stored.
+                    if applies_fonts {
+                        crate::zoom::apply(cx);
+                    }
                     cx.refresh_windows();
                 }
             },

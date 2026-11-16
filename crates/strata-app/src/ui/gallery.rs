@@ -543,11 +543,10 @@ impl Render for Gallery {
                 ),
         ));
 
-        div()
-            .size_full()
-            .track_focus(&self.focus)
-            .child(column)
-            .into_any_element()
+        let mut root = div().size_full().track_focus(&self.focus).child(column);
+        // The gallery is a window of its own, so it carries the CJK chain too.
+        root.text_style().font_fallbacks = Some(style::font_fallbacks());
+        root.into_any_element()
     }
 }
 

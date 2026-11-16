@@ -41,6 +41,7 @@ mod diff_view;
 mod external_tools;
 mod fake;
 mod file_history;
+mod fonts;
 mod git_config_view;
 mod github;
 mod graph_canvas;
