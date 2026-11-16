@@ -10,6 +10,7 @@
 //! UI forwards them to its own main thread. Nothing here depends on a UI
 //! toolkit or an async runtime.
 
+mod backend;
 mod blame;
 mod content_search;
 mod diffs;
@@ -19,6 +20,8 @@ mod publish;
 mod queries;
 mod refresh;
 mod signatures;
+
+pub use backend::{GitExtras, RepoLocation, RepoReader, RepositorySession};
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -776,6 +779,8 @@ pub struct SessionOptions {
 
 pub struct Session {
     shared: Arc<Shared>,
+    reader: Arc<dyn RepoReader>,
+    git_extras: Arc<dyn GitExtras>,
     /// Held so that dropping the session closes every worker's channel.
     senders: Option<Senders>,
     /// Kept last-in, first-dropped: its callback holds channel senders.
@@ -851,6 +856,8 @@ impl Session {
         let signature_cache = Arc::new(SignatureCache::new());
         let query_state = Arc::new(queries::QueryState::new());
 
+        let reader: Arc<dyn RepoReader> = Arc::new(repo.clone());
+        let git_extras: Arc<dyn GitExtras> = Arc::new(git.clone());
         let shared = Arc::new(Shared::new(repo, git, events, empty_snapshot()));
 
         // Start the watcher before the workers: a failure here must not leave
@@ -922,6 +929,8 @@ impl Session {
 
         let session = Self {
             shared,
+            reader,
+            git_extras,
             senders: Some(Senders {
                 load: load_tx,
                 status: status_tx,
@@ -1699,5 +1708,59 @@ mod tests {
                 .summary,
             format!("commit {COMMIT_CHUNK}")
         );
+    }
+
+    #[test]
+    fn repository_session_trait_loads_snapshot_and_reads_head() {
+        let test_repo = crate::test_support::TestRepo::new();
+        test_repo.write("README.md", "hello\n");
+        let expected_head = test_repo.commit("initial commit");
+
+        let (session, events) = open_session(test_repo.path());
+        let session_ref: &dyn RepositorySession = &session;
+
+        let snapshot = wait_for_complete_dyn(session_ref, &events);
+        assert_eq!(
+            snapshot.head,
+            Some(HeadInfo::Branch {
+                short_name: "main".into(),
+                target: Some(expected_head),
+            })
+        );
+
+        let head = session_ref.reader().head().expect("read head via trait");
+        assert_eq!(
+            head,
+            HeadInfo::Branch {
+                short_name: "main".into(),
+                target: Some(expected_head),
+            }
+        );
+
+        let expected_root = crate::fs_path::canonicalize(test_repo.path());
+        let actual_root = session_ref
+            .location()
+            .local_path()
+            .map(crate::fs_path::canonicalize);
+        assert_eq!(actual_root, Some(expected_root));
+    }
+
+    fn wait_for_complete_dyn(
+        session: &dyn RepositorySession,
+        events: &Receiver<SessionEvent>,
+    ) -> Arc<RepoSnapshot> {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let snapshot = session.snapshot();
+            if snapshot.commits.complete && snapshot.head.is_some() {
+                return snapshot;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match events.recv_timeout(remaining) {
+                Ok(SessionEvent::LoadFailed { error }) => panic!("session load failed: {error}"),
+                Ok(_) => {}
+                Err(error) => panic!("snapshot did not complete: {error}"),
+            }
+        }
     }
 }
