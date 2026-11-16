@@ -45,9 +45,144 @@ use crate::style::{self, Design};
 use crate::ui::{self, BadgeTone, ButtonKind, ButtonSize, RowState};
 use crate::workspace::Workspace;
 
-/// Below this window width the compare header puts its controls on a second
-/// row instead of letting them be clipped by the title.
-const COMPARE_HEADER_STACK_WIDTH: f32 = 900.0;
+/// Space the title bar reserves around its own row: the component's left
+/// padding and the platform's window controls, which the row must never
+/// paint over.
+const COMPARE_TITLE_CHROME: f32 = 144.0;
+
+/// The gap between the title bar's parts.
+const COMPARE_ROW_GAP: f32 = 8.0;
+
+/// The 1 px rule between the app mark and the title, with its margins.
+const COMPARE_DIVIDER_WIDTH: f32 = 9.0;
+
+/// The narrowest the title may get before the details around it give way. A
+/// truncated title is still readable; a title squeezed to nothing is not.
+const COMPARE_MIN_TITLE_WIDTH: f32 = 120.0;
+
+/// A small ghost button, which is how refresh and the back arrow are drawn at
+/// every width.
+const COMPARE_ICON_BUTTON_WIDTH: f32 = 30.0;
+
+/// The gap inside the action pair on the right.
+const COMPARE_BUTTON_GAP: f32 = 4.0;
+
+/// The "Back to file list" label beside its arrow, at the widest tier.
+const COMPARE_BACK_LABEL_WIDTH: f32 = 150.0;
+
+/// The "New Compare…" label beside its icon, at the widest tier.
+const COMPARE_NEW_LABEL_WIDTH: f32 = 112.0;
+
+/// Below this width the wordmark gives its space to the title.
+const COMPARE_WORDMARK_BELOW: f32 = 1100.0;
+
+/// Below this width the back button keeps only its arrow, with the
+/// destination in the tooltip.
+const COMPARE_BACK_LABEL_BELOW: f32 = 820.0;
+
+/// Below this width the refresh and New Compare actions become icons, with
+/// their names in the tooltips.
+const COMPARE_ACTION_LABEL_BELOW: f32 = 900.0;
+
+/// What the compare title bar shows at a given window width.
+///
+/// The row never grows taller than the title bar and never pushes the window
+/// controls off screen: the title takes the leftover width and truncates,
+/// while the details around it give way in one order as the window narrows —
+/// the wordmark, the back button's label, then the New Compare label. Window
+/// controls are drawn by the title bar itself, so every width here is the
+/// part this row may use.
+#[derive(Clone, Copy, Debug)]
+struct CompareHeaderFit {
+    /// The window has a list to return to, so the back button is shown.
+    has_back: bool,
+    /// The "STRATA" wordmark next to the app mark.
+    wordmark: bool,
+    /// Whether the back button shows its destination beside the arrow.
+    back_label: bool,
+    /// Whether New Compare shows its label beside its icon.
+    new_compare_label: bool,
+    zoom: f32,
+}
+
+impl CompareHeaderFit {
+    fn new(width: f32, has_back: bool, zoom: f32) -> Self {
+        let effective = width / zoom;
+        let mut fit = Self {
+            has_back,
+            wordmark: effective >= COMPARE_WORDMARK_BELOW,
+            back_label: has_back && effective >= COMPARE_BACK_LABEL_BELOW,
+            new_compare_label: effective >= COMPARE_ACTION_LABEL_BELOW,
+            zoom,
+        };
+        // Every tier above leaves room at its own threshold; this is the
+        // safety net for a zoomed window, where the threshold and the row it
+        // reserves drift apart.
+        while fit.used() > width && fit.shed() {}
+        fit
+    }
+
+    /// The width the row reserves, including the narrowest title it keeps.
+    fn used(&self) -> f32 {
+        let mark = style::BRAND_MARK
+            + if self.wordmark {
+                // The gap inside the app mark group.
+                7.0 + style::wordmark_width(style::BRAND_WORDMARK)
+            } else {
+                0.0
+            };
+        let back = if self.has_back {
+            COMPARE_ROW_GAP
+                + COMPARE_ICON_BUTTON_WIDTH
+                + if self.back_label {
+                    COMPARE_BACK_LABEL_WIDTH
+                } else {
+                    0.0
+                }
+        } else {
+            0.0
+        };
+        let actions = COMPARE_ICON_BUTTON_WIDTH
+            + COMPARE_BUTTON_GAP
+            + if self.new_compare_label {
+                COMPARE_NEW_LABEL_WIDTH
+            } else {
+                COMPARE_ICON_BUTTON_WIDTH
+            };
+        (COMPARE_TITLE_CHROME
+            + mark
+            + COMPARE_ROW_GAP
+            + COMPARE_DIVIDER_WIDTH
+            + COMPARE_ROW_GAP
+            // The compare glyph before the title, with its gap.
+            + 22.0
+            + back
+            + COMPARE_ROW_GAP
+            + COMPARE_MIN_TITLE_WIDTH
+            + COMPARE_ROW_GAP
+            + actions)
+            * self.zoom
+    }
+
+    /// Gives up one detail, the least load-bearing first. Returns false once
+    /// only the icon-only row is left, which always fits the app's minimum
+    /// window.
+    fn shed(&mut self) -> bool {
+        if self.wordmark {
+            // The app mark alone still identifies the window.
+            self.wordmark = false;
+        } else if self.back_label {
+            // The arrow keeps the way back; the tooltip names the
+            // destination.
+            self.back_label = false;
+        } else if self.new_compare_label {
+            self.new_compare_label = false;
+        } else {
+            return false;
+        }
+        true
+    }
+}
 
 /// Validated target for a standalone 2-way or 3-way comparison.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1929,93 +2064,57 @@ impl CompareView {
     }
 
     fn header(&self, design: &Design, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let subtitle = self.root.subtitle();
         let title = self.tab_title();
-        // Below this width the title's own row cannot share a line with the
-        // three-way controls without squeezing the title to nothing, so the
-        // controls move to a second row; the header grows instead of clipping.
-        let stacked = f32::from(window.viewport_size().width) < COMPARE_HEADER_STACK_WIDTH;
+        // The paths are too wide to sit beside the title at any useful window
+        // size, so they only appear in the tooltip.
+        let path = self.root.subtitle();
+        let has_back = self.drilled_relative_path.is_some();
+        let fit = CompareHeaderFit::new(
+            f32::from(window.viewport_size().width),
+            has_back,
+            design.zoom,
+        );
 
-        let mut title_row = div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .min_w_0()
-            .child(
-                div()
-                    .flex()
-                    .flex_none()
-                    .items_center()
-                    .gap(design.px(7.0))
-                    .child(style::app_mark(design.scale(style::BRAND_MARK)))
-                    .child(style::wordmark(
-                        design.scale(style::BRAND_WORDMARK),
-                        design.text,
-                    )),
-            )
-            .child(
-                div()
-                    .flex_none()
-                    .w(px(1.0))
-                    .h(design.px(18.0))
-                    .mx_1()
-                    .bg(design.border),
-            )
-            .when(self.drilled_relative_path.is_some(), |bar| {
-                bar.child(
-                    ui::button(
-                        "compare-back-folder",
-                        t!("compare.back_to_folder").to_string(),
-                    )
+        let back = has_back.then(|| {
+            let label = t!("compare.back_to_folder").to_string();
+            let button = if fit.back_label {
+                ui::button("compare-back-folder", label.clone())
                     .ghost()
                     .size(ButtonSize::Small)
                     .icon(IconName::ArrowLeft)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.back_to_folder(window, cx);
-                    })),
-                )
-            })
-            .child(
-                Icon::new(IconName::Replace)
-                    .flex_none()
-                    .size(design.px(14.0))
-                    .text_color(design.text),
-            )
-            .child({
-                let tooltip: SharedString = title.clone().into();
-                div()
-                    .id("compare-title")
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .text_size(px(design.ui))
-                    .child(title)
-                    .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
-            });
+            } else {
+                // The arrow keeps the way back; the tooltip names where it
+                // leads.
+                ui::icon_button("compare-back-folder", IconName::ArrowLeft)
+                    .ghost()
+                    .size(ButtonSize::Small)
+            };
+            button
+                .tooltip(label)
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.back_to_folder(window, cx);
+                }))
+                .into_any_element()
+        });
 
-        if !stacked {
-            title_row = title_row.child(
-                div()
-                    .flex_shrink(1.0)
-                    .min_w_0()
-                    .truncate()
-                    .px_3()
-                    .text_size(design.px(11.0))
-                    .text_color(design.muted)
-                    .child(subtitle),
-            );
-        }
+        let new_compare = if fit.new_compare_label {
+            ui::button("compare-new", t!("compare.new_compare").to_string())
+                .ghost()
+                .size(ButtonSize::Small)
+                .icon(IconName::Replace)
+        } else {
+            ui::icon_button("compare-new", IconName::Replace)
+                .ghost()
+                .size(ButtonSize::Small)
+        };
 
-        let mut controls = div()
+        let actions = div()
             .flex()
             .flex_none()
             .items_center()
-            .gap_1()
+            .gap(design.px(COMPARE_BUTTON_GAP))
             .occlude()
-            .debug_selector(|| "compare-header-controls".to_string());
-
-        controls = controls
+            .debug_selector(|| "compare-header-controls".to_string())
             .child(
                 ui::icon_button("compare-refresh", IconName::RefreshCw)
                     .ghost()
@@ -2024,10 +2123,8 @@ impl CompareView {
                     .on_click(cx.listener(|this, _, window, cx| this.reload(window, cx))),
             )
             .child(
-                ui::button("compare-new", t!("compare.new_compare").to_string())
-                    .ghost()
-                    .size(ButtonSize::Small)
-                    .icon(IconName::Replace)
+                new_compare
+                    .tooltip(t!("compare.new_compare").to_string())
                     .on_click(cx.listener(|this, _, window, cx| {
                         if let Some(ws) = this.workspace.upgrade() {
                             ws.update(cx, |ws, cx| ws.open_compare_dialog(window, cx));
@@ -2035,34 +2132,79 @@ impl CompareView {
                     })),
             );
 
-        let bar = if stacked {
-            div()
-                .flex()
-                .flex_col()
-                .items_stretch()
-                .gap_1()
-                .w_full()
-                .debug_selector(|| "compare-header".to_string())
-                .child(title_row)
-                .child(div().flex().justify_end().w_full().child(controls))
-        } else {
-            div()
-                .flex()
-                .items_center()
-                .justify_end()
-                .gap_2()
-                .w_full()
-                .debug_selector(|| "compare-header".to_string())
-                .child(title_row.flex_1())
-                .child(controls)
-        };
+        let tooltip_title: SharedString = title.clone().into();
+        let tooltip_path: SharedString = path.into();
+        let title_element = div()
+            .id("compare-title")
+            .flex_1()
+            .min_w_0()
+            .truncate()
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_size(px(design.ui))
+            .child(title)
+            .tooltip(move |window, cx| {
+                let title = tooltip_title.clone();
+                let path = tooltip_path.clone();
+                Tooltip::element(move |_, _| {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap_0p5()
+                        .child(
+                            div()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child(title.clone()),
+                        )
+                        .child(div().child(path.clone()))
+                        .into_any_element()
+                })
+                .build(window, cx)
+            });
 
         TitleBar::new()
-            .h_auto()
-            .min_h(design.px(style::TITLE_BAR_HEIGHT))
+            .h(design.px(style::TITLE_BAR_HEIGHT))
             .bg(design.chrome)
             .border_color(design.border)
-            .child(bar)
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .min_w_0()
+                    .items_center()
+                    .gap(design.px(COMPARE_ROW_GAP))
+                    .debug_selector(|| "compare-header".to_string())
+                    .child(
+                        div()
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .gap(design.px(7.0))
+                            .child(style::app_mark(design.scale(style::BRAND_MARK)))
+                            .when(fit.wordmark, |mark| {
+                                mark.child(style::wordmark(
+                                    design.scale(style::BRAND_WORDMARK),
+                                    design.text,
+                                ))
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(1.0))
+                            .h(design.px(18.0))
+                            .mx_1()
+                            .bg(design.border),
+                    )
+                    .when_some(back, |row, back| row.child(back))
+                    .child(
+                        Icon::new(IconName::Replace)
+                            .flex_none()
+                            .size(design.px(14.0))
+                            .text_color(design.text),
+                    )
+                    .child(title_element)
+                    .child(actions),
+            )
             .into_any_element()
     }
 
@@ -4090,6 +4232,65 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_compare_title_bar_fits_every_window_at_every_zoom() {
+        for width in (style::MIN_WINDOW_SIZE.0 as u32..=1920).map(|width| width as f32) {
+            for zoom in [1.0, 1.5] {
+                for has_back in [false, true] {
+                    let fit = CompareHeaderFit::new(width, has_back, zoom);
+                    assert!(
+                        fit.used() <= width + 0.01,
+                        "zoom {zoom}, has_back {has_back}: the title bar needs {} px of a {width} px window, which pushes the window controls off screen",
+                        fit.used()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_compare_title_bar_sheds_its_details_in_order() {
+        let wide = CompareHeaderFit::new(1600.0, true, 1.0);
+        assert!(wide.wordmark);
+        assert!(wide.back_label);
+        assert!(wide.new_compare_label);
+
+        let no_wordmark = CompareHeaderFit::new(1000.0, true, 1.0);
+        assert!(!no_wordmark.wordmark, "the wordmark goes first");
+        assert!(no_wordmark.back_label);
+        assert!(no_wordmark.new_compare_label);
+
+        let icons = CompareHeaderFit::new(850.0, true, 1.0);
+        assert!(!icons.wordmark);
+        assert!(icons.back_label, "the arrow's label outlives the action's");
+        assert!(!icons.new_compare_label, "New Compare drops its label next");
+
+        let minimum = CompareHeaderFit::new(style::MIN_WINDOW_SIZE.0, true, 1.0);
+        assert!(!minimum.wordmark);
+        assert!(!minimum.back_label);
+        assert!(!minimum.new_compare_label);
+        assert!(
+            minimum.used() <= style::MIN_WINDOW_SIZE.0,
+            "the minimum window keeps the title's own width: {}",
+            minimum.used()
+        );
+
+        // A window with nothing to go back to never reserves the arrow.
+        let no_back = CompareHeaderFit::new(1600.0, false, 1.0);
+        assert!(!no_back.back_label);
+        assert!(no_back.used() < wide.used());
+    }
+
+    #[test]
+    fn the_compare_title_bar_scales_with_the_zoom() {
+        let fit_1x = CompareHeaderFit::new(1360.0, true, 1.0);
+        let fit_15x = CompareHeaderFit::new(1360.0 * 1.5, true, 1.5);
+        assert_eq!(fit_1x.wordmark, fit_15x.wordmark);
+        assert_eq!(fit_1x.back_label, fit_15x.back_label);
+        assert_eq!(fit_1x.new_compare_label, fit_15x.new_compare_label);
+        assert!((fit_15x.used() - fit_1x.used() * 1.5).abs() < 0.01);
+    }
+
     #[gpui::test]
     fn the_compare_header_keeps_its_controls_inside_the_minimum_window(
         cx: &mut gpui::TestAppContext,
@@ -4150,6 +4351,12 @@ mod tests {
         assert!(
             controls.right() <= header.right() && controls.left() >= header.left(),
             "the controls have to stay visible at the minimum width: {controls:?} in {header:?}"
+        );
+        // One row of controls is at most the title bar's own height; the
+        // second row this bar used to grow sits well past it.
+        assert!(
+            header.size.height <= px(crate::style::TITLE_BAR_HEIGHT),
+            "the title bar stays one row tall: {header:?}"
         );
     }
 }
