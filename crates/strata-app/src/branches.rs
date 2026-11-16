@@ -260,6 +260,14 @@ impl RevealState {
     fn is_stash(&self, index: usize) -> bool {
         matches!(self.revealed, Some(RevealedRef::Stash(revealed)) if revealed == index)
     }
+
+    /// The revealed ref when it is a local branch.
+    fn local_branch(&self) -> Option<&str> {
+        match &self.revealed {
+            Some(RevealedRef::Ref(RefKind::LocalBranch, name)) => Some(name.as_str()),
+            _ => None,
+        }
+    }
 }
 
 /// One line of the sidebar's virtualised list.
@@ -840,6 +848,12 @@ pub(crate) enum DialogRequest {
 }
 
 impl Branches {
+    /// The local branch the sidebar revealed last, if any. The palette's
+    /// three-way compare command acts on it, like the branch row's menu does.
+    pub(crate) fn revealed_local_branch(&self) -> Option<&str> {
+        self.reveal.local_branch()
+    }
+
     /// Renders the virtualised ref sections and, when one is open, the dialog
     /// on top of the window.
     #[allow(clippy::too_many_arguments)]
@@ -2923,6 +2937,38 @@ fn local_row(
                     },
                 )
             };
+            let three_way_blocked =
+                crate::repo_view::compare::three_way_with_current_branch_blocked(
+                    view.session.is_some(),
+                    active,
+                    busy,
+                    head,
+                    view.compare_branch_tip(&branch),
+                    // The ancestry read is only worth it when the entry could
+                    // run; the permanent reasons win over it anyway.
+                    if active || busy {
+                        None
+                    } else {
+                        view.compare_branch_merge_base(&branch)
+                    },
+                );
+            let three_way = {
+                let entity = entity_menu.clone();
+                let branch = branch.clone();
+                PopupMenuItem::new(crate::ui::menu_label(
+                    t!("branch.menu.compare_three_way").to_string(),
+                    three_way_blocked.as_ref(),
+                ))
+                .disabled(three_way_blocked.is_some())
+                .on_click(
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        let branch = branch.clone();
+                        entity.update(cx, |view, cx| {
+                            view.open_three_way_with_current_branch(&branch, window, cx)
+                        });
+                    },
+                )
+            };
             let menu = menu.item(
                 PopupMenuItem::new(crate::ui::menu_label(
                     t!("branch.menu.checkout").to_string(),
@@ -2951,6 +2997,7 @@ fn local_row(
             let menu = menu
                 .separator()
                 .item(compare)
+                .item(three_way)
                 .item(
                     PopupMenuItem::new(crate::ui::menu_label(
                         t!("branch.menu.merge_into_current").to_string(),

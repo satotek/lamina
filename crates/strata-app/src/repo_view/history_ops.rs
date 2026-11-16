@@ -666,6 +666,14 @@ pub(crate) struct MultiPickContext {
     blocked: Option<String>,
 }
 
+impl MultiPickContext {
+    /// The selection's real commits, oldest first. The synthetic benchmark's
+    /// rows are left out.
+    pub(super) fn commits(&self) -> &[Oid] {
+        &self.commits
+    }
+}
+
 /// A branch ref that points at the commit a menu was opened on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct BranchAtCommit {
@@ -1273,6 +1281,31 @@ fn multi_commit_menu(
                     let entity = entity.clone();
                     move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
                         entity.update(cx, |view, cx| view.open_compare_pair(a, b, window, cx));
+                    }
+                }),
+            )
+            .separator();
+    }
+    // Three commits are a three-way comparison with one of them as the base,
+    // which the compare tab lets the user change.
+    if let [a, b, c] = multi.commits.as_slice() {
+        let blocked = super::compare::three_commit_blocked(true, &multi.commits);
+        let commits = vec![*a, *b, *c];
+        menu = menu
+            .item(
+                PopupMenuItem::new(blocked_label(
+                    t!("history_ops.menu.compare_three_way").to_string(),
+                    blocked.as_deref(),
+                    shared,
+                ))
+                .disabled(blocked.is_some())
+                .on_click({
+                    let entity = entity.clone();
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        let commits = commits.clone();
+                        entity.update(cx, |view, cx| {
+                            view.open_three_way_commits(commits, window, cx)
+                        });
                     }
                 }),
             )

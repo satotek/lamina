@@ -28,7 +28,7 @@ use crate::actions::{
     PreviousTab, ReopenClosedTab, SelectTab1, SelectTab2, SelectTab3, SelectTab4, SelectTab5,
     SelectTab6, SelectTab7, SelectTab8, SelectTab9, WORKSPACE,
 };
-use crate::compare::{CompareTarget, CompareView};
+use crate::compare::{CompareTarget, CompareView, RepoThreeWaySource};
 use crate::debug_launch::{self, DebugDialog, DebugLaunch};
 use crate::picker::{Mode, OpenTarget, Picker};
 use crate::recent::{self, RecentRepositories};
@@ -660,6 +660,27 @@ impl Workspace {
     ) {
         let workspace = cx.weak_entity();
         let view = cx.new(|cx| CompareView::new(target, workspace, cx));
+        self.open_compare_view(view, window, cx);
+    }
+
+    /// Opens a comparison of three repository commits in a new workspace tab.
+    pub(crate) fn open_compare_three_way(
+        &mut self,
+        source: RepoThreeWaySource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let workspace = cx.weak_entity();
+        let view = cx.new(|cx| CompareView::new_revisions(source, workspace, cx));
+        self.open_compare_view(view, window, cx);
+    }
+
+    fn open_compare_view(
+        &mut self,
+        view: Entity<CompareView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let title = view.read(cx).window_title();
         let hint_path = view.read(cx).hint_path().map(Path::to_path_buf);
         let slot = TabSlot::Compare(CompareSlot { view, hint_path });
@@ -1598,6 +1619,7 @@ mod tests {
     use gpui::VisualTestContext;
     use gpui_component::Root;
     use std::process::Command;
+    use strata_core::test_support::TestRepo;
 
     fn parent(name: &str) -> ParentRepo {
         ParentRepo {
@@ -2253,6 +2275,80 @@ mod tests {
         });
         cx.run_until_parked();
         assert!(compare_weak.upgrade().is_none());
+    }
+
+    #[gpui::test]
+    fn three_way_compare_opens_a_tab_with_revision_pane_labels(cx: &mut gpui::TestAppContext) {
+        let repo = TestRepo::new();
+        repo.write("shared.txt", "line\n");
+        repo.commit("base");
+        repo.git(&["checkout", "-q", "-b", "feature"]);
+        repo.write("shared.txt", "feature\n");
+        repo.write("feature.txt", "new\n");
+        let feature = repo.commit("feature work");
+        repo.git(&["checkout", "-q", "main"]);
+        repo.write("shared.txt", "main\n");
+        let main = repo.commit("main work");
+        let base = repo.rev("main~1");
+
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            gpui_component::init(cx);
+            cx.set_global(Settings::default());
+            crate::actions::bind(cx);
+        });
+
+        let workspace_cell: std::rc::Rc<std::cell::RefCell<Option<Entity<Workspace>>>> =
+            std::rc::Rc::new(std::cell::RefCell::new(None));
+        let workspace_cell_init = workspace_cell.clone();
+        let launch = Launch::open_quiet(repo.path(), None);
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), move |window, cx| {
+                    let workspace = cx.new(|cx| Workspace::new(Some(launch), window, cx));
+                    *workspace_cell_init.borrow_mut() = Some(workspace.clone());
+                    cx.new(|cx| Root::new(workspace, window, cx))
+                })
+            })
+            .expect("open window");
+        let mut visual_cx = VisualTestContext::from_window(window.into(), cx);
+        visual_cx.run_until_parked();
+
+        let workspace = workspace_cell.borrow().clone().expect("workspace created");
+        let repo_view = visual_cx.update(|_, cx| {
+            let Content::Tabs(deck) = &workspace.read(cx).content else {
+                panic!("expected repository tabs");
+            };
+            assert_eq!(deck.len(), 1);
+            deck.active().expect("active slot").repo().view.clone()
+        });
+
+        visual_cx.update(|window, cx| {
+            repo_view.update(cx, |view, cx| {
+                view.open_three_way_with_current_branch("feature", window, cx)
+            });
+        });
+        visual_cx.run_until_parked();
+
+        visual_cx.update(|_, cx| {
+            let ws = workspace.read(cx);
+            assert_eq!(ws.tab_count(), 2, "the comparison opens as a new tab");
+            let Content::Tabs(deck) = &ws.content else {
+                panic!("expected tabs");
+            };
+            let TabSlot::Compare(slot) = deck.active().expect("active slot") else {
+                panic!("expected a compare tab");
+            };
+            let view = slot.view.read(cx);
+            assert!(!view.is_loading(), "the background read has finished");
+            let expected = vec![
+                format!("main ({})", crate::data::short_oid(main)),
+                format!("merge base ({})", crate::data::short_oid(base)),
+                format!("feature ({})", crate::data::short_oid(feature)),
+            ];
+            assert_eq!(view.pane_labels(), Some(expected.clone()));
+            assert_eq!(view.tab_title(), expected.join(" ↔ "));
+        });
     }
 
     #[gpui::test]

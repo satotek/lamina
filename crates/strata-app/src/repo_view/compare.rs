@@ -12,6 +12,7 @@
 //! keeps the History details split: the file column and the diff share the
 //! saved fraction and the same draggable boundary.
 
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -31,6 +32,7 @@ use strata_core::{HeadInfo, Oid};
 use super::details::file_stat_label;
 use super::split::{self, files_fraction};
 use super::{RepoView, RowsTarget};
+use crate::compare::{CompareRevision, RepoThreeWaySource};
 use crate::data;
 use crate::diff_view::{self, DiffColors, DiffContext, Row as DiffRow};
 use crate::repo_view::history_diff_options;
@@ -227,6 +229,40 @@ pub(crate) fn with_current_branch_blocked(
     None
 }
 
+/// Why "Three-way compare with current branch" cannot run, or `None` when it
+/// can. `merge_base` is the result of the ancestry read the caller already did
+/// for the branch.
+pub(crate) fn three_way_with_current_branch_blocked(
+    repo_open: bool,
+    is_current: bool,
+    busy: bool,
+    head: Option<Oid>,
+    tip: Option<Oid>,
+    merge_base: Option<Oid>,
+) -> Option<String> {
+    if let Some(reason) = with_current_branch_blocked(repo_open, is_current, busy, head) {
+        return Some(reason);
+    }
+    if tip.is_none() {
+        return Some(t!("compare.no_commit").to_string());
+    }
+    if merge_base.is_none() {
+        return Some(t!("compare.three_way.no_merge_base").to_string());
+    }
+    None
+}
+
+/// Why "Three-way compare" cannot run for a commit selection.
+pub(crate) fn three_commit_blocked(repo_open: bool, commits: &[Oid]) -> Option<String> {
+    if !repo_open {
+        return Some(t!("compare.no_repository").to_string());
+    }
+    if commits.len() != 3 {
+        return Some(t!("compare.select_three").to_string());
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // RepoView glue.
 // ---------------------------------------------------------------------------
@@ -350,6 +386,131 @@ impl RepoView {
         );
     }
 
+    /// "Three-way compare with current branch": the current branch on the
+    /// left, the merge base in the middle and the branch on the right.
+    pub(crate) fn open_three_way_with_current_branch(
+        &mut self,
+        branch: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (Some(tip), Some(head), Some(base)) = (
+            self.compare_branch_target(branch),
+            self.compare_head(),
+            self.compare_branch_merge_base(branch),
+        ) else {
+            return;
+        };
+        let Some(reader) = self.session.as_ref().map(|session| session.reader()) else {
+            return;
+        };
+        let source = RepoThreeWaySource {
+            reader,
+            root: self.repository_root(),
+            left: CompareRevision::named(self.compare_head_label(), head),
+            base: CompareRevision::named(t!("compare.three_way.merge_base").to_string(), base),
+            right: CompareRevision::named(branch, tip),
+        };
+        self.open_three_way_tab(source, window, cx);
+    }
+
+    /// "Three-way compare" for exactly three selected commits. The default
+    /// roles come from the commits' ancestry and dates; the compare tab can
+    /// swap the base afterwards.
+    pub(crate) fn open_three_way_commits(
+        &mut self,
+        commits: Vec<Oid>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let [first, second, third] = commits.as_slice() else {
+            return;
+        };
+        let Some(reader) = self.session.as_ref().map(|session| session.reader()) else {
+            return;
+        };
+        let Ok(roles) = reader.three_way_roles([*first, *second, *third]) else {
+            return;
+        };
+        let source = RepoThreeWaySource {
+            reader,
+            root: self.repository_root(),
+            left: self.commit_revision(roles.left),
+            base: self.commit_revision(roles.base),
+            right: self.commit_revision(roles.right),
+        };
+        self.open_three_way_tab(source, window, cx);
+    }
+
+    /// A revision labelled with the local branch pointing at it, when one
+    /// does; otherwise the short id stands alone.
+    fn commit_revision(&self, oid: Oid) -> CompareRevision {
+        let label = self
+            .session
+            .as_ref()
+            .and_then(|session| {
+                session
+                    .snapshot()
+                    .refs
+                    .iter()
+                    .find(|info| {
+                        info.target == oid && info.kind == strata_core::RefKind::LocalBranch
+                    })
+                    .map(|info| info.short_name.clone())
+            })
+            .unwrap_or_default();
+        CompareRevision::named(label, oid)
+    }
+
+    /// The palette's branch command: the branch the sidebar revealed last.
+    pub(crate) fn three_way_branch_command(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(branch) = self.branches.revealed_local_branch().map(str::to_owned) else {
+            return;
+        };
+        self.open_three_way_with_current_branch(&branch, window, cx);
+    }
+
+    /// The palette's commit command: the current three-commit selection.
+    pub(crate) fn three_way_commits_command(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(multi) = self.multi_pick_context() else {
+            return;
+        };
+        self.open_three_way_commits(multi.commits().to_vec(), window, cx);
+    }
+
+    fn open_three_way_tab(
+        &mut self,
+        source: RepoThreeWaySource,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(workspace) = self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.upgrade())
+        else {
+            return;
+        };
+        // Deferred: opening the tab deactivates this repository view, which
+        // cannot happen while this view is the one being updated.
+        window.defer(cx, move |window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.open_compare_three_way(source, window, cx);
+            });
+        });
+    }
+
+    fn repository_root(&self) -> PathBuf {
+        self.session
+            .as_ref()
+            .and_then(|session| session.location().local_path().map(Path::to_path_buf))
+            .unwrap_or_default()
+    }
+
     /// The commit HEAD points at, or `None` on an unborn branch.
     pub(crate) fn compare_head(&self) -> Option<Oid> {
         let snapshot = self.session.as_ref()?.snapshot();
@@ -381,6 +542,21 @@ impl RepoView {
                 info.kind == strata_core::RefKind::LocalBranch && info.short_name == branch
             })
             .map(|info| info.target)
+    }
+
+    /// The merge base of the current HEAD and a local branch, if they share
+    /// history.
+    pub(crate) fn compare_branch_merge_base(&self, branch: &str) -> Option<Oid> {
+        let head = self.compare_head()?;
+        let tip = self.compare_branch_target(branch)?;
+        let reader = self.session.as_ref()?.reader();
+        reader.merge_base(head, tip).ok().flatten()
+    }
+
+    /// The commit a local branch points at, for menu entries that need to know
+    /// whether the branch can be read at all.
+    pub(crate) fn compare_branch_tip(&self, branch: &str) -> Option<Oid> {
+        self.compare_branch_target(branch)
     }
 
     /// Requests the comparison. Anything the view was waiting for is cancelled
@@ -1276,5 +1452,94 @@ mod tests {
             with_current_branch_blocked(true, false, false, Some(oid(1))),
             None
         );
+    }
+
+    #[test]
+    fn three_way_compare_needs_a_head_a_branch_and_a_merge_base() {
+        assert_eq!(
+            three_way_with_current_branch_blocked(
+                true,
+                true,
+                false,
+                Some(oid(1)),
+                Some(oid(2)),
+                Some(oid(3))
+            ),
+            Some(t!("compare.current_branch").to_string()),
+            "the current branch has nothing to compare with itself"
+        );
+        assert_eq!(
+            three_way_with_current_branch_blocked(
+                true,
+                false,
+                true,
+                Some(oid(1)),
+                Some(oid(2)),
+                Some(oid(3))
+            ),
+            Some(t!("compare.busy").to_string())
+        );
+        assert_eq!(
+            three_way_with_current_branch_blocked(
+                true,
+                false,
+                false,
+                None,
+                Some(oid(2)),
+                Some(oid(3))
+            ),
+            Some(t!("compare.no_head").to_string())
+        );
+        assert_eq!(
+            three_way_with_current_branch_blocked(
+                true,
+                false,
+                false,
+                Some(oid(1)),
+                None,
+                Some(oid(3))
+            ),
+            Some(t!("compare.no_commit").to_string())
+        );
+        assert_eq!(
+            three_way_with_current_branch_blocked(
+                true,
+                false,
+                false,
+                Some(oid(1)),
+                Some(oid(2)),
+                None
+            ),
+            Some(t!("compare.three_way.no_merge_base").to_string()),
+            "a comparison without a base cannot run"
+        );
+        assert_eq!(
+            three_way_with_current_branch_blocked(
+                true,
+                false,
+                false,
+                Some(oid(1)),
+                Some(oid(2)),
+                Some(oid(3))
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn three_way_compare_needs_exactly_three_commits() {
+        assert_eq!(
+            three_commit_blocked(false, &[oid(1), oid(2), oid(3)]),
+            Some(t!("compare.no_repository").to_string())
+        );
+        assert_eq!(
+            three_commit_blocked(true, &[oid(1), oid(2)]),
+            Some(t!("compare.select_three").to_string())
+        );
+        assert_eq!(
+            three_commit_blocked(true, &[oid(1), oid(2), oid(3), oid(4)]),
+            Some(t!("compare.select_three").to_string())
+        );
+        assert_eq!(three_commit_blocked(true, &[oid(1), oid(2), oid(3)]), None);
     }
 }
