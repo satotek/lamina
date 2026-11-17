@@ -168,11 +168,17 @@ fn run_one(
         let generation = shared.begin_reload();
         let _ = load.send(LoadCommand { generation });
         let _ = status.send(RefreshStatus::default());
-    } else if late.config || late.status_changed() {
-        let _ = status.send(RefreshStatus {
-            config: late.config,
-            ..RefreshStatus::default()
-        });
+    } else if late.config || late.status_changed() || late.worktrees {
+        if late.worktrees {
+            // The worktree list is re-read on a publish, not by a status scan.
+            shared.publish(|_| {});
+        }
+        if late.config || late.status_changed() {
+            let _ = status.send(RefreshStatus {
+                config: late.config,
+                ..RefreshStatus::default()
+            });
+        }
     }
 }
 

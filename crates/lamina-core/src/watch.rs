@@ -58,6 +58,10 @@ pub struct Changes {
     /// `.git/config` changed, so remotes and upstreams may differ. History and
     /// status do not depend on it and are left alone.
     pub config: bool,
+    /// `.git/worktrees` changed: a linked checkout was added, removed or pruned.
+    /// The worktree list is read outside the snapshot (one `git worktree list`
+    /// per publish), so this only asks the UI to publish a fresh snapshot.
+    pub worktrees: bool,
     /// Watcher overflowed, reported a rescan/root event, dropped paths past
     /// `MAX_PATHS`, or saw an ignore/attribute file change, so status must fall
     /// back to a full scan.
@@ -68,7 +72,13 @@ pub struct Changes {
 
 impl Changes {
     fn is_idle(&self) -> bool {
-        !(self.worktree || self.index || self.refs || self.head || self.config || self.rescan)
+        !(self.worktree
+            || self.index
+            || self.refs
+            || self.head
+            || self.config
+            || self.worktrees
+            || self.rescan)
     }
 }
 
@@ -250,6 +260,7 @@ impl Watch {
                         Scope::Refs => changes.refs = true,
                         Scope::Head => changes.head = true,
                         Scope::Config => changes.config = true,
+                        Scope::Worktrees => changes.worktrees = true,
                         Scope::Rescan => {
                             changes.worktree = true;
                             changes.rescan = true;
@@ -524,6 +535,8 @@ enum Scope {
     Head,
     /// `.git/config`, which decides the configured remotes and upstreams.
     Config,
+    /// `.git/worktrees`, which decides the linked worktree list.
+    Worktrees,
     /// `.git/info/exclude` or `.git/info/attributes` changed; requires a full status scan.
     Rescan,
     /// Git bookkeeping that cannot change what the UI shows.
@@ -563,6 +576,11 @@ fn classify_git_dir(relative: &Path) -> Scope {
     // edit the configuration, so the file has to be visible to the session.
     if first == OsStr::new("config") {
         return Scope::Config;
+    }
+    // `git worktree add/remove/prune` writes and deletes here. The list is read
+    // by a query, so the UI only has to republish a snapshot to re-read it.
+    if first == OsStr::new("worktrees") {
+        return Scope::Worktrees;
     }
     if first == OsStr::new("info")
         && matches!(
@@ -617,6 +635,14 @@ mod tests {
         assert_eq!(classify_git_dir(Path::new("ORIG_HEAD")), Scope::Refs);
         assert_eq!(classify_git_dir(Path::new("MERGE_HEAD")), Scope::Refs);
         assert_eq!(classify_git_dir(Path::new("config")), Scope::Config);
+        assert_eq!(
+            classify_git_dir(Path::new("worktrees/wt/HEAD")),
+            Scope::Worktrees
+        );
+        assert_eq!(
+            classify_git_dir(Path::new("worktrees/wt/gitdir")),
+            Scope::Worktrees
+        );
         assert_eq!(classify_git_dir(Path::new("info/exclude")), Scope::Rescan);
         assert_eq!(
             classify_git_dir(Path::new("info/attributes")),
@@ -711,6 +737,15 @@ mod tests {
         let changes = watch.changes(&[Ok(info_exclude)]);
         assert!(changes.worktree);
         assert!(changes.rescan);
+
+        let worktree_meta = notify::Event::new(EventKind::Remove(RemoveKind::Folder))
+            .add_path(git_dir.join("worktrees").join("wt"));
+        let changes = watch.changes(&[Ok(worktree_meta)]);
+        assert!(changes.worktrees);
+        assert!(
+            !changes.worktree,
+            "a worktree registration only asks for a new list, not a status scan"
+        );
     }
 
     /// The debounce used by the session, so the rule is tested at its real
