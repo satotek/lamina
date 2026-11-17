@@ -184,7 +184,7 @@ impl RepoView {
     fn patch_blocked(&self) -> Option<String> {
         self.session
             .is_none()
-            .then(|| t!("remote.no_session").to_string())
+            .then(|| self.no_session_reason())
             .or_else(|| self.is_busy().then(|| t!("branch.reason.busy").to_string()))
     }
 
@@ -204,7 +204,7 @@ impl RepoView {
 
     fn create_branch_blocked(&self) -> Option<String> {
         if self.session.is_none() {
-            return Some(t!("remote.no_session").to_string());
+            return Some(self.no_session_reason());
         }
         if self.is_busy() {
             return Some(t!("branch.reason.busy").to_string());
@@ -222,7 +222,7 @@ impl RepoView {
     /// on another machine is not itself a reason to close the command.
     fn undo_blocked(&self) -> Option<String> {
         if self.session.is_none() {
-            return Some(t!("remote.no_session").to_string());
+            return Some(self.no_session_reason());
         }
         let gate = self.undo_gate();
         if gate.busy {
@@ -409,6 +409,11 @@ mod tests {
         let view = window.root(cx).expect("the window's root view");
         let mut vcx = VisualTestContext::from_window(window.into(), cx);
         assert_eq!(
+            view.read_with(&vcx, |view, _| view.no_session_reason()),
+            t!("remote.not_connected").to_string(),
+            "a restored tab points at Connect, not at the generic no-repository reason"
+        );
+        assert_eq!(
             blocked_reason(&view, &mut vcx, "lamina::OpenGitConfig").as_deref(),
             Some(t!("title_bar.not_connected").as_ref()),
             "the config window needs the host's session"
@@ -442,12 +447,12 @@ mod tests {
         );
         assert_eq!(
             blocked_reason(&view, &mut vcx, "lamina::UndoLastAction").as_deref(),
-            Some(t!("remote.no_session").as_ref()),
-            "undo needs a session, which a disconnected tab does not have"
+            Some(t!("remote.not_connected").as_ref()),
+            "undo needs the session a restored tab has not opened yet"
         );
         assert_eq!(
             blocked_reason(&view, &mut vcx, "lamina::ApplyPatch"),
-            Some(t!("remote.no_session").to_string()),
+            Some(t!("remote.not_connected").to_string()),
             "a patch needs the host's session"
         );
         assert_eq!(

@@ -898,7 +898,7 @@ impl RepoView {
     /// Why a remote command cannot run right now, if it cannot.
     pub(crate) fn remote_blocked(&self) -> Option<String> {
         if self.session.is_none() {
-            return Some(no_session());
+            return Some(self.no_session_reason());
         }
         if self.remote.is_running()
             || self.branches.is_running()

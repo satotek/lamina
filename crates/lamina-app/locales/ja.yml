@@ -766,6 +766,7 @@ branch.placeholder.fetch_first: "先にリモートを Fetch し、そのリモ�
 remote.detached_head: "デタッチ HEAD です。Pull や Push をするにはブランチを Checkout してください。"
 remote.busy: "すでに操作を実行中です。"
 remote.no_session: "リモート操作にはリポジトリを開いている必要があります。`--fake` は合成データを表示します。"
+remote.not_connected: "リモートリポジトリにまだ接続していません。「接続」を押して開いてください。"
 remote.auth_hint: "ユーザー名とパスワードを確認するか、認証情報ヘルパーを設定するか、鍵を ssh-agent に読み込んでください。"
 remote.auto_fetch_hint: "認証情報を入力するには手動で Fetch を実行してください。"
 remote.kind.fetch: "Fetch"
