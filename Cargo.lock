@@ -5199,6 +5199,7 @@ version = "0.1.10"
 dependencies = [
  "lamina-core",
  "lamina-remote-protocol",
+ "log",
 ]
 
 [[package]]

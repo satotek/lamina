@@ -14,6 +14,8 @@ use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, RwLock};
 use std::thread::{self, JoinHandle, ThreadId};
 use std::time::{Duration, Instant};
 
+use log::{debug, info, warn};
+
 use lamina_core::compare::{RepoCompareFile, RepoCompareSide, ThreeWayTreeCompare};
 use lamina_core::diff::DiffOptions;
 use lamina_core::git_cli::CommandLog;
@@ -299,6 +301,13 @@ impl RemoteSession {
         // Anything the helper sent before HelloAck is part of the same stream.
         // Applying it here, before the reader starts, keeps those frames from
         // sitting unread in a buffer this handshake did not keep.
+        info!(
+            "remote: negotiated protocol {} with {} at {} (watcher {})",
+            proto::PROTOCOL_VERSION,
+            target.host,
+            ack.root,
+            if ack.watching { "on" } else { "off" }
+        );
         for event in early {
             inner.apply_event(event);
         }
@@ -356,6 +365,7 @@ impl RemoteSession {
     /// The helper kills the git child, or skips the job if it has not started.
     /// The outcome still arrives as [`SessionEvent::OperationFinished`].
     pub fn cancel_operation(&self, id: OperationId) {
+        info!("remote: cancelling operation {}", id.0);
         let _ = self
             .inner
             .send_detached(Request::CancelOperation { id: id.0 });
@@ -368,6 +378,55 @@ impl Drop for RemoteSession {
         // still close stdin and read the resulting EOF before the process is
         // killed.
         self.inner.shutdown();
+    }
+}
+
+/// A static label for one request, for debug timing.
+///
+/// It must not include a payload: patch bytes, messages, paths and a
+/// credential answer all travel in requests, and none of them belong in a log.
+fn request_name(request: &Request) -> &'static str {
+    match request {
+        Request::Hello { .. } => "hello",
+        Request::Ping { .. } => "ping",
+        Request::SubscribeSnapshots => "subscribe",
+        Request::Reload => "reload",
+        Request::Head => "head",
+        Request::CommitChanges { .. } => "commit changes",
+        Request::TreeEntries { .. } => "tree entries",
+        Request::BlobAt { .. } => "blob",
+        Request::CommitMessage { .. } => "commit message",
+        Request::Parents { .. } => "parents",
+        Request::Diff { .. } => "diff",
+        Request::CancelDiff { .. } => "cancel diff",
+        Request::Run { .. } => "operation",
+        Request::CancelOperation { .. } => "cancel operation",
+        Request::AnswerAskpass { .. } => "askpass answer",
+        Request::CommitsBetween { .. } => "commits between",
+        Request::IsAncestor { .. } => "is ancestor",
+        Request::MergeMessage => "merge message",
+        Request::Query { .. } => "query",
+        Request::CancelQuery { .. } => "cancel query",
+        Request::FileInWorktree { .. } => "worktree file",
+        Request::ConflictSides { .. } => "conflict sides",
+        Request::ConflictStyle => "conflict style",
+        Request::MergeBase { .. } => "merge base",
+        Request::ThreeWayTree { .. } => "three-way tree",
+        Request::ThreeWayBlobs { .. } => "three-way blobs",
+        Request::ThreeWayRoles { .. } => "three-way roles",
+        Request::ThreeWaySideTree { .. } => "three-way side tree",
+        Request::CompareSideBlob { .. } => "compare side blob",
+        Request::CommitChangedFileCount { .. } => "changed file count",
+        Request::LfsInfoAt { .. } => "lfs info at",
+        Request::LfsInfoInIndex { .. } => "lfs info in index",
+        Request::LfsInfoInWorktree { .. } => "lfs info in worktree",
+        Request::UsesLfs => "uses lfs",
+        Request::ReadLfsObject { .. } => "read lfs object",
+        Request::LfsAvailable => "lfs available",
+        Request::LfsLocks => "lfs locks",
+        Request::FormatPatch { .. } => "format patch",
+        Request::GitConfig => "git config",
+        Request::PreviewGitConfig { .. } => "preview git config",
     }
 }
 
@@ -552,6 +611,7 @@ impl Inner {
         if self.lost.swap(true, Ordering::SeqCst) {
             return;
         }
+        warn!("remote: connection lost: {message}");
         *lock(&self.lost_text) = Some(message.clone());
         // A late pong must not resurrect a sample from the link that just died.
         lock(&self.pings).clear();
@@ -647,6 +707,8 @@ impl Inner {
 
     fn call(&self, request: Request) -> Result<Response> {
         self.ensure_open()?;
+        let name = request_name(&request);
+        let started = Instant::now();
         let (tx, rx) = mpsc::channel();
         let stream = self.alloc_stream()?;
         lock(&self.pending).insert(stream, tx);
@@ -658,11 +720,21 @@ impl Inner {
             lock(&self.pending).remove(&stream);
             return Err(error);
         }
-        match rx.recv() {
+        let response = match rx.recv() {
             Ok(Response::Error(error)) => Err(remote_error(error)),
             Ok(other) => Ok(other),
             Err(_) => Err(self.lost_error()),
+        };
+        // The name is a static label, never the request's payload: a request
+        // can carry patch bytes, paths or a credential answer.
+        match &response {
+            Ok(_) => debug!("remote: {name} answered in {:?}", started.elapsed()),
+            Err(error) => debug!(
+                "remote: {name} failed after {:?}: {error}",
+                started.elapsed()
+            ),
         }
+        response
     }
 
     /// `Run` returns before the git command does. The stream stays registered
