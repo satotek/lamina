@@ -427,7 +427,20 @@ fn execute(
         } => git.worktree_add(path, branch.as_deref(), new_branch.as_deref(), *commit),
         Operation::WorktreeRemove { path, force } => git.worktree_remove(path, *force),
         Operation::WorktreePrune => git.worktree_prune(),
-        Operation::LfsTrack { path } => git.lfs_track(path),
+        Operation::LfsTrack { path } => {
+            let installed = git.lfs_track(path)?;
+            if installed {
+                // The app turns this marker into a translated note; the
+                // operation succeeded, but the user should know the command
+                // changed more than `.gitattributes`.
+                shared.emit(SessionEvent::OperationProgress {
+                    id,
+                    text: crate::lfs::FILTER_INSTALLED_EVENT.to_owned(),
+                    percent: None,
+                });
+            }
+            Ok(())
+        }
         Operation::LfsLock { path } => git.lfs_lock(path),
         Operation::LfsUnlock { path } => git.lfs_unlock(path),
         Operation::LfsPull { path } => git.lfs_pull(path),

@@ -18,6 +18,15 @@ pub const POINTER_HEADER: &str = "version https://git-lfs.github.com/spec/v1";
 /// mention LFS, not a pointer.
 pub const MAX_POINTER_BYTES: usize = 1024;
 
+/// A progress line that is not git's own output.
+///
+/// `git lfs install --local` runs as part of tracking, and the status bar has
+/// to say so. Operation progress is the one existing channel that carries a
+/// message from a running operation to either a local or a remote tab, so the
+/// operation executor sends this marker and the app replaces it with a
+/// translated sentence. It must never look like a real progress line.
+pub const FILTER_INSTALLED_EVENT: &str = "strata:lfs-filter-installed";
+
 /// A parsed `version`/`oid sha256:`/`size` pointer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LfsPointer {

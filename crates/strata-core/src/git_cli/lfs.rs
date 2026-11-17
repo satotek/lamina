@@ -42,8 +42,33 @@ impl Git {
     }
 
     /// `git lfs track <pattern>`: adds `filter=lfs` to `.gitattributes`.
-    pub fn lfs_track(&self, pattern: &str) -> Result<()> {
-        self.run(&["lfs", "track", "--", pattern], None).map(|_| ())
+    ///
+    /// Returns true when the filter was missing and `git lfs install --local`
+    /// ran first. Without that install, tracking only edits `.gitattributes`
+    /// and the next commit stores the raw bytes, because `filter.lfs.clean`
+    /// never converted them.
+    pub fn lfs_track(&self, pattern: &str) -> Result<bool> {
+        let installed = !self.lfs_filter_configured()?;
+        if installed {
+            self.run(&["lfs", "install", "--local"], None)?;
+        }
+        self.run(&["lfs", "track", "--", pattern], None)
+            .map(|_| ())?;
+        Ok(installed)
+    }
+
+    /// Whether both sides of the LFS clean filter are configured.
+    ///
+    /// `git lfs install --local` writes these; a repository that only added
+    /// `filter=lfs` to `.gitattributes` has neither.
+    fn lfs_filter_configured(&self) -> Result<bool> {
+        let process = self
+            .run_internal(&["config", "--get", "filter.lfs.process"], None)
+            .is_ok();
+        let clean = self
+            .run_internal(&["config", "--get", "filter.lfs.clean"], None)
+            .is_ok();
+        Ok(process && clean)
     }
 
     /// `git lfs pull --include=<path>`, which needs the remote.
@@ -60,6 +85,42 @@ mod tests {
 
     fn git_lfs_available(test: &TestRepo) -> bool {
         test.git_output(&["lfs", "version"]).status.success()
+    }
+
+    #[test]
+    fn tracking_installs_the_filter_when_it_is_not_configured() {
+        let test = TestRepo::new();
+        if !git_lfs_available(&test) {
+            eprintln!("skipping LFS filter test: git-lfs is not installed");
+            return;
+        }
+        // A fresh repository has `filter=lfs` nowhere. Install runs before
+        // tracking so the next commit stores a pointer instead of raw bytes.
+        assert!(
+            !test
+                .git_output(&["config", "--get", "filter.lfs.process"])
+                .status
+                .success(),
+            "the fixture must start without the filter"
+        );
+
+        let git = test.git_handle();
+        assert!(
+            git.lfs_track("*.bin").expect("track with a missing filter"),
+            "tracking had to run `git lfs install --local`"
+        );
+        for key in ["filter.lfs.process", "filter.lfs.clean"] {
+            let output = test.git_output(&["config", "--get", key]);
+            assert!(
+                output.status.success(),
+                "{key} was not configured: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        assert!(
+            !git.lfs_track("*.dat").expect("track again"),
+            "a configured filter must not be installed twice"
+        );
     }
 
     /// Skips instead of failing when `git-lfs` is not installed, so a CI image
