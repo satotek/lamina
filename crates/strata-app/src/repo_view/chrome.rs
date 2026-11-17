@@ -42,6 +42,9 @@ impl Render for RepoView {
         let started = self.metrics.begin_frame();
         self.target_frame_ms = RepoView::target_frame_ms(window, cx);
         self.sync_title(window);
+        // A message an action left behind retires on its own; doing it before
+        // the bar is built keeps a stale line from being drawn one more frame.
+        self.observe_status(cx);
         // The first frame of a repository asks for its pull requests, waiting
         // for tool detection when that is still running.
         self.start_pull_request_refresh(cx);

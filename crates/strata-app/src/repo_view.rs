@@ -520,6 +520,10 @@ pub struct RepoView {
     /// A transient message that is not a failure, such as which copy of a file
     /// the editor opened. Shown in the status bar while no error is.
     pub(crate) status_note: Option<String>,
+    /// The message the status bar last showed and when it appeared, so a
+    /// message a later action succeeds past is replaced and one nobody
+    /// replaces is retired instead of staying for the rest of the session.
+    status_clock: status_bar::StatusClock,
 
     title: String,
     target_frame_ms: f32,
@@ -709,6 +713,7 @@ impl RepoView {
             status_error: None,
             multi_pick: None,
             status_note: None,
+            status_clock: status_bar::StatusClock::default(),
             title,
             target_frame_ms: 1000.0 / 60.0,
             overlay: smoke,
@@ -1300,6 +1305,9 @@ impl RepoView {
             }
             SessionEvent::OperationFinished { id, error } => {
                 let failed = error.is_some();
+                // The outcome replaces whatever an earlier action left, so an
+                // old failure cannot sit beside a fresh success.
+                self.clear_status();
                 // The indicator stops here rather than when the next snapshot
                 // lands, so a command that has reported back is not still
                 // shown as running.
@@ -1391,6 +1399,10 @@ impl RepoView {
                 self.notify_tab_state(cx);
             }
             SessionEvent::OperationStarted { id } => {
+                // A new command makes the previous outcome history; without
+                // this a worktree or "not available" message outlived every
+                // later action.
+                self.clear_status();
                 // The snapshot published with `busy` still holds the status
                 // from before the command, which is what the switch compares
                 // against.

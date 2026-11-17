@@ -1,14 +1,108 @@
 //! The status bar: what runs now, the last git command and the last error.
 
-use gpui::{AnyElement, IntoElement, ParentElement, Styled, div, px};
+use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, div, px};
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::RepoView;
 use crate::remote;
 use crate::style::Design;
 
+/// How long the bar keeps a message before treating it as stale. Long enough
+/// to read a path or an error, short enough that a message about an old
+/// failure does not look like the outcome of the last action.
+pub(super) const STATUS_MESSAGE_TTL: Duration = Duration::from_secs(30);
+
+/// Whether the message first shown at `shown` has outlived the bar's window.
+pub(super) fn status_message_expired(shown: Option<Instant>, now: Instant) -> bool {
+    shown.is_some_and(|shown| now.saturating_duration_since(shown) >= STATUS_MESSAGE_TTL)
+}
+
+/// What a new observation of the status line found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Seen {
+    /// The same message is still fresh.
+    Fresh,
+    /// The message changed, so its time starts now.
+    Changed,
+    /// The message stayed too long and the caller must drop it.
+    Expired,
+}
+
+/// The one status message on screen and when it appeared.
+///
+/// The bar has a single slot, and several actions only write an error or a
+/// note without clearing the other. Tracking the text here means every path
+/// that leaves a message behind is covered: a later message resets the clock,
+/// and a message nothing replaces is retired on its own.
+#[derive(Default)]
+pub(super) struct StatusClock {
+    shown: Option<(String, Instant)>,
+}
+
+impl StatusClock {
+    pub(super) fn observe(&mut self, text: &str, now: Instant) -> Seen {
+        match &self.shown {
+            Some((shown, at)) if shown == text => {
+                if status_message_expired(Some(*at), now) {
+                    self.shown = None;
+                    Seen::Expired
+                } else {
+                    Seen::Fresh
+                }
+            }
+            _ => {
+                self.shown = Some((text.to_owned(), now));
+                Seen::Changed
+            }
+        }
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.shown = None;
+    }
+}
+
 impl RepoView {
+    /// Retires a status message once it has been visible long enough, and
+    /// schedules the repaint that makes the retirement visible. Runs from
+    /// every frame so a message set by a less central action is covered too.
+    pub(super) fn observe_status(&mut self, cx: &mut Context<Self>) {
+        let Some(text) = self
+            .status_error
+            .clone()
+            .or_else(|| self.status_note.clone())
+        else {
+            self.status_clock.clear();
+            return;
+        };
+        match self.status_clock.observe(&text, Instant::now()) {
+            Seen::Expired => {
+                self.status_error = None;
+                self.status_note = None;
+                cx.notify();
+            }
+            Seen::Changed => {
+                // Nothing else repaints when a message nobody replaces goes
+                // stale, so one timer per new message wakes the view.
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(STATUS_MESSAGE_TTL).await;
+                    this.update(cx, |this, cx| this.observe_status(cx)).ok();
+                })
+                .detach();
+            }
+            Seen::Fresh => {}
+        }
+    }
+
+    /// Drops the current message. A new action replaces whatever an earlier
+    /// one left, so a success never leaves an old failure on screen.
+    pub(super) fn clear_status(&mut self) {
+        self.status_error = None;
+        self.status_note = None;
+        self.status_clock.clear();
+    }
+
     pub(super) fn status_bar(&self, design: &Design) -> AnyElement {
         let command = self
             .last_command
@@ -105,5 +199,54 @@ impl RepoView {
                 ),
         )
         .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{STATUS_MESSAGE_TTL, Seen, StatusClock, status_message_expired};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn a_status_message_expires_after_its_window() {
+        let now = Instant::now();
+        assert!(!status_message_expired(None, now));
+        assert!(!status_message_expired(
+            Some(now),
+            now + STATUS_MESSAGE_TTL - Duration::from_secs(1)
+        ));
+        assert!(status_message_expired(Some(now), now + STATUS_MESSAGE_TTL));
+    }
+
+    #[test]
+    fn a_replaced_message_gets_a_fresh_window() {
+        let start = Instant::now();
+        let mut clock = StatusClock::default();
+
+        assert_eq!(clock.observe("first failure", start), Seen::Changed);
+        assert_eq!(
+            clock.observe("first failure", start + Duration::from_secs(5)),
+            Seen::Fresh
+        );
+
+        // A later action leaves a new message: it must not inherit the age of
+        // the message it replaced.
+        assert_eq!(
+            clock.observe("done", start + STATUS_MESSAGE_TTL),
+            Seen::Changed
+        );
+        assert_eq!(
+            clock.observe("done", start + STATUS_MESSAGE_TTL + Duration::from_secs(1)),
+            Seen::Fresh
+        );
+        assert_eq!(
+            clock.observe("done", start + STATUS_MESSAGE_TTL * 2),
+            Seen::Expired
+        );
+        // Once expired, the same text seen again starts over.
+        assert_eq!(
+            clock.observe("done", start + STATUS_MESSAGE_TTL * 2),
+            Seen::Changed
+        );
     }
 }
