@@ -25,6 +25,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 
+use log::{debug, info};
 use strata_core::{Error, Result};
 use strata_remote_protocol::PROTOCOL_VERSION;
 
@@ -102,7 +103,15 @@ pub(crate) fn install_with(
         return Err(Error::other("the ssh program path is empty"));
     }
     let probe = probe(options, askpass)?;
+    debug!(
+        "remote helper probe: host={} os={} arch={}",
+        options.host, probe.os, probe.arch
+    );
     if let Some(override_path) = probe.helper_override {
+        info!(
+            "remote helper: using the host's override at {override_path} on {}",
+            options.host
+        );
         verify(options, askpass, &override_path, true)?;
         return Ok(override_path);
     }
@@ -122,8 +131,14 @@ pub(crate) fn install_with(
     // protocol and build is the one this app would upload, so a reconnect
     // reuses it instead of sending it again.
     if verify(options, askpass, &remote_path, false).is_ok() {
+        debug!("remote helper: reusing {remote_path} on {}", options.host);
         return Ok(remote_path);
     }
+    info!(
+        "remote helper: uploading {} to {}:{remote_path}",
+        local.display(),
+        options.host
+    );
     upload(options, askpass, &local, &remote_path)?;
     if verify(options, askpass, &remote_path, false).is_err() {
         // One replacement covers a partial upload. A second failure is
@@ -266,6 +281,10 @@ fn verify(
             "remote helper build id mismatch at {where_}: expected {expected}, found {build}"
         )));
     }
+    info!(
+        "remote helper: {remote_path} on {} speaks protocol {protocol} (build {build})",
+        options.host
+    );
     Ok(())
 }
 

@@ -14,6 +14,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Context, Entity, IntoElement, ParentElement as _, Styled as _, Window, div,
 };
+use log::{info, warn};
 use strata_core::session::{RepoLocation, RepositorySession, SessionEvent};
 
 use super::RepoView;
@@ -116,6 +117,12 @@ impl RepoView {
         tab.reconnecting = self.session.is_some();
         tab.rtt = None;
         let (sender, mut receiver) = futures_mpsc::unbounded();
+        if tab.reconnecting {
+            info!(
+                "remote: reconnecting to {} at {}",
+                tab.spec.host, tab.spec.path
+            );
+        }
         spawn_connect(spec, ssh, sender);
         // Replacing the task drops the previous receiver. The old worker's
         // sends then fail, and an unsent `Ready` drops its session on that
@@ -147,6 +154,11 @@ impl RepoView {
                 reply,
             } => self.prompt_remote_askpass(prompt, secret, reply, cx),
             ConnectMsg::Failed(error) => {
+                if self.session.is_some() {
+                    warn!("remote: connection lost: {error}");
+                } else {
+                    warn!("remote: connect failed: {error}");
+                }
                 if let Some(tab) = &mut self.remote_tab {
                     tab.buffering = false;
                     tab.pending.clear();
@@ -228,6 +240,7 @@ impl RepoView {
         let head = session.reader().head().ok();
         self.name = Some(name.clone());
         self.title = crate::data::window_title(&name, head.as_ref());
+        info!("remote: session ready for {name}");
         let old = self.session.replace(session);
         if let Some(tab) = &mut self.remote_tab {
             tab.phase = ConnectPhase::LoadingHistory;
@@ -577,6 +590,7 @@ impl RepoView {
         if !self.is_ssh() || !error.contains(strata_remote_client::CONNECTION_LOST) {
             return false;
         }
+        warn!("remote: connection lost: {error}");
         if let Some(tab) = &mut self.remote_tab {
             tab.lost = true;
             tab.reconnecting = false;

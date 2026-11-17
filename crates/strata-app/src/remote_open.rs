@@ -20,6 +20,7 @@ use gpui_component::ActiveTheme as _;
 use gpui_component::WindowExt as _;
 use gpui_component::dialog::DialogFooter;
 use gpui_component::input::{Input, InputState};
+use log::{info, warn};
 use strata_core::askpass::{Answer, Prompt};
 use strata_core::session::{RepositorySession, SessionEvent};
 use strata_remote_client::{
@@ -253,6 +254,7 @@ pub(crate) fn spawn_connect(
 }
 
 fn connect_worker(spec: RemoteSpec, ssh: Option<SshOverride>, sender: UnboundedSender<ConnectMsg>) {
+    info!("remote: connecting to {} at {}", spec.host, spec.path);
     let _ = sender.unbounded_send(ConnectMsg::Phase(ConnectPhase::Connecting));
     let program = ssh_program(ssh.as_ref());
     let helper_dir = match ssh.as_ref() {
@@ -260,6 +262,7 @@ fn connect_worker(spec: RemoteSpec, ssh: Option<SshOverride>, sender: UnboundedS
         None => match resolve_helper_dir() {
             Ok(dir) => dir,
             Err(error) => {
+                warn!("remote: cannot connect to {}: {error}", spec.host);
                 let _ = sender.unbounded_send(ConnectMsg::Failed(error));
                 return;
             }
@@ -277,8 +280,12 @@ fn connect_worker(spec: RemoteSpec, ssh: Option<SshOverride>, sender: UnboundedS
         askpass: Some(Arc::clone(&askpass)),
     };
     let helper = match install_helper(&install) {
-        Ok(helper) => helper,
+        Ok(helper) => {
+            info!("remote: helper ready at {helper} on {}", spec.host);
+            helper
+        }
         Err(error) => {
+            warn!("remote: helper install failed for {}: {error}", spec.host);
             let _ = sender.unbounded_send(ConnectMsg::Failed(error.to_string()));
             return;
         }
@@ -308,9 +315,11 @@ fn connect_worker(spec: RemoteSpec, ssh: Option<SshOverride>, sender: UnboundedS
     );
     match connected {
         Ok(session) => {
+            info!("remote: connected to {}", spec.host);
             let _ = sender.unbounded_send(ConnectMsg::Ready(Box::new(session)));
         }
         Err(error) => {
+            warn!("remote: connect failed for {}: {error}", spec.host);
             let _ = sender.unbounded_send(ConnectMsg::Failed(error.to_string()));
         }
     }

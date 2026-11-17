@@ -1755,6 +1755,7 @@ impl RepoView {
         if ids.is_empty() {
             return false;
         }
+        log::info!("session: cancelling {} operation(s)", ids.len());
         if let Some(session) = self.session.as_ref() {
             for id in &ids {
                 session.cancel_operation(*id);

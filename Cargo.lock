@@ -7900,6 +7900,7 @@ dependencies = [
 name = "strata-remote-client"
 version = "0.1.5"
 dependencies = [
+ "log",
  "strata-core",
  "strata-remote-protocol",
 ]
