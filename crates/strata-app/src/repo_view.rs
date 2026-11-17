@@ -63,7 +63,7 @@ use strata_core::session::{
     DiffOptions, DiffRequest, DiffTicket, DiffView, Operation, OperationId, QueryTicket,
     RepoLocation, RepoReader, RepositorySession, Session, SessionEvent, SessionOptions,
 };
-use strata_core::{FileChange, HeadInfo, Oid, RefKind};
+use strata_core::{FileChange, HeadInfo, Oid, RefKind, RepoState};
 
 use crate::activity::{Activity, ActivityKind};
 use crate::branch_switcher::BranchSwitcher;
@@ -1327,9 +1327,13 @@ impl RepoView {
                     }
                 }
                 self.worktree.on_operation_finished(id, error.as_deref());
-                let finished = self
-                    .remote
-                    .on_finished(id, error.as_deref(), cx, self.active);
+                let state = self
+                    .session
+                    .as_ref()
+                    .map_or(RepoState::Normal, |session| session.snapshot().state);
+                let finished =
+                    self.remote
+                        .on_finished(id, error.as_deref(), state, cx, self.active);
                 // Shown before the refresh below: a push notification leaves the
                 // marker that keeps that refresh from being throttled.
                 if let Some(announcement) = finished.announcement {

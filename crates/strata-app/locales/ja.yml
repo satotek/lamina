@@ -740,6 +740,7 @@ remote.no_commits: "このブランチにはまだコミットがありません
 remote.pushed: "%{branch} を %{remote} に Push しました"
 remote.pulled: "%{upstream} を Pull しました"
 remote.pulled_current: "現在のブランチを Pull しました"
+remote.pull_stopped: "Pull が競合で停止しました。競合を解決してから続行してください。"
 remote.commit.one: "%{count} コミット"
 remote.commit.other: "%{count} コミット"
 remote.no_upstream_hint: "ブランチを公開してアップストリームを作成してください。"

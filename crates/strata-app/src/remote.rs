@@ -25,7 +25,7 @@ use gpui_component::notification::Notification;
 use gpui_component::{Icon, Sizable as _, WindowExt as _};
 use gpui_kit_assets::IconName;
 use strata_core::session::{Operation, OperationId, RepoSnapshot};
-use strata_core::{HeadInfo, RefInfo, RefKind, UpstreamInfo};
+use strata_core::{HeadInfo, RefInfo, RefKind, RepoState, UpstreamInfo};
 
 use crate::activity::ActivityKind;
 use crate::data::Source;
@@ -117,6 +117,27 @@ impl Kind {
             Kind::Pull => t!("remote.failed.pull").to_string(),
             Kind::Push => t!("remote.failed.push").to_string(),
         }
+    }
+}
+
+/// Whether a finished operation reports a success or a stop it left behind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Outcome {
+    Success,
+    /// A pull stopped on conflicts; the repository stays mid-merge or mid-rebase
+    /// for the user to resolve. Core reports it as a normal outcome, not an
+    /// error, so the notification has to name the stop itself.
+    Stopped,
+}
+
+/// A pull that left a merge or rebase in progress stopped on conflicts; any
+/// other successful operation is a success. `Git::pull` deliberately reports a
+/// conflicted stop as `Ok`, so the repository state is what tells them apart.
+fn outcome(kind: Kind, state: RepoState) -> Outcome {
+    if kind == Kind::Pull && matches!(state, RepoState::Merging | RepoState::Rebasing) {
+        Outcome::Stopped
+    } else {
+        Outcome::Success
     }
 }
 
@@ -505,6 +526,7 @@ impl Remote {
         &mut self,
         id: OperationId,
         error: Option<&str>,
+        state: RepoState,
         cx: &mut Context<RepoView>,
         active: bool,
     ) -> Finished {
@@ -533,6 +555,10 @@ impl Remote {
                     Trigger::Manual => running.kind.failed(),
                 };
                 Notification::error(failure_detail(running.trigger, *failure, line)).title(title)
+            }
+            None if outcome(running.kind, state) == Outcome::Stopped => {
+                Notification::warning(t!("remote.pull_stopped").to_string())
+                    .title(running.kind.label())
             }
             None => Notification::success(running.success.clone()).title(running.kind.label()),
         };
@@ -1444,6 +1470,26 @@ mod tests {
         assert_eq!(pull_message(None), "Pulled the current branch");
         assert_eq!(commits(1), "1 commit");
         assert_eq!(commits(2), "2 commits");
+    }
+
+    #[test]
+    fn a_pull_that_stopped_on_conflicts_is_not_a_success() {
+        // Core reports a conflicted pull stop as `Ok`, in both merge and rebase
+        // mode, so the state left behind is what tells the two outcomes apart.
+        assert_eq!(
+            outcome(Kind::Pull, RepoState::Merging),
+            Outcome::Stopped,
+            "a merge conflict stop must not be announced as a successful pull"
+        );
+        assert_eq!(
+            outcome(Kind::Pull, RepoState::Rebasing),
+            Outcome::Stopped,
+            "a rebase conflict stop must not be announced as a successful pull"
+        );
+        assert_eq!(outcome(Kind::Pull, RepoState::Normal), Outcome::Success);
+        // Other operations do not stop with a merge or rebase in progress.
+        assert_eq!(outcome(Kind::Fetch, RepoState::Merging), Outcome::Success);
+        assert_eq!(outcome(Kind::Push, RepoState::Rebasing), Outcome::Success);
     }
 
     #[test]
