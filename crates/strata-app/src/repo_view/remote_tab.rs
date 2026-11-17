@@ -847,6 +847,108 @@ mod tests {
 
     #[cfg(unix)]
     #[gpui::test]
+    fn a_remote_merge_commit_counts_files_against_its_first_parent(cx: &mut TestAppContext) {
+        let repo = strata_core::test_support::TestRepo::new();
+        repo.write("base.txt", "base\n");
+        repo.commit("base");
+        repo.git(&["checkout", "-q", "-b", "side"]);
+        repo.write("one.txt", "one\n");
+        repo.write("two.txt", "two\n");
+        repo.commit("side");
+        repo.git(&["checkout", "-q", "main"]);
+        repo.write("main.txt", "main\n");
+        repo.commit("main");
+        repo.git(&["merge", "-q", "--no-ff", "-m", "merge side", "side"]);
+        let merge = repo.head();
+        cx.dispatcher.allow_parking();
+
+        let scratch = super::super::remote_fixture::scratch_dir("strata-app-ssh-count");
+        let laid = layout_fake_ssh(&scratch);
+        let helper = wait_for_helper();
+        install_host_helper(&helper, &laid.helpers);
+
+        open_app(cx);
+        let window = cx.add_window(|window, cx| {
+            RepoView::new(
+                Launch::Remote(RemoteLaunch {
+                    spec: RemoteSpec {
+                        host: "git.example.com".into(),
+                        port: None,
+                        path: repo.path().to_string_lossy().into_owned(),
+                    },
+                    auto_connect: true,
+                    ssh: Some(SshOverride {
+                        program: laid.ssh.clone(),
+                        helper_dir: laid.helpers.clone(),
+                    }),
+                }),
+                window,
+                cx,
+            )
+        });
+        let view = window.root(cx).expect("the window's root view");
+
+        let deadline = Instant::now() + Duration::from_secs(90);
+        while cx.read(|cx| view.read(cx).commit_count()) == 0 {
+            assert!(Instant::now() < deadline, "the remote history did not load");
+            std::thread::sleep(Duration::from_millis(50));
+            cx.run_until_parked();
+        }
+
+        cx.update(|cx| {
+            view.update(cx, |view, cx| {
+                view.observe_visible_changed_file_counts(vec![merge], cx);
+            });
+        });
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            std::thread::sleep(Duration::from_millis(50));
+            // The count worker waits on a debounce timer; a test clock only
+            // moves when the test moves it.
+            cx.executor().advance_clock(Duration::from_millis(100));
+            cx.run_until_parked();
+            let count = cx.read(|cx| view.read(cx).commit_changed_file_count(merge));
+            if let Some(count) = count {
+                assert_eq!(
+                    count, 2,
+                    "a merge counts the two files its second parent added"
+                );
+                break;
+            }
+            if Instant::now() > deadline {
+                let log = std::fs::read_to_string(&laid.log).unwrap_or_default();
+                panic!("the changed-file count never arrived\nssh log:\n{log}");
+            }
+        }
+
+        // The details pane reads the file list separately. A merge must not
+        // look empty there either.
+        cx.update(|cx| {
+            view.update(cx, |view, cx| view.select(Some(0), cx));
+        });
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            std::thread::sleep(Duration::from_millis(50));
+            cx.executor().advance_clock(Duration::from_millis(100));
+            cx.run_until_parked();
+            let files = cx.read(|cx| view.read(cx).files.as_ref().map(|files| files.len()));
+            if let Some(len) = files {
+                assert_eq!(
+                    len, 2,
+                    "the merge changed two files against its first parent"
+                );
+                break;
+            }
+            if Instant::now() > deadline {
+                panic!("the merge's changed-file list never loaded");
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
     fn a_remote_tab_shows_history_a_diff_and_a_lost_connection(cx: &mut TestAppContext) {
         let repo = strata_core::test_support::TestRepo::new();
         repo.write("README.md", "alpha\n");
