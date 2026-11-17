@@ -549,13 +549,25 @@ fn session_merge_conflict_then_resolve_ours_and_continue() {
 
     let id = harness.session.run(Operation::MergeContinue);
     assert_eq!(harness.wait_for_operation(id), None);
-    // The history walk and the status refresh race with each other, so wait for
-    // both halves of the finished state.
+    // The history walk, the head refresh and the status refresh publish
+    // separately, so wait for every half of the finished state. The walk can
+    // already list the merge commit while the head still names its parent.
+    let head_id: Oid = harness
+        .repo
+        .git(&["rev-parse", "HEAD"])
+        .trim()
+        .parse()
+        .unwrap();
     let done = harness.wait_until(|snapshot| {
         snapshot.commits.complete
             && snapshot.commits.len() == 4
             && snapshot.state == RepoState::Normal
             && snapshot.conflicts.is_empty()
+            && matches!(
+                &snapshot.head,
+                Some(HeadInfo::Branch { short_name, target: Some(target) })
+                    if short_name == "main" && *target == head_id
+            )
     });
     assert_eq!(done.state, RepoState::Normal);
     assert!(done.conflicts.is_empty());
