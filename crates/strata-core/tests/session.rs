@@ -1327,19 +1327,21 @@ fn cancelling_session_blame_kills_in_flight_git_process() {
     );
     let ticket = harness.session.request_blame(head, "big.txt");
 
+    // The shell creates the file before it writes the pid, so waiting for
+    // `exists` alone can observe an empty file.
     let start = Instant::now();
-    while !pid_file.exists() {
+    let pid: u32 = loop {
+        if let Ok(raw) = fs::read_to_string(&pid_file)
+            && let Ok(pid) = raw.trim().parse()
+        {
+            break pid;
+        }
         assert!(
             start.elapsed() < Duration::from_secs(5),
-            "mock git never started"
+            "mock git never wrote its pid"
         );
         std::thread::sleep(Duration::from_millis(10));
-    }
-    let pid: u32 = fs::read_to_string(&pid_file)
-        .expect("read pid")
-        .trim()
-        .parse()
-        .expect("pid");
+    };
 
     harness.session.cancel_query(ticket);
 
