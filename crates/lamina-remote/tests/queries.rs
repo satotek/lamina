@@ -778,6 +778,13 @@ fn assert_changed_counts(repo: &TestRepo, remote: &RemoteSession, commits: [Oid;
                 .expect("remote count"),
             "changed-file count diverged for {commit}"
         );
+        // The details pane's file list is a separate read. A merge must list
+        // the same first-parent files on both sides, not an empty list.
+        assert_eq!(
+            local.commit_changes(commit).expect("local changes").len(),
+            reader.commit_changes(commit).expect("remote changes").len(),
+            "changed-file list diverged for {commit}"
+        );
     }
 }
 
