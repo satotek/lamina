@@ -305,22 +305,18 @@ fn file_row(
         trigger,
         move |menu, window, cx| {
             let count = menu_entity.read(cx).worktree.selection.len();
-            let ssh = menu_entity.read(cx).is_ssh();
-            let remote_reason = ssh.then(crate::remote_open::unavailable_reason);
             // The menu acts on the pointed-at row even when the selection
             // holds several files.
             let editor_entity = menu_entity.clone();
             let editor_path = menu_path.clone();
             let mut menu = menu.item(
-                PopupMenuItem::new(crate::ui::menu_label(
-                    t!("history.open_in_editor").to_string(),
-                    remote_reason.as_ref(),
-                ))
-                .disabled(ssh)
-                .on_click(move |_, _window, cx| {
-                    let path = editor_path.clone();
-                    editor_entity.update(cx, |this, cx| this.open_file_in_editor(&path, None, cx));
-                }),
+                PopupMenuItem::new(t!("history.open_in_editor").to_string()).on_click(
+                    move |_, _window, cx| {
+                        let path = editor_path.clone();
+                        editor_entity
+                            .update(cx, |this, cx| this.open_file_in_editor(&path, None, cx));
+                    },
+                ),
             );
 
             if !menu_lfs_tracked {

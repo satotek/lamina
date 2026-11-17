@@ -987,21 +987,22 @@ impl RepoView {
                             move |menu, window, cx| {
                                 let variables = menu_entity.read(cx).custom_variables();
                                 let ssh = menu_entity.read(cx).is_ssh();
-                                let reason = ssh.then(crate::remote_open::unavailable_reason);
                                 let entity = menu_entity.clone();
                                 let path = menu_path.clone();
-                                let present = in_working_tree(menu_work_dir.as_deref(), &path);
-                                let editor_label = if let Some(reason) = reason.as_deref() {
-                                    crate::ui::menu_label(
-                                        t!("history.open_in_editor").to_string(),
-                                        Some(reason),
-                                    )
+                                // A remote file has no local checkout to stat.
+                                // The read reports a missing revision, and the
+                                // opener copies whichever revision is on screen,
+                                // so the item stays available.
+                                let present =
+                                    ssh || in_working_tree(menu_work_dir.as_deref(), &path);
+                                let editor_label = if ssh {
+                                    t!("history.open_in_editor").to_string()
                                 } else {
                                     editor_entry_label(at_head, present)
                                 };
                                 let mut menu = menu.item(
                                     PopupMenuItem::new(editor_label)
-                                        .disabled(ssh || !present)
+                                        .disabled(!present)
                                         .on_click(
                                             move |_: &ClickEvent,
                                                   _window: &mut Window,
