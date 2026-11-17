@@ -525,8 +525,10 @@ pub(crate) struct AddWorktreeDialog {
     /// The name the default path uses while the branch field is empty.
     default_name: String,
     /// A remote tab's directory is on the host. The dialog must not ask this
-    /// machine whether that path exists.
-    skip_local_dir_check: bool,
+    /// machine whether that path exists, and it must not turn a relative path
+    /// into one under the host's checkout either: only an absolute path names
+    /// the directory the user meant on the other machine.
+    remote: bool,
     _path_events: Subscription,
     _branch_events: Subscription,
 }
@@ -539,7 +541,7 @@ impl AddWorktreeDialog {
         branches: Vec<String>,
         start: Option<Oid>,
         start_label: String,
-        skip_local_dir_check: bool,
+        remote: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -563,7 +565,7 @@ impl AddWorktreeDialog {
             false,
             default_name,
             default_path,
-            skip_local_dir_check,
+            remote,
             window,
             cx,
         )
@@ -576,7 +578,7 @@ impl AddWorktreeDialog {
         root: PathBuf,
         commit: Oid,
         short: String,
-        skip_local_dir_check: bool,
+        remote: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -592,7 +594,7 @@ impl AddWorktreeDialog {
             true,
             short,
             default_path,
-            skip_local_dir_check,
+            remote,
             window,
             cx,
         )
@@ -609,7 +611,7 @@ impl AddWorktreeDialog {
         allow_detached: bool,
         default_name: String,
         default_path: String,
-        skip_local_dir_check: bool,
+        remote: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -657,7 +659,7 @@ impl AddWorktreeDialog {
             path_edited: false,
             allow_detached,
             default_name,
-            skip_local_dir_check,
+            remote,
             _path_events,
             _branch_events,
         }
@@ -709,17 +711,20 @@ impl AddWorktreeDialog {
             self.fail(&t!("worktree.add.path_required"), cx);
             return;
         }
-        // git resolves a relative path against the repository, so the dialog
+        // git resolves a relative path against the repository, so a local dialog
         // does the same instead of against whatever directory the app runs in.
+        // The host helper cannot use this machine's root, and joining there
+        // would silently create the checkout inside the remote repository, so a
+        // remote path travels unchanged and the helper rejects a relative one.
         let path = PathBuf::from(&text);
-        let path = if path.is_absolute() {
+        let path = if path.is_absolute() || self.remote {
             path
         } else {
             self.root.join(path)
         };
         // The directory is on this machine only for a local repository. A
         // remote path is checked by the helper, which can see the host.
-        if !self.skip_local_dir_check
+        if !self.remote
             && std::fs::read_dir(&path).is_ok_and(|mut entries| entries.next().is_some())
         {
             self.fail(
@@ -768,7 +773,7 @@ impl AddWorktreeDialog {
         let offer_open = self.allow_detached;
         let _ = self.view.update(cx, |view, cx| {
             let started = view.run_operation(operation, label, window, cx);
-            if offer_open && started.is_some() && !self.skip_local_dir_check {
+            if offer_open && started.is_some() && !self.remote {
                 view.pending_worktree_open = Some(path);
             }
         });

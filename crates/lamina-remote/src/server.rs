@@ -1445,6 +1445,41 @@ mod tests {
     }
 
     #[test]
+    fn a_worktree_add_must_name_an_absolute_path() {
+        let relative = std::path::Path::new("relative/wt");
+        let error = require_explicit_absolute_path(relative).expect_err("relative path");
+        assert_eq!(
+            error.message,
+            "worktree path must be an absolute path: relative/wt"
+        );
+
+        let escaping = std::env::temp_dir().join("..").join("wt");
+        let error = require_explicit_absolute_path(&escaping).expect_err("dot-dot component");
+        assert!(
+            error.message.contains("must not contain . or .."),
+            "{error:?}"
+        );
+
+        let sibling = std::env::temp_dir().join("wt");
+        require_explicit_absolute_path(&sibling).expect("a plain absolute path");
+    }
+
+    #[test]
+    fn a_relative_worktree_operation_is_rejected_before_git_sees_it() {
+        let operation = lamina_core::session::Operation::WorktreeAdd {
+            path: PathBuf::from("relative/wt"),
+            branch: None,
+            new_branch: Some("wt".to_owned()),
+            commit: None,
+        };
+        let message = rejected_operation_path(&operation).expect("a relative path is refused");
+        assert!(
+            message.contains("must be an absolute path"),
+            "the message should say what is wrong, got {message}"
+        );
+    }
+
+    #[test]
     fn the_snapshot_queue_blocks_until_a_slot_frees() {
         let outbox = Arc::new(Outbox::new());
         assert!(outbox.push_low(b"snapshot".to_vec()));
