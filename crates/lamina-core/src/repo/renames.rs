@@ -1,11 +1,13 @@
-//! Rename detection over a first-parent tree change list.
+//! Rename detection over a tree change list.
 //!
-//! A commit's file list and its line counts share one tree walk, and only the
-//! file list needs to know about renames. Replaying the walk through gix's
-//! rewrite tracker would pair every added and deleted file, which on a large
-//! merge means tens of thousands of blob diffs.
+//! Two callers need the same pairing: a commit's file list ([`apply`]), and
+//! path-limited history (`source_of`), which follows one file across the rename
+//! that produced it. A commit's file list and its line counts share one tree
+//! walk, and only the file list needs to know about renames. Replaying the walk
+//! through gix's rewrite tracker would pair every added and deleted file, which
+//! on a large merge means tens of thousands of blob diffs.
 //!
-//! This pass pairs the same entries with the same rules: identical blob ids
+//! This module pairs the same entries with the same rules: identical blob ids
 //! first, then the best similarity above the same threshold gix uses. The score
 //! is gix's, but prepared blobs are cached per item, candidates are bounded by
 //! both size ratio and a line-hash multiset intersection before any diff runs,
@@ -18,6 +20,7 @@ use std::sync::Arc;
 use gix::bstr::{BStr, BString, ByteSlice};
 use gix::diff::blob::platform::prepare_diff::Operation;
 use gix::diff::blob::{Algorithm, Diff, InternedInput, ResourceKind};
+use gix::diff::tree::visit::Relation;
 use gix::object::tree::diff::ChangeDetached;
 use gix::object::tree::{EntryKind, EntryMode};
 
@@ -27,13 +30,71 @@ use super::stat::{
 };
 use crate::{ChangeKind, Error, Oid, Result};
 
-/// One added or deleted file from the walk.
+/// How a walk's changes become rename items.
+#[derive(Clone, Copy)]
+enum Walk {
+    /// A commit's file list only shows files; a rewritten directory is not a
+    /// row of its own, and its entries carry no relation to anything.
+    Files,
+    /// Path history needs directory entries too: gix pairs renamed directories
+    /// first and then propagates the pair to their children.
+    Tree,
+}
+
+/// One added or deleted entry from the walk.
 struct Item {
     path: BString,
     id: Oid,
     mode: EntryMode,
     added: bool,
+    /// Set only for entries of a rewritten directory, which is what lets a
+    /// directory rename carry its children along.
+    relation: Option<Relation>,
     emitted: bool,
+}
+
+impl Item {
+    /// The item `change` contributes, unless the walk has no use for it.
+    fn from_change(change: &ChangeDetached, walk: Walk) -> Option<Self> {
+        let (path, relation, mode, id, added) = match change {
+            ChangeDetached::Addition {
+                location,
+                relation,
+                entry_mode,
+                id,
+                ..
+            } => (location, relation, entry_mode, id, true),
+            ChangeDetached::Deletion {
+                location,
+                relation,
+                entry_mode,
+                id,
+                ..
+            } => (location, relation, entry_mode, id, false),
+            ChangeDetached::Modification { .. } | ChangeDetached::Rewrite { .. } => return None,
+        };
+        let keep = match walk {
+            Walk::Files => !mode.is_tree(),
+            // A tree without a relation is an ordinary added or removed
+            // directory, not part of a rewrite; gix's tracker skips it too.
+            Walk::Tree => !mode.is_tree() || relation.is_some(),
+        };
+        if !keep {
+            return None;
+        }
+        let relation = match walk {
+            Walk::Files => None,
+            Walk::Tree => *relation,
+        };
+        Some(Self {
+            path: path.clone(),
+            id: *id,
+            mode: *mode,
+            added,
+            relation,
+            emitted: false,
+        })
+    }
 }
 
 /// The files of `changes`, with renames applied.
@@ -45,56 +106,27 @@ pub(crate) fn apply(
     let mut items = Vec::new();
     let mut direct = Vec::new();
     for (index, change) in changes.iter().enumerate() {
-        match change {
-            ChangeDetached::Addition {
-                location,
-                entry_mode,
-                id,
-                ..
-            } if !entry_mode.is_tree() => items.push(Item {
-                path: location.clone(),
-                id: *id,
-                mode: *entry_mode,
-                added: true,
-                emitted: false,
-            }),
-            ChangeDetached::Deletion {
-                location,
-                entry_mode,
-                id,
-                ..
-            } if !entry_mode.is_tree() => items.push(Item {
-                path: location.clone(),
-                id: *id,
-                mode: *entry_mode,
-                added: false,
-                emitted: false,
-            }),
+        match Item::from_change(change, Walk::Files) {
+            Some(item) => items.push(item),
             // Modifications, and the directory entries a file list never shows.
-            _ => direct.push(index),
+            None => direct.push(index),
         }
     }
 
     // The tracker's order makes matching deterministic and independent of the
     // order in which the walk emitted the changes.
-    items.sort_by(|a, b| {
-        a.id.cmp(&b.id)
-            .then_with(|| a.path.as_bstr().cmp(b.path.as_bstr()))
-            .then_with(|| a.added.cmp(&b.added))
-            .then_with(|| a.mode.value().cmp(&b.mode.value()))
-    });
+    sort_items(&mut items);
 
     let rewrites = gix::diff::Rewrites::default();
     debug_assert!(
         rewrites.copies.is_none(),
         "this pass detects renames, not copies"
     );
-    let percentage = rewrites.percentage.unwrap_or(1.0);
     let track_empty = rewrites.track_empty;
+    let cap = max_checks(items.len(), rewrites.limit);
 
     let mut pairs = Vec::new();
-    let cap = max_checks(items.len(), rewrites.limit);
-    match_by_identity(&mut items, track_empty, cap, &mut pairs);
+    match_by_identity(&mut items, None, track_empty, false, cap, &mut pairs);
 
     let sources = items
         .iter()
@@ -104,21 +136,18 @@ pub(crate) fn apply(
         .iter()
         .filter(|item| item.added && !item.emitted)
         .count();
+    let percentage = rewrites.percentage.unwrap_or(1.0);
     let limited = rewrites.limit != 0
         && (sources as u128) * (destinations as u128)
             > (rewrites.limit as u128) * (rewrites.limit as u128);
     if !limited && sources > 0 && destinations > 0 && percentage < 1.0 {
-        let mut platform = repo
-            .diff_resource_cache_for_tree_diff()
-            .map_err(Error::gix)?;
         match_by_similarity(
             &mut items,
+            repo,
+            blobs,
             track_empty,
             percentage,
             cap,
-            repo,
-            blobs,
-            &mut platform,
             &mut pairs,
         )?;
     }
@@ -159,6 +188,109 @@ pub(crate) fn apply(
     Ok(files)
 }
 
+/// The parent-side path of the rename that produced `target_path`, if any.
+///
+/// Path history follows one file backwards, so the walk stops as soon as its
+/// own destination is resolved instead of pairing the whole change list.
+pub(crate) fn source_of(
+    changes: &[ChangeDetached],
+    repo: &gix::Repository,
+    target_path: &[u8],
+) -> Result<Option<Vec<u8>>> {
+    let mut items = Vec::new();
+    let mut has_deletion = false;
+    let mut has_target = false;
+    for change in changes {
+        let Some(item) = Item::from_change(change, Walk::Tree) else {
+            continue;
+        };
+        if item.added && item.path.as_slice() == target_path {
+            has_target = true;
+        }
+        has_deletion |= !item.added;
+        items.push(item);
+    }
+    if !has_target || !has_deletion {
+        return Ok(None);
+    }
+
+    sort_items(&mut items);
+
+    let Some(target) = items
+        .iter()
+        .position(|item| item.added && item.path.as_slice() == target_path)
+    else {
+        return Ok(None);
+    };
+
+    let rewrites = gix::diff::Rewrites::default();
+    let cap = max_checks(items.len(), rewrites.limit);
+    let track_empty = rewrites.track_empty;
+    let mut pairs = Vec::new();
+
+    // Pass 1a: parent directories matched by identity (and their children).
+    if match_by_identity(&mut items, Some(target), track_empty, true, cap, &mut pairs) {
+        return Ok(Some(paired_source(&items, &pairs, target)));
+    }
+    if items[target].emitted {
+        return Ok(None);
+    }
+
+    // Pass 1b: all additions vs deletions matched by exact object id.
+    if match_by_identity(
+        &mut items,
+        Some(target),
+        track_empty,
+        false,
+        cap,
+        &mut pairs,
+    ) {
+        return Ok(Some(paired_source(&items, &pairs, target)));
+    }
+    if items[target].emitted {
+        return Ok(None);
+    }
+
+    let Some(percentage) = rewrites.percentage.filter(|&percentage| percentage < 1.0) else {
+        return Ok(None);
+    };
+    let Some(source) = match_similarity_target(
+        &mut items,
+        repo,
+        track_empty,
+        percentage,
+        cap,
+        rewrites.limit,
+        target,
+    )?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(items[source].path.clone().into()))
+}
+
+/// The source path of `target`, which the identity pass just paired.
+fn paired_source(items: &[Item], pairs: &[(usize, usize)], target: usize) -> Vec<u8> {
+    let &(_, source) = pairs
+        .iter()
+        .rev()
+        .find(|(dest, _)| *dest == target)
+        .expect("target was paired in this pass");
+    items[source].path.clone().into()
+}
+
+/// The tracker's order: id first, so same-id candidates are contiguous, then
+/// every observable field so matching does not depend on the walk's order.
+fn sort_items(items: &mut [Item]) {
+    items.sort_by(|a, b| {
+        a.id.cmp(&b.id)
+            .then_with(|| a.path.cmp(&b.path))
+            .then_with(|| a.added.cmp(&b.added))
+            .then_with(|| a.relation.cmp(&b.relation))
+            .then_with(|| a.mode.cmp(&b.mode))
+    });
+}
+
 /// The most similarity checks gix allows before it stops pairing a walk with
 /// this many entries.
 fn max_checks(items_len: usize, limit: usize) -> usize {
@@ -169,222 +301,539 @@ fn max_checks(items_len: usize, limit: usize) -> usize {
     }
 }
 
-/// Pairs added files with the deleted file that has the same contents.
+/// Pairs each eligible destination with the same-id source gix would choose.
+///
+/// `parents_only` restricts the pass to directories, which is how gix pairs a
+/// renamed directory before carrying its children along. When `target` is set,
+/// the pass returns as soon as that destination is paired.
 fn match_by_identity(
     items: &mut [Item],
+    target: Option<usize>,
     track_empty: bool,
+    parents_only: bool,
     max_checks: usize,
     pairs: &mut Vec<(usize, usize)>,
-) {
+) -> bool {
+    // Items only stop being sources while matching, so this list is a superset
+    // of the sources any later destination can see.
+    let sources: Vec<usize> = items
+        .iter()
+        .enumerate()
+        .filter_map(|(index, item)| (!item.added && !item.emitted).then_some(index))
+        .collect();
+    if sources.is_empty() {
+        return false;
+    }
+
     let mut checks = 0usize;
     for dest in 0..items.len() {
-        if !wants_destination(items, dest, track_empty) {
+        if !is_identity_destination(&items[dest], track_empty, parents_only) {
             continue;
         }
-        let name = filename(&items[dest].path).to_owned();
-        // Items are sorted by id, so the same-id candidates are contiguous.
-        let start = items.partition_point(|item| item.id < items[dest].id);
-        let end = items.partition_point(|item| item.id <= items[dest].id);
-        let mut fallback = None;
-        for source in start..end {
-            if !is_source(items, source) || !compatible(items[source].mode, items[dest].mode) {
-                continue;
+        let dest_id = items[dest].id;
+        let start = sources.partition_point(|&index| items[index].id < dest_id);
+        let end = sources.partition_point(|&index| items[index].id <= dest_id);
+        let mut matched = None;
+        if start < end {
+            let dest_name = filename(&items[dest].path);
+            for &source in &sources[start..end] {
+                checks += 1;
+                if source == dest
+                    || items[source].emitted
+                    || !compatible(items[source].mode, items[dest].mode)
+                {
+                    continue;
+                }
+                if filename(&items[source].path) == dest_name {
+                    matched = Some(source);
+                    break;
+                }
+                matched.get_or_insert(source);
             }
-            checks += 1;
-            if filename(&items[source].path) == name.as_slice() {
-                fallback = Some(source);
-                break;
-            }
-            fallback.get_or_insert(source);
-        }
-        if let Some(source) = fallback {
-            items[dest].emitted = true;
-            items[source].emitted = true;
-            pairs.push((dest, source));
         }
         if max_checks != 0 && checks > max_checks {
-            return;
+            return false;
+        }
+        let Some(source) = matched else {
+            continue;
+        };
+
+        let relations = items[source].relation.zip(items[dest].relation);
+        items[dest].emitted = true;
+        items[source].emitted = true;
+        pairs.push((dest, source));
+        if Some(dest) == target {
+            return true;
+        }
+
+        // A renamed directory carries identical children with it; gix treats
+        // those children as renamed without another identity lookup.
+        if let Some((Relation::Parent(src_parent), Relation::Parent(dst_parent))) = relations {
+            let children = |parent: u32| -> Vec<usize> {
+                items
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, item)| {
+                        (!item.emitted
+                            && matches!(item.relation, Some(Relation::ChildOfParent(id)) if id == parent))
+                            .then_some(index)
+                    })
+                    .collect()
+            };
+            let src_children = children(src_parent);
+            let dst_children = children(dst_parent);
+            for (child_src, child_dest) in src_children.into_iter().zip(dst_children) {
+                if items[child_src].id == items[child_dest].id
+                    && filename(&items[child_src].path) == filename(&items[child_dest].path)
+                {
+                    items[child_src].emitted = true;
+                    items[child_dest].emitted = true;
+                    pairs.push((child_dest, child_src));
+                    if Some(child_dest) == target {
+                        return true;
+                    }
+                }
+            }
         }
     }
+    false
 }
 
 /// Pairs the remaining added files with their most similar deleted file.
 #[allow(clippy::too_many_arguments)]
 fn match_by_similarity(
     items: &mut [Item],
+    repo: &gix::Repository,
+    blobs: Option<&BlobCache>,
     track_empty: bool,
     percentage: f32,
     max_checks: usize,
-    repo: &gix::Repository,
-    blobs: Option<&BlobCache>,
-    platform: &mut gix::diff::blob::Platform,
     pairs: &mut Vec<(usize, usize)>,
 ) -> Result<()> {
-    let source_candidates: Vec<usize> = items
-        .iter()
-        .enumerate()
-        .filter_map(|(i, item)| (!item.added && !item.emitted && is_blob(item.mode)).then_some(i))
-        .collect();
-    if source_candidates.is_empty() {
+    let mut matcher = SimilarityMatcher::new(items, repo, blobs, percentage, max_checks)?;
+    if matcher.sources.is_empty() {
         return Ok(());
     }
 
-    let simple_platform = platform.filter.drivers().is_empty();
-    let algorithm = platform.options.algorithm.unwrap_or(Algorithm::Histogram);
-    let objects = CachedObjects::new(repo, blobs);
-    let mut preps = vec![PreparedBlob::Unloaded; items.len()];
-    let mut diff = Diff::default();
-    let mut candidates = Vec::new();
-    let mut checks = 0usize;
-
-    for dest in 0..items.len() {
-        if !wants_destination(items, dest, track_empty) || !is_blob(items[dest].mode) {
-            continue;
-        }
-        if simple_platform {
-            let PreparedBlob::Text { data, .. } = preps[dest].ensure(
-                platform,
-                &objects,
-                items[dest].id,
-                items[dest].mode.kind(),
-                items[dest].path.as_bstr(),
-                ResourceKind::NewOrDestination,
-            )?
-            else {
+    if matcher.simple {
+        let mut candidates = Vec::new();
+        for dest in 0..items.len() {
+            if !is_similarity_destination(&items[dest], track_empty) {
+                continue;
+            }
+            let Some(dst_len) = matcher.prepare_destination(items, dest)? else {
                 continue;
             };
-            let dst_len = data.len();
-            if dst_len == 0 {
-                continue;
-            }
-
-            let dest_name = filename(&items[dest].path).to_vec();
-            candidates.clear();
-
-            for (src_pos, &source) in source_candidates.iter().enumerate() {
-                if items[source].emitted || !compatible(items[source].mode, items[dest].mode) {
-                    continue;
-                }
-                checks += 1;
-                let src_len = match preps[source].ensure_len(
-                    platform,
-                    &objects,
-                    items[source].id,
-                    items[source].mode.kind(),
-                    items[source].path.as_bstr(),
-                    ResourceKind::OldOrSource,
-                )? {
-                    Some(len) => len,
-                    None => continue,
-                };
-                if !size_bound_passes(src_len, dst_len, percentage) {
-                    continue;
-                }
-
-                // Lazily compute line profiles once for items that pass size bounds.
-                let (dst_profile, src_profile) = ensure_pair_profiles(&mut preps, dest, source);
-                let upper_sim = upper_similarity(src_len, dst_len, src_profile, dst_profile);
-                if upper_sim < percentage {
-                    continue;
-                }
-                let same_name = filename(&items[source].path) == dest_name.as_slice();
-                candidates.push(SimilarityCandidate {
-                    src_idx: source,
-                    src_pos,
-                    upper_sim,
-                    same_name,
-                });
-            }
-
-            if max_checks != 0 && checks > max_checks {
+            matcher.fill_candidates(items, dest, dst_len, &mut candidates)?;
+            if matcher.budget_spent() {
                 return Ok(());
             }
             if candidates.is_empty() {
                 continue;
             }
-
-            sort_candidates(&mut candidates);
-            let dst_data = preps[dest].data().expect("text dest");
-            let mut best: Option<(usize, usize, f32, bool)> = None;
-
-            for &cand in &candidates {
-                if !candidate_can_beat(best, cand) {
-                    break;
-                }
-                let src_data = preps[cand.src_idx].data().expect("text src");
-                let sim = similarity_bytes(src_data, dst_data, algorithm, &mut diff);
-                if sim < percentage {
-                    continue;
-                }
-                if is_better_match(best, cand.src_pos, sim, cand.same_name) {
-                    best = Some((cand.src_idx, cand.src_pos, sim, cand.same_name));
-                }
-            }
-
-            if let Some((source, _, _, _)) = best {
+            if let Some((source, _, _, _)) = matcher.best_match(items, dest, &mut candidates, &[]) {
                 items[dest].emitted = true;
                 items[source].emitted = true;
                 pairs.push((dest, source));
             }
-        } else {
-            let dest_name = filename(&items[dest].path).to_vec();
-            let mut best: Option<(usize, f32, bool)> = None;
-            for &source in &source_candidates {
-                if items[source].emitted || !compatible(items[source].mode, items[dest].mode) {
-                    continue;
-                }
-                checks += 1;
-                let Some(sim) = similarity_via_platform(
-                    platform,
-                    &objects,
-                    items[dest].id,
-                    items[dest].mode,
-                    items[dest].path.as_bstr(),
-                    items[source].id,
-                    items[source].mode,
-                    items[source].path.as_bstr(),
-                    Some(percentage),
-                    &mut diff,
-                )?
-                else {
-                    continue;
-                };
-                if sim < percentage {
-                    continue;
-                }
-                let same_name = filename(&items[source].path) == dest_name.as_slice();
-                let better = best.is_none_or(|(_, best_similarity, best_same_name)| {
-                    sim > best_similarity
-                        || (sim == best_similarity && same_name && !best_same_name)
-                });
-                if better {
-                    best = Some((source, sim, same_name));
-                }
-            }
-            if let Some((source, _, _)) = best {
-                items[dest].emitted = true;
-                items[source].emitted = true;
-                pairs.push((dest, source));
-            }
-            if max_checks != 0 && checks > max_checks {
-                return Ok(());
-            }
+        }
+        return Ok(());
+    }
+
+    for dest in 0..items.len() {
+        if !is_similarity_destination(&items[dest], track_empty) {
+            continue;
+        }
+        let best = matcher.best_via_platform(items, dest, Some(percentage))?;
+        if matcher.budget_spent() {
+            return Ok(());
+        }
+        if let Some((source, _, _)) = best {
+            items[dest].emitted = true;
+            items[source].emitted = true;
+            pairs.push((dest, source));
         }
     }
     Ok(())
 }
 
+/// Similarity pass for one tracked destination.
+///
+/// The destination is checked first: if no source can reach the threshold, the
+/// pass returns without touching the destinations before it. Otherwise the
+/// pass runs in gix's destination order up to `target`, so the sources earlier
+/// destinations consume are the same ones the tracker would have consumed.
+#[allow(clippy::too_many_arguments)]
+fn match_similarity_target(
+    items: &mut [Item],
+    repo: &gix::Repository,
+    track_empty: bool,
+    percentage: f32,
+    max_checks: usize,
+    limit: usize,
+    target: usize,
+) -> Result<Option<usize>> {
+    if !is_similarity_destination(&items[target], track_empty) {
+        return Ok(None);
+    }
+    let source_count = items
+        .iter()
+        .filter(|item| !item.added && !item.emitted)
+        .count();
+    if source_count == 0 {
+        return Ok(None);
+    }
+    let destinations = items
+        .iter()
+        .filter(|item| item.added && !item.emitted)
+        .count();
+    if limit != 0
+        && (source_count as u128) * (destinations as u128) > (limit as u128).saturating_pow(2)
+    {
+        return Ok(None);
+    }
+
+    let mut matcher = SimilarityMatcher::new(items, repo, None, percentage, max_checks)?;
+
+    if matcher.simple {
+        let Some(target_len) = matcher.prepare_destination(items, target)? else {
+            return Ok(None);
+        };
+        let mut target_candidates = Vec::new();
+        matcher.fill_candidates(items, target, target_len, &mut target_candidates)?;
+        if target_candidates.is_empty() {
+            return Ok(None);
+        }
+        let mut cached = Vec::new();
+        if !matcher.target_reachable(target, &mut target_candidates, &mut cached) {
+            return Ok(None);
+        }
+
+        let mut candidates = Vec::new();
+        for dest in 0..=target {
+            if !is_similarity_destination(&items[dest], track_empty) {
+                continue;
+            }
+            if dest == target {
+                matcher.checks += matcher.compatible_source_count(items, dest);
+                if matcher.budget_spent() {
+                    return Ok(None);
+                }
+                return Ok(matcher
+                    .best_match(items, dest, &mut target_candidates, &cached)
+                    .map(|(source, _, _, _)| source));
+            }
+            let Some(dst_len) = matcher.prepare_destination(items, dest)? else {
+                continue;
+            };
+            matcher.fill_candidates(items, dest, dst_len, &mut candidates)?;
+            if matcher.budget_spent() {
+                return Ok(None);
+            }
+            if candidates.is_empty() {
+                continue;
+            }
+            if let Some((source, _, _, _)) = matcher.best_match(items, dest, &mut candidates, &[]) {
+                items[dest].emitted = true;
+                items[source].emitted = true;
+            }
+        }
+        return Ok(None);
+    }
+
+    if !matcher.any_source_reaches(items, target)? {
+        return Ok(None);
+    }
+    for dest in 0..=target {
+        if !is_similarity_destination(&items[dest], track_empty) {
+            continue;
+        }
+        let best = matcher.best_via_platform(items, dest, Some(percentage))?;
+        if matcher.budget_spent() {
+            return Ok(None);
+        }
+        if let Some((source, _, _)) = best {
+            items[dest].emitted = true;
+            items[source].emitted = true;
+            if dest == target {
+                return Ok(Some(source));
+            }
+        }
+    }
+    Ok(None)
+}
+
+/// State the similarity passes share: the diff platform, cached object reads,
+/// prepared blobs, and the check budget gix uses to bound pathological walks.
+struct SimilarityMatcher<'repo> {
+    platform: gix::diff::blob::Platform,
+    objects: CachedObjects<'repo>,
+    preps: Vec<PreparedBlob>,
+    diff: Diff,
+    algorithm: Algorithm,
+    percentage: f32,
+    max_checks: usize,
+    checks: usize,
+    sources: Vec<usize>,
+    simple: bool,
+}
+
+impl<'repo> SimilarityMatcher<'repo> {
+    fn new(
+        items: &[Item],
+        repo: &'repo gix::Repository,
+        blobs: Option<&'repo BlobCache>,
+        percentage: f32,
+        max_checks: usize,
+    ) -> Result<Self> {
+        let mut platform = repo
+            .diff_resource_cache_for_tree_diff()
+            .map_err(Error::gix)?;
+        // Similarity only compares what git itself would diff; leaving this on
+        // would turn an external diff driver into an unscoreable candidate.
+        platform
+            .options
+            .skip_internal_diff_if_external_is_configured = false;
+        let simple = platform.filter.drivers().is_empty();
+        let algorithm = platform.options.algorithm.unwrap_or(Algorithm::Histogram);
+        let sources = items
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| (!item.added && !item.emitted).then_some(index))
+            .collect();
+        Ok(Self {
+            platform,
+            objects: CachedObjects::new(repo, blobs),
+            preps: vec![PreparedBlob::Unloaded; items.len()],
+            diff: Diff::default(),
+            algorithm,
+            percentage,
+            max_checks,
+            checks: 0,
+            sources,
+            simple,
+        })
+    }
+
+    fn budget_spent(&self) -> bool {
+        self.max_checks != 0 && self.checks > self.max_checks
+    }
+
+    /// The destination's text length, or `None` when it cannot take part in a
+    /// similarity diff.
+    fn prepare_destination(&mut self, items: &[Item], dest: usize) -> Result<Option<usize>> {
+        Ok(self.preps[dest]
+            .ensure_len(
+                &mut self.platform,
+                &self.objects,
+                items[dest].id,
+                items[dest].mode.kind(),
+                items[dest].path.as_bstr(),
+                ResourceKind::NewOrDestination,
+            )?
+            .filter(|len| *len > 0))
+    }
+
+    /// Fill `out` with the sources that can still reach the threshold, in the
+    /// tracker's source order.
+    fn fill_candidates(
+        &mut self,
+        items: &[Item],
+        dest: usize,
+        dst_len: usize,
+        out: &mut Vec<SimilarityCandidate>,
+    ) -> Result<()> {
+        out.clear();
+        let dest_name = filename(&items[dest].path).to_vec();
+        for (src_pos, &source) in self.sources.iter().enumerate() {
+            if items[source].emitted || !compatible(items[source].mode, items[dest].mode) {
+                continue;
+            }
+            self.checks += 1;
+            let Some(src_len) = self.preps[source].ensure_len(
+                &mut self.platform,
+                &self.objects,
+                items[source].id,
+                items[source].mode.kind(),
+                items[source].path.as_bstr(),
+                ResourceKind::OldOrSource,
+            )?
+            else {
+                continue;
+            };
+            if !size_bound_passes(src_len, dst_len, self.percentage) {
+                continue;
+            }
+
+            // Lazily compute line profiles once for items that pass size bounds.
+            let (dst_profile, src_profile) = ensure_pair_profiles(&mut self.preps, dest, source);
+            let upper_sim = upper_similarity(src_len, dst_len, src_profile, dst_profile);
+            if upper_sim < self.percentage {
+                continue;
+            }
+            out.push(SimilarityCandidate {
+                src_idx: source,
+                src_pos,
+                upper_sim,
+                same_name: filename(&items[source].path) == dest_name.as_slice(),
+            });
+        }
+        Ok(())
+    }
+
+    /// The best candidate that reaches the threshold. `cache` holds scores the
+    /// tracked destination already computed, so they are not recomputed here.
+    fn best_match(
+        &mut self,
+        items: &[Item],
+        dest: usize,
+        candidates: &mut [SimilarityCandidate],
+        cache: &[(usize, f32)],
+    ) -> Option<(usize, usize, f32, bool)> {
+        sort_candidates(candidates);
+        let dst_data = self.preps[dest].data().expect("text dest");
+        let mut best: Option<(usize, usize, f32, bool)> = None;
+
+        for &cand in candidates.iter() {
+            if items[cand.src_idx].emitted {
+                continue;
+            }
+            if !candidate_can_beat(best, cand) {
+                break;
+            }
+            let sim = match cache.iter().find(|(source, _)| *source == cand.src_idx) {
+                Some(&(_, sim)) => sim,
+                None => {
+                    let src_data = self.preps[cand.src_idx].data().expect("text src");
+                    similarity_bytes(src_data, dst_data, self.algorithm, &mut self.diff)
+                }
+            };
+            if sim < self.percentage {
+                continue;
+            }
+            if is_better_match(best, cand.src_pos, sim, cand.same_name) {
+                best = Some((cand.src_idx, cand.src_pos, sim, cand.same_name));
+            }
+        }
+        best
+    }
+
+    /// Whether the tracked destination has any source reaching the threshold,
+    /// recording the scores it computed so the full pass can reuse them.
+    fn target_reachable(
+        &mut self,
+        target: usize,
+        candidates: &mut [SimilarityCandidate],
+        cache: &mut Vec<(usize, f32)>,
+    ) -> bool {
+        sort_candidates(candidates);
+        let target_data = self.preps[target].data().expect("text target");
+        for &cand in candidates.iter() {
+            let src_data = self.preps[cand.src_idx].data().expect("text src");
+            let sim = similarity_bytes(src_data, target_data, self.algorithm, &mut self.diff);
+            cache.push((cand.src_idx, sim));
+            if sim >= self.percentage {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn compatible_source_count(&self, items: &[Item], dest: usize) -> usize {
+        self.sources
+            .iter()
+            .filter(|&&source| {
+                !items[source].emitted && compatible(items[source].mode, items[dest].mode)
+            })
+            .count()
+    }
+
+    fn any_source_reaches(&mut self, items: &[Item], dest: usize) -> Result<bool> {
+        for &source in &self.sources {
+            if !compatible(items[source].mode, items[dest].mode) {
+                continue;
+            }
+            if let Some(sim) = similarity_via_platform(
+                &mut self.platform,
+                &self.objects,
+                items[dest].id,
+                items[dest].mode,
+                items[dest].path.as_bstr(),
+                items[source].id,
+                items[source].mode,
+                items[source].path.as_bstr(),
+                Some(self.percentage),
+                &mut self.diff,
+            )? && sim >= self.percentage
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// The fallback when custom diff drivers or filters are configured: each
+    /// pair goes through the platform, which may refuse to diff it at all.
+    fn best_via_platform(
+        &mut self,
+        items: &[Item],
+        dest: usize,
+        min_percentage: Option<f32>,
+    ) -> Result<Option<(usize, f32, bool)>> {
+        let dest_name = filename(&items[dest].path).to_vec();
+        let mut best: Option<(usize, f32, bool)> = None;
+        for &source in &self.sources {
+            if source == dest
+                || items[source].emitted
+                || !compatible(items[source].mode, items[dest].mode)
+            {
+                continue;
+            }
+            self.checks += 1;
+            let Some(sim) = similarity_via_platform(
+                &mut self.platform,
+                &self.objects,
+                items[dest].id,
+                items[dest].mode,
+                items[dest].path.as_bstr(),
+                items[source].id,
+                items[source].mode,
+                items[source].path.as_bstr(),
+                Some(best.map_or_else(
+                    || min_percentage.unwrap_or(self.percentage),
+                    |(_, best, _)| best,
+                )),
+                &mut self.diff,
+            )?
+            else {
+                continue;
+            };
+            if sim < self.percentage {
+                continue;
+            }
+            let same_name = filename(&items[source].path) == dest_name.as_slice();
+            let better = best.is_none_or(|(_, best_similarity, best_same_name)| {
+                sim > best_similarity || (sim == best_similarity && same_name && !best_same_name)
+            });
+            if better {
+                best = Some((source, sim, same_name));
+            }
+        }
+        Ok(best)
+    }
+}
+
 /// Object lookup wrapper that serves decoded Added/Deleted blobs directly from
 /// `BlobCache` when present and records newly read blobs so `commit_stat` or a
 /// subsequent pass does not re-inflate or re-scan them.
-pub(crate) struct CachedObjects<'a> {
+struct CachedObjects<'a> {
     repo: &'a gix::Repository,
     blobs: Option<&'a BlobCache>,
     empty_blob: Oid,
 }
 
 impl<'a> CachedObjects<'a> {
-    pub(crate) fn new(repo: &'a gix::Repository, blobs: Option<&'a BlobCache>) -> Self {
+    fn new(repo: &'a gix::Repository, blobs: Option<&'a BlobCache>) -> Self {
         Self {
             repo,
             blobs,
@@ -392,7 +841,7 @@ impl<'a> CachedObjects<'a> {
         }
     }
 
-    pub(crate) fn cached_data(&self, id: Oid) -> Option<CachedBlob> {
+    fn cached_data(&self, id: Oid) -> Option<CachedBlob> {
         self.blobs.and_then(|cache| cache.get(id))
     }
 }
@@ -449,7 +898,7 @@ impl gix::objs::FindHeader for CachedObjects<'_> {
 }
 
 #[derive(Clone)]
-pub(crate) enum PreparedBlob {
+enum PreparedBlob {
     Unloaded,
     Skip,
     Text {
@@ -459,7 +908,7 @@ pub(crate) enum PreparedBlob {
 }
 
 impl PreparedBlob {
-    pub(crate) fn ensure(
+    fn ensure(
         &mut self,
         platform: &mut gix::diff::blob::Platform,
         objects: &CachedObjects<'_>,
@@ -506,7 +955,7 @@ impl PreparedBlob {
         Ok(self)
     }
 
-    pub(crate) fn ensure_len(
+    fn ensure_len(
         &mut self,
         platform: &mut gix::diff::blob::Platform,
         objects: &CachedObjects<'_>,
@@ -522,14 +971,14 @@ impl PreparedBlob {
         })
     }
 
-    pub(crate) fn data(&self) -> Option<&[u8]> {
+    fn data(&self) -> Option<&[u8]> {
         match self {
             Self::Text { data, .. } => Some(data),
             Self::Unloaded | Self::Skip => None,
         }
     }
 
-    pub(crate) fn ensure_profile(&mut self) -> Option<&LineProfile> {
+    fn ensure_profile(&mut self) -> Option<&LineProfile> {
         match self {
             Self::Text { data, profile } => {
                 Some(profile.get_or_insert_with(|| LineProfile::new(data)))
@@ -539,7 +988,7 @@ impl PreparedBlob {
     }
 }
 
-pub(crate) fn ensure_pair_profiles(
+fn ensure_pair_profiles(
     preps: &mut [PreparedBlob],
     dest_idx: usize,
     src_idx: usize,
@@ -572,12 +1021,12 @@ struct LineCount {
 /// bucket with a larger count, so the multiset intersection sum can only
 /// overestimate (never underestimate) the bytes that an edit script may match.
 #[derive(Clone)]
-pub(crate) struct LineProfile {
+struct LineProfile {
     entries: Vec<LineCount>,
 }
 
 impl LineProfile {
-    pub(crate) fn new(data: &[u8]) -> Self {
+    fn new(data: &[u8]) -> Self {
         if data.is_empty() {
             return Self {
                 entries: Vec::new(),
@@ -614,7 +1063,7 @@ impl LineProfile {
         Self { entries }
     }
 
-    pub(crate) fn matched_bytes_upper_bound(&self, other: &Self) -> usize {
+    fn matched_bytes_upper_bound(&self, other: &Self) -> usize {
         let a = &self.entries;
         let b = &other.entries;
         let mut i = 0usize;
@@ -656,7 +1105,7 @@ fn hash_line(bytes: &[u8]) -> u64 {
 }
 
 #[inline]
-pub(crate) fn size_bound_passes(old_len: usize, new_len: usize, percentage: f32) -> bool {
+fn size_bound_passes(old_len: usize, new_len: usize, percentage: f32) -> bool {
     let longest = old_len.max(new_len);
     if longest == 0 {
         return false;
@@ -665,7 +1114,7 @@ pub(crate) fn size_bound_passes(old_len: usize, new_len: usize, percentage: f32)
 }
 
 #[inline]
-pub(crate) fn upper_similarity(
+fn upper_similarity(
     old_len: usize,
     new_len: usize,
     old_profile: &LineProfile,
@@ -683,14 +1132,14 @@ pub(crate) fn upper_similarity(
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct SimilarityCandidate {
-    pub(crate) src_idx: usize,
-    pub(crate) src_pos: usize,
-    pub(crate) upper_sim: f32,
-    pub(crate) same_name: bool,
+struct SimilarityCandidate {
+    src_idx: usize,
+    src_pos: usize,
+    upper_sim: f32,
+    same_name: bool,
 }
 
-pub(crate) fn sort_candidates(candidates: &mut [SimilarityCandidate]) {
+fn sort_candidates(candidates: &mut [SimilarityCandidate]) {
     candidates.sort_unstable_by(|a, b| {
         b.upper_sim
             .total_cmp(&a.upper_sim)
@@ -700,10 +1149,7 @@ pub(crate) fn sort_candidates(candidates: &mut [SimilarityCandidate]) {
 }
 
 #[inline]
-pub(crate) fn candidate_can_beat(
-    best: Option<(usize, usize, f32, bool)>,
-    cand: SimilarityCandidate,
-) -> bool {
+fn candidate_can_beat(best: Option<(usize, usize, f32, bool)>, cand: SimilarityCandidate) -> bool {
     let Some((_, best_pos, best_sim, best_same_name)) = best else {
         return true;
     };
@@ -715,7 +1161,7 @@ pub(crate) fn candidate_can_beat(
 }
 
 #[inline]
-pub(crate) fn is_better_match(
+fn is_better_match(
     best: Option<(usize, usize, f32, bool)>,
     src_pos: usize,
     sim: f32,
@@ -732,12 +1178,7 @@ pub(crate) fn is_better_match(
 
 /// Exact gix similarity score over two text blobs, reusing `diff` and skipping
 /// identical leading/trailing lines.
-pub(crate) fn similarity_bytes(
-    old: &[u8],
-    new: &[u8],
-    algorithm: Algorithm,
-    diff: &mut Diff,
-) -> f32 {
+fn similarity_bytes(old: &[u8], new: &[u8], algorithm: Algorithm, diff: &mut Diff) -> f32 {
     let longest = old.len().max(new.len());
     if longest == 0 {
         return 0.0;
@@ -773,7 +1214,7 @@ pub(crate) fn similarity_bytes(
 /// Fallback similarity computation using full `gix::diff::blob::Platform` when
 /// custom diff drivers or filters are configured.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn similarity_via_platform(
+fn similarity_via_platform(
     platform: &mut gix::diff::blob::Platform,
     objects: &CachedObjects<'_>,
     dest_id: Oid,
@@ -820,13 +1261,30 @@ pub(crate) fn similarity_via_platform(
     Ok(Some(similarity_bytes(old, new, algorithm, diff)))
 }
 
-fn wants_destination(items: &[Item], index: usize, track_empty: bool) -> bool {
-    let item = &items[index];
-    item.added && !item.emitted && (track_empty || item.id != Oid::empty_blob(item.id.kind()))
+/// Destinations the exact-id pass may pair. The parent pass only looks at
+/// directories; the general pass also pairs the empty files of a rewritten
+/// directory, which gix keeps even when empty.
+fn is_identity_destination(item: &Item, track_empty: bool, parents_only: bool) -> bool {
+    if !item.added || item.emitted {
+        return false;
+    }
+    if parents_only {
+        return matches!(item.relation, Some(Relation::Parent(_)));
+    }
+    track_empty
+        || matches!(item.relation, Some(Relation::ChildOfParent(_)))
+        || item.id != Oid::empty_blob(item.id.kind())
 }
 
-fn is_source(items: &[Item], index: usize) -> bool {
-    !items[index].added && !items[index].emitted
+/// Destinations the similarity pass may pair: an added, unpaired file that the
+/// tracker still considers, including empty files inside a rewritten directory.
+fn is_similarity_destination(item: &Item, track_empty: bool) -> bool {
+    item.added
+        && !item.emitted
+        && item.mode.is_blob()
+        && (track_empty
+            || matches!(item.relation, Some(Relation::ChildOfParent(_)))
+            || item.id != Oid::empty_blob(item.id.kind()))
 }
 
 /// The entry kinds rewrite detection may pair, as gix decides it.
@@ -834,12 +1292,11 @@ fn compatible(a: EntryMode, b: EntryMode) -> bool {
     use gix::object::tree::EntryKind::*;
     matches!(
         (a.kind(), b.kind()),
-        (Blob | BlobExecutable, Blob | BlobExecutable) | (Link, Link) | (Commit, Commit)
+        (Blob | BlobExecutable, Blob | BlobExecutable)
+            | (Link, Link)
+            | (Tree, Tree)
+            | (Commit, Commit)
     )
-}
-
-fn is_blob(mode: EntryMode) -> bool {
-    mode.is_blob()
 }
 
 fn filename(path: &BString) -> &[u8] {
