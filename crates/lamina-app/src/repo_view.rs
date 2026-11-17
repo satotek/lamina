@@ -1632,6 +1632,15 @@ impl RepoView {
                 }
             }
             SessionEvent::OperationProgress { id, text, percent } => {
+                if text == lamina_core::lfs::FILTER_INSTALLED_EVENT {
+                    // A successful LFS track that also configured the filter.
+                    // The note stays after the operation finishes so the user
+                    // knows the repository changed beyond `.gitattributes`.
+                    self.status_note = Some(t!("lfs.filter_installed").to_string());
+                    self.status_error = None;
+                    self.notify_if_active(cx);
+                    return;
+                }
                 if let Some(pending) = &mut self.multi_pick
                     && let Some(skipped) = commit_selection::parse_skipped(&text)
                 {
