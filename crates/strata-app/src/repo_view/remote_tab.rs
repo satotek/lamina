@@ -331,6 +331,19 @@ impl RepoView {
                 .is_some_and(|tab| tab.placeholder || tab.error.is_some())
     }
 
+    /// Why a command that needs a session cannot run.
+    ///
+    /// A restored remote tab has no repository open yet, but the generic
+    /// no-repository reason would tell the user to open one instead of the
+    /// Connect button the tab is showing.
+    pub(crate) fn no_session_reason(&self) -> String {
+        if self.remote_not_connected() {
+            t!("remote.not_connected").to_string()
+        } else {
+            t!("remote.no_session").to_string()
+        }
+    }
+
     /// Asks for a fresh status. A watched remote tab already hears outside
     /// edits; this is how the user asks anyway, and how an unwatched helper
     /// catches up. A local tab uses the same request; its watcher is not replaced.
