@@ -2173,7 +2173,7 @@ impl RepoView {
         cx: &mut Context<Self>,
     ) {
         let Some(state) = self.history_menu_state() else {
-            self.note_history_refusal(t!("remote.no_session").to_string(), cx);
+            self.note_history_refusal(self.no_session_reason(), cx);
             return;
         };
         if let Some(reason) = state.blocked_for(HistoryAction::Revert, commit) {
@@ -2230,7 +2230,7 @@ impl RepoView {
         cx: &mut Context<Self>,
     ) {
         let Some(state) = self.history_menu_state() else {
-            self.note_history_refusal(t!("remote.no_session").to_string(), cx);
+            self.note_history_refusal(self.no_session_reason(), cx);
             return;
         };
         if let Some(reason) = state.blocked(HistoryAction::CheckoutCommit) {
