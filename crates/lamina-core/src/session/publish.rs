@@ -32,6 +32,7 @@ pub(crate) struct PendingRefresh {
     pub(crate) index: bool,
     pub(crate) worktree: bool,
     pub(crate) config: bool,
+    pub(crate) worktrees: bool,
     pub(crate) rescan: bool,
 }
 
@@ -42,6 +43,7 @@ impl PendingRefresh {
         self.index |= changes.index;
         self.worktree |= changes.worktree;
         self.config |= changes.config;
+        self.worktrees |= changes.worktrees;
         self.rescan |= changes.rescan;
     }
 

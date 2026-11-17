@@ -1416,6 +1416,12 @@ fn on_watch(
         let generation = shared.begin_reload();
         let _ = load.send(LoadCommand { generation });
     }
+    // The worktree list sits outside the snapshot and is re-read on every
+    // publish, so a registration change only needs a fresh generation. A
+    // reload above publishes one already.
+    if changes.worktrees && !(changes.refs || changes.head) {
+        shared.publish(|_| {});
+    }
     // A history reload re-reads the configuration anyway; the extra refresh is
     // only needed for a config edit that no reload covers.
     let config = changes.config && !(changes.refs || changes.head);
