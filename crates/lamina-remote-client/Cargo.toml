@@ -10,3 +10,4 @@ description = "Client-side remote repository session for Lamina"
 [dependencies]
 lamina-core = { workspace = true }
 lamina-remote-protocol = { workspace = true }
+log = "0.4"

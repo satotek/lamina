@@ -26,6 +26,7 @@ use gpui_component::{Icon, Sizable as _, WindowExt as _};
 use gpui_kit_assets::IconName;
 use lamina_core::session::{Operation, OperationId, RepoSnapshot};
 use lamina_core::{HeadInfo, RefInfo, RefKind, RepoState, UpstreamInfo};
+use log::{info, warn};
 
 use crate::activity::ActivityKind;
 use crate::data::Source;
@@ -551,6 +552,15 @@ impl Remote {
         }
 
         let failure = error.map(|error| (classify(error), first_error_line(error)));
+        if running.trigger == Trigger::Automatic {
+            match &failure {
+                Some((failure, _)) => warn!(
+                    "remote: automatic {} failed ({failure:?})",
+                    running.kind.label()
+                ),
+                None => info!("remote: automatic {} succeeded", running.kind.label()),
+            }
+        }
         // A fetch or push changes the upstreams and pull requests the badges
         // describe. A failed one leaves them as they were.
         let refresh = failure.is_none() && matches!(running.kind, Kind::Fetch | Kind::Push);
@@ -1152,6 +1162,13 @@ impl RepoView {
             return;
         };
         let id = session.run(operation);
+        if trigger == Trigger::Automatic {
+            info!(
+                "remote: automatic {} started as operation {}",
+                kind.label(),
+                id.0
+            );
+        }
         self.activity.begin(id, ActivityKind::Remote, cx);
         self.remote.running = Some(Running {
             id,
