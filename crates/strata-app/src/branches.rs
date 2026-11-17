@@ -3838,11 +3838,30 @@ fn commit_label(commit: Option<strata_core::Oid>) -> String {
 fn worktree_label(worktree: &WorktreeInfo) -> String {
     match &worktree.head {
         Some(HeadInfo::Branch { short_name, .. }) => short_name.clone(),
-        Some(HeadInfo::Detached { target }) => t!(
-            "branch.detail.detached",
-            oid = crate::data::short_oid(*target)
-        )
-        .to_string(),
+        Some(HeadInfo::Detached { target }) => {
+            let detached = t!(
+                "branch.detail.detached",
+                oid = crate::data::short_oid(*target)
+            )
+            .to_string();
+            // Two detached checkouts named only by their commit are
+            // indistinguishable; the directory's last component tells them
+            // apart while the row's tooltip keeps the full path.
+            match worktree
+                .path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .filter(|name| !name.is_empty())
+            {
+                Some(name) => t!(
+                    "branch.detail.detached_named",
+                    detached = detached,
+                    name = name
+                )
+                .to_string(),
+                None => detached,
+            }
+        }
         None => t!("branch.detail.unknown_head").to_string().to_owned(),
     }
 }
@@ -7120,8 +7139,8 @@ mod tests {
         );
         assert_eq!(
             worktree_label(&worktrees[2]),
-            "detached abababa",
-            "a detached checkout is named by its short commit"
+            "detached abababa · strata-gone",
+            "a detached checkout still has to be distinguishable by its directory"
         );
         let labels: Vec<String> = rows
             .iter()
