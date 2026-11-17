@@ -422,6 +422,41 @@ fn mergetool_resolves_the_path_with_the_configured_tool() {
     assert_eq!(parents.split_whitespace().count(), 3);
 }
 
+#[test]
+fn continuing_a_merge_drops_the_prepared_conflict_comments() {
+    let repo = conflict_repo();
+    let merge = repo.git_output(&["merge", "side"]);
+    assert!(!merge.status.success(), "the merge should conflict");
+
+    // git writes the conflict summary into the message the editor would open,
+    // marked with `core.commentChar` so an editor or clean-up can drop it.
+    let prepared = repo.read(".git/MERGE_MSG");
+    assert!(
+        prepared.contains("# Conflicts:"),
+        "precondition: the prepared message carries the conflict summary: {prepared}"
+    );
+
+    repo.write("conflict.txt", "resolved\n");
+    repo.git(&["add", "conflict.txt"]);
+    repo.git_handle()
+        .merge_continue()
+        .expect("finish the merge");
+
+    let body = repo.git(&["log", "-1", "--format=%B"]);
+    assert!(
+        body.contains("Merge branch 'side'"),
+        "the merge subject is kept: {body}"
+    );
+    assert!(
+        !body.lines().any(|line| line.starts_with('#')),
+        "the committed message must not keep git's comment lines: {body}"
+    );
+    assert!(
+        !body.contains("Conflicts:"),
+        "the conflict summary is not part of the merge commit: {body}"
+    );
+}
+
 struct Harness {
     // Session first: it owns threads and a watcher that must stop before the
     // temporary repository disappears.

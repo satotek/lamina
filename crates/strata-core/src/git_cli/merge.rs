@@ -111,8 +111,14 @@ impl Git {
     }
 
     /// Commit a stopped merge with the message git prepared in `MERGE_MSG`.
+    ///
+    /// `--cleanup=strip` is what git applies to an edited message, and it
+    /// removes the `# Conflicts:` block git wrote into `MERGE_MSG`. Without it,
+    /// `git commit --no-edit` uses the `whitespace` cleanup and stores those
+    /// comment lines in the merge commit's body. git does the stripping itself
+    /// so `core.commentChar` keeps working.
     pub fn merge_continue(&self) -> Result<()> {
-        self.run(&["commit", "--no-edit"], None)?;
+        self.run(&["commit", "--no-edit", "--cleanup=strip"], None)?;
         Ok(())
     }
 
