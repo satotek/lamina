@@ -1752,6 +1752,7 @@ pub(crate) fn open_tabs_window(
     });
     match opened {
         Ok(handle) => {
+            crate::window_registry::track(handle.window_id(), cx);
             let _ = handle.update(cx, |_, window, _| window.activate_window());
         }
         Err(error) => log::warn!("cannot open a repository window: {error}"),
@@ -1788,6 +1789,7 @@ pub(crate) fn open_compare_window(target: CompareTarget, window_size: (f32, f32)
     });
     match opened {
         Ok(handle) => {
+            crate::window_registry::track(handle.window_id(), cx);
             let _ = handle.update(cx, |_, window, _| window.activate_window());
         }
         Err(error) => log::warn!("cannot open a compare window: {error}"),

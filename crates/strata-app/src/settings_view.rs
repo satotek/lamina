@@ -100,6 +100,7 @@ fn open(cx: &mut App) {
 
     match opened {
         Ok(handle) => {
+            crate::window_registry::track(handle.window_id(), cx);
             cx.global_mut::<OpenSettingsWindow>().0 = Some(handle.into());
             cx.activate(true);
         }

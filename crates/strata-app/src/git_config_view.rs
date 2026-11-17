@@ -154,6 +154,7 @@ fn open(cx: &mut App) {
 
     match opened {
         Ok(handle) => {
+            crate::window_registry::track(handle.window_id(), cx);
             let view = view_slot.borrow_mut().take().map(|view| view.downgrade());
             if cx.has_global::<OpenConfigWindow>() {
                 let global = cx.global_mut::<OpenConfigWindow>();

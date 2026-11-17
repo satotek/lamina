@@ -72,6 +72,7 @@ mod tabs;
 mod terminal_panel;
 mod tools;
 mod ui;
+mod window_registry;
 mod workspace;
 mod worktree_panel;
 mod zoom;
@@ -132,6 +133,9 @@ fn main() {
 
     app.run(move |cx: &mut App| {
         gpui_component::init(cx);
+        // Window tracking has to exist before the first window opens, because
+        // closing the last one is what ends the app off macOS.
+        window_registry::init(cx);
         style::theme::init(cx);
         settings::init(cx);
         i18n::apply(cx);
@@ -325,6 +329,7 @@ fn open_window(launch: Option<Launch>, gallery: bool, mut debug: DebugLaunch, cx
     });
 
     let handle = opened.expect("failed to open the Strata window");
+    window_registry::track(handle.window_id(), cx);
     if let Some(dialog) = window_dialog {
         debug_launch::open_window_dialog(handle.into(), dialog, cx);
     }
