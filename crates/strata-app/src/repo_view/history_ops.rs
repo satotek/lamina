@@ -25,8 +25,8 @@ use gpui_component::dialog::DialogFooter;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{PopupMenu, PopupMenuItem};
 use strata_core::git_cli::{
-    MoveDirection, RebaseAction, RebaseStep, drop_commit, move_commit, reword_commit,
-    squash_commit_into_parent,
+    AcrossMergesAction, MoveDirection, RebaseAction, RebaseStep, drop_commit, move_commit,
+    reword_commit, squash_commit_into_parent,
 };
 use strata_core::session::{Operation, RepoReader, RepoSnapshot, RepositorySession, ResetMode};
 use strata_core::{ChangeKind, Error, HeadInfo, Oid, RefKind, RepoState, Result, WorktreeStatus};
@@ -394,6 +394,8 @@ pub(crate) struct EditContext {
     /// reachable without being on the first-parent line, which the entries
     /// explain differently from a commit on another branch.
     reachable: bool,
+    /// The shape around a commit a merge brought in, when it is one.
+    side: Option<SideView>,
     head: Oid,
     /// Remote-tracking refs, as `(short name, tip)`.
     remotes: Vec<(String, Oid)>,
@@ -420,6 +422,7 @@ impl EditContext {
             line,
             distance,
             reachable: distance.is_some(),
+            side: None,
             head,
             remotes,
             snapshot,
@@ -429,6 +432,9 @@ impl EditContext {
         // the full ancestry check to tell it apart from one on another branch.
         if !context.reachable {
             context.reachable = context.reaches(commit, head);
+            if context.reachable {
+                context.side = context.side_view(commit);
+            }
         }
         Some(context)
     }
@@ -439,7 +445,26 @@ impl EditContext {
             line: &self.line,
             distance: self.distance,
             reachable: self.reachable,
+            side: self.side,
         }
+    }
+
+    /// Reads what the rules need about a merged-in commit: whether it and its
+    /// parent are merges, and whether the parent is already back on HEAD's
+    /// line, where the merged branch forked.
+    fn side_view(&self, commit: Oid) -> Option<SideView> {
+        let parents_of =
+            |id: Oid| snapshot_parents(&self.snapshot, id).or_else(|| self.repo.parents(id).ok());
+        let parents = parents_of(commit)?;
+        let parent = parents.first().copied();
+        Some(SideView {
+            is_merge: parents.len() > 1,
+            parent_is_merge: parent
+                .and_then(parents_of)
+                .is_some_and(|grandparents| grandparents.len() > 1),
+            parent_on_line: parent
+                .is_none_or(|parent| self.line.iter().any(|(id, _)| *id == parent)),
+        })
     }
 
     /// The `onto` commit and the commits `onto..HEAD` oldest first, which is
@@ -551,6 +576,19 @@ struct LineView<'a> {
     line: &'a [LineCommit],
     distance: Option<usize>,
     reachable: bool,
+    side: Option<SideView>,
+}
+
+/// A commit HEAD reaches only through a merge's second parent, seen from the
+/// rules: `git rebase --rebase-merges` can replay its side branch, but only
+/// within that branch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SideView {
+    is_merge: bool,
+    parent_is_merge: bool,
+    /// The parent is where the side branch forked, so it is outside the
+    /// branch's own chain (also true for a root, which has no parent).
+    parent_on_line: bool,
 }
 
 impl<'a> LineView<'a> {
@@ -559,6 +597,28 @@ impl<'a> LineView<'a> {
             line,
             distance,
             reachable,
+            side: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_side(mut self, side: SideView) -> Self {
+        self.side = Some(side);
+        self
+    }
+
+    /// Whether `action` has to replay through merges with
+    /// `git rebase --rebase-merges` instead of a plain `git rebase -i`.
+    fn needs_rebase_merges(&self, action: EditAction) -> bool {
+        let Some(distance) = self.distance else {
+            return self.reachable;
+        };
+        match action {
+            EditAction::Reword => false,
+            EditAction::Drop | EditAction::MoveUp => merge_within(self.line, distance),
+            EditAction::Squash | EditAction::Fixup | EditAction::MoveDown => {
+                merge_within(self.line, distance + 1)
+            }
         }
     }
 
@@ -591,52 +651,86 @@ impl<'a> LineView<'a> {
 /// no `onto` commit to offer.
 fn blocked_on_line(view: LineView<'_>, action: EditAction) -> Option<String> {
     let Some(target) = view.target() else {
-        return Some(if view.reachable {
-            t!("history_ops.reason.merged_in").to_string()
-        } else {
-            t!("history_ops.reason.not_on_branch").to_string()
-        });
+        if !view.reachable {
+            return Some(t!("history_ops.reason.not_on_branch").to_string());
+        }
+        return blocked_on_side(view.side, action);
     };
     let distance = view.distance?;
-    // A reword only replaces a message, so it works on a root commit too.
-    if action != EditAction::Reword && target.1.is_empty() {
+    if action == EditAction::Reword {
+        // A reword only replaces a message, so it is rebuilt rather than
+        // replayed: a root or a merge in the range does not stand in its way.
+        return None;
+    }
+    if target.1.is_empty() {
         return Some(t!("history_ops.reason.root_commit").to_string());
     }
+    // `--rebase-merges` recreates merges around the commit, but a merge itself
+    // is not a `pick` it can drop, meld or move.
+    if target.1.len() > 1 {
+        return Some(t!("history_ops.reason.is_merge").to_string());
+    }
+    let is_merge = |index: usize| {
+        view.line
+            .get(index)
+            .is_some_and(|(_, parents)| parents.len() > 1)
+    };
     match action {
-        // A reword keeps every tree, so it is rebuilt rather than replayed and
-        // a merge in the range does not stand in its way.
-        EditAction::Reword => {}
-        EditAction::Drop => {
-            if view.has_merge() {
-                return Some(t!("history_ops.reason.merge").to_string());
-            }
-        }
+        EditAction::Reword | EditAction::Drop => {}
         EditAction::Squash | EditAction::Fixup => {
+            if is_merge(distance + 1) {
+                return Some(t!("history_ops.reason.parent_merge").to_string());
+            }
             if view.line.get(distance + 2).is_none() {
                 return Some(t!("history_ops.reason.parent_root").to_string());
-            }
-            if merge_within(view.line, distance + 1) {
-                return Some(t!("history_ops.reason.merge").to_string());
             }
         }
         EditAction::MoveUp => {
             if distance == 0 {
                 return Some(t!("history_ops.reason.already_newest").to_string());
             }
-            if view.has_merge() {
-                return Some(t!("history_ops.reason.merge").to_string());
+            if is_merge(distance - 1) {
+                return Some(t!("history_ops.reason.next_to_merge").to_string());
             }
         }
         EditAction::MoveDown => {
+            if is_merge(distance + 1) {
+                return Some(t!("history_ops.reason.next_to_merge").to_string());
+            }
             if view.line.get(distance + 2).is_none() {
                 return Some(t!("history_ops.reason.already_oldest").to_string());
-            }
-            if merge_within(view.line, distance + 1) {
-                return Some(t!("history_ops.reason.merge").to_string());
             }
         }
     }
     None
+}
+
+/// The same rules for a commit a merge brought in. Without its shape the
+/// commit can only be described, not edited.
+fn blocked_on_side(side: Option<SideView>, action: EditAction) -> Option<String> {
+    let merged_in = || Some(t!("history_ops.reason.merged_in").to_string());
+    let Some(side) = side else {
+        return merged_in();
+    };
+    match action {
+        // The commit-tree rebuild follows HEAD's first-parent line only.
+        EditAction::Reword => merged_in(),
+        _ if side.is_merge => Some(t!("history_ops.reason.is_merge").to_string()),
+        EditAction::Drop | EditAction::MoveUp => None,
+        EditAction::Squash | EditAction::Fixup if side.parent_on_line => {
+            Some(t!("history_ops.reason.parent_outside").to_string())
+        }
+        EditAction::MoveDown if side.parent_on_line => {
+            Some(t!("history_ops.reason.already_oldest").to_string())
+        }
+        EditAction::Squash | EditAction::Fixup if side.parent_is_merge => {
+            Some(t!("history_ops.reason.parent_merge").to_string())
+        }
+        EditAction::MoveDown if side.parent_is_merge => {
+            Some(t!("history_ops.reason.next_to_merge").to_string())
+        }
+        EditAction::Squash | EditAction::Fixup | EditAction::MoveDown => None,
+    }
 }
 
 /// Whether a merge commit sits between HEAD and the commit at `index`.
@@ -2573,6 +2667,29 @@ impl RepoView {
         } else {
             None
         };
+        if edit.view().needs_rebase_merges(action) {
+            let across = match action {
+                EditAction::Drop => AcrossMergesAction::Drop,
+                EditAction::Squash => AcrossMergesAction::Squash,
+                EditAction::Fixup => AcrossMergesAction::Fixup,
+                EditAction::MoveUp => AcrossMergesAction::Move(MoveDirection::Up),
+                EditAction::MoveDown => AcrossMergesAction::Move(MoveDirection::Down),
+                EditAction::Reword => return,
+            };
+            // Recreated merges get new ids, and a merged-in commit has no
+            // distance on the line, so the selection is not carried over.
+            let label = format!("{} {}", action.verb(), short_oid(commit));
+            self.run_operation(
+                Operation::RewriteAcrossMerges {
+                    commit,
+                    action: across,
+                },
+                label,
+                window,
+                cx,
+            );
+            return;
+        }
         let Some((onto, commits)) = edit.plan(action) else {
             return;
         };
@@ -3211,11 +3328,18 @@ mod tests {
         );
         assert_eq!(
             blocked_on_line(view_at(&merged, Some(1)), EditAction::Drop),
-            Some(t!("history_ops.reason.merge").to_string())
+            None,
+            "a drop behind a merge replays with --rebase-merges"
         );
+        assert!(view_at(&merged, Some(1)).needs_rebase_merges(EditAction::Drop));
         assert_eq!(
             blocked_on_line(view_at(&merged, Some(1)), EditAction::MoveUp),
-            Some(t!("history_ops.reason.merge").to_string())
+            Some(t!("history_ops.reason.next_to_merge").to_string()),
+            "the neighbour above is the merge, which is not a pick to swap with"
+        );
+        assert_eq!(
+            blocked_on_line(view_at(&merged, Some(0)), EditAction::Drop),
+            Some(t!("history_ops.reason.is_merge").to_string())
         );
 
         // A merge at the parent is outside a reword's range but inside a
@@ -3228,7 +3352,85 @@ mod tests {
         );
         assert_eq!(
             blocked_on_line(view_at(&merged_parent, Some(0)), EditAction::Squash),
-            Some(t!("history_ops.reason.merge").to_string())
+            Some(t!("history_ops.reason.parent_merge").to_string())
+        );
+        assert_eq!(
+            blocked_on_line(view_at(&merged_parent, Some(0)), EditAction::MoveDown),
+            Some(t!("history_ops.reason.next_to_merge").to_string())
+        );
+        // Two commits further down, the merge is only in the range.
+        let five = [oid(1), oid(2), oid(3), oid(4), oid(5)];
+        let mut far = line_of(&five);
+        far[0].1.push(oid(9));
+        let view = view_at(&far, Some(2));
+        assert!(view.needs_rebase_merges(EditAction::Squash));
+        assert!(!view_at(&line, Some(1)).needs_rebase_merges(EditAction::Squash));
+        for action in [
+            EditAction::Squash,
+            EditAction::Fixup,
+            EditAction::MoveUp,
+            EditAction::MoveDown,
+            EditAction::Drop,
+        ] {
+            assert_eq!(blocked_on_line(view, action), None, "{action:?}");
+        }
+    }
+
+    #[test]
+    fn a_merged_in_commit_is_edited_within_its_own_branch() {
+        let line = line_of(&[oid(1), oid(2), oid(3)]);
+        let side = SideView {
+            is_merge: false,
+            parent_is_merge: false,
+            parent_on_line: false,
+        };
+        let view = LineView::at(&line, None, true).with_side(side);
+        assert!(view.needs_rebase_merges(EditAction::Drop));
+        for action in [
+            EditAction::Drop,
+            EditAction::Squash,
+            EditAction::Fixup,
+            EditAction::MoveUp,
+            EditAction::MoveDown,
+        ] {
+            assert_eq!(blocked_on_line(view, action), None, "{action:?}");
+        }
+        assert_eq!(
+            blocked_on_line(view, EditAction::Reword),
+            Some(t!("history_ops.reason.merged_in").to_string()),
+            "the reword rebuild only follows the first-parent line"
+        );
+
+        let first = LineView::at(&line, None, true).with_side(SideView {
+            parent_on_line: true,
+            ..side
+        });
+        assert_eq!(blocked_on_line(first, EditAction::Drop), None);
+        assert_eq!(
+            blocked_on_line(first, EditAction::Squash),
+            Some(t!("history_ops.reason.parent_outside").to_string())
+        );
+        assert_eq!(
+            blocked_on_line(first, EditAction::MoveDown),
+            Some(t!("history_ops.reason.already_oldest").to_string())
+        );
+
+        let after_merge = LineView::at(&line, None, true).with_side(SideView {
+            parent_is_merge: true,
+            ..side
+        });
+        assert_eq!(
+            blocked_on_line(after_merge, EditAction::Fixup),
+            Some(t!("history_ops.reason.parent_merge").to_string())
+        );
+
+        let merge = LineView::at(&line, None, true).with_side(SideView {
+            is_merge: true,
+            ..side
+        });
+        assert_eq!(
+            blocked_on_line(merge, EditAction::Drop),
+            Some(t!("history_ops.reason.is_merge").to_string())
         );
     }
 
