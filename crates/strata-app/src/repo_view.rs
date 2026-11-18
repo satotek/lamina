@@ -451,6 +451,9 @@ pub struct RepoView {
     /// The apply the "Apply patch…" action started, so its success is reported
     /// as a notice rather than only through the command log.
     pending_apply_patch: Option<strata_core::session::OperationId>,
+    /// The LFS track that also installed the filter. Its finish clears the
+    /// status bar for the outcome, so the note is written again there.
+    lfs_filter_note_for: Option<strata_core::session::OperationId>,
 
     /// Running maximum of graph widths, updated as chunks arrive.
     lanes: LaneWidth,
@@ -706,6 +709,7 @@ impl RepoView {
             hidden_refs: Vec::new(),
             pending_worktree_open: None,
             pending_apply_patch: None,
+            lfs_filter_note_for: None,
             lanes: LaneWidth::default(),
             selected: None,
             uncommitted_selected: false,
@@ -1538,6 +1542,12 @@ impl RepoView {
                 {
                     self.offer_open_worktree(path, cx);
                 }
+                if self.lfs_filter_note_for == Some(id) {
+                    self.lfs_filter_note_for = None;
+                    if !failed {
+                        self.status_note = Some(t!("lfs.filter_installed").to_string());
+                    }
+                }
                 if self.pending_apply_patch == Some(id) {
                     self.pending_apply_patch = None;
                     if !failed {
@@ -1572,6 +1582,7 @@ impl RepoView {
                     // knows the repository changed beyond `.gitattributes`.
                     self.status_note = Some(t!("lfs.filter_installed").to_string());
                     self.status_error = None;
+                    self.lfs_filter_note_for = Some(id);
                     self.notify_if_active(cx);
                     return;
                 }
