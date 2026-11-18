@@ -32,7 +32,7 @@ use std::time::Duration;
 
 use crate::diff::FileDiff;
 use crate::encoding::TextEncoding;
-use crate::git_cli::{CommandRecord, Git, RebaseStep};
+use crate::git_cli::{AcrossMergesAction, CommandRecord, Git, RebaseStep};
 use crate::graph::{GraphRow, GraphRows};
 use crate::highlight::LineHighlights;
 use crate::merge::ContentHash;
@@ -451,6 +451,13 @@ pub enum Operation {
     RewordAcrossMerges {
         commit: Oid,
         message: String,
+    },
+    /// Drop, squash, fix up or move `commit` with `git rebase -i
+    /// --rebase-merges`, which recreates each merge in the range instead of
+    /// refusing it. Conflicts stop it with `state == Rebasing`, like a merge.
+    RewriteAcrossMerges {
+        commit: Oid,
+        action: AcrossMergesAction,
     },
     /// Replay the current branch onto `onto`: `git rebase <onto>`, or
     /// `git rebase --onto <onto> <upstream>` when an upstream is given.

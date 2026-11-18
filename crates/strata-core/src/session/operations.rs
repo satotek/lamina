@@ -202,6 +202,7 @@ fn changes_refs(operation: &Operation) -> bool {
             | Operation::Revert { .. }
             | Operation::RebaseEdit { .. }
             | Operation::RewordAcrossMerges { .. }
+            | Operation::RewriteAcrossMerges { .. }
             | Operation::Rebase { .. }
             | Operation::Reset { .. }
             | Operation::UndoReflog { .. }
@@ -373,6 +374,9 @@ fn execute(shared: &Arc<Shared>, id: OperationId, operation: &Operation) -> Resu
         Operation::RebaseEdit { onto, steps } => git.rebase_edit(*onto, steps),
         Operation::RewordAcrossMerges { commit, message } => {
             git.reword_across_merges(*commit, message)
+        }
+        Operation::RewriteAcrossMerges { commit, action } => {
+            git.rewrite_across_merges(*commit, *action)
         }
         Operation::Rebase {
             onto,
