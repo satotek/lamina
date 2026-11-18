@@ -23,6 +23,7 @@ mod merge;
 mod ops;
 mod progress;
 mod rebase;
+mod rebase_merges;
 mod reflog;
 mod rewrite;
 mod signature;
@@ -36,6 +37,7 @@ pub use rebase::{
     MoveDirection, RebaseAction, RebaseStep, drop_commit, move_commit, reword_commit,
     squash_commit_into_parent,
 };
+pub use rebase_merges::{AcrossMergesAction, rewrite_merges_todo};
 pub use reflog::{SwitchTarget, UndoPlan, UndoStep};
 
 use std::ffi::OsString;

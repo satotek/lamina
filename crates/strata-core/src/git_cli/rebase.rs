@@ -408,7 +408,7 @@ pub(super) fn state_name(state: RepoState) -> &'static str {
 /// Quote one argument for the POSIX shell git uses to run editors and `exec`
 /// lines. A Windows path is written with forward slashes, which its `sh`
 /// understands and which avoids backslash escaping.
-fn shell_quote(path: &Path) -> String {
+pub(super) fn shell_quote(path: &Path) -> String {
     #[cfg(windows)]
     let text = path.to_string_lossy().replace('\\', "/");
     #[cfg(not(windows))]
@@ -419,12 +419,12 @@ fn shell_quote(path: &Path) -> String {
 static SCRATCH_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Todo and reword-message files, removed when the rebase command returns.
-struct Scratch {
+pub(super) struct Scratch {
     dir: PathBuf,
 }
 
 impl Scratch {
-    fn new() -> Result<Self> {
+    pub(super) fn new() -> Result<Self> {
         let base = std::env::temp_dir();
         for _ in 0..32 {
             let id = SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -440,7 +440,7 @@ impl Scratch {
         ))
     }
 
-    fn path(&self, name: &str) -> PathBuf {
+    pub(super) fn path(&self, name: &str) -> PathBuf {
         self.dir.join(name)
     }
 }
