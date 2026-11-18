@@ -54,6 +54,23 @@ serde_json = "1"
 toml = "1.2"
 log = "0.4"
 
+# Blocking HTTP client for checking and downloading updates on the background
+# executor; rustls with the platform verifier avoids an async runtime, system
+# OpenSSL dependencies, and bundled root-certificate crates.
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "platform-verifier", "gzip"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+
+# Verifies release manifests and downloaded installers against the embedded
+# Ed25519 minisign public key before offering or installing any update.
+minisign-verify = "0.3"
+
+# Compares release versions against the package version, hashes downloads for
+# integrity checks, and stages installers in an isolated temporary directory.
+semver = "1"
+sha2 = "0.11"
+hex = "0.4"
+tempfile = "3.27.0"
+
 # Only the X11 window icon is passed in as pixels. GPUI already depends on
 # `image`, but it is not re-exported, so the app names it here; the png feature
 # is the only decoder this needs.
@@ -66,7 +83,8 @@ winresource = "0.1"
 
 [dev-dependencies]
 strata-core = { workspace = true, features = ["test-support"] }
-tempfile = "3.27.0"
+# Generates ephemeral test keypairs and signatures for updater verification tests.
+minisign = "0.10"
 # `TestAppContext` and `#[gpui::test]`, for the tests that check a view is
 # actually released. Test-only: the binary is built without it.
 gpui = { package = "gpui-pre", version = "=0.3.12", features = ["test-support"] }

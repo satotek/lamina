@@ -200,6 +200,7 @@ use crate::remote::{FetchRemotes, PullBranch, PushBranch};
 use crate::search::{FocusSearch, SearchDismiss, SearchNext, SearchPrevious, SearchSubmit};
 use crate::settings_view::CloseSettings;
 use crate::shortcuts::{DismissShortcuts, ShowKeyboardShortcuts};
+use crate::updater::CheckForUpdates;
 use crate::worktree_panel::{
     CommitMessage, DiscardSelected, ExtendNextFile, ExtendPreviousFile, SelectAllFiles,
     SelectNextFile, SelectPreviousFile, ShowHistory, StageSelected, ToggleSelected,
@@ -1203,6 +1204,16 @@ pub static ACTIONS: &[ActionSpec] = &[
         AboutStrata,
         [],
         42,
+        false
+    ),
+    action!(
+        "strata::CheckForUpdates",
+        "Check for Updates…",
+        Application,
+        None,
+        CheckForUpdates,
+        [],
+        43,
         false
     ),
     action!(
@@ -2372,7 +2383,7 @@ mod tests {
             }
         }
         // Every built-in palette entry has a registry row.
-        let expected_count = if cfg!(feature = "terminal") { 53 } else { 52 };
+        let expected_count = if cfg!(feature = "terminal") { 54 } else { 53 };
         assert_eq!(orders.len(), expected_count);
     }
 

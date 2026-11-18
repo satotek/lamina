@@ -72,6 +72,7 @@ mod tabs;
 mod terminal_panel;
 mod tools;
 mod ui;
+mod updater;
 mod window_registry;
 mod workspace;
 mod worktree_panel;
@@ -155,6 +156,7 @@ fn main() {
         picker::bind(cx);
         palette::bind(cx);
         about::bind(cx);
+        updater::bind(cx);
         zoom::bind(cx);
         shortcuts::bind(cx);
         menus::bind(cx);
@@ -172,12 +174,16 @@ fn main() {
         // after every default and the user's file have been applied.
         menus::install(cx);
 
+        let auto_check_updates = !matches!(start, StartMode::Gallery | StartMode::Fake(_));
         open_start(start, debug, cx);
         cx.activate(true);
         // A file that could not be parsed leaves the app running: the window
         // says which line it was, and the settings page keeps the message.
         keymap::report_to_window(cx);
         commands::report_to_window(cx);
+        if auto_check_updates {
+            updater::schedule_startup_check(cx);
+        }
     });
 }
 

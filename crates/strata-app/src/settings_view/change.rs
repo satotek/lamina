@@ -72,7 +72,10 @@ pub fn reset_section(settings: &mut Settings, section: Section) {
         Section::Appearance => settings.appearance = Appearance::default(),
         Section::Diff => settings.diff = DiffSettings::default(),
         Section::History => settings.history = HistorySettings::default(),
-        Section::Behaviour => settings.behaviour = Behaviour::default(),
+        Section::Behaviour => {
+            settings.behaviour = Behaviour::default();
+            settings.updates.auto_check = true;
+        }
         Section::Tools => settings.tools = Tools::default(),
         Section::Privacy => settings.privacy = Privacy::default(),
         // The keymap and the command list are files of their own; the page's
@@ -235,6 +238,10 @@ pub fn restore_last_repository(settings: &mut Settings, restore: bool) {
     settings.behaviour.restore_last_repository = restore;
 }
 
+pub fn auto_check_updates(settings: &mut Settings, enabled: bool) {
+    settings.updates.auto_check = enabled;
+}
+
 pub fn editor(settings: &mut Settings, command: &str) {
     settings.tools.editor = optional_text(command);
 }
@@ -306,6 +313,7 @@ mod tests {
         summary_length_hint(&mut settings, 90.0);
         confirm_destructive(&mut settings, false);
         restore_last_repository(&mut settings, false);
+        auto_check_updates(&mut settings, false);
         editor(&mut settings, "code --goto {path}:{line}");
         terminal(&mut settings, "alacritty --working-directory {path}");
         embedded_shell(&mut settings, "/bin/zsh -l");
@@ -316,6 +324,7 @@ mod tests {
         assert_eq!(loaded.appearance.theme, ThemeMode::Dark);
         assert_eq!(loaded.diff.layout, DiffLayout::Split);
         assert_eq!(loaded.behaviour.auto_fetch_minutes, 15);
+        assert!(!loaded.updates.auto_check);
         assert_eq!(
             loaded.behaviour.git_executable,
             Some(PathBuf::from("/opt/git/bin/git"))

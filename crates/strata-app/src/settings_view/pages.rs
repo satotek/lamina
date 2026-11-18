@@ -468,6 +468,18 @@ fn behaviour(control: f32, design: &Design) -> SettingPage {
             .description(t!("settings.behaviour.restore_last_repository_description").to_string()),
         ]),
     )
+    .groups(
+        card(t!("settings.behaviour.updates").to_string(), design).item(
+            SettingItem::new(
+                t!("settings.behaviour.auto_check_updates").to_string(),
+                toggle(
+                    |settings| settings.updates.auto_check,
+                    change::auto_check_updates,
+                ),
+            )
+            .description(t!("settings.behaviour.auto_check_updates_description").to_string()),
+        ),
+    )
 }
 
 fn tools(control: f32, design: &Design) -> SettingPage {

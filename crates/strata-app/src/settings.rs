@@ -32,6 +32,7 @@ pub struct Settings {
     pub tools: Tools,
     pub privacy: Privacy,
     pub commit_graph: CommitGraphSettings,
+    pub updates: UpdateSettings,
 }
 
 impl Global for Settings {}
@@ -447,6 +448,28 @@ impl CommitGraphSettings {
     pub fn ignore(&mut self, repository: PathBuf) {
         if !self.ignored_repositories.contains(&repository) {
             self.ignored_repositories.push(repository);
+        }
+    }
+}
+
+/// Application update checking preferences and persisted state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UpdateSettings {
+    /// Whether to check for new versions automatically on startup.
+    pub auto_check: bool,
+    /// Unix timestamp in seconds of the last completed update check.
+    pub last_checked_at: Option<u64>,
+    /// Release version string the user chose to skip (e.g. `0.1.7`).
+    pub skipped_version: Option<String>,
+}
+
+impl Default for UpdateSettings {
+    fn default() -> Self {
+        Self {
+            auto_check: true,
+            last_checked_at: None,
+            skipped_version: None,
         }
     }
 }

@@ -392,6 +392,15 @@ impl AboutView {
                             .on_click(|_, _, cx| cx.open_with_system(Path::new(ISSUES))),
                     )
                     .child(
+                        button("about-check-updates", t!("about.check_updates").to_string())
+                            .kind(ButtonKind::Normal)
+                            .size(ButtonSize::Small)
+                            .on_click(|_, window, cx| {
+                                window
+                                    .dispatch_action(Box::new(crate::updater::CheckForUpdates), cx);
+                            }),
+                    )
+                    .child(
                         button(
                             "about-copy",
                             if self.copied {

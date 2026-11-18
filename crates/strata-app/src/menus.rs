@@ -140,6 +140,7 @@ const fn optional(action: &'static str, menu: MenuKind, section: u8) -> Placemen
 /// Every menu item that comes from the registry, in bar order.
 pub static PLACEMENTS: &[Placement] = &[
     item("AboutStrata", MenuKind::Strata, 0),
+    item("CheckForUpdates", MenuKind::Strata, 0),
     item("OpenSettings", MenuKind::Strata, 1),
     item("Quit", MenuKind::Strata, 2),
     item("NewTab", MenuKind::File, 0),
@@ -233,13 +234,16 @@ fn items(kind: MenuKind) -> Vec<MenuItem> {
 }
 
 /// One menu's items for a platform, built without an `App` so a test can read
-/// it. macOS keeps About in the application menu; the other platforms put it
-/// under Help, where their menu guidelines expect it.
+/// it. macOS keeps About and Check for Updates in the application menu; the
+/// other platforms put them under Help, where their menu guidelines expect them.
 fn items_for(kind: MenuKind, macos: bool) -> Vec<MenuItem> {
     let mut items = Vec::new();
     let mut section = None;
     for placement in PLACEMENTS.iter().filter(|item| item.menu == kind) {
-        if !macos && kind == MenuKind::Strata && placement.action == "AboutStrata" {
+        if !macos
+            && kind == MenuKind::Strata
+            && matches!(placement.action, "AboutStrata" | "CheckForUpdates")
+        {
             continue;
         }
         let Some(spec) = keymap::resolve(placement.action) else {
@@ -291,14 +295,19 @@ fn items_for(kind: MenuKind, macos: bool) -> Vec<MenuItem> {
             ),
         ]);
     }
-    if !macos
-        && kind == MenuKind::Help
-        && let Some(spec) = keymap::resolve("AboutStrata")
-    {
-        if !items.is_empty() {
-            items.push(MenuItem::separator());
+    if !macos && kind == MenuKind::Help {
+        let extras: Vec<_> = ["CheckForUpdates", "AboutStrata"]
+            .into_iter()
+            .filter_map(keymap::resolve)
+            .collect();
+        if !extras.is_empty() {
+            if !items.is_empty() {
+                items.push(MenuItem::separator());
+            }
+            for spec in extras {
+                items.push(action_item(spec));
+            }
         }
-        items.push(action_item(spec));
     }
     items
 }
@@ -437,23 +446,47 @@ mod tests {
         assert_eq!(titles, expected);
     }
 
-    fn has_about(items: &[MenuItem]) -> bool {
+    fn has_action<A: gpui::Action>(items: &[MenuItem]) -> bool {
         items.iter().any(|item| {
             matches!(
                 item,
                 MenuItem::Action { action, .. }
-                    if action.as_any().is::<AboutStrata>()
+                    if action.as_any().is::<A>()
             )
         })
     }
 
     #[test]
     fn about_sits_in_the_application_menu_on_macos_and_under_help_elsewhere() {
-        assert!(has_about(&items_for(MenuKind::Strata, true)));
-        assert!(!has_about(&items_for(MenuKind::Help, true)));
+        assert!(has_action::<AboutStrata>(&items_for(
+            MenuKind::Strata,
+            true
+        )));
+        assert!(!has_action::<AboutStrata>(&items_for(MenuKind::Help, true)));
 
-        assert!(!has_about(&items_for(MenuKind::Strata, false)));
-        assert!(has_about(&items_for(MenuKind::Help, false)));
+        assert!(!has_action::<AboutStrata>(&items_for(
+            MenuKind::Strata,
+            false
+        )));
+        assert!(has_action::<AboutStrata>(&items_for(MenuKind::Help, false)));
+
+        assert!(has_action::<crate::updater::CheckForUpdates>(&items_for(
+            MenuKind::Strata,
+            true
+        )));
+        assert!(!has_action::<crate::updater::CheckForUpdates>(&items_for(
+            MenuKind::Help,
+            true
+        )));
+
+        assert!(!has_action::<crate::updater::CheckForUpdates>(&items_for(
+            MenuKind::Strata,
+            false
+        )));
+        assert!(has_action::<crate::updater::CheckForUpdates>(&items_for(
+            MenuKind::Help,
+            false
+        )));
     }
 
     #[test]
