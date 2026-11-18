@@ -238,6 +238,16 @@ impl Git {
         self.run_unit(&args, None)
     }
 
+    /// `git checkout --detach <commit>`.
+    ///
+    /// [`Git::checkout_branch`] appends `--`, which makes git treat the
+    /// argument as a pathspec. An object id must not go through that form.
+    pub fn checkout_detached(&self, commit: &Oid) -> Result<()> {
+        let id = commit.to_string();
+        let args = vec!["checkout".to_owned(), "--detach".to_owned(), id];
+        self.run_unit(&args, None)
+    }
+
     pub fn create_branch(
         &self,
         name: &str,

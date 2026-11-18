@@ -848,6 +848,36 @@ fn revert_of_a_clean_commit_restores_its_parent() {
 }
 
 #[test]
+fn checkout_commit_detaches_without_moving_the_branch() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "one\n");
+    repo.commit_all("one");
+    let first = repo.head();
+    repo.write("a.txt", "two\n");
+    repo.commit_all("two");
+    let second = repo.head();
+
+    let harness = Harness::open(repo);
+    harness.wait_for_complete(2);
+
+    assert_eq!(
+        harness.run(Operation::CheckoutCommit { commit: first }),
+        None,
+        "checking out an older commit must detach"
+    );
+    let done = harness
+        .wait_until(|snapshot| matches!(snapshot.head.as_ref(), Some(HeadInfo::Detached { .. })));
+    assert_eq!(done.head, Some(HeadInfo::Detached { target: first }));
+    assert_eq!(harness.repo.read("a.txt"), "one\n");
+    assert_eq!(
+        harness.repo.oid("main"),
+        second,
+        "the branch the checkout left still points at its tip"
+    );
+    assert_eq!(harness.repo.status(), "");
+}
+
+#[test]
 fn revert_of_a_merge_commit_uses_the_first_parent() {
     let repo = TestRepo::new();
     repo.write("base.txt", "base\n");

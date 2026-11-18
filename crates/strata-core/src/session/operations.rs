@@ -175,6 +175,7 @@ fn changes_refs(operation: &Operation) -> bool {
         operation,
         Operation::Commit { .. }
             | Operation::Checkout { .. }
+            | Operation::CheckoutCommit { .. }
             | Operation::CreateBranch { .. }
             | Operation::DeleteBranch { .. }
             | Operation::RenameBranch { .. }
@@ -249,6 +250,7 @@ fn execute(shared: &Arc<Shared>, id: OperationId, operation: &Operation) -> Resu
             },
         ),
         Operation::Checkout { branch } => git.checkout_branch(branch),
+        Operation::CheckoutCommit { commit } => git.checkout_detached(commit),
         Operation::CreateBranch {
             name,
             start_point,
