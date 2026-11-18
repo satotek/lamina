@@ -201,7 +201,14 @@ impl RepoView {
                 design.muted
             });
         if let Some(full) = message.clone() {
-            slot = slot.tooltip(move |window, cx| Tooltip::new(full.clone()).build(window, cx));
+            // The bar sits at the window's bottom right, so an unbounded
+            // tooltip would run off the window; a fixed width wraps instead.
+            let width = design.px(520.0);
+            slot = slot.tooltip(move |window, cx| {
+                let full = full.clone();
+                Tooltip::element(move |_, _| div().max_w(width).child(full.clone()))
+                    .build(window, cx)
+            });
         }
         bar.child(slot.child(message.unwrap_or_else(|| t!("status.watching").to_string())))
             .into_any_element()
