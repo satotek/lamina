@@ -23,11 +23,15 @@ use crate::style::Design;
 use crate::ui;
 
 /// Opens the editor for `commit`, prefilled with `message`.
+///
+/// `warning` is the non-blocking note shown when the commit is already
+/// published, because the reword will need a force push to reach the remote.
 pub(super) fn open(
     view: &mut RepoView,
     commit: Oid,
     short: String,
     message: String,
+    warning: Option<String>,
     window: &mut Window,
     cx: &mut Context<RepoView>,
 ) {
@@ -35,7 +39,8 @@ pub(super) fn open(
     // focus it was opened with, which must outlive the menu.
     view.focus_root(window, cx);
     let handle = cx.weak_entity();
-    let dialog = cx.new(|cx| RewordDialog::new(handle, commit, short, message, window, cx));
+    let dialog =
+        cx.new(|cx| RewordDialog::new(handle, commit, short, message, warning, window, cx));
     let focus = dialog.read(cx).message_focus(cx);
     let content = dialog.clone();
     let footer = dialog.clone();
@@ -84,6 +89,8 @@ struct RewordDialog {
     commit: Oid,
     short: String,
     message: Entity<TextareaState>,
+    /// Shown while the commit is already on its upstream.
+    warning: Option<String>,
     _events: Vec<Subscription>,
 }
 
@@ -93,6 +100,7 @@ impl RewordDialog {
         commit: Oid,
         short: String,
         message: String,
+        warning: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -111,6 +119,7 @@ impl RewordDialog {
             commit,
             short,
             message: input,
+            warning,
             _events: events,
         }
     }
@@ -151,6 +160,9 @@ impl Render for RewordDialog {
                     .text_color(design.muted)
                     .child(t!("edit_dialog.description", short = self.short)),
             )
+            .when_some(self.warning.clone(), |form, warning| {
+                form.child(ui::banner(ui::BannerKind::Warning, warning, &design))
+            })
             .child(
                 Textarea::new(&self.message)
                     .h(design.px(220.0))

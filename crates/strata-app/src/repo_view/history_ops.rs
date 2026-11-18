@@ -201,6 +201,23 @@ pub(crate) fn blocked_label(
     }
 }
 
+/// The warning a rewrite's confirmation shows when the edited commit is already
+/// on the branch's upstream: publishing the rewritten commit needs a force
+/// push. Non-blocking, because the rewrite is still exactly what was asked for.
+pub(crate) fn published_warning(upstream: Option<&str>) -> Option<String> {
+    upstream
+        .map(|upstream| t!("history_ops.pushed_commit_warning", upstream = upstream).to_string())
+}
+
+/// Appends [`published_warning`] to a confirmation body, separated by a blank
+/// line so it reads as its own note.
+fn with_pushed_warning(detail: String, upstream: Option<&str>) -> String {
+    match published_warning(upstream) {
+        Some(warning) => format!("{detail}\n\n{warning}"),
+        None => detail,
+    }
+}
+
 /// The commit rewrites the context menu can run.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum EditAction {
@@ -213,15 +230,6 @@ pub(crate) enum EditAction {
 }
 
 impl EditAction {
-    const ALL: [Self; 6] = [
-        Self::Reword,
-        Self::Squash,
-        Self::Fixup,
-        Self::Drop,
-        Self::MoveUp,
-        Self::MoveDown,
-    ];
-
     /// The menu entry, without the reason a disabled one shows.
     fn label(self) -> String {
         match self {
@@ -257,6 +265,34 @@ impl EditAction {
             Self::Drop => t!("history_ops.confirm.drop", short = short).to_string(),
             Self::MoveUp => t!("history_ops.confirm.move_up", short = short).to_string(),
             Self::MoveDown => t!("history_ops.confirm.move_down", short = short).to_string(),
+        }
+    }
+}
+
+/// One row of the "Edit" submenu: a commit rewrite or the whole-range dialog.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum EditEntry {
+    Action(EditAction),
+    History,
+}
+
+impl EditEntry {
+    /// Every row, in menu order.
+    const ALL: [Self; 7] = [
+        Self::Action(EditAction::Reword),
+        Self::Action(EditAction::Squash),
+        Self::Action(EditAction::Fixup),
+        Self::Action(EditAction::Drop),
+        Self::Action(EditAction::MoveUp),
+        Self::Action(EditAction::MoveDown),
+        Self::History,
+    ];
+
+    /// The menu entry, without the reason a disabled one shows.
+    fn label(self) -> String {
+        match self {
+            Self::Action(action) => action.label(),
+            Self::History => t!("history_ops.menu.edit_history").to_string(),
         }
     }
 }
@@ -348,11 +384,16 @@ fn head_reachable_set(session: &dyn RepositorySession) -> HashSet<Oid> {
 /// Everything the edit entries need about one commit, read once when the menu
 /// opens. The rules are methods on plain data so the tests can build a line
 /// without a repository.
+#[derive(Clone)]
 pub(crate) struct EditContext {
     /// HEAD's first-parent line, newest first, far enough for every action.
     line: Vec<LineCommit>,
     /// Where the target sits on the line; `None` when it is not on it.
     distance: Option<usize>,
+    /// Whether HEAD reaches the target at all. A commit a merge brought in is
+    /// reachable without being on the first-parent line, which the entries
+    /// explain differently from a commit on another branch.
+    reachable: bool,
     head: Oid,
     /// Remote-tracking refs, as `(short name, tip)`.
     remotes: Vec<(String, Oid)>,
@@ -375,14 +416,30 @@ impl EditContext {
             .filter(|reference| reference.kind == RefKind::RemoteBranch)
             .map(|reference| (reference.short_name.clone(), reference.target))
             .collect();
-        Some(Self {
+        let mut context = Self {
             line,
             distance,
+            reachable: distance.is_some(),
             head,
             remotes,
             snapshot,
             repo,
-        })
+        };
+        // The walk only follows first parents, so a commit behind a merge needs
+        // the full ancestry check to tell it apart from one on another branch.
+        if !context.reachable {
+            context.reachable = context.reaches(commit, head);
+        }
+        Some(context)
+    }
+
+    /// What the enable rules read, for [`blocked_on_line`].
+    fn view(&self) -> LineView<'_> {
+        LineView {
+            line: &self.line,
+            distance: self.distance,
+            reachable: self.reachable,
+        }
     }
 
     /// The `onto` commit and the commits `onto..HEAD` oldest first, which is
@@ -409,6 +466,38 @@ impl EditContext {
             .unwrap_or_else(|| short_oid(commit))
     }
 
+    /// The branch's upstream when it already contains `commit`, so rewriting
+    /// the commit needs a force push.
+    fn upstream_containing(&self, commit: Oid) -> Option<String> {
+        let HeadInfo::Branch { short_name, .. } = self.snapshot.head.as_ref()? else {
+            return None;
+        };
+        let name = match self.snapshot.upstreams.get(short_name) {
+            Some(upstream) => upstream.name.clone(),
+            // A narrowed snapshot can leave the upstream out; the branch's
+            // configuration still names it, and the tracking ref resolves the
+            // tip directly.
+            None => {
+                let upstream = self.repo.branch_upstream_target(short_name).ok()??;
+                format!("{}/{}", upstream.remote, upstream.branch)
+            }
+        };
+        let tip = self
+            .snapshot
+            .refs
+            .iter()
+            .find(|reference| {
+                reference.kind == RefKind::RemoteBranch && reference.short_name == name
+            })
+            .map(|reference| reference.target)
+            .or_else(|| self.repo.resolve_commit(&name).ok().flatten())?;
+        let published = self
+            .repo
+            .is_ancestor(commit, tip)
+            .unwrap_or_else(|_| self.reaches(commit, tip));
+        published.then_some(name)
+    }
+
     /// Remote-tracking branches that already contain commits in `action`'s
     /// range, so rewriting them needs a force push.
     fn pushed_remotes(&self, action: EditAction) -> Vec<String> {
@@ -422,7 +511,7 @@ impl EditContext {
     /// range another action builds, such as a rebase onto another ref.
     fn pushed_remotes_in(&self, commits: &[Oid]) -> Vec<String> {
         remotes_containing(commits, &self.remotes, |commit, tip| {
-            self.reachable(commit, tip)
+            self.reaches(commit, tip)
         })
     }
 
@@ -433,7 +522,7 @@ impl EditContext {
     /// was, because the walk emits children before parents, so it is a leaf
     /// and the check stops there. The repository read is the fallback for a
     /// narrowed history scope that left the remote out.
-    fn reachable(&self, ancestor: Oid, descendant: Oid) -> bool {
+    fn reaches(&self, ancestor: Oid, descendant: Oid) -> bool {
         let mut stack = vec![descendant];
         let mut seen = HashSet::new();
         while let Some(id) = stack.pop() {
@@ -456,35 +545,77 @@ impl EditContext {
     }
 }
 
-/// Why `action` cannot run on the commit at `distance`. A merge anywhere in
-/// the range core would replay stops the rewrite; a squash or a downward move
-/// needs the parent's parent as the range base, so a root in that spot has no
-/// `onto` commit to offer.
-fn blocked_on_line(
-    line: &[LineCommit],
+/// The part of [`EditContext`] the enable rules read.
+#[derive(Clone, Copy)]
+struct LineView<'a> {
+    line: &'a [LineCommit],
     distance: Option<usize>,
-    action: EditAction,
-) -> Option<String> {
-    let Some(distance) = distance else {
-        return Some(t!("history_ops.reason.not_on_branch").to_string());
+    reachable: bool,
+}
+
+impl<'a> LineView<'a> {
+    fn at(line: &'a [LineCommit], distance: Option<usize>, reachable: bool) -> Self {
+        Self {
+            line,
+            distance,
+            reachable,
+        }
+    }
+
+    /// The target and its parents, when it is on the line.
+    fn target(&self) -> Option<&'a (Oid, Vec<Oid>)> {
+        self.line.get(self.distance?)
+    }
+
+    /// Whether a merge commit sits between HEAD and the target, which only a
+    /// replay has to care about.
+    fn has_merge(&self) -> bool {
+        self.distance
+            .is_some_and(|distance| merge_within(self.line, distance))
+    }
+
+    /// Whether a reword of the target has to be rebuilt with `git commit-tree`
+    /// rather than replayed: a merge stops `git rebase -i`, and a root commit
+    /// has no `onto` commit to replay onto.
+    fn reword_needs_rebuild(&self) -> bool {
+        self.target().is_some_and(|(_, parents)| parents.is_empty()) || self.has_merge()
+    }
+}
+
+/// Why `action` cannot run on the commit the view describes.
+///
+/// A commit HEAD cannot reach at all is a different problem from one a merge
+/// brought in, and both differ from a merge between the commit and HEAD, which
+/// only stops an action that has to replay the range. A squash or a downward
+/// move needs the parent's parent as the range base, so a root in that spot has
+/// no `onto` commit to offer.
+fn blocked_on_line(view: LineView<'_>, action: EditAction) -> Option<String> {
+    let Some(target) = view.target() else {
+        return Some(if view.reachable {
+            t!("history_ops.reason.merged_in").to_string()
+        } else {
+            t!("history_ops.reason.not_on_branch").to_string()
+        });
     };
-    let Some((_, parents)) = line.get(distance) else {
-        return Some(t!("history_ops.reason.not_on_branch").to_string());
-    };
-    if parents.is_empty() {
+    let distance = view.distance?;
+    // A reword only replaces a message, so it works on a root commit too.
+    if action != EditAction::Reword && target.1.is_empty() {
         return Some(t!("history_ops.reason.root_commit").to_string());
     }
     match action {
-        EditAction::Reword | EditAction::Drop => {
-            if merge_within(line, distance) {
+        // A reword keeps every tree, so it is rebuilt rather than replayed and
+        // a merge in the range does not stand in its way.
+        EditAction::Reword => {}
+        EditAction::Drop => {
+            if view.has_merge() {
                 return Some(t!("history_ops.reason.merge").to_string());
             }
         }
         EditAction::Squash | EditAction::Fixup => {
-            if line.get(distance + 2).is_none() {
+            if view.line.get(distance + 2).is_none() {
                 return Some(t!("history_ops.reason.parent_root").to_string());
             }
-            if merge_within(line, distance + 1) {
+            if merge_within(view.line, distance + 1) {
                 return Some(t!("history_ops.reason.merge").to_string());
             }
         }
@@ -492,15 +623,15 @@ fn blocked_on_line(
             if distance == 0 {
                 return Some(t!("history_ops.reason.already_newest").to_string());
             }
-            if merge_within(line, distance) {
+            if view.has_merge() {
                 return Some(t!("history_ops.reason.merge").to_string());
             }
         }
         EditAction::MoveDown => {
-            if line.get(distance + 2).is_none() {
+            if view.line.get(distance + 2).is_none() {
                 return Some(t!("history_ops.reason.already_oldest").to_string());
             }
-            if merge_within(line, distance + 1) {
+            if merge_within(view.line, distance + 1) {
                 return Some(t!("history_ops.reason.merge").to_string());
             }
         }
@@ -577,16 +708,16 @@ fn edit_blocked(
     edit: Option<&EditContext>,
     action: EditAction,
 ) -> Option<String> {
-    match edit {
-        Some(edit) => edit_blocked_on_line(state, &edit.line, edit.distance, action),
-        None => edit_blocked_on_line(state, &[], None, action),
-    }
+    let view = match edit {
+        Some(edit) => edit.view(),
+        None => LineView::at(&[], None, false),
+    };
+    edit_blocked_on_line(state, view, action)
 }
 
 fn edit_blocked_on_line(
     state: &MenuState,
-    line: &[LineCommit],
-    distance: Option<usize>,
+    view: LineView<'_>,
     action: EditAction,
 ) -> Option<String> {
     if state.busy {
@@ -598,13 +729,83 @@ fn edit_blocked_on_line(
     if state.branch.is_none() && state.head.is_some() {
         return Some(t!("reflog.head_detached").to_string());
     }
-    if let Some(reason) = blocked_on_line(line, distance, action) {
+    if let Some(reason) = blocked_on_line(view, action) {
         return Some(reason);
     }
-    if state.dirty {
+    // A reword rebuilt with `git commit-tree` only moves the branch: HEAD keeps
+    // its tree, so uncommitted changes stay valid and a dirty worktree is
+    // allowed. A replay has to carry the changes through the worktree, so there
+    // it waits for a clean one.
+    let rebuilt = action == EditAction::Reword && view.reword_needs_rebuild();
+    if state.dirty && !rebuilt {
         return Some(t!("reflog.commit_or_stash").to_string());
     }
     None
+}
+
+/// Why the interactive history dialog cannot open. It replays the range a
+/// reword does with `git rebase -i`, which neither a merge nor a root commit
+/// gives an `onto` commit for.
+fn edit_history_blocked_on_line(state: &MenuState, view: LineView<'_>) -> Option<String> {
+    if let Some(reason) = edit_blocked_on_line(state, view, EditAction::Reword) {
+        return Some(reason);
+    }
+    if view.target().is_some_and(|(_, parents)| parents.is_empty()) {
+        return Some(t!("history_ops.reason.parent_root").to_string());
+    }
+    if view.has_merge() {
+        return Some(t!("history_ops.reason.merge").to_string());
+    }
+    None
+}
+
+/// Why one row of the "Edit" submenu cannot run.
+fn edit_entry_blocked_on_line(
+    state: &MenuState,
+    view: LineView<'_>,
+    entry: EditEntry,
+) -> Option<String> {
+    match entry {
+        EditEntry::Action(action) => edit_blocked_on_line(state, view, action),
+        EditEntry::History => edit_history_blocked_on_line(state, view),
+    }
+}
+
+/// The line a menu's edit context describes, or an empty view without one.
+fn view_of(edit: Option<&EditContext>) -> LineView<'_> {
+    match edit {
+        Some(edit) => edit.view(),
+        None => LineView::at(&[], None, false),
+    }
+}
+
+fn edit_entry_blocked(
+    state: &MenuState,
+    edit: Option<&EditContext>,
+    entry: EditEntry,
+) -> Option<String> {
+    edit_entry_blocked_on_line(state, view_of(edit), entry)
+}
+
+/// The one reason that blocks every edit row, when they all share it.
+///
+/// The menu then shows a disabled "Edit" entry with that reason instead of a
+/// submenu whose every row repeats it. One available row is enough to open the
+/// submenu, where the inapplicable rows say why.
+fn collapsed_edit_reason_on_line(state: &MenuState, view: LineView<'_>) -> Option<String> {
+    let mut shared: Option<String> = None;
+    for entry in EditEntry::ALL {
+        let blocked = edit_entry_blocked_on_line(state, view, entry)?;
+        match &shared {
+            Some(previous) if *previous != blocked => return None,
+            _ => shared = Some(blocked),
+        }
+    }
+    shared
+}
+
+fn collapsed_edit_reason(state: &MenuState, edit: Option<&EditContext>) -> Option<String> {
+    collapsed_edit_reason_on_line(state, view_of(edit))
 }
 
 /// The selection a finished rewrite should restore: the commit at `distance`
@@ -954,9 +1155,11 @@ fn show_all_history_item(entity: &Entity<RepoView>) -> PopupMenuItem {
 
 /// The context menu for one commit row.
 ///
-/// Clipboard entries are always available; the history actions need a real
-/// commit and a session, and say why they are disabled when they cannot run.
-/// Popup items carry no tooltip, so the reason is folded into the label.
+/// The top level stays short: the entries that act on the commit directly, then
+/// one submenu per group of related actions. Clipboard entries are always
+/// available; the history actions need a real commit and a session, and say why
+/// they are disabled when they cannot run. Popup items carry no tooltip, so the
+/// reason is folded into the label.
 pub(crate) fn commit_menu(
     mut menu: PopupMenu,
     target: CommitTarget,
@@ -988,29 +1191,17 @@ pub(crate) fn commit_menu(
         .id
         .map_or_else(|| target.short.clone(), |commit| commit.to_string());
     let copy_summary = target.summary.clone();
-    menu = menu
-        .item(
-            PopupMenuItem::new(t!("history_ops.menu.copy_id").to_string()).on_click(
-                move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(copy_id.clone()));
-                },
-            ),
-        )
-        .item(
-            PopupMenuItem::new(t!("history_ops.menu.copy_summary").to_string()).on_click(
-                move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
-                    cx.write_to_clipboard(ClipboardItem::new_string(copy_summary.clone()));
-                },
-            ),
-        );
+    menu = menu.separator();
+    menu = copy_menu(menu, copy_id, copy_summary, window, cx);
 
     let (Some(commit), Some(state)) = (target.id, state) else {
         return menu;
     };
-    menu = RepoView::graph_submenu(menu, entity.clone(), commit, state.head, window, cx);
     let short = target.short;
     let summary = target.summary;
     let tags = target.tags;
+    let shared = shared.as_deref();
+    menu = RepoView::graph_submenu(menu, entity.clone(), commit, state.head, window, cx);
 
     if let Some(item) = crate::github::commit_item(&entity, commit, cx) {
         menu = menu.item(item);
@@ -1020,54 +1211,15 @@ pub(crate) fn commit_menu(
     let cherry_blocked = state.blocked_for(HistoryAction::CherryPick, commit);
     let revert_blocked = state.blocked_for(HistoryAction::Revert, commit);
     let checkout_blocked = state.blocked(HistoryAction::CheckoutCommit);
-    let reset_blocked = state.blocked(HistoryAction::Reset);
-    let tag_blocked = state.blocked(HistoryAction::CreateTag);
-    let delete_blocked = state.blocked(HistoryAction::DeleteTag);
-    let branch_blocked = state.blocked(HistoryAction::CreateBranch);
-    let rebase = entity.read(cx).rebase_target(
-        commit,
-        t!("history_ops.menu.commit_label", short = short).to_string(),
-    );
-
     // A merge commit is picked or reverted against its first parent (`-m 1` in
     // `git_cli::history`), so these stay enabled for merges.
-    let cherry = {
-        let entity = entity.clone();
-        let short = short.clone();
-        PopupMenuItem::new(blocked_label(
-            t!("history_ops.menu.cherry_pick_onto", onto = onto).to_string(),
-            cherry_blocked.as_deref(),
-            shared.as_deref(),
-        ))
-        .disabled(cherry_blocked.is_some())
-        .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-            let short = short.clone();
-            entity.update(cx, |view, cx| view.cherry_pick(commit, short, window, cx));
-        })
-    };
-    let revert = {
-        let entity = entity.clone();
-        let short = short.clone();
-        PopupMenuItem::new(blocked_label(
-            t!("history_ops.menu.revert").to_string(),
-            revert_blocked.as_deref(),
-            shared.as_deref(),
-        ))
-        .disabled(revert_blocked.is_some())
-        .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-            let short = short.clone();
-            entity.update(cx, |view, cx| {
-                view.confirm_revert(commit, short, window, cx)
-            });
-        })
-    };
     let checkout = {
         let entity = entity.clone();
         let short = short.clone();
         PopupMenuItem::new(blocked_label(
             t!("history_ops.menu.checkout_commit").to_string(),
             checkout_blocked.as_deref(),
-            shared.as_deref(),
+            shared,
         ))
         .disabled(checkout_blocked.is_some())
         .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
@@ -1082,104 +1234,69 @@ pub(crate) fn commit_menu(
             });
         })
     };
+    let cherry = {
+        let entity = entity.clone();
+        let short = short.clone();
+        PopupMenuItem::new(blocked_label(
+            t!("history_ops.menu.cherry_pick_onto", onto = onto).to_string(),
+            cherry_blocked.as_deref(),
+            shared,
+        ))
+        .disabled(cherry_blocked.is_some())
+        .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+            let short = short.clone();
+            entity.update(cx, |view, cx| view.cherry_pick(commit, short, window, cx));
+        })
+    };
+    let revert = {
+        let entity = entity.clone();
+        let short = short.clone();
+        PopupMenuItem::new(blocked_label(
+            t!("history_ops.menu.revert").to_string(),
+            revert_blocked.as_deref(),
+            shared,
+        ))
+        .disabled(revert_blocked.is_some())
+        .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+            let short = short.clone();
+            entity.update(cx, |view, cx| {
+                view.confirm_revert(commit, short, window, cx)
+            });
+        })
+    };
+    let rebase = entity.read(cx).rebase_target(
+        commit,
+        t!("history_ops.menu.commit_label", short = short).to_string(),
+    );
 
-    menu = menu.separator().item(cherry).item(revert).item(checkout);
+    menu = menu.separator().item(checkout).item(cherry).item(revert);
     if let Some(target) = rebase {
         menu = menu.item(rebase_menu_item(
             target,
             &onto,
             None,
-            shared.as_deref(),
+            shared,
             entity.clone(),
         ));
     }
+
+    let busy_reason = state.busy().then(|| t!("branch.reason.busy").to_string());
+    let branch_blocked = state.blocked(HistoryAction::CreateBranch);
+    let tag_blocked = state.blocked(HistoryAction::CreateTag);
     menu = menu.separator();
-
-    let reset_label = t!("history_ops.menu.reset_to_here", onto = onto).to_string();
-    menu = match reset_blocked {
-        // `PopupMenu` cannot mark the submenu entry itself disabled, so a
-        // blocked reset is a plain disabled entry that names the reason.
-        Some(reason) => menu.item(
-            PopupMenuItem::new(blocked_label(
-                reset_label,
-                Some(reason.as_str()),
-                shared.as_deref(),
-            ))
-            .disabled(true),
-        ),
-        None => {
-            let entity = entity.clone();
-            let short = short.clone();
-            menu.submenu(reset_label, window, cx, move |submenu, _, _| {
-                let entry = |mode: ResetMode, label: String| {
-                    let entity = entity.clone();
-                    let short = short.clone();
-                    PopupMenuItem::new(label).on_click(
-                        move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                            let short = short.clone();
-                            entity.update(cx, |view, cx| {
-                                view.confirm_reset(commit, short, mode, window, cx)
-                            });
-                        },
-                    )
-                };
-                submenu
-                    .item(entry(
-                        ResetMode::Soft,
-                        t!("history_ops.menu.soft").to_string(),
-                    ))
-                    .item(entry(
-                        ResetMode::Mixed,
-                        t!("history_ops.menu.mixed").to_string(),
-                    ))
-                    .item(entry(
-                        ResetMode::Hard,
-                        t!("history_ops.menu.hard").to_string(),
-                    ))
-                    .item(entry(
-                        ResetMode::Keep,
-                        t!("history_ops.menu.keep").to_string(),
-                    ))
-            })
-        }
-    };
-
-    let create_branch = {
-        let entity = entity.clone();
-        let point = commit.to_string();
-        let from = t!("history_ops.menu.from_commit", short = short).to_string();
-        PopupMenuItem::new(blocked_label(
-            t!("history_ops.menu.create_branch").to_string(),
-            branch_blocked.as_deref(),
-            shared.as_deref(),
-        ))
-        .disabled(branch_blocked.is_some())
-        .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-            let point = point.clone();
-            let from = from.clone();
-            entity.update(cx, |view, cx| {
-                view.open_create_dialog(Some(point), from, window, cx);
-            });
-        })
-    };
-    let create_tag = {
-        let entity = entity.clone();
-        let short = short.clone();
-        PopupMenuItem::new(blocked_label(
-            t!("history_ops.menu.create_tag").to_string(),
-            tag_blocked.as_deref(),
-            shared.as_deref(),
-        ))
-        .disabled(tag_blocked.is_some())
-        .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-            let short = short.clone();
-            entity.update(cx, |view, cx| {
-                view.open_tag_dialog(commit, short, window, cx)
-            });
-        })
-    };
-
-    menu = menu.separator().item(create_branch).item(create_tag);
+    menu = create_menu(
+        menu,
+        commit,
+        short.clone(),
+        branch_blocked,
+        tag_blocked,
+        busy_reason.clone(),
+        shared.map(str::to_owned),
+        entity.clone(),
+        window,
+        cx,
+    );
+    let delete_blocked = state.blocked(HistoryAction::DeleteTag);
     for tag in tags {
         let entity = entity.clone();
         let name = tag.clone();
@@ -1187,7 +1304,7 @@ pub(crate) fn commit_menu(
             PopupMenuItem::new(blocked_label(
                 t!("history_ops.menu.delete_tag", tag = tag).to_string(),
                 delete_blocked.as_deref(),
-                shared.as_deref(),
+                shared,
             ))
             .disabled(delete_blocked.is_some())
             .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
@@ -1196,91 +1313,342 @@ pub(crate) fn commit_menu(
             }),
         );
     }
-    // One grouped entry rather than a submenu, so the compare view is one
-    // click away from the commit it starts at.
-    menu = menu.separator();
-    // A menu only opens with a session, so the repository is there.
-    let compare_blocked = super::compare::with_head_blocked(true, Some(commit), state.head);
-    menu = menu.item(
-        PopupMenuItem::new(blocked_label(
-            t!("history_ops.menu.compare_head").to_string(),
-            compare_blocked.as_deref(),
-            shared.as_deref(),
-        ))
-        .disabled(compare_blocked.is_some())
-        .on_click({
-            let entity = entity.clone();
-            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                entity.update(cx, |view, cx| {
-                    view.open_compare_with_head(commit, window, cx)
-                });
-            }
-        }),
-    );
-    let worktree_compare_blocked = super::compare::with_worktree_blocked(true, Some(commit));
-    menu = menu.item(
-        PopupMenuItem::new(blocked_label(
-            t!("history_ops.menu.compare_worktree").to_string(),
-            worktree_compare_blocked.as_deref(),
-            shared.as_deref(),
-        ))
-        .disabled(worktree_compare_blocked.is_some())
-        .on_click({
-            let entity = entity.clone();
-            move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                entity.update(cx, |view, cx| {
-                    view.open_compare_with_worktree(commit, window, cx)
-                });
-            }
-        }),
-    );
-
-    let busy_reason = state.busy().then(|| t!("branch.reason.busy").to_string());
-    let worktree_short = short.clone();
-    let create_worktree = {
-        let entity = entity.clone();
-        PopupMenuItem::new(blocked_label(
-            t!("history_ops.menu.create_worktree").to_string(),
-            busy_reason.as_deref(),
-            shared.as_deref(),
-        ))
-        .disabled(busy_reason.is_some())
-        .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-            entity.update(cx, |view, cx| {
-                view.open_worktree_from_commit(commit, worktree_short.clone(), window, cx)
-            });
-        })
-    };
-    let save_patch = {
-        let entity = entity.clone();
-        let short = short.clone();
-        PopupMenuItem::new(blocked_label(
-            t!("history_ops.menu.save_patch").to_string(),
-            busy_reason.as_deref(),
-            shared.as_deref(),
-        ))
-        .disabled(busy_reason.is_some())
-        .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-            let short = short.clone();
-            entity.update(cx, |view, cx| {
-                view.save_commit_as_patch(commit, short, window, cx)
-            });
-        })
-    };
-    menu = menu.separator().item(create_worktree).item(save_patch);
 
     let edit = entity.read(cx).edit_context(commit);
     menu = menu.separator();
-    menu = edit_group(
+    menu = edit_menu(
         menu,
         commit,
-        &summary,
-        &state,
-        edit.as_ref(),
-        shared.as_deref(),
-        &entity,
+        summary,
+        state.clone(),
+        edit,
+        shared.map(str::to_owned),
+        entity.clone(),
+        window,
+        cx,
+    );
+    menu = reset_menu(
+        menu,
+        commit,
+        short.clone(),
+        state.clone(),
+        shared,
+        entity.clone(),
+        window,
+        cx,
+    );
+    menu = compare_menu(
+        menu,
+        commit,
+        state.head,
+        shared.map(str::to_owned),
+        entity,
+        window,
+        cx,
     );
     menu
+}
+
+/// The "Copy" submenu: the full id and the summary of the commit.
+fn copy_menu(
+    menu: PopupMenu,
+    id: String,
+    summary: String,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    menu.submenu(
+        t!("history_ops.menu.copy").to_string(),
+        window,
+        cx,
+        move |submenu, _, _| {
+            let copy_id = id.clone();
+            let copy_summary = summary.clone();
+            submenu
+                .item(
+                    PopupMenuItem::new(t!("history_ops.menu.copy_id").to_string()).on_click(
+                        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(copy_id.clone()));
+                        },
+                    ),
+                )
+                .item(
+                    PopupMenuItem::new(t!("history_ops.menu.copy_summary").to_string()).on_click(
+                        move |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(copy_summary.clone()));
+                        },
+                    ),
+                )
+        },
+    )
+}
+
+/// The "Create" submenu: a branch, a tag, a worktree or a patch at this commit.
+#[allow(clippy::too_many_arguments)]
+fn create_menu(
+    menu: PopupMenu,
+    commit: Oid,
+    short: String,
+    branch_blocked: Option<String>,
+    tag_blocked: Option<String>,
+    busy: Option<String>,
+    shared: Option<String>,
+    entity: Entity<RepoView>,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    menu.submenu(
+        t!("history_ops.menu.create").to_string(),
+        window,
+        cx,
+        move |submenu, _, _| {
+            let point = commit.to_string();
+            let from = t!("history_ops.menu.from_commit", short = short).to_string();
+            let branch = {
+                let entity = entity.clone();
+                PopupMenuItem::new(blocked_label(
+                    t!("history_ops.menu.create_branch").to_string(),
+                    branch_blocked.as_deref(),
+                    shared.as_deref(),
+                ))
+                .disabled(branch_blocked.is_some())
+                .on_click(
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        let point = point.clone();
+                        let from = from.clone();
+                        entity.update(cx, |view, cx| {
+                            view.open_create_dialog(Some(point), from, window, cx);
+                        });
+                    },
+                )
+            };
+            let tag = {
+                let entity = entity.clone();
+                let short = short.clone();
+                PopupMenuItem::new(blocked_label(
+                    t!("history_ops.menu.create_tag").to_string(),
+                    tag_blocked.as_deref(),
+                    shared.as_deref(),
+                ))
+                .disabled(tag_blocked.is_some())
+                .on_click(
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        let short = short.clone();
+                        entity.update(cx, |view, cx| {
+                            view.open_tag_dialog(commit, short, window, cx)
+                        });
+                    },
+                )
+            };
+            let worktree = {
+                let entity = entity.clone();
+                let short = short.clone();
+                PopupMenuItem::new(blocked_label(
+                    t!("history_ops.menu.create_worktree").to_string(),
+                    busy.as_deref(),
+                    shared.as_deref(),
+                ))
+                .disabled(busy.is_some())
+                .on_click(
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        entity.update(cx, |view, cx| {
+                            view.open_worktree_from_commit(commit, short.clone(), window, cx)
+                        });
+                    },
+                )
+            };
+            let patch = {
+                let entity = entity.clone();
+                let short = short.clone();
+                PopupMenuItem::new(blocked_label(
+                    t!("history_ops.menu.save_patch").to_string(),
+                    busy.as_deref(),
+                    shared.as_deref(),
+                ))
+                .disabled(busy.is_some())
+                .on_click(
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        let short = short.clone();
+                        entity.update(cx, |view, cx| {
+                            view.save_commit_as_patch(commit, short, window, cx)
+                        });
+                    },
+                )
+            };
+            submenu.item(branch).item(tag).item(worktree).item(patch)
+        },
+    )
+}
+
+/// The "Edit" submenu, or one disabled "Edit" entry when every row is blocked
+/// for the same reason.
+#[allow(clippy::too_many_arguments)]
+fn edit_menu(
+    menu: PopupMenu,
+    commit: Oid,
+    summary: String,
+    state: MenuState,
+    edit: Option<EditContext>,
+    shared: Option<String>,
+    entity: Entity<RepoView>,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    let label = t!("history_ops.menu.edit").to_string();
+    // `PopupMenu` cannot mark a submenu entry itself disabled, so a blocked
+    // group is a plain disabled entry that names the one reason.
+    if let Some(reason) = collapsed_edit_reason(&state, edit.as_ref()) {
+        return menu.item(
+            PopupMenuItem::new(blocked_label(
+                label,
+                Some(reason.as_str()),
+                shared.as_deref(),
+            ))
+            .disabled(true),
+        );
+    }
+    menu.submenu(label, window, cx, move |submenu, _, _| {
+        let mut submenu = submenu;
+        for entry in EditEntry::ALL {
+            if entry == EditEntry::History {
+                submenu = submenu.separator();
+            }
+            let blocked = edit_entry_blocked(&state, edit.as_ref(), entry);
+            let mut item = PopupMenuItem::new(blocked_label(
+                entry.label(),
+                blocked.as_deref(),
+                shared.as_deref(),
+            ))
+            .disabled(blocked.is_some());
+            if blocked.is_none() {
+                let entity = entity.clone();
+                let summary = summary.clone();
+                item = match entry {
+                    EditEntry::Action(action) => {
+                        item.on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                            entity.update(cx, |view, cx| {
+                                view.open_edit(action, commit, summary.clone(), window, cx)
+                            });
+                        })
+                    }
+                    EditEntry::History => {
+                        item.on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                            entity
+                                .update(cx, |view, cx| view.open_edit_history(commit, window, cx));
+                        })
+                    }
+                };
+            }
+            submenu = submenu.item(item);
+        }
+        submenu
+    })
+}
+
+/// The "Reset" submenu, or one disabled entry when a reset cannot run.
+#[allow(clippy::too_many_arguments)]
+fn reset_menu(
+    menu: PopupMenu,
+    commit: Oid,
+    short: String,
+    state: MenuState,
+    shared: Option<&str>,
+    entity: Entity<RepoView>,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    let label = t!("history_ops.menu.reset").to_string();
+    let Some(reason) = state.blocked(HistoryAction::Reset) else {
+        return menu.submenu(label, window, cx, move |submenu, _, _| {
+            let entry = |mode: ResetMode, label: String| {
+                let entity = entity.clone();
+                let short = short.clone();
+                PopupMenuItem::new(label).on_click(
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        let short = short.clone();
+                        entity.update(cx, |view, cx| {
+                            view.confirm_reset(commit, short, mode, window, cx)
+                        });
+                    },
+                )
+            };
+            submenu
+                .item(entry(
+                    ResetMode::Soft,
+                    t!("history_ops.menu.soft").to_string(),
+                ))
+                .item(entry(
+                    ResetMode::Mixed,
+                    t!("history_ops.menu.mixed").to_string(),
+                ))
+                .item(entry(
+                    ResetMode::Hard,
+                    t!("history_ops.menu.hard").to_string(),
+                ))
+                .item(entry(
+                    ResetMode::Keep,
+                    t!("history_ops.menu.keep").to_string(),
+                ))
+        });
+    };
+    menu.item(
+        PopupMenuItem::new(blocked_label(label, Some(reason.as_str()), shared)).disabled(true),
+    )
+}
+
+/// The "Compare" submenu: against HEAD and against the working tree.
+fn compare_menu(
+    menu: PopupMenu,
+    commit: Oid,
+    head: Option<Oid>,
+    shared: Option<String>,
+    entity: Entity<RepoView>,
+    window: &mut Window,
+    cx: &mut Context<PopupMenu>,
+) -> PopupMenu {
+    // A menu only opens with a session, so the repository is there.
+    let head_blocked = super::compare::with_head_blocked(true, Some(commit), head);
+    let worktree_blocked = super::compare::with_worktree_blocked(true, Some(commit));
+    menu.submenu(
+        t!("history_ops.menu.compare").to_string(),
+        window,
+        cx,
+        move |submenu, _, _| {
+            let head_item = {
+                let entity = entity.clone();
+                PopupMenuItem::new(blocked_label(
+                    t!("history_ops.menu.compare_head").to_string(),
+                    head_blocked.as_deref(),
+                    shared.as_deref(),
+                ))
+                .disabled(head_blocked.is_some())
+                .on_click(
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        entity.update(cx, |view, cx| {
+                            view.open_compare_with_head(commit, window, cx)
+                        });
+                    },
+                )
+            };
+            let worktree_item = {
+                let entity = entity.clone();
+                PopupMenuItem::new(blocked_label(
+                    t!("history_ops.menu.compare_worktree").to_string(),
+                    worktree_blocked.as_deref(),
+                    shared.as_deref(),
+                ))
+                .disabled(worktree_blocked.is_some())
+                .on_click(
+                    move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+                        entity.update(cx, |view, cx| {
+                            view.open_compare_with_worktree(commit, window, cx)
+                        });
+                    },
+                )
+            };
+            submenu.item(head_item).item(worktree_item)
+        },
+    )
 }
 
 /// The context menu for a multi-selection: the one pick it can run and the ids
@@ -1395,54 +1763,6 @@ fn multi_commit_menu(
         });
     }
     menu.item(item)
-}
-
-/// The t!("history_ops.menu.edit_commit").to_string() group. Every entry says why it is disabled, because a
-/// popup item has no tooltip; the menu-wide reason is not repeated.
-fn edit_group(
-    mut menu: PopupMenu,
-    commit: Oid,
-    summary: &str,
-    state: &MenuState,
-    edit: Option<&EditContext>,
-    shared: Option<&str>,
-    entity: &Entity<RepoView>,
-) -> PopupMenu {
-    menu = menu.item(PopupMenuItem::label(
-        t!("history_ops.menu.edit_commit").to_string(),
-    ));
-    for action in EditAction::ALL {
-        let blocked = edit_blocked(state, edit, action);
-        let mut item =
-            PopupMenuItem::new(blocked_label(action.label(), blocked.as_deref(), shared))
-                .disabled(blocked.is_some());
-        if blocked.is_none() {
-            let entity = entity.clone();
-            let summary = summary.to_owned();
-            item = item.on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                entity.update(cx, |view, cx| {
-                    view.open_edit(action, commit, summary.clone(), window, cx)
-                });
-            });
-        }
-        menu = menu.item(item);
-    }
-    // The dialog edits `onto..HEAD` with `onto` at the commit's parent, which
-    // is the range a reword of this commit replays, so it qualifies the same way.
-    let blocked = edit_blocked(state, edit, EditAction::Reword);
-    let mut item = PopupMenuItem::new(blocked_label(
-        t!("history_ops.menu.edit_history").to_string(),
-        blocked.as_deref(),
-        shared,
-    ))
-    .disabled(blocked.is_some());
-    if blocked.is_none() {
-        let entity = entity.clone();
-        item = item.on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-            entity.update(cx, |view, cx| view.open_edit_history(commit, window, cx));
-        });
-    }
-    menu.separator().item(item)
 }
 
 /// What a reset confirmation says: which branch moves, what happens to the
@@ -2027,7 +2347,7 @@ impl RepoView {
             return;
         }
         match action {
-            EditAction::Reword => self.open_reword(commit, window, cx),
+            EditAction::Reword => self.open_reword(commit, &edit, window, cx),
             EditAction::Drop => self.confirm_drop(commit, &summary, &edit, &state, window, cx),
             _ => self.confirm_or_run_edit(action, commit, &edit, window, cx),
         }
@@ -2043,7 +2363,7 @@ impl RepoView {
         };
         // Same guard as the single edits: a stale click must not open a dialog
         // for a repository that has since moved.
-        if edit_blocked(&state, Some(&edit), EditAction::Reword).is_some() {
+        if edit_entry_blocked(&state, Some(&edit), EditEntry::History).is_some() {
             return;
         }
         let Some((onto, commits)) = edit.plan(EditAction::Reword) else {
@@ -2057,13 +2377,20 @@ impl RepoView {
                 .map(|commit| (commit, edit.summary(commit)))
                 .collect(),
             pushed: edit.pushed_remotes(EditAction::Reword),
+            published: edit.upstream_containing(commit),
             repo: edit.repo.clone(),
         };
         rebase_dialog::open(self, request, window, cx);
     }
 
     /// Opens the message editor with the commit's full message filled in.
-    fn open_reword(&mut self, commit: Oid, window: &mut Window, cx: &mut Context<Self>) {
+    fn open_reword(
+        &mut self,
+        commit: Oid,
+        edit: &EditContext,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(session) = self.session.as_ref() else {
             return;
         };
@@ -2082,7 +2409,16 @@ impl RepoView {
                 return;
             }
         };
-        edit_dialog::open(self, commit, short_oid(commit), message, window, cx);
+        let warning = published_warning(edit.upstream_containing(commit).as_deref());
+        edit_dialog::open(
+            self,
+            commit,
+            short_oid(commit),
+            message,
+            warning,
+            window,
+            cx,
+        );
     }
 
     /// Asks before leaving a commit out of the branch.
@@ -2118,6 +2454,7 @@ impl RepoView {
             )
             .to_string(),
         };
+        let detail = with_pushed_warning(detail, edit.upstream_containing(commit).as_deref());
         self.focus_root(window, cx);
         let entity = cx.weak_entity();
         ui::confirm(
@@ -2133,8 +2470,9 @@ impl RepoView {
         );
     }
 
-    /// Runs a squash, fixup or move, warning first when the range is already on
-    /// a remote-tracking branch: a rewrite there needs a force push.
+    /// Runs a squash, fixup or move. A confirmation opens when the range is
+    /// already on a remote-tracking branch, or when the commit is on the
+    /// branch's upstream and publishing the rewrite needs a force push.
     fn confirm_or_run_edit(
         &mut self,
         action: EditAction,
@@ -2144,11 +2482,21 @@ impl RepoView {
         cx: &mut Context<Self>,
     ) {
         let remotes = edit.pushed_remotes(action);
-        if remotes.is_empty() {
+        let published = edit.upstream_containing(commit);
+        if remotes.is_empty() && published.is_none() {
             self.run_edit(action, commit, None, window, cx);
             return;
         }
-        let detail = t!("history_ops.force_push_note", remote = remotes.join(", ")).to_string();
+        let mut detail = String::new();
+        if !remotes.is_empty() {
+            detail = t!("history_ops.force_push_note", remote = remotes.join(", ")).to_string();
+        }
+        if let Some(warning) = published_warning(published.as_deref()) {
+            if !detail.is_empty() {
+                detail.push_str("\n\n");
+            }
+            detail.push_str(&warning);
+        }
         self.focus_root(window, cx);
         let entity = cx.weak_entity();
         ui::confirm(
@@ -2194,19 +2542,40 @@ impl RepoView {
             cx.notify();
             return;
         }
+        // A reword only replaces one message, so a merge in the range or a root
+        // commit is rebuilt with `git commit-tree` instead of replayed.
+        let message = if action == EditAction::Reword {
+            let message = message.unwrap_or_default();
+            if message.trim().is_empty() {
+                self.status_error = Some(t!("history_ops.empty_message").to_string());
+                cx.notify();
+                return;
+            }
+            if edit.view().reword_needs_rebuild() {
+                if let Some(distance) = edit.distance {
+                    self.edit_selection = Some(PendingSelection {
+                        old_head: edit.head,
+                        distance,
+                    });
+                }
+                let label = format!("{} {}", action.verb(), short_oid(commit));
+                self.run_operation(
+                    Operation::RewordAcrossMerges { commit, message },
+                    label,
+                    window,
+                    cx,
+                );
+                return;
+            }
+            Some(message)
+        } else {
+            None
+        };
         let Some((onto, commits)) = edit.plan(action) else {
             return;
         };
         let steps = match action {
-            EditAction::Reword => {
-                let message = message.unwrap_or_default();
-                if message.trim().is_empty() {
-                    self.status_error = Some(t!("history_ops.empty_message").to_string());
-                    cx.notify();
-                    return;
-                }
-                reword_commit(&commits, commit, message)
-            }
+            EditAction::Reword => reword_commit(&commits, commit, message.unwrap_or_default()),
             EditAction::Squash => squash_commit_into_parent(&commits, commit),
             EditAction::Fixup => fixup_steps(&commits, commit),
             EditAction::Drop => drop_commit(&commits, commit),
@@ -2777,44 +3146,73 @@ mod tests {
         assert_eq!(selection_distance(2, EditAction::MoveDown), Some(3));
     }
 
+    /// A view of `line` with the target `distance` steps down and HEAD able to
+    /// reach it.
+    fn view_at(line: &[LineCommit], distance: Option<usize>) -> LineView<'_> {
+        LineView::at(line, distance, true)
+    }
+
     #[test]
     fn edit_reasons_mirror_what_core_refuses() {
         let ids = [oid(1), oid(2), oid(3), oid(4)];
         let line = line_of(&ids);
 
         assert_eq!(
-            blocked_on_line(&line, None, EditAction::Reword),
+            blocked_on_line(LineView::at(&line, None, false), EditAction::Reword),
             Some(t!("history_ops.reason.not_on_branch").to_string())
         );
         assert_eq!(
-            blocked_on_line(&line, Some(3), EditAction::Reword),
+            blocked_on_line(LineView::at(&line, None, true), EditAction::Reword),
+            Some(t!("history_ops.reason.merged_in").to_string()),
+            "a merge brought the commit in, so it is reachable without being on the line"
+        );
+        assert_eq!(
+            blocked_on_line(view_at(&line, Some(3)), EditAction::Drop),
             Some(t!("history_ops.reason.root_commit").to_string()),
             "a root has no parent to rebase onto"
         );
         assert_eq!(
-            blocked_on_line(&line, Some(0), EditAction::MoveUp),
+            blocked_on_line(view_at(&line, Some(3)), EditAction::Reword),
+            None,
+            "a reword rebuilds the commit, so a root needs no onto"
+        );
+        assert_eq!(
+            blocked_on_line(view_at(&line, Some(0)), EditAction::MoveUp),
             Some(t!("history_ops.reason.already_newest").to_string())
         );
         assert_eq!(
-            blocked_on_line(&line, Some(2), EditAction::Squash),
+            blocked_on_line(view_at(&line, Some(2)), EditAction::Squash),
             Some(t!("history_ops.reason.parent_root").to_string()),
             "squashing into the root would need an onto before it"
         );
         assert_eq!(
-            blocked_on_line(&line, Some(2), EditAction::MoveDown),
+            blocked_on_line(view_at(&line, Some(2)), EditAction::MoveDown),
             Some(t!("history_ops.reason.already_oldest").to_string())
         );
-        assert_eq!(blocked_on_line(&line, Some(2), EditAction::Reword), None);
+        assert_eq!(
+            blocked_on_line(view_at(&line, Some(2)), EditAction::Reword),
+            None
+        );
 
-        // A merge at HEAD blocks every action whose range contains it.
+        // A merge at HEAD stops every replay, but not a reword, which keeps
+        // every tree and rebuilds the commits instead.
         let mut merged = line_of(&ids);
         merged[0].1.push(oid(9));
         assert_eq!(
-            blocked_on_line(&merged, Some(0), EditAction::Reword),
+            blocked_on_line(view_at(&merged, Some(0)), EditAction::Reword),
+            None
+        );
+        assert_eq!(
+            blocked_on_line(view_at(&merged, Some(1)), EditAction::Reword),
+            None,
+            "a commit behind a merge can be reworded"
+        );
+        assert_eq!(
+            blocked_on_line(view_at(&merged, Some(1)), EditAction::Drop),
             Some(t!("history_ops.reason.merge").to_string())
         );
         assert_eq!(
-            blocked_on_line(&merged, Some(1), EditAction::Drop),
+            blocked_on_line(view_at(&merged, Some(1)), EditAction::MoveUp),
             Some(t!("history_ops.reason.merge").to_string())
         );
 
@@ -2823,13 +3221,111 @@ mod tests {
         let mut merged_parent = line_of(&ids);
         merged_parent[1].1.push(oid(9));
         assert_eq!(
-            blocked_on_line(&merged_parent, Some(0), EditAction::Reword),
+            blocked_on_line(view_at(&merged_parent, Some(0)), EditAction::Reword),
             None
         );
         assert_eq!(
-            blocked_on_line(&merged_parent, Some(0), EditAction::Squash),
+            blocked_on_line(view_at(&merged_parent, Some(0)), EditAction::Squash),
             Some(t!("history_ops.reason.merge").to_string())
         );
+    }
+
+    #[test]
+    fn the_history_dialog_needs_a_range_a_replay_can_take() {
+        let state = MenuState::read(Some(&branch("main", oid(1))), RepoState::Normal, false);
+        let line = line_of(&[oid(1), oid(2), oid(3)]);
+        assert_eq!(
+            edit_entry_blocked_on_line(&state, view_at(&line, Some(0)), EditEntry::History),
+            None
+        );
+
+        let mut merged = line_of(&[oid(1), oid(2), oid(3)]);
+        merged[0].1.push(oid(9));
+        assert_eq!(
+            edit_entry_blocked_on_line(&state, view_at(&merged, Some(1)), EditEntry::History),
+            Some(t!("history_ops.reason.merge").to_string()),
+            "the dialog replays with `git rebase -i`, which a merge stops"
+        );
+
+        let root = line_of(&[oid(1), oid(2)]);
+        assert_eq!(
+            edit_entry_blocked_on_line(&state, view_at(&root, Some(1)), EditEntry::History),
+            Some(t!("history_ops.reason.parent_root").to_string()),
+            "the dialog has no onto commit below a root"
+        );
+    }
+
+    #[test]
+    fn the_edit_entry_collapses_only_when_every_row_shares_a_reason() {
+        let state = MenuState::read(Some(&branch("main", oid(1))), RepoState::Normal, false);
+        let line = line_of(&[oid(1), oid(2), oid(3)]);
+
+        // (a) a commit on another branch blocks every row for the same reason.
+        assert_eq!(
+            collapsed_edit_reason_on_line(&state, LineView::at(&line, None, false)),
+            Some(t!("history_ops.reason.not_on_branch").to_string())
+        );
+        // (b) a merged-in commit does too.
+        assert_eq!(
+            collapsed_edit_reason_on_line(&state, LineView::at(&line, None, true)),
+            Some(t!("history_ops.reason.merged_in").to_string())
+        );
+        // A head commit has a reword and a move available, so the submenu
+        // opens and only the inapplicable rows are disabled.
+        assert_eq!(
+            collapsed_edit_reason_on_line(&state, view_at(&line, Some(0))),
+            None
+        );
+
+        let busy = MenuState::read(Some(&branch("main", oid(1))), RepoState::Normal, true);
+        assert_eq!(
+            collapsed_edit_reason_on_line(&busy, view_at(&line, Some(0))),
+            Some(t!("branch.reason.busy").to_string())
+        );
+
+        // The disabled entry carries that one reason in its label.
+        let reason = collapsed_edit_reason_on_line(&state, LineView::at(&line, None, true));
+        assert_eq!(
+            blocked_label(
+                t!("history_ops.menu.edit").to_string(),
+                reason.as_deref(),
+                None
+            ),
+            format!("Edit ({})", t!("history_ops.reason.merged_in"))
+        );
+    }
+
+    #[test]
+    fn a_published_commit_warns_that_the_rewrite_needs_a_force_push() {
+        assert_eq!(
+            published_warning(Some("origin/main")),
+            Some(
+                "This commit is already on origin/main. Publishing the change needs a force push."
+                    .to_owned()
+            )
+        );
+        assert_eq!(published_warning(None), None);
+
+        assert_eq!(with_pushed_warning("Body".to_owned(), None), "Body");
+        let warned = with_pushed_warning("Body".to_owned(), Some("origin/main"));
+        assert!(
+            warned.starts_with("Body\n\n"),
+            "the note is its own paragraph: {warned}"
+        );
+        assert!(
+            warned.contains("already on origin/main"),
+            "the note names the upstream: {warned}"
+        );
+
+        // Every rewrite confirmation and the history dialog show the same
+        // note, so the wording is chosen once.
+        for entry in EditEntry::ALL {
+            let warned = with_pushed_warning(entry.label(), Some("upstream/main"));
+            assert!(
+                warned.ends_with("needs a force push."),
+                "{entry:?} carries the note: {warned}"
+            );
+        }
     }
 
     #[test]
@@ -2839,13 +3335,13 @@ mod tests {
 
         let pending = MenuState::read(Some(&head), RepoState::Rebasing, false);
         assert_eq!(
-            edit_blocked_on_line(&pending, &line, Some(0), EditAction::Reword),
+            edit_blocked_on_line(&pending, view_at(&line, Some(0)), EditAction::Reword),
             Some(t!("reflog.finish_first").to_string())
         );
 
         let busy = MenuState::read(Some(&head), RepoState::Normal, true);
         assert_eq!(
-            edit_blocked_on_line(&busy, &line, Some(0), EditAction::Reword),
+            edit_blocked_on_line(&busy, view_at(&line, Some(0)), EditAction::Reword),
             Some(t!("branch.reason.busy").to_string())
         );
 
@@ -2855,13 +3351,13 @@ mod tests {
             false,
         );
         assert_eq!(
-            edit_blocked_on_line(&detached, &line, Some(0), EditAction::Reword),
+            edit_blocked_on_line(&detached, view_at(&line, Some(0)), EditAction::Reword),
             Some(t!("reflog.head_detached").to_string())
         );
     }
 
     #[test]
-    fn tracked_changes_block_a_rewrite_but_untracked_files_do_not() {
+    fn tracked_changes_block_a_replay_but_not_a_rebuilt_reword() {
         let head = branch("main", oid(1));
         let read = |status: WorktreeStatus| {
             MenuState::read(Some(&head), RepoState::Normal, false).with_worktree(&status)
@@ -2871,7 +3367,7 @@ mod tests {
         let clean = read(WorktreeStatus::default());
         assert!(!clean.dirty);
         assert_eq!(
-            edit_blocked_on_line(&clean, &line, Some(0), EditAction::Reword),
+            edit_blocked_on_line(&clean, view_at(&line, Some(0)), EditAction::Reword),
             None
         );
 
@@ -2881,8 +3377,23 @@ mod tests {
         let staged = read(worktree(strata_core::ChangeKind::Modified, true));
         assert!(staged.dirty);
         assert_eq!(
-            edit_blocked_on_line(&staged, &line, Some(0), EditAction::Reword),
-            Some(t!("reflog.commit_or_stash").to_string())
+            edit_blocked_on_line(&staged, view_at(&line, Some(0)), EditAction::Reword),
+            Some(t!("reflog.commit_or_stash").to_string()),
+            "the linear reword replays through the worktree"
+        );
+
+        // A reword with a merge in its range is rebuilt instead of replayed:
+        // HEAD keeps its tree, so the uncommitted change stays valid.
+        let mut merged = line_of(&[oid(1), oid(2), oid(3)]);
+        merged[0].1.push(oid(9));
+        assert_eq!(
+            edit_blocked_on_line(&staged, view_at(&merged, Some(1)), EditAction::Reword),
+            None
+        );
+        assert_eq!(
+            edit_blocked_on_line(&staged, view_at(&line, Some(0)), EditAction::Drop),
+            Some(t!("reflog.commit_or_stash").to_string()),
+            "a drop still replays the range"
         );
 
         let edited = read(worktree(strata_core::ChangeKind::Modified, false));

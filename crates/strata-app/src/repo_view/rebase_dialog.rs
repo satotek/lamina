@@ -48,6 +48,9 @@ pub(super) struct RebaseRequest {
     pub(super) commits: Vec<(Oid, String)>,
     /// Remote-tracking branches that already contain part of the range.
     pub(super) pushed: Vec<String>,
+    /// The branch's upstream when the edited commit is already on it, so
+    /// publishing the rewrite needs a force push.
+    pub(super) published: Option<String>,
     pub(super) repo: Arc<dyn RepoReader>,
 }
 
@@ -141,6 +144,7 @@ struct RebaseDialog {
     /// The row keyboard commands act on.
     cursor: usize,
     pushed: Vec<String>,
+    published: Option<String>,
     /// A failed message read, shown until the next edit.
     error: Option<String>,
     focus: FocusHandle,
@@ -157,6 +161,7 @@ impl RebaseDialog {
             plan: RebasePlan::new(request.commits),
             cursor: 0,
             pushed: request.pushed,
+            published: request.published,
             error: None,
             focus: cx.focus_handle(),
             scroll: ScrollHandle::new(),
@@ -496,6 +501,16 @@ impl Render for RebaseDialog {
                             "rebase_edit.pushed_warning",
                             remotes = self.pushed.join(", ")
                         ),
+                        &design,
+                    )
+                    .rounded(design.px(6.0)),
+                )
+            })
+            .when_some(self.published.clone(), |body, upstream| {
+                body.child(
+                    ui::banner(
+                        ui::BannerKind::Warning,
+                        t!("history_ops.pushed_commit_warning", upstream = upstream),
                         &design,
                     )
                     .rounded(design.px(6.0)),
