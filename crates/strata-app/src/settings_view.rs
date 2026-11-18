@@ -26,6 +26,7 @@ use gpui_component::setting::Settings as SettingsPages;
 use gpui_component::{ActiveTheme as _, TitleBar, h_flex, v_flex};
 
 use crate::actions::OpenSettings;
+use crate::menus::AboutStrata;
 use crate::settings::{self, Appearance, Settings};
 use crate::style::{self, Design};
 
@@ -203,6 +204,13 @@ impl SettingsView {
                     .truncate()
                     .text_color(design.muted)
                     .child(label),
+            )
+            // Off macOS the menu bar is never drawn, so the Help menu's About
+            // entry is unreachable; this is the one place every platform shows.
+            .child(
+                crate::ui::button("open-about", t!("action.about_strata").to_string())
+                    .size(crate::ui::ButtonSize::Tiny)
+                    .on_click(|_, _, cx| cx.dispatch_action(&AboutStrata)),
             )
             .child(
                 crate::ui::button(
