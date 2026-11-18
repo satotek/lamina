@@ -89,6 +89,13 @@ jobs:
     needs: version
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
+    env:
+      # A step's `if:` cannot read a secret, so the presence test is computed
+      # here; the certificate itself only reaches the step that imports it.
+      HAS_SIGNING_P12: ${{ secrets.STRATA_SIGNING_P12 != '' }}
+      # Self-signed, so signing needs no Apple Developer Program membership.
+      # packaging/macos/SIGNING.md describes the certificate and the secrets.
+      SIGNING_IDENTITY: Strata Code Signing
     strategy:
       fail-fast: false
       matrix:
@@ -150,12 +157,60 @@ jobs:
         shell: bash
         run: packaging/third-party/generate.sh dist/THIRD-PARTY-NOTICES.md
 
+      # The certificate is self-signed, so this needs no Apple Developer
+      # Program membership. Its only job is a designated requirement that
+      # stays the same across releases, which is what lets an update keep the
+      # user's Keychain and privacy grants. See packaging/macos/SIGNING.md.
+      - name: Import the signing certificate
+        if: runner.os == 'macOS' && env.HAS_SIGNING_P12 == 'true'
+        env:
+          SIGNING_P12: ${{ secrets.STRATA_SIGNING_P12 }}
+          SIGNING_P12_PASSWORD: ${{ secrets.STRATA_SIGNING_P12_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password=$(openssl rand -hex 24)
+          printf '%s' "$SIGNING_P12" | base64 --decode > "$RUNNER_TEMP/signing.p12"
+
+          security create-keychain -p "$keychain_password" "$keychain"
+          # Allowed to relock after an hour rather than staying unlocked on the
+          # runner for the rest of the job.
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/signing.p12" -k "$keychain" \
+            -P "$SIGNING_P12_PASSWORD" -T /usr/bin/codesign
+          # Lets codesign use the key without a GUI prompt.
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$keychain_password" "$keychain" > /dev/null
+          # The runner's existing keychains stay in the list; this one goes
+          # first because codesign searches in order.
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "$keychain" \
+            $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/signing.p12"
+
+      - name: Note the ad-hoc signing fallback
+        if: runner.os == 'macOS' && env.HAS_SIGNING_P12 != 'true'
+        run: |
+          echo "::warning::STRATA_SIGNING_P12 is not set, so Strata.app is signed ad hoc and its identity changes with every release"
+
       - name: Build, bundle and create the disk image
         if: runner.os == 'macOS'
         run: |
-          packaging/macos/bundle.sh --target ${{ matrix.target }}
+          if [ "$HAS_SIGNING_P12" = 'true' ]; then
+            packaging/macos/bundle.sh --target ${{ matrix.target }} --sign "$SIGNING_IDENTITY"
+          else
+            packaging/macos/bundle.sh --target ${{ matrix.target }}
+          fi
           packaging/macos/dmg.sh --target ${{ matrix.target }}
           hdiutil verify dist/*.dmg
+
+      # A designated requirement naming the certificate, rather than a cdhash,
+      # is what keeps the app the same app across updates.
+      - name: Verify the app signature
+        if: runner.os == 'macOS' && env.HAS_SIGNING_P12 == 'true'
+        run: |
+          codesign --verify --deep --strict --verbose=2 dist/Strata.app
+          codesign -dr - dist/Strata.app
 
       - name: Build and zip the executable
         if: runner.os == 'Windows'
@@ -186,6 +241,11 @@ jobs:
             dist/*.tar.gz
           if-no-files-found: error
           retention-days: 7
+
+      # Also on failure, so a broken build cannot leave the key on the runner.
+      - name: Remove the signing keychain
+        if: always() && runner.os == 'macOS' && env.HAS_SIGNING_P12 == 'true'
+        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
 
   publish:
     name: create draft release

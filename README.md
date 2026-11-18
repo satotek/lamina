@@ -86,7 +86,7 @@ Prebuilt binaries are published on GitHub Releases.
 ### macOS
 Download the `.dmg` (Apple silicon, macOS 14.0 or later), open it, and drag `Strata.app` to `/Applications`. Intel Macs are not supported.
 
-Release builds are ad-hoc signed and **not notarized**. On first launch, right-click `Strata.app` and choose **Open**, or clear the quarantine attribute:
+Release builds carry a self-signed signature and are **not notarized**. On first launch, right-click `Strata.app` and choose **Open**, or clear the quarantine attribute:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/Strata.app

@@ -1,14 +1,17 @@
 #!/bin/sh
 # Builds dist/Strata.app: the release binary, a bundle Info.plist and the
-# checked-in Strata.icns, then signs it ad hoc so it launches on this Mac.
-# Nothing here notarises the app; the release workflow uses the same script and
-# dmg.sh to turn the result into a disk image.
+# checked-in Strata.icns, then signs it so it launches on this Mac. Without an
+# identity the signature is ad hoc; the release workflow imports a self-signed
+# certificate and passes its name so the app keeps one identity across
+# releases. Nothing here notarises the app; dmg.sh turns the result into a disk
+# image.
 #
 # Run it from the dev shell so cargo and the release target directory match a
 # normal build:
 #
 #     direnv exec . packaging/macos/bundle.sh
 #     packaging/macos/bundle.sh --target x86_64-apple-darwin
+#     packaging/macos/bundle.sh --sign "Strata Code Signing"
 set -eu
 
 root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
@@ -17,24 +20,28 @@ root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
 usage() {
     cat <<'EOF'
 Builds dist/Strata.app: the release binary, a bundle Info.plist and the
-checked-in Strata.icns, then signs it ad hoc so it launches on this Mac.
-Nothing here notarises the app; dmg.sh turns the result into the disk image
-the release publishes.
+checked-in Strata.icns, then signs it so it launches on this Mac. Nothing here
+notarises the app; dmg.sh turns the result into the disk image the release
+publishes.
 
     direnv exec . packaging/macos/bundle.sh
     packaging/macos/bundle.sh --target x86_64-apple-darwin
+    packaging/macos/bundle.sh --sign "Strata Code Signing"
 
 Options:
     --target <triple>  build and bundle that target instead of the host
     --no-build         bundle a release binary that already exists
+    --sign <identity>  sign with that identity instead of ad hoc
 
 Environment:
     NOTICES  notices file to embed (default: dist/THIRD-PARTY-NOTICES.md)
+    STRATA_SIGNING_IDENTITY  identity to sign with when --sign is absent
 EOF
 }
 
 target=
 build=1
+identity=
 while [ $# -gt 0 ]; do
     case $1 in
     --target)
@@ -42,6 +49,10 @@ while [ $# -gt 0 ]; do
         shift 2
         ;;
     --no-build) build=0; shift ;;
+    --sign)
+        identity=${2:?--sign needs an identity}
+        shift 2
+        ;;
     -h | --help)
         usage
         exit 0
@@ -52,6 +63,9 @@ while [ $# -gt 0 ]; do
         ;;
     esac
 done
+
+# The flag wins so a caller can override an exported default.
+identity=${identity:-${STRATA_SIGNING_IDENTITY:-}}
 
 cd "$root"
 
@@ -142,9 +156,19 @@ cat >"$app/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-# Ad-hoc signature: Gatekeeper still treats the app as unsigned for downloads,
-# but a signed bundle gets a stable identity, so TCC prompts and the Dock
-# recognise it between launches.
-codesign --force --sign - --timestamp=none "$app"
+# The bundle carries no nested code (no frameworks or helper apps), so one
+# signature over the app seals everything.
+#
+# An ad-hoc signature is tied to the binary's hash, so macOS treats every
+# release as a different app and the user's Keychain "Always Allow" choices and
+# privacy grants reset on each update. A certificate identity produces a
+# designated requirement naming the certificate instead, which stays the same
+# between builds. Gatekeeper still treats either as unnotarised.
+if [ -n "$identity" ]; then
+    codesign --force --sign "$identity" --timestamp=none "$app"
+    echo "signed $app with $identity"
+else
+    codesign --force --sign - --timestamp=none "$app"
+fi
 
 echo "built $app ($version)"

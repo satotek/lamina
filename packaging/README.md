@@ -6,8 +6,9 @@ output lands in `dist/`, which is git-ignored.
 | Path | What it does |
 | --- | --- |
 | `lib/common.sh` | Version, target-directory and arch helpers the scripts share. |
-| `macos/bundle.sh` | Builds `dist/Strata.app` with `Info.plist`, the `.icns`, the licences and the notices, ad-hoc signed. |
+| `macos/bundle.sh` | Builds `dist/Strata.app` with `Info.plist`, the `.icns`, the licences and the notices, signed ad hoc or with a certificate identity. |
 | `macos/dmg.sh` | Wraps that app in `dist/Strata-<version>-macos-<arch>.dmg`. |
+| `macos/SIGNING.md` | How to make the self-signed signing certificate and the secrets the release workflow imports. |
 | `linux/package.sh` | Builds `dist/strata-<version>-linux-<arch>.tar.gz`. |
 | `linux/strata.desktop` | Desktop entry for menus and file managers. |
 | `linux/install.sh` | Installs the binary, icons and desktop entry into a prefix; works from an unpacked archive or a checkout. |
@@ -155,7 +156,13 @@ binary to `Contents/MacOS/strata` and `Strata.icns`, `LICENSE-MIT`,
 `dist/THIRD-PARTY-NOTICES.md`, so run `third-party/generate.sh` first, or point
 `NOTICES` at another file.
 
-The signature is enough for local use; Gatekeeper still treats the app as
+Pass `--sign "Strata Code Signing"` (or set `STRATA_SIGNING_IDENTITY`) to sign
+with the self-signed certificate instead, which keeps the app's identity the
+same across releases so updates keep Keychain and privacy grants.
+[`macos/SIGNING.md`](macos/SIGNING.md) covers the certificate and the secrets
+the release workflow uses.
+
+The ad-hoc signature is enough for local use; Gatekeeper still treats the app as
 unsigned for anything downloaded, and there is no notarization. The version
 comes from the workspace `Cargo.toml`; the bundle id is `dev.strata.Strata`.
 
