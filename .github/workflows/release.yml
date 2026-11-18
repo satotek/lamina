@@ -212,10 +212,18 @@ jobs:
           codesign --verify --deep --strict --verbose=2 dist/Strata.app
           codesign -dr - dist/Strata.app
 
-      - name: Build and zip the executable
+      # The runner image also carries Inno Setup, but its version drifts with
+      # image updates; a pinned choco package keeps the installer's build
+      # tool, and therefore its output, stable.
+      - name: Install Inno Setup
         if: runner.os == 'Windows'
         shell: pwsh
-        run: packaging/windows/package.ps1 -Target '${{ matrix.target }}'
+        run: choco install innosetup --no-progress -y --version 6.7.1
+
+      - name: Build, zip and package the installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: packaging/windows/package.ps1 -Target '${{ matrix.target }}' -Installer
 
       - name: Build and create the tarball
         if: runner.os == 'Linux'
@@ -239,6 +247,7 @@ jobs:
             dist/*.dmg
             dist/*.zip
             dist/*.tar.gz
+            dist/*.exe
           if-no-files-found: error
           retention-days: 7
 

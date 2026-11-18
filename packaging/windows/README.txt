@@ -16,6 +16,11 @@ Settings live in %APPDATA%\Strata.
 This build is not code signed, so Windows SmartScreen may ask for confirmation
 the first time it runs.
 
+This is the portable build: unpack it anywhere and run strata.exe. The release
+also carries Strata-<version>-windows-x64-setup.exe, which installs Strata
+into %LOCALAPPDATA%\Programs\Strata with Start-menu shortcuts and an
+uninstaller, without administrator rights.
+
 Licences
 --------
 

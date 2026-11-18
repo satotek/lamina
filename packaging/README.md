@@ -12,7 +12,8 @@ output lands in `dist/`, which is git-ignored.
 | `linux/package.sh` | Builds `dist/strata-<version>-linux-<arch>.tar.gz`. |
 | `linux/strata.desktop` | Desktop entry for menus and file managers. |
 | `linux/install.sh` | Installs the binary, icons and desktop entry into a prefix; works from an unpacked archive or a checkout. |
-| `windows/package.ps1` | Builds and zips `strata.exe`, the README, the licences and the notices. |
+| `windows/package.ps1` | Builds and zips `strata.exe`, the README, the licences and the notices; `-Installer` adds the setup executable. |
+| `windows/strata.iss` | Inno Setup script behind `-Installer`: installs the staged zip contents per user and registers an uninstaller. |
 | `release/update-manifest.sh` | Signs the release archives and writes `latest.json` for the app's updater. |
 | `third-party/generate.sh` | Writes the third-party notices that every artifact carries. |
 | `third-party/libghostty-vt.md` | The part of those notices that cargo-about cannot see: the Zig side of the terminal backend. |
@@ -47,7 +48,8 @@ several minutes of Zig work.
    artifact:
    - `Strata-<version>-macos-arm64.dmg` on `macos-15`
      (`aarch64-apple-darwin`)
-   - `Strata-<version>-windows-x64.zip` on `windows-latest`
+   - `Strata-<version>-windows-x64.zip` and
+     `Strata-<version>-windows-x64-setup.exe` on `windows-latest`
      (`x86_64-pc-windows-msvc`)
    - `strata-<version>-linux-x86_64.tar.gz` on `ubuntu-22.04`
      (`x86_64-unknown-linux-gnu`, the oldest hosted runner, so the archive
@@ -227,6 +229,7 @@ is behind `cfg(target_os = "linux")`.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File packaging\windows\package.ps1
+powershell -ExecutionPolicy Bypass -File packaging\windows\package.ps1 -Installer
 ```
 
 Builds with `cargo build --release --locked -p strata-app` and writes
@@ -237,6 +240,24 @@ mirror the shell scripts, and the script resolves the binary through
 executable, which is what Explorer, the taskbar and every window show, so the
 zip needs no icon files. Build on Windows: GPUI compiles its shaders with
 `fxc.exe` from the Windows SDK, so there is no cross-build.
+
+`-Installer` additionally compiles `strata.iss` with Inno Setup into
+`dist\Strata-<version>-windows-x64-setup.exe`, from the very files it just
+staged for the zip, so the two artifacts cannot drift apart. It needs `iscc`
+(Inno Setup 6.3 or newer) on PATH or under `C:\Program Files (x86)\Inno
+Setup 6`; CI installs the pinned chocolatey package.
+
+The installer needs no administrator: it installs into
+`%LOCALAPPDATA%\Programs\Strata`, creates a Start-menu shortcut, an optional
+(unchecked) desktop shortcut, and an uninstaller registered under Apps &
+features, and upgrades a previous version in place, closing a running Strata
+via Restart Manager. The `AppId` GUID is fixed, so never change it. Next to
+`strata.exe` it writes an empty `installed-by-setup` marker, which is how the
+app recognizes an installed copy and may update it by running the installer
+again; the marker is removed on uninstall, and a silent run
+(`setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS`)
+relaunches Strata when it finishes. The portable zip is unaffected: it
+unpacks anywhere and carries no marker.
 
 ## Third-party notices
 
@@ -270,9 +291,9 @@ of the pinned release, so bumping libghostty-vt means updating that table too.
 
 3. Wait for the Release workflow. It fails immediately if the tag and the
    manifest version disagree.
-4. Review the draft release on GitHub: check the four archives, their
-   `.minisig` files, `latest.json`, `SHA256SUMS.txt` and the generated notes,
-   then publish it.
+4. Review the draft release on GitHub: check the three archives, the Windows
+   installer, their `.minisig` files, `latest.json`, `SHA256SUMS.txt` and the
+   generated notes, then publish it.
 
 ## Regenerating the icons
 
