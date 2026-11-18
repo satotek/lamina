@@ -161,7 +161,7 @@ impl Render for RewordDialog {
                     .child(t!("edit_dialog.description", short = self.short)),
             )
             .when_some(self.warning.clone(), |form, warning| {
-                form.child(ui::banner(ui::BannerKind::Warning, warning, &design))
+                form.child(ui::banner(ui::BannerKind::Warning, warning, &design).wrap())
             })
             .child(
                 Textarea::new(&self.message)

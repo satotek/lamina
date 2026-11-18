@@ -1,6 +1,10 @@
 //! The status bar: what runs now, the last git command and the last error.
 
-use gpui::{AnyElement, Context, IntoElement, ParentElement, Styled, div, px};
+use gpui::{
+    AnyElement, Context, InteractiveElement as _, IntoElement, ParentElement,
+    StatefulInteractiveElement as _, Styled, div, px,
+};
+use gpui_component::tooltip::Tooltip;
 
 use std::time::{Duration, Instant};
 
@@ -183,22 +187,24 @@ impl RepoView {
         if let Some(operation) = operation {
             bar = bar.child(operation);
         }
-        bar.child(
-            div()
-                .max_w(design.px(720.0))
-                .truncate()
-                .text_color(if error.is_some() {
-                    design.remove_text
-                } else {
-                    design.muted
-                })
-                .child(
-                    error
-                        .or(note)
-                        .unwrap_or_else(|| t!("status.watching").to_string()),
-                ),
-        )
-        .into_any_element()
+        let is_error = error.is_some();
+        let message = error.or(note);
+        // A git error rarely fits the bar; the tooltip carries the whole text
+        // so the advice at its end ("commit or stash …") stays readable.
+        let mut slot = div()
+            .id("status-message")
+            .max_w(design.px(720.0))
+            .truncate()
+            .text_color(if is_error {
+                design.remove_text
+            } else {
+                design.muted
+            });
+        if let Some(full) = message.clone() {
+            slot = slot.tooltip(move |window, cx| Tooltip::new(full.clone()).build(window, cx));
+        }
+        bar.child(slot.child(message.unwrap_or_else(|| t!("status.watching").to_string())))
+            .into_any_element()
     }
 }
 

@@ -503,6 +503,7 @@ impl Render for RebaseDialog {
                         ),
                         &design,
                     )
+                    .wrap()
                     .rounded(design.px(6.0)),
                 )
             })
@@ -513,12 +514,15 @@ impl Render for RebaseDialog {
                         t!("history_ops.pushed_commit_warning", upstream = upstream),
                         &design,
                     )
+                    .wrap()
                     .rounded(design.px(6.0)),
                 )
             })
             .when_some(self.error.clone(), |body, error| {
                 body.child(
-                    ui::banner(ui::BannerKind::Danger, error, &design).rounded(design.px(6.0)),
+                    ui::banner(ui::BannerKind::Danger, error, &design)
+                        .wrap()
+                        .rounded(design.px(6.0)),
                 )
             })
             .when_some(problem.filter(PlanProblem::is_error), |body, problem| {
