@@ -518,7 +518,10 @@ impl RepoView {
     /// `cause` decides whether the call is worth making now; the automatic one
     /// that would repeat a refresh made in the last minute does nothing.
     pub(crate) fn refresh_pull_requests(&mut self, cause: RefreshCause, cx: &mut Context<Self>) {
-        if self.refuse_if_ssh(cx) {
+        // Quietly, like the other reasons above: this runs after every fetch
+        // and push, and the "not available remotely" note would then read as
+        // the outcome of a push that succeeded.
+        if self.is_ssh() {
             return;
         }
         let Some(remote) = crate::github::remote_for(self, cx) else {
