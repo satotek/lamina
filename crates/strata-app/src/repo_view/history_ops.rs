@@ -732,12 +732,11 @@ fn edit_blocked_on_line(
     if let Some(reason) = blocked_on_line(view, action) {
         return Some(reason);
     }
-    // A reword rebuilt with `git commit-tree` only moves the branch: HEAD keeps
-    // its tree, so uncommitted changes stay valid and a dirty worktree is
-    // allowed. A replay has to carry the changes through the worktree, so there
-    // it waits for a clean one.
-    let rebuilt = action == EditAction::Reword && view.reword_needs_rebuild();
-    if state.dirty && !rebuilt {
+    // A reword never needs a clean worktree: with uncommitted changes it is
+    // rebuilt with `git commit-tree`, which only moves the branch and keeps
+    // HEAD's tree, so the changes stay valid. Every other rewrite replays its
+    // changes through the worktree, so it waits for a clean one.
+    if state.dirty && action != EditAction::Reword {
         return Some(t!("reflog.commit_or_stash").to_string());
     }
     None
@@ -2551,7 +2550,10 @@ impl RepoView {
                 cx.notify();
                 return;
             }
-            if edit.view().reword_needs_rebuild() {
+            // A clean linear reword still replays, so the user's commit-msg
+            // hook runs as it would for `git rebase -i`; a dirty worktree
+            // rules the replay out.
+            if edit.view().reword_needs_rebuild() || state.dirty {
                 if let Some(distance) = edit.distance {
                     self.edit_selection = Some(PendingSelection {
                         old_head: edit.head,
@@ -3377,13 +3379,13 @@ mod tests {
         let staged = read(worktree(strata_core::ChangeKind::Modified, true));
         assert!(staged.dirty);
         assert_eq!(
-            edit_blocked_on_line(&staged, view_at(&line, Some(0)), EditAction::Reword),
-            Some(t!("reflog.commit_or_stash").to_string()),
-            "the linear reword replays through the worktree"
+            edit_blocked_on_line(&staged, view_at(&line, Some(1)), EditAction::Reword),
+            None,
+            "a dirty linear reword is rebuilt instead of replayed"
         );
 
-        // A reword with a merge in its range is rebuilt instead of replayed:
-        // HEAD keeps its tree, so the uncommitted change stays valid.
+        // A reword with a merge in its range is rebuilt as well: HEAD keeps
+        // its tree, so the uncommitted change stays valid.
         let mut merged = line_of(&[oid(1), oid(2), oid(3)]);
         merged[0].1.push(oid(9));
         assert_eq!(

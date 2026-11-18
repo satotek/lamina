@@ -210,7 +210,9 @@ pub(crate) fn blocked_reason(
     if entry.kind.moves_branch() && gate.detached {
         return Some(t!("reflog.head_detached").to_string());
     }
-    if gate.dirty {
+    // A reword only replaced messages, so both tips carry the same tree and
+    // `git reset --keep` leaves every uncommitted change where it is.
+    if gate.dirty && entry.kind != ReflogKind::Reword {
         return Some(t!("reflog.commit_or_stash").to_string());
     }
     if entry.kind.moves_branch() && gate.pushed {
@@ -1170,6 +1172,11 @@ mod tests {
         assert_eq!(
             blocked_reason(Some(&entry(ReflogKind::Commit)), dirty, Some("main")),
             Some(t!("reflog.commit_or_stash").to_string())
+        );
+        assert_eq!(
+            blocked_reason(Some(&entry(ReflogKind::Reword)), dirty, Some("main")),
+            None,
+            "a reword keeps the tree, so the changes survive its undo"
         );
     }
 
