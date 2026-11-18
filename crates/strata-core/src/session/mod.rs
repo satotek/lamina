@@ -292,6 +292,13 @@ pub enum Operation {
     Checkout {
         branch: String,
     },
+    /// Point HEAD at `commit` and leave the current branch.
+    ///
+    /// Not [`Self::Checkout`]: that command ends with `--`, so an object id
+    /// would be checked out as a path instead of detached.
+    CheckoutCommit {
+        commit: Oid,
+    },
     CreateBranch {
         name: String,
         start_point: Option<String>,

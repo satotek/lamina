@@ -52,6 +52,9 @@ pub(crate) enum HistoryAction {
     DeleteTag,
     /// Branch creation is not a history edit; it only needs the commit.
     CreateBranch,
+    /// Leave the current branch and point HEAD at the commit. Works while
+    /// HEAD is already detached; it does not need a branch to move.
+    CheckoutCommit,
 }
 
 /// What the history menu may offer right now, read from one snapshot.
@@ -155,6 +158,15 @@ impl MenuState {
             HistoryAction::CreateTag | HistoryAction::DeleteTag | HistoryAction::CreateBranch => {
                 None
             }
+            // Detaching does not need a branch, including when HEAD is already
+            // detached. It still has to wait out a merge or rebase.
+            HistoryAction::CheckoutCommit if self.pending => {
+                Some(t!("reflog.finish_first").to_string())
+            }
+            HistoryAction::CheckoutCommit if self.head.is_none() => {
+                Some(t!("history_ops.no_branch_to_move").to_string())
+            }
+            HistoryAction::CheckoutCommit => None,
             _ if self.pending => Some(t!("reflog.finish_first").to_string()),
             _ if self.branch.is_none() && self.head.is_some() => {
                 Some(t!("reflog.head_detached").to_string())
@@ -1007,6 +1019,7 @@ pub(crate) fn commit_menu(
     let onto = state.branch_label();
     let cherry_blocked = state.blocked_for(HistoryAction::CherryPick, commit);
     let revert_blocked = state.blocked_for(HistoryAction::Revert, commit);
+    let checkout_blocked = state.blocked(HistoryAction::CheckoutCommit);
     let reset_blocked = state.blocked(HistoryAction::Reset);
     let tag_blocked = state.blocked(HistoryAction::CreateTag);
     let delete_blocked = state.blocked(HistoryAction::DeleteTag);
@@ -1048,8 +1061,29 @@ pub(crate) fn commit_menu(
             });
         })
     };
+    let checkout = {
+        let entity = entity.clone();
+        let short = short.clone();
+        PopupMenuItem::new(blocked_label(
+            t!("history_ops.menu.checkout_commit").to_string(),
+            checkout_blocked.as_deref(),
+            shared.as_deref(),
+        ))
+        .disabled(checkout_blocked.is_some())
+        .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
+            let short = short.clone();
+            let entity = entity.clone();
+            // The context menu dismisses as this click returns and drops a
+            // dialog opened in the same turn, the same way Revert did.
+            window.defer(cx, move |window, cx| {
+                entity.update(cx, |view, cx| {
+                    view.confirm_checkout_commit(commit, short, window, cx);
+                });
+            });
+        })
+    };
 
-    menu = menu.separator().item(cherry).item(revert);
+    menu = menu.separator().item(cherry).item(revert).item(checkout);
     if let Some(target) = rebase {
         menu = menu.item(rebase_menu_item(
             target,
@@ -1690,6 +1724,55 @@ impl RepoView {
                 view.run_operation(Operation::Revert { commit }, label, window, cx);
             });
         });
+    }
+
+    /// Asks before leaving the current branch for `commit`.
+    ///
+    /// The confirmation always opens. Skipping it when destructive
+    /// confirmations are off would detach HEAD without saying so.
+    pub(crate) fn confirm_checkout_commit(
+        &mut self,
+        commit: Oid,
+        short: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(state) = self.history_menu_state() else {
+            return;
+        };
+        if state.blocked(HistoryAction::CheckoutCommit).is_some() {
+            return;
+        }
+        let detail = t!("history_ops.checkout_commit_detail", short = short).to_string();
+        let mut confirm = ui::Confirm::new(
+            t!("history_ops.confirm.checkout_commit", short = short).to_string(),
+            detail,
+        )
+        .ok_label(t!("history_ops.checkout_commit_button").to_string())
+        .always_ask();
+        // The branch stays where it is and the reflog still has it, so OK is
+        // not painted as a destructive action.
+        confirm.danger = false;
+        self.focus_root(window, cx);
+        let entity = cx.weak_entity();
+        // `confirm`'s callback is `Fn`, so the short id is cloned per click.
+        ui::confirm(window, cx, confirm, move |window, cx| {
+            let short = short.clone();
+            let _ = entity.update(cx, |view, cx| {
+                view.run_checkout_commit(commit, short, window, cx)
+            });
+        });
+    }
+
+    fn run_checkout_commit(
+        &mut self,
+        commit: Oid,
+        short: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let label = t!("history_ops.op.checkout_commit", short = short).to_string();
+        self.run_operation(Operation::CheckoutCommit { commit }, label, window, cx);
     }
 
     /// Asks before moving the current branch back to `target`.
@@ -2400,6 +2483,7 @@ mod tests {
             HistoryAction::CreateTag,
             HistoryAction::DeleteTag,
             HistoryAction::CreateBranch,
+            HistoryAction::CheckoutCommit,
         ] {
             assert_eq!(state.blocked(action), None, "{action:?} needs no branch");
         }
@@ -2418,6 +2502,11 @@ mod tests {
             None,
             "a tag can point into the past while a merge runs"
         );
+        assert_eq!(
+            pending.blocked(HistoryAction::CheckoutCommit),
+            Some(t!("reflog.finish_first").to_string()),
+            "detaching during a merge would move HEAD out from under it"
+        );
 
         let busy = MenuState::read(Some(&head), RepoState::Normal, true);
         for action in [
@@ -2427,6 +2516,7 @@ mod tests {
             HistoryAction::CreateTag,
             HistoryAction::DeleteTag,
             HistoryAction::CreateBranch,
+            HistoryAction::CheckoutCommit,
         ] {
             assert_eq!(
                 busy.blocked(action),
@@ -2462,6 +2552,10 @@ mod tests {
         let state = MenuState::read(None, RepoState::Normal, false);
         assert_eq!(
             state.blocked(HistoryAction::Reset),
+            Some(t!("history_ops.no_branch_to_move").to_string())
+        );
+        assert_eq!(
+            state.blocked(HistoryAction::CheckoutCommit),
             Some(t!("history_ops.no_branch_to_move").to_string())
         );
     }
