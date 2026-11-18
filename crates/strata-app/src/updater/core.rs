@@ -541,10 +541,11 @@ mod tests {
 
     #[test]
     fn placeholder_key_is_detected_and_refused() {
-        assert!(is_placeholder_key(UPDATE_PUBLIC_KEY));
+        const PLACEHOLDER: &str = "untrusted comment: placeholder\nRWQ_PLACEHOLDER_KEY\n";
+        assert!(is_placeholder_key(PLACEHOLDER));
         assert!(is_placeholder_key(""));
         assert!(matches!(
-            parse_public_key(UPDATE_PUBLIC_KEY),
+            parse_public_key(PLACEHOLDER),
             Err(UpdateError::PlaceholderKey)
         ));
 
@@ -553,16 +554,24 @@ mod tests {
         let payload = b"fake binary";
         let (manifest_bytes, manifest_sig) = sample_manifest(&keys, payload);
         assert!(matches!(
-            verify_manifest_and_parse(UPDATE_PUBLIC_KEY, &manifest_bytes, &manifest_sig),
+            verify_manifest_and_parse(PLACEHOLDER, &manifest_bytes, &manifest_sig),
             Err(UpdateError::PlaceholderKey)
         ));
 
         let sha = hex::encode(Sha256::digest(payload));
         let sig = sign_bytes(&keys, payload);
         assert!(matches!(
-            verify_reader_against_asset(UPDATE_PUBLIC_KEY, &mut Cursor::new(payload), &sig, &sha,),
+            verify_reader_against_asset(PLACEHOLDER, &mut Cursor::new(payload), &sig, &sha,),
             Err(UpdateError::PlaceholderKey)
         ));
+    }
+
+    /// A release built with the placeholder would refuse every update, and
+    /// one built with a malformed key would fail the same way, only later.
+    #[test]
+    fn the_embedded_key_is_a_real_key() {
+        assert!(!is_placeholder_key(UPDATE_PUBLIC_KEY));
+        parse_public_key(UPDATE_PUBLIC_KEY).expect("embedded update key parses");
     }
 
     #[test]
