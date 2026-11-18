@@ -14,4 +14,8 @@ accepted = [
     "Unicode-3.0",
     "0BSD",
     "MPL-2.0",
+    # The Mozilla root certificate list, which the update check's TLS verifier
+    # falls back to where the platform has no trust store of its own. A
+    # permissive data licence: redistribution only has to carry its text.
+    "CDLA-Permissive-2.0",
 ]
