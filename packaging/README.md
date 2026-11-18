@@ -12,6 +12,7 @@ output lands in `dist/`, which is git-ignored.
 | `linux/strata.desktop` | Desktop entry for menus and file managers. |
 | `linux/install.sh` | Installs the binary, icons and desktop entry into a prefix; works from an unpacked archive or a checkout. |
 | `windows/package.ps1` | Builds and zips `strata.exe`, the README, the licences and the notices. |
+| `release/update-manifest.sh` | Signs the release archives and writes `latest.json` for the app's updater. |
 | `third-party/generate.sh` | Writes the third-party notices that every artifact carries. |
 | `third-party/libghostty-vt.md` | The part of those notices that cargo-about cannot see: the Zig side of the terminal backend. |
 | `third-party/catppuccin.md` | MIT notice for the bundled Catppuccin colour palettes. |
@@ -50,14 +51,93 @@ several minutes of Zig work.
    - `strata-<version>-linux-x86_64.tar.gz` on `ubuntu-22.04`
      (`x86_64-unknown-linux-gnu`, the oldest hosted runner, so the archive
      needs no newer glibc than 2.35)
-3. `publish` (tags only) downloads the archives, writes `SHA256SUMS.txt`, and
-   creates a **draft** GitHub release with generated notes. A manual dispatch
-   stops after step 2 and leaves the archives in the workflow run.
+3. `publish` (tags only) downloads the archives, signs them and writes
+   `latest.json` when the signing secret is present, writes `SHA256SUMS.txt`
+   (which covers the signatures and the manifest too) and creates a **draft**
+   GitHub release with generated notes. A manual dispatch stops after step 2 and
+   leaves the archives in the workflow run.
 
 Every artifact carries both licences and `THIRD-PARTY-NOTICES.md`, which
 `third-party/generate.sh` produces from `cargo-about` plus the pinned Zig
 dependency list. macOS releases target Apple silicon only; Intel Macs are not
 supported.
+
+## Update manifest and signatures
+
+`publish` runs `release/update-manifest.sh` after every archive has been
+downloaded and before `SHA256SUMS.txt` is written, so the sums cover the
+signatures and the manifest as well. The script signs each archive into
+`<archive>.minisig` and writes `latest.json`, the document the app's updater
+reads to decide whether a newer release exists:
+
+```json
+{
+  "version": "0.1.7",
+  "tag": "v0.1.7",
+  "notes_url": "https://github.com/satotek/strata/releases/tag/v0.1.7",
+  "assets": {
+    "macos-aarch64": {"name": "Strata-0.1.7-macos-arm64.dmg", "sha256": "<hex>", "minisig": "<full .minisig text>"},
+    "windows-x86_64": {"name": "Strata-0.1.7-windows-x64-setup.exe", "sha256": "<hex>", "minisig": "<full .minisig text>"},
+    "windows-x86_64-portable": {"name": "Strata-0.1.7-windows-x64.zip", "sha256": "<hex>", "minisig": "<full .minisig text>"},
+    "linux-x86_64": {"name": "strata-0.1.7-linux-x86_64.tar.gz", "sha256": "<hex>", "minisig": "<full .minisig text>"}
+  }
+}
+```
+
+A platform with no archive in the run is left out of `assets` instead of
+failing the job, so the Windows installer only shows up once a build job
+produces one. An archive that matches no known name pattern fails the job, as
+do two archives for the same platform: either would produce a manifest the
+updater cannot use. The manifest itself is signed into `latest.json.minisig`, so
+one verification vouches for the whole document.
+
+### The signing key
+
+One key pair signs every release. It is separate from the platform code signing
+keys because the app checks it itself:
+
+```sh
+minisign -G -W -p strata-update.pub -s strata-update.key
+```
+
+`-W` leaves the secret key unencrypted, because the workflow has no terminal to
+answer a passphrase prompt. Neither file belongs in the repository: the public
+key is compiled into the app as the app's embedded update key, and the secret
+key is a repository secret:
+
+```sh
+gh secret set STRATA_UPDATE_KEY < strata-update.key
+```
+
+Keep `strata-update.key` out of the working tree and backed up somewhere only
+release managers can reach. Without it a release cannot be signed, and anyone
+holding it can sign an update the app will install. Rotating the key means
+generating a pair, embedding the new public key, publishing a release with it
+and then switching the secret; the app has to accept the old key until every
+version users still run knows the new one.
+
+A run without the secret — a fork that never set it, for instance — logs a
+`::warning::` and publishes unsigned archives with no `latest.json`.
+
+### Verifying by hand
+
+```sh
+minisign -V -p strata-update.pub -m Strata-0.1.7-macos-arm64.dmg
+minisign -V -p strata-update.pub -m latest.json
+```
+
+Installing `latest.json.minisig` next to `latest.json` is enough for minisign to
+find it. The workflow installs minisign 0.12 from a pinned release tarball and
+checks its SHA-256 before using it, so signing does not depend on whatever
+version the runner image happens to ship.
+
+To run the script against a directory of archives:
+
+```sh
+packaging/release/update-manifest.sh --key ~/strata-update.key dist 0.1.7 v0.1.7
+```
+
+It needs `jq` and `minisign` on `PATH`.
 
 ## macOS
 
@@ -183,8 +263,9 @@ of the pinned release, so bumping libghostty-vt means updating that table too.
 
 3. Wait for the Release workflow. It fails immediately if the tag and the
    manifest version disagree.
-4. Review the draft release on GitHub: check the four archives,
-   `SHA256SUMS.txt` and the generated notes, then publish it.
+4. Review the draft release on GitHub: check the four archives, their
+   `.minisig` files, `latest.json`, `SHA256SUMS.txt` and the generated notes,
+   then publish it.
 
 ## Regenerating the icons
 

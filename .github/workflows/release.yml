@@ -204,6 +204,43 @@ jobs:
           path: dist
           merge-multiple: true
 
+      # The signatures are only as trustworthy as the tool that writes them, so
+      # this takes a pinned release and checks its digest instead of whatever
+      # version the runner image happens to ship.
+      - name: Install minisign
+        run: |
+          set -euo pipefail
+          version=0.12
+          sha256=9a599b48ba6eb7b1e80f12f36b94ceca7c00b7a5173c95c3efc88d9822957e73
+          url="https://github.com/jedisct1/minisign/releases/download/${version}/minisign-${version}-linux.tar.gz"
+          curl --fail --silent --show-error --location --output "$RUNNER_TEMP/minisign.tar.gz" "$url"
+          echo "${sha256}  ${RUNNER_TEMP}/minisign.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/minisign.tar.gz" -C "$RUNNER_TEMP"
+          printf '%s\n' "$RUNNER_TEMP/minisign-linux/x86_64" >>"$GITHUB_PATH"
+
+      # Signing needs a key that forks and manual runs do not have. Without it
+      # the release is still usable by hand, it just has no update feed, so the
+      # step warns and moves on instead of failing.
+      - name: Sign the assets and write the update manifest
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          UPDATE_KEY: ${{ secrets.STRATA_UPDATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$UPDATE_KEY" ]; then
+            echo "::warning::STRATA_UPDATE_KEY is not set; the archives are unsigned and latest.json is skipped"
+            exit 0
+          fi
+          # The key only ever exists as a file: passing it as an argument would
+          # put it in the process list and in the step log.
+          key="$RUNNER_TEMP/strata-update.key"
+          trap 'rm -f "$key"' EXIT
+          (umask 077 && printf '%s\n' "$UPDATE_KEY" >"$key")
+          chmod 600 "$key"
+          packaging/release/update-manifest.sh --key "$key" dist "$VERSION" "$GITHUB_REF_NAME"
+
+      # `*` picks up the .minisig files and latest.json written above, so the
+      # sums cover everything the release publishes.
       - name: Write SHA256SUMS.txt
         run: |
           cd dist
