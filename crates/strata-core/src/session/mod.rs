@@ -444,6 +444,14 @@ pub enum Operation {
         onto: Oid,
         steps: Vec<RebaseStep>,
     },
+    /// Replace `commit`'s message and rebuild every commit above it on HEAD's
+    /// first-parent line, without replaying changes: each commit keeps its
+    /// tree, so merges in the range survive. Moves the branch with
+    /// `git update-ref`, which the reflog-based undo can restore.
+    RewordAcrossMerges {
+        commit: Oid,
+        message: String,
+    },
     /// Replay the current branch onto `onto`: `git rebase <onto>`, or
     /// `git rebase --onto <onto> <upstream>` when an upstream is given.
     /// Conflicts stop it with `state == Rebasing`, like a merge.

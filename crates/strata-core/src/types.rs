@@ -132,6 +132,8 @@ pub enum ReflogKind {
     /// A checkout or switch, including one that creates a branch.
     Checkout,
     Reset,
+    /// A message-only rewrite of history (`reword: ...`).
+    Reword,
     /// A rebase entry other than its finish (start, pick, squash, abort).
     RebaseStart,
     /// The entry that records the branch the rebase left behind.
@@ -163,6 +165,8 @@ impl ReflogKind {
             Self::Checkout
         } else if message.starts_with("reset: ") {
             Self::Reset
+        } else if message.starts_with("reword: ") {
+            Self::Reword
         } else if message.starts_with("rebase (finish)") {
             Self::RebaseFinish
         } else if message.starts_with("rebase (") {
@@ -195,6 +199,7 @@ impl ReflogKind {
                 | Self::Amend
                 | Self::Checkout
                 | Self::Reset
+                | Self::Reword
                 | Self::RebaseFinish
                 | Self::Merge
                 | Self::CherryPick

@@ -176,6 +176,7 @@ mod tests {
             ("commit (amend): two", ReflogKind::Amend),
             ("checkout: moving from main to topic", ReflogKind::Checkout),
             ("reset: moving to HEAD~1", ReflogKind::Reset),
+            ("reword: 1234567", ReflogKind::Reword),
             ("rebase (start): checkout main", ReflogKind::RebaseStart),
             (
                 "rebase (finish): returning to refs/heads/topic",
@@ -274,6 +275,7 @@ mod tests {
         assert!(ReflogKind::Amend.can_restore());
         assert!(ReflogKind::Checkout.can_restore());
         assert!(ReflogKind::Reset.can_restore());
+        assert!(ReflogKind::Reword.can_restore());
         assert!(ReflogKind::RebaseFinish.can_restore());
         assert!(ReflogKind::Merge.can_restore());
         assert!(ReflogKind::CherryPick.can_restore());

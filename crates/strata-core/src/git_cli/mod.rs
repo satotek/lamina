@@ -24,6 +24,7 @@ mod ops;
 mod progress;
 mod rebase;
 mod reflog;
+mod rewrite;
 mod signature;
 
 pub use clone::{CloneOptions, CloneOutcome, clone_repository, init_repository};

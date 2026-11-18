@@ -201,6 +201,7 @@ fn changes_refs(operation: &Operation) -> bool {
             | Operation::CherryPickMany { .. }
             | Operation::Revert { .. }
             | Operation::RebaseEdit { .. }
+            | Operation::RewordAcrossMerges { .. }
             | Operation::Rebase { .. }
             | Operation::Reset { .. }
             | Operation::UndoReflog { .. }
@@ -370,6 +371,9 @@ fn execute(shared: &Arc<Shared>, id: OperationId, operation: &Operation) -> Resu
         }
         Operation::Revert { commit } => git.revert(*commit),
         Operation::RebaseEdit { onto, steps } => git.rebase_edit(*onto, steps),
+        Operation::RewordAcrossMerges { commit, message } => {
+            git.reword_across_merges(*commit, message)
+        }
         Operation::Rebase {
             onto,
             upstream,

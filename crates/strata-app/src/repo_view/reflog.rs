@@ -1029,6 +1029,7 @@ pub(crate) fn kind_label(kind: ReflogKind) -> String {
         ReflogKind::Amend => t!("reflog.kind.amend"),
         ReflogKind::Checkout => t!("reflog.kind.checkout"),
         ReflogKind::Reset => t!("reflog.kind.reset"),
+        ReflogKind::Reword => t!("reflog.kind.reword"),
         ReflogKind::RebaseStart => t!("reflog.kind.rebase"),
         ReflogKind::RebaseFinish => t!("reflog.kind.rebase_done"),
         ReflogKind::Merge => t!("reflog.kind.merge"),
@@ -1047,6 +1048,7 @@ fn kind_tone(kind: ReflogKind) -> ui::BadgeTone {
             ui::BadgeTone::Accent
         }
         ReflogKind::Reset
+        | ReflogKind::Reword
         | ReflogKind::RebaseStart
         | ReflogKind::RebaseFinish
         | ReflogKind::Merge => ui::BadgeTone::Warning,

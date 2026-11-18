@@ -12,6 +12,8 @@
 //! `in_progress.rs` reads details of an unfinished merge, rebase, cherry-pick,
 //! revert, bisect or `am`. `config.rs` reports every effective configuration
 //! value with the file and line that set it, without writing anything.
+//! `rewrite.rs` reads the tree, parents, author and message a commit rewrite
+//! has to reproduce.
 
 mod blame;
 mod bloom;
@@ -29,6 +31,7 @@ mod range;
 mod reflog;
 mod remotes;
 mod renames;
+mod rewrite;
 mod signature;
 mod stat;
 mod status;
@@ -58,6 +61,8 @@ pub use history::{PathHistory, PathHistoryEntries, PathHistoryEntry};
 pub use in_progress::{InProgressCommit, InProgressDetails, RebaseOnto};
 pub use log::CommitWalk;
 pub use range::{SelectionRange, SelectionRangeKind, SelectionRangeMode, plan_selection_range};
+pub(crate) use rewrite::CommitSource;
+
 pub use signature::{
     CommitSignature, SignatureConfigHints, SignatureFormat, SignatureValidity,
     classify_signature_armor,
