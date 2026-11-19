@@ -426,7 +426,7 @@ mod tests {
                 );
             }
         }
-        for key in ["about.title", "about.description"] {
+        for key in ["action.about_strata", "about.description"] {
             for locale in ["en", "ja"] {
                 assert!(
                     i18n::lookup(locale, key).is_some(),
