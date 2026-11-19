@@ -1,32 +1,32 @@
-//! The About window: what the binary is, how it was built, and what it bundles.
+//! The About page: what the binary is, how it was built, and what it bundles.
 //!
 //! The build revision and date are written into the binary by `build.rs`, so
-//! the window never asks git or the filesystem for them at render time. The
+//! the page never asks git or the filesystem for them at render time. The
 //! git version and the third-party notices are probed on the background
-//! executor; until they arrive the window draws the rest, because an About
-//! window must open even when git is missing or slow.
+//! executor; until they arrive the page draws the rest, because the About
+//! page must open even when git is missing or slow.
+//!
+//! The page lives in the settings dialog; [`AboutStrata`] opens that dialog on
+//! this page.
 //!
 //! The licence texts are embedded, so they are always readable. The
 //! third-party notices are generated per release and copied next to the
 //! executable (or into `Contents/Resources` in a bundle); a development build
 //! has no such file and shows a link to the repository instead.
 
-use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    AnyWindowHandle, App, AppContext as _, Bounds, ClipboardItem, Context, Div, Entity,
-    FocusHandle, FontWeight, Global, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window,
-    WindowBounds, WindowDecorations, WindowOptions, actions, div, px,
+    App, ClipboardItem, Context, Div, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Window, actions, div,
+    px,
 };
-use gpui_component::{ActiveTheme as _, TitleBar, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, WindowExt as _, h_flex, v_flex};
 use strata_core::git_cli::Git;
 
 use crate::menus::AboutStrata;
-use crate::settings::{self, Settings};
+use crate::settings::Settings;
 use crate::style::{self, Design};
 use crate::ui::{ButtonKind, ButtonSize, button};
 
@@ -41,8 +41,6 @@ const COMMIT: &str = env!("STRATA_BUILD_COMMIT");
 const BUILD_DATE: &str = env!("STRATA_BUILD_DATE");
 
 pub(crate) const ABOUT_VIEW: &str = "AboutView";
-const WIDTH: f32 = 620.0;
-const HEIGHT: f32 = 640.0;
 /// How long the copy button says that it copied.
 const COPIED_FOR: Duration = Duration::from_secs(2);
 
@@ -52,108 +50,24 @@ const APACHE_LICENSE: &str = include_str!("../../../LICENSE-APACHE");
 actions!(
     strata_about,
     [
-        /// Closes the About window.
+        /// Closes the dialog showing the About page.
         CloseAbout,
     ]
 );
 
-/// Registers the window and the action that opens it. Call once at startup.
+/// Registers the action that opens the page. Call once at startup.
 pub fn bind(cx: &mut App) {
-    cx.set_global(OpenAboutWindow::default());
-    // The window is opened from a menu or palette dispatch, which already
-    // borrows the window the action came from; wait until that dispatch ends.
-    cx.on_action(|_: &AboutStrata, cx: &mut App| cx.defer(open));
+    cx.on_action(|_: &AboutStrata, cx: &mut App| {
+        crate::settings_view::show(Some(crate::settings_view::Destination::About), cx);
+    });
     crate::keymap::bind_group(cx, crate::keymap::Group::Application);
 }
 
-/// The one About window, so a second command raises it instead of stacking
-/// identical windows.
-#[derive(Default)]
-struct OpenAboutWindow {
-    window: Option<AnyWindowHandle>,
-    view: Option<WeakEntity<AboutView>>,
-}
-
-impl Global for OpenAboutWindow {}
-
-/// Whether the About window is open, for tests outside this module.
-#[cfg(test)]
-pub(crate) fn is_open(cx: &App) -> bool {
-    cx.try_global::<OpenAboutWindow>()
-        .and_then(|open| open.view.as_ref())
-        .is_some_and(|view| view.upgrade().is_some())
-}
-
-fn open(cx: &mut App) {
-    if let Some(view) = cx
-        .try_global::<OpenAboutWindow>()
-        .and_then(|window| window.view.clone())
-        && let Some(view) = view.upgrade()
-    {
-        // Keep the page the user was reading when the window is asked for
-        // again; only raise it.
-        view.update(cx, |_, cx| cx.notify());
-        if let Some(handle) = cx
-            .try_global::<OpenAboutWindow>()
-            .and_then(|window| window.window)
-        {
-            let _ = handle.update(cx, |_, window, _| window.activate_window());
-        }
-        cx.activate(true);
-        return;
-    }
-
-    let bounds = Bounds::centered(None, crate::zoom::window_size(WIDTH, HEIGHT, cx), cx);
-    let slot: Rc<RefCell<Option<Entity<AboutView>>>> = Rc::new(RefCell::new(None));
-    let window_slot = slot.clone();
-    let opened = cx.open_window(
-        WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: Some(style::window_titlebar(t!("about.title").to_string())),
-            window_decorations: Some(WindowDecorations::Client),
-            // The content is a fixed card: there is nothing to gain from a
-            // resize, and the scrollable pages already handle a small screen.
-            is_resizable: false,
-            focus: true,
-            ..TitleBar::window_options()
-        },
-        move |window, cx| {
-            settings::apply_theme(Some(window), cx);
-            let view = cx.new(|cx| AboutView::new(window, cx));
-            *window_slot.borrow_mut() = Some(view.clone());
-            cx.new(|cx| gpui_component::Root::new(view, window, cx))
-        },
-    );
-
-    match opened {
-        Ok(handle) => {
-            crate::window_registry::track(handle.window_id(), cx);
-            let view = slot.borrow_mut().take().map(|view| view.downgrade());
-            if cx.has_global::<OpenAboutWindow>() {
-                let global = cx.global_mut::<OpenAboutWindow>();
-                global.window = Some(handle.into());
-                global.view = view;
-            }
-            cx.activate(true);
-        }
-        Err(error) => log::warn!("cannot open the About window: {error}"),
-    }
-}
-
-struct AboutView {
-    focus: FocusHandle,
+pub(crate) struct AboutView {
     page: Page,
     notices: Notices,
     git_version: Option<String>,
     copied: bool,
-    /// The window follows the system appearance like every other one; this
-    /// keeps the subscription alive.
-    _appearance: Subscription,
-    /// The appearance last applied, so unrelated setting changes do not reload
-    /// the palette.
-    appearance: crate::settings::Appearance,
-    /// Repaints this window when another one changes the theme.
-    _settings: Subscription,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -202,21 +116,7 @@ impl Notices {
 }
 
 impl AboutView {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let focus = cx.focus_handle();
-        window.focus(&focus, cx);
-        let appearance =
-            window.observe_window_appearance(|window, cx| settings::apply_theme(Some(window), cx));
-        let current_appearance = Settings::get(cx).appearance.clone();
-        let settings = cx.observe_global::<Settings>(|this, cx| {
-            let next = Settings::get(cx).appearance.clone();
-            if next != this.appearance {
-                this.appearance = next;
-                settings::apply_theme(None, cx);
-            }
-            cx.notify();
-        });
-
+    pub(crate) fn new(cx: &mut Context<Self>) -> Self {
         let executable = std::env::current_exe().ok();
         let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let task = cx.background_executor().spawn(async move {
@@ -246,14 +146,10 @@ impl AboutView {
         .detach();
 
         Self {
-            focus,
             page: Page::Overview,
             notices: Notices::Loading,
             git_version: None,
             copied: false,
-            _appearance: appearance,
-            appearance: current_appearance,
-            _settings: settings,
         }
     }
 
@@ -286,36 +182,6 @@ impl AboutView {
             Page::License(license) => Some(license.text().to_owned()),
             Page::Notices => self.notices.text().map(str::to_owned),
         }
-    }
-
-    fn title_bar(&self, design: &Design) -> impl IntoElement {
-        TitleBar::new()
-            .h(design.px(style::TITLE_BAR_HEIGHT))
-            .bg(design.chrome)
-            .border_color(design.border)
-            .child(
-                h_flex()
-                    .items_center()
-                    .gap_2()
-                    .flex_none()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(design.px(7.0))
-                            .child(style::app_mark(design.scale(style::BRAND_MARK)))
-                            .child(style::wordmark(
-                                design.scale(style::BRAND_WORDMARK),
-                                design.text,
-                            )),
-                    )
-                    .child(div().w(px(1.0)).h(design.px(18.0)).mx_1().bg(design.border))
-                    .child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(t!("about.title").to_string()),
-                    ),
-            )
     }
 
     fn header(&self, design: &Design) -> impl IntoElement {
@@ -563,37 +429,13 @@ impl Render for AboutView {
             Page::Notices => self.notices_page(&design, cx).into_any_element(),
         };
 
-        let mut root = v_flex()
+        v_flex()
             .size_full()
             .key_context(ABOUT_VIEW)
-            .track_focus(&self.focus)
-            .on_action(cx.listener(|_, _: &CloseAbout, window, _| window.remove_window()))
-            .bg(design.background)
+            .on_action(cx.listener(|_, _: &CloseAbout, window, cx| window.close_dialog(cx)))
             .text_color(design.text)
             .text_size(px(design.ui))
-            .child(self.title_bar(&design))
             .child(page)
-            .child(
-                h_flex()
-                    .flex_none()
-                    .justify_end()
-                    .items_center()
-                    .h(design.px(48.0))
-                    .px(design.px(20.0))
-                    .border_t_1()
-                    .border_color(design.border)
-                    .bg(design.chrome)
-                    .child(
-                        button("about-close", t!("common.close").to_string())
-                            .kind(ButtonKind::Normal)
-                            .size(ButtonSize::Medium)
-                            .on_click(|_, window, _| window.remove_window()),
-                    ),
-            );
-        // This window is a root of its own, so the CJK chain has to be set
-        // here as well as on the main window's.
-        root.text_style().font_fallbacks = Some(style::font_fallbacks());
-        root
     }
 }
 
@@ -708,17 +550,9 @@ fn locate_notices(platform: Platform, executable: &Path) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use gpui::{Render, TestAppContext, VisualTestContext, point};
+    use gpui::{TestAppContext, VisualTestContext, point};
 
     use super::*;
-
-    struct Probe;
-
-    impl Render for Probe {
-        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-            div().size_full()
-        }
-    }
 
     #[test]
     fn build_info_is_known() {
@@ -775,42 +609,18 @@ mod tests {
     }
 
     #[gpui::test]
-    fn dispatching_about_opens_the_view_and_the_mit_button_shows_its_license(
-        cx: &mut TestAppContext,
-    ) {
+    fn the_mit_button_shows_its_license(cx: &mut TestAppContext) {
         cx.update(|cx| {
             gpui_component::init(cx);
             cx.set_global(Settings::default());
-            bind(cx);
         });
 
-        let window = cx.add_window(|_, _| Probe);
-        window
-            .update(cx, |_, window, _| window.activate_window())
-            .expect("the probe window");
-        let mut main = VisualTestContext::from_window(window.into(), cx);
-        main.update(|window, cx| window.draw(cx).clear(cx));
-
-        main.dispatch_action(AboutStrata);
-        main.run_until_parked();
-
-        let (about_window, view) = main.cx.update(|cx| {
-            let open = cx
-                .try_global::<OpenAboutWindow>()
-                .expect("the About window is registered");
-            (
-                open.window.expect("the About window opened"),
-                open.view
-                    .clone()
-                    .expect("the About view was recorded")
-                    .upgrade()
-                    .expect("the About view is alive"),
-            )
-        });
-        assert_eq!(view.read_with(&main, |view, _| view.page), Page::Overview);
-
-        let mut about = VisualTestContext::from_window(about_window, &main.cx);
+        let window = cx.add_window(|_, cx| AboutView::new(cx));
+        let view = window.root(cx).expect("the About view");
+        let mut about = VisualTestContext::from_window(window.into(), cx);
         about.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(view.read_with(&about, |view, _| view.page), Page::Overview);
+
         let bounds = about
             .debug_bounds("about-license-mit")
             .expect("the MIT licence button was laid out");

@@ -11,30 +11,24 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use super::kit::{Field, Group, Item, ItemCx, NumberOptions, Page};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Anchor, AnyElement, App, AppContext as _, BorrowAppContext as _, Entity, FontWeight,
-    IntoElement, ParentElement, PathPromptOptions, SharedString, StyleRefinement, Styled,
-    Subscription, Task, Window, div, px, relative,
+    Anchor, AnyElement, App, AppContext as _, BorrowAppContext as _, Entity, IntoElement,
+    ParentElement, PathPromptOptions, SharedString, Styled, Subscription, Task, Window, div, px,
 };
 use gpui_component::button::Button;
-use gpui_component::group_box::GroupBoxVariant;
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::label::Label;
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::notification::Notification;
 use gpui_component::searchable_list::SearchableListItem;
 use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectState};
-use gpui_component::setting::{
-    NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage,
-};
 use gpui_component::{
     ActiveTheme as _, Disableable as _, IndexPath, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit_assets::IconName;
 use strata_core::proxy::ProxyScheme;
 
-use super::SIDEBAR_MAX;
 use super::change::{self, Section};
 use crate::actions::OpenGitConfig;
 use crate::fonts::{self, FontChoice};
@@ -47,22 +41,11 @@ use crate::tools::Tooling;
 /// clears its masked input and any pending save.
 static NETWORK_RESET_EPOCH: AtomicU64 = AtomicU64::new(0);
 
-/// The gutter the page list gives its cards, and the padding a card gives its
-/// rows. Both come from gpui-component; they are named here because the width a
-/// control may take is what is left after them.
-const PAGE_GUTTER: f32 = 16.0;
-const CARD_PADDING: f32 = 16.0;
+/// The gap between a row's label column and its control.
+const ROW_GAP: f32 = 16.0;
 
-/// The gap between a row's label column and its control (`SettingItem`'s).
-const ROW_GAP: f32 = 12.0;
-
-/// The gap between a card's label and the card's surface, the space a group
-/// title used to sit over its group.
-const CARD_LABEL_GAP: f32 = 8.0;
-
-/// The share of a row the label column may take. `SettingItem` caps it there
-/// and stops shrinking it at that cap, so a control wider than the rest of the
-/// row is pushed past the card's right padding instead of fitting beside it.
+/// The share of a row the label column keeps, so a long setting name is not
+/// squeezed into a sliver beside a wide control.
 const LABEL_FRACTION: f32 = 0.6;
 
 /// Widest a control gets: wide enough for a font name, not a slab of the page.
@@ -71,7 +54,7 @@ const CONTROL_MAX: f32 = 260.0;
 /// The icon the sidebar shows beside a section, matching the main sidebar's
 /// use of one per list. Every name here is in the asset bundle the app embeds,
 /// so a section cannot end up with a blank space where its icon belongs.
-fn icon(section: Section) -> IconName {
+pub(super) fn icon(section: Section) -> IconName {
     match section {
         Section::Appearance => IconName::Palette,
         Section::Diff => IconName::Replace,
@@ -87,11 +70,10 @@ fn icon(section: Section) -> IconName {
 
 /// Every page, in the order the sidebar lists them.
 ///
-/// `viewport_width` is the settings window's width. The right-hand controls are
-/// sized from it because the page list and its cards are only as wide as the
-/// window leaves them.
-pub(super) fn pages(viewport_width: f32, design: &Design, cx: &App) -> Vec<SettingPage> {
-    let control = control_width(viewport_width, design);
+/// `content_width` is the width the dialog leaves the page body; the controls
+/// on the right of the rows are sized from it.
+pub(super) fn pages(content_width: f32, design: &Design, cx: &App) -> Vec<Page> {
+    let control = control_width(content_width, design);
     let manual_proxy = Settings::get(cx).proxy.mode == ProxyMode::Manual;
     Section::ALL
         .into_iter()
@@ -101,24 +83,16 @@ pub(super) fn pages(viewport_width: f32, design: &Design, cx: &App) -> Vec<Setti
 
 /// Width every control on the right of a settings row shares, so the right edge
 /// lines up down a page and across pages.
-///
-/// The sidebar keeps the width it was dragged to inside the settings component,
-/// so the widest it can become is what the calculation may assume; beside a
-/// narrower sidebar the control just ends further inside the card.
-fn control_width(viewport_width: f32, design: &Design) -> f32 {
-    let row = viewport_width
-        - design.scale(SIDEBAR_MAX)
-        - 2.0 * design.scale(PAGE_GUTTER)
-        - 2.0 * design.scale(CARD_PADDING);
+fn control_width(row: f32, design: &Design) -> f32 {
     let room = row * (1.0 - LABEL_FRACTION) - design.scale(ROW_GAP);
     room.clamp(0.0, design.scale(CONTROL_MAX))
 }
 
-fn page(section: Section, control: f32, manual_proxy: bool, design: &Design) -> SettingPage {
+fn page(section: Section, control: f32, manual_proxy: bool, design: &Design) -> Page {
     match section {
         Section::Appearance => appearance(control, design),
         Section::Diff => diff(control, design),
-        Section::History => history(control, design),
+        Section::History => history(design),
         Section::Behaviour => behaviour(control, design),
         Section::Tools => tools(control, design),
         Section::Network => network(control, manual_proxy, design),
@@ -128,7 +102,7 @@ fn page(section: Section, control: f32, manual_proxy: bool, design: &Design) -> 
     }
 }
 
-fn appearance(control: f32, design: &Design) -> SettingPage {
+fn appearance(control: f32, design: &Design) -> Page {
     shell(
         Section::Appearance,
         t!("settings.appearance.description").to_string(),
@@ -136,24 +110,28 @@ fn appearance(control: f32, design: &Design) -> SettingPage {
     )
     .groups(
         card(t!("settings.theme.card").to_string(), design).items([
-            SettingItem::new(t!("settings.theme.mode").to_string(), theme_field(control))
+            Item::new(t!("settings.theme.mode").to_string(), theme_field())
                 .description(t!("settings.theme.description").to_string()),
-            SettingItem::new(
+            Item::new(
                 t!("settings.theme.light_theme").to_string(),
                 palette_field(ThemeAppearance::Light, control),
             )
             .description(t!("settings.theme.light_theme_description").to_string()),
-            SettingItem::new(
+            Item::new(
                 t!("settings.theme.dark_theme").to_string(),
                 palette_field(ThemeAppearance::Dark, control),
             )
             .description(t!("settings.theme.dark_theme_description").to_string()),
-            SettingItem::render(user_themes_row),
+            Item::render(user_themes_row).keywords([
+                t!("settings.theme.open_folder").to_string(),
+                t!("settings.theme.export_current").to_string(),
+                t!("settings.theme.reload").to_string(),
+            ]),
         ]),
     )
     .groups(
         card(t!("settings.appearance.language").to_string(), design).item(
-            SettingItem::new(
+            Item::new(
                 t!("settings.appearance.language").to_string(),
                 language_field(control),
             )
@@ -162,7 +140,7 @@ fn appearance(control: f32, design: &Design) -> SettingPage {
     )
     .groups(
         card(t!("settings.fonts.card").to_string(), design).items([
-            SettingItem::new(
+            Item::new(
                 t!("settings.fonts.interface").to_string(),
                 font_field(
                     t!("settings.fonts.system_default").to_string(),
@@ -173,7 +151,7 @@ fn appearance(control: f32, design: &Design) -> SettingPage {
                 ),
             )
             .description(t!("settings.fonts.interface_description").to_string()),
-            SettingItem::new(
+            Item::new(
                 t!("settings.fonts.interface_size").to_string(),
                 number(
                     change::FONT_SIZE,
@@ -183,7 +161,7 @@ fn appearance(control: f32, design: &Design) -> SettingPage {
                     change::ui_font_size,
                 ),
             ),
-            SettingItem::new(
+            Item::new(
                 t!("settings.fonts.code").to_string(),
                 font_field(
                     t!("settings.fonts.bundled_monospace").to_string(),
@@ -194,7 +172,7 @@ fn appearance(control: f32, design: &Design) -> SettingPage {
                 ),
             )
             .description(t!("settings.fonts.code_description").to_string()),
-            SettingItem::new(
+            Item::new(
                 t!("settings.fonts.code_size").to_string(),
                 number(
                     change::FONT_SIZE,
@@ -204,7 +182,7 @@ fn appearance(control: f32, design: &Design) -> SettingPage {
                     change::code_font_size,
                 ),
             ),
-            SettingItem::new(
+            Item::new(
                 t!("settings.fonts.tab_width").to_string(),
                 number(
                     change::TAB_WIDTH,
@@ -219,7 +197,7 @@ fn appearance(control: f32, design: &Design) -> SettingPage {
     )
     .groups(
         card(t!("settings.zoom.card").to_string(), design).item(
-            SettingItem::new(
+            Item::new(
                 t!("settings.appearance.zoom").to_string(),
                 zoom_field(control),
             )
@@ -228,7 +206,7 @@ fn appearance(control: f32, design: &Design) -> SettingPage {
     )
 }
 
-fn diff(control: f32, design: &Design) -> SettingPage {
+fn diff(control: f32, design: &Design) -> Page {
     shell(
         Section::Diff,
         t!("settings.diff.description").to_string(),
@@ -236,7 +214,7 @@ fn diff(control: f32, design: &Design) -> SettingPage {
     )
     .groups(
         card(t!("settings.diff.layout.card").to_string(), design).items([
-            SettingItem::new(
+            Item::new(
                 t!("settings.diff.layout.card").to_string(),
                 choice(
                     &[
@@ -258,7 +236,7 @@ fn diff(control: f32, design: &Design) -> SettingPage {
                 ),
             )
             .description(t!("settings.diff.layout.description").to_string()),
-            SettingItem::new(
+            Item::new(
                 t!("settings.diff.wrap").to_string(),
                 toggle(|settings| settings.diff.wrap_lines, change::wrap_lines),
             )
@@ -267,7 +245,7 @@ fn diff(control: f32, design: &Design) -> SettingPage {
     )
     .groups(
         card(t!("settings.diff.text.card").to_string(), design).items([
-            SettingItem::new(
+            Item::new(
                 t!("settings.diff.syntax").to_string(),
                 toggle(
                     |settings| settings.diff.syntax_highlighting,
@@ -275,7 +253,7 @@ fn diff(control: f32, design: &Design) -> SettingPage {
                 ),
             )
             .description(t!("settings.diff.syntax_description").to_string()),
-            SettingItem::new(
+            Item::new(
                 t!("settings.diff.whitespace").to_string(),
                 toggle(
                     |settings| settings.diff.show_whitespace,
@@ -288,8 +266,9 @@ fn diff(control: f32, design: &Design) -> SettingPage {
     .groups(
         card(t!("settings.diff.comparison.card").to_string(), design)
             .description(t!("settings.diff.comparison_description").to_string())
+            .note(t!("settings.diff.comparison_note").to_string())
             .items([
-                SettingItem::new(
+                Item::new(
                     t!("settings.diff.ignore_whitespace").to_string(),
                     toggle(
                         |settings| settings.diff.ignore_whitespace,
@@ -297,7 +276,7 @@ fn diff(control: f32, design: &Design) -> SettingPage {
                     ),
                 )
                 .description(t!("settings.diff.ignore_whitespace_description").to_string()),
-                SettingItem::new(
+                Item::new(
                     t!("settings.diff.context_lines").to_string(),
                     number(
                         change::CONTEXT_LINES,
@@ -312,7 +291,7 @@ fn diff(control: f32, design: &Design) -> SettingPage {
     )
 }
 
-fn history(control: f32, design: &Design) -> SettingPage {
+fn history(design: &Design) -> Page {
     shell(
         Section::History,
         t!("settings.history.description").to_string(),
@@ -320,7 +299,7 @@ fn history(control: f32, design: &Design) -> SettingPage {
     )
     .groups(
         card(t!("settings.history.refs").to_string(), design).items([
-            SettingItem::new(
+            Item::new(
                 t!("settings.history.remote_branches").to_string(),
                 toggle(
                     |settings| settings.history.show_remote_branches,
@@ -328,12 +307,12 @@ fn history(control: f32, design: &Design) -> SettingPage {
                 ),
             )
             .description(t!("settings.history.remote_branches_description").to_string()),
-            SettingItem::new(
+            Item::new(
                 t!("settings.history.tags").to_string(),
                 toggle(|settings| settings.history.show_tags, change::show_tags),
             )
             .description(t!("settings.history.tags_description").to_string()),
-            SettingItem::new(
+            Item::new(
                 t!("settings.history.stashes").to_string(),
                 toggle(
                     |settings| settings.history.show_stashes,
@@ -345,14 +324,13 @@ fn history(control: f32, design: &Design) -> SettingPage {
     )
     .groups(
         card(t!("settings.history.dates").to_string(), design).item(
-            SettingItem::new(
+            Item::new(
                 t!("settings.history.date_format").to_string(),
-                choice(
+                segments(
                     &[
                         ("relative", t!("settings.history.relative").to_string()),
                         ("absolute", t!("settings.history.absolute").to_string()),
                     ],
-                    control,
                     |settings| match settings.history.date_format {
                         DateFormat::Relative => "relative".to_owned(),
                         DateFormat::Absolute => "absolute".to_owned(),
@@ -371,7 +349,7 @@ fn history(control: f32, design: &Design) -> SettingPage {
     )
     .groups(
         card(t!("settings.history.signatures").to_string(), design).item(
-            SettingItem::new(
+            Item::new(
                 t!("settings.history.commit_signatures").to_string(),
                 toggle(
                     |settings| settings.history.show_commit_signatures,
@@ -383,7 +361,7 @@ fn history(control: f32, design: &Design) -> SettingPage {
     )
     .groups(
         card(t!("settings.history.rows").to_string(), design).items([
-            SettingItem::new(
+            Item::new(
                 t!("settings.history.uncommitted_changes").to_string(),
                 toggle(
                     |settings| settings.history.show_uncommitted_changes,
@@ -391,7 +369,7 @@ fn history(control: f32, design: &Design) -> SettingPage {
                 ),
             )
             .description(t!("settings.history.uncommitted_changes_description").to_string()),
-            SettingItem::new(
+            Item::new(
                 t!("settings.history.changed_file_count").to_string(),
                 toggle(
                     |settings| settings.history.show_changed_file_count,
@@ -403,7 +381,7 @@ fn history(control: f32, design: &Design) -> SettingPage {
     )
 }
 
-fn behaviour(control: f32, design: &Design) -> SettingPage {
+fn behaviour(control: f32, design: &Design) -> Page {
     let every_minutes = |minutes: usize| {
         t!(
             &crate::i18n::count_key("settings.behaviour.every_minutes", minutes),
@@ -418,7 +396,7 @@ fn behaviour(control: f32, design: &Design) -> SettingPage {
     )
     .groups(
         card(t!("settings.behaviour.fetching").to_string(), design).items([
-            SettingItem::new(
+            Item::new(
                 t!("settings.behaviour.auto_fetch").to_string(),
                 choice(
                     &[
@@ -437,7 +415,7 @@ fn behaviour(control: f32, design: &Design) -> SettingPage {
                 ),
             )
             .description(t!("settings.behaviour.auto_fetch_description").to_string()),
-            SettingItem::new(
+            Item::new(
                 t!("settings.behaviour.prune_on_fetch").to_string(),
                 toggle(
                     |settings| settings.behaviour.prune_on_fetch,
@@ -449,7 +427,7 @@ fn behaviour(control: f32, design: &Design) -> SettingPage {
     )
     .groups(
         card(t!("settings.behaviour.safety").to_string(), design).items([
-            SettingItem::new(
+            Item::new(
                 t!("settings.behaviour.confirm_destructive").to_string(),
                 toggle(
                     |settings| settings.behaviour.confirm_destructive,
@@ -457,7 +435,7 @@ fn behaviour(control: f32, design: &Design) -> SettingPage {
                 ),
             )
             .description(t!("settings.behaviour.confirm_destructive_description").to_string()),
-            SettingItem::new(
+            Item::new(
                 t!("settings.behaviour.summary_length_hint").to_string(),
                 number(
                     change::SUMMARY_LENGTH,
@@ -468,7 +446,7 @@ fn behaviour(control: f32, design: &Design) -> SettingPage {
                 ),
             )
             .description(t!("settings.behaviour.summary_length_hint_description").to_string()),
-            SettingItem::new(
+            Item::new(
                 t!("settings.behaviour.restore_last_repository").to_string(),
                 toggle(
                     |settings| settings.behaviour.restore_last_repository,
@@ -480,7 +458,7 @@ fn behaviour(control: f32, design: &Design) -> SettingPage {
     )
     .groups(
         card(t!("settings.behaviour.updates").to_string(), design).item(
-            SettingItem::new(
+            Item::new(
                 t!("settings.behaviour.auto_check_updates").to_string(),
                 toggle(
                     |settings| settings.updates.auto_check,
@@ -490,9 +468,37 @@ fn behaviour(control: f32, design: &Design) -> SettingPage {
             .description(t!("settings.behaviour.auto_check_updates_description").to_string()),
         ),
     )
+    .group(card(t!("settings.file").to_string(), design).item(settings_file_row()))
 }
 
-fn tools(control: f32, design: &Design) -> SettingPage {
+/// Where the settings are kept, with a way to open that folder. Editing the
+/// file by hand is the path for anything the pages do not offer.
+fn settings_file_row() -> Item {
+    let file = settings::settings_file();
+    let label = file.as_ref().map_or_else(
+        || t!("settings.file_unknown").to_string(),
+        |file| file.display().to_string(),
+    );
+    Item::new(
+        t!("settings.file_location").to_string(),
+        Field::render(move |_, _, _| {
+            crate::ui::button(
+                "open-settings-folder",
+                t!("settings.open_folder").to_string(),
+            )
+            .size(crate::ui::ButtonSize::Small)
+            .disabled(settings::settings_file().is_none())
+            .on_click(|_, _, cx| {
+                if let Some(folder) = settings::settings_file().as_deref().and_then(Path::parent) {
+                    cx.open_with_system(folder);
+                }
+            })
+        }),
+    )
+    .note(label)
+}
+
+fn tools(control: f32, design: &Design) -> Page {
     shell(
         Section::Tools,
         t!("settings.tools.description").to_string(),
@@ -500,25 +506,26 @@ fn tools(control: f32, design: &Design) -> SettingPage {
     )
     .groups(
         card(t!("settings.tools.git").to_string(), design).item(
-            SettingItem::new(
+            Item::new(
                 t!("settings.tools.git_executable").to_string(),
                 git_field(control),
             )
-            .description(t!("settings.tools.git_executable_description").to_string()),
+            .description(t!("settings.tools.git_executable_description").to_string())
+            .note(t!("settings.tools.git_executable_note").to_string()),
         ),
     )
     .groups(
         card("ghq", design).items([
-            SettingItem::new(
+            Item::new(
                 t!("settings.tools.use_ghq").to_string(),
                 tool_toggle(|settings| settings.tools.ghq.enabled, change::ghq_enabled),
             )
             .description(t!("settings.tools.use_ghq_description").to_string()),
-            SettingItem::new(
+            Item::new(
                 t!("settings.tools.status").to_string(),
-                SettingField::render(tool_status_row("redetect-ghq", ghq_status)),
+                Field::render(tool_status_row("redetect-ghq", ghq_status)),
             ),
-            SettingItem::new(
+            Item::new(
                 t!("settings.tools.root_override").to_string(),
                 text_field(
                     "/path/to/ghq/root",
@@ -539,58 +546,56 @@ fn tools(control: f32, design: &Design) -> SettingPage {
     )
     .groups(
         card(t!("settings.tools.github_cli").to_string(), design).items([
-            SettingItem::new(
+            Item::new(
                 t!("settings.tools.use_gh").to_string(),
                 tool_toggle(|settings| settings.tools.gh.enabled, change::gh_enabled),
             )
             .description(t!("settings.tools.use_gh_description").to_string()),
-            SettingItem::new(
+            Item::new(
                 t!("settings.tools.status").to_string(),
-                SettingField::render(tool_status_row("redetect-gh", gh_status)),
+                Field::render(tool_status_row("redetect-gh", gh_status)),
             ),
         ]),
     )
     .groups(
-        card(t!("settings.tools.repository").to_string(), design).item(SettingItem::render(
-            |_, _, cx| {
-                let design = Design::new(cx.theme(), Settings::get(cx));
-                let available = crate::git_config_view::has_repository(cx);
-                v_flex()
-                    .gap_1()
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .items_center()
-                            .child(
-                                crate::ui::button(
-                                    "open-git-config",
-                                    t!("settings.tools.show_git_config").to_string(),
-                                )
-                                .size(crate::ui::ButtonSize::Small)
-                                .disabled(!available)
-                                .on_click(|_, window, cx| {
-                                    window.dispatch_action(Box::new(OpenGitConfig), cx);
-                                }),
+        card(t!("settings.tools.repository").to_string(), design).item(Item::render(|_, _, cx| {
+            let design = Design::new(cx.theme(), Settings::get(cx));
+            let available = crate::git_config_view::has_repository(cx);
+            v_flex()
+                .gap_1()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            crate::ui::button(
+                                "open-git-config",
+                                t!("settings.tools.show_git_config").to_string(),
                             )
-                            .child(
-                                div()
-                                    .text_size(px(design.tiny()))
-                                    .text_color(design.muted)
-                                    .child(if available {
-                                        t!("settings.tools.show_git_config_available").to_string()
-                                    } else {
-                                        t!("settings.tools.show_git_config_unavailable").to_string()
-                                    }),
-                            ),
-                    )
-                    .into_any_element()
-            },
-        )),
+                            .size(crate::ui::ButtonSize::Small)
+                            .disabled(!available)
+                            .on_click(|_, window, cx| {
+                                window.dispatch_action(Box::new(OpenGitConfig), cx);
+                            }),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(design.tiny()))
+                                .text_color(design.muted)
+                                .child(if available {
+                                    t!("settings.tools.show_git_config_available").to_string()
+                                } else {
+                                    t!("settings.tools.show_git_config_unavailable").to_string()
+                                }),
+                        ),
+                )
+                .into_any_element()
+        })),
     )
     .groups({
         #[cfg_attr(not(feature = "terminal"), allow(unused_mut))]
         let mut items = vec![
-            SettingItem::new(
+            Item::new(
                 t!("settings.tools.editor_command").to_string(),
                 text_field(
                     "code --goto {path}:{line}",
@@ -600,7 +605,7 @@ fn tools(control: f32, design: &Design) -> SettingPage {
                 ),
             )
             .description(t!("settings.tools.editor_description").to_string()),
-            SettingItem::new(
+            Item::new(
                 t!("settings.tools.terminal_command").to_string(),
                 text_field(
                     "alacritty --working-directory {path}",
@@ -613,7 +618,7 @@ fn tools(control: f32, design: &Design) -> SettingPage {
         ];
         #[cfg(feature = "terminal")]
         items.push(
-            SettingItem::new(
+            Item::new(
                 t!("settings.tools.embedded_shell").to_string(),
                 text_field(
                     "/bin/zsh -l",
@@ -628,7 +633,7 @@ fn tools(control: f32, design: &Design) -> SettingPage {
     })
 }
 
-fn network(control: f32, manual: bool, design: &Design) -> SettingPage {
+fn network(control: f32, manual: bool, design: &Design) -> Page {
     shell(
         Section::Network,
         t!("settings.network.description").to_string(),
@@ -636,7 +641,7 @@ fn network(control: f32, manual: bool, design: &Design) -> SettingPage {
     )
     .groups(
         card(t!("settings.network.proxy_card").to_string(), design).item(
-            SettingItem::new(
+            Item::new(
                 t!("settings.network.mode").to_string(),
                 choice(
                     &[
@@ -660,12 +665,13 @@ fn network(control: f32, manual: bool, design: &Design) -> SettingPage {
                     },
                 ),
             )
-            .description(t!("settings.network.mode_description").to_string()),
+            .description(t!("settings.network.mode_description").to_string())
+            .note(t!("settings.network.mode_note").to_string()),
         ),
     )
     .groups(
         card(t!("settings.network.manual_card").to_string(), design).items([
-            SettingItem::new(
+            Item::new(
                 t!("settings.network.scheme").to_string(),
                 choice(
                     &[
@@ -691,7 +697,7 @@ fn network(control: f32, manual: bool, design: &Design) -> SettingPage {
             )
             .description(t!("settings.network.scheme_description").to_string())
             .disabled(!manual),
-            SettingItem::new(
+            Item::new(
                 t!("settings.network.host").to_string(),
                 text_field(
                     "proxy.example.com",
@@ -704,10 +710,10 @@ fn network(control: f32, manual: bool, design: &Design) -> SettingPage {
             )
             .description(t!("settings.network.host_description").to_string())
             .disabled(!manual),
-            SettingItem::new(t!("settings.network.port").to_string(), port_field(control))
+            Item::new(t!("settings.network.port").to_string(), port_field(control))
                 .description(t!("settings.network.port_description").to_string())
                 .disabled(!manual),
-            SettingItem::new(
+            Item::new(
                 t!("settings.network.username").to_string(),
                 text_field(
                     t!("settings.network.optional").to_string(),
@@ -721,13 +727,13 @@ fn network(control: f32, manual: bool, design: &Design) -> SettingPage {
             )
             .description(t!("settings.network.username_description").to_string())
             .disabled(!manual),
-            SettingItem::new(
+            Item::new(
                 t!("settings.network.password").to_string(),
                 password_field(control),
             )
-            .description(t!("settings.network.password_description").to_string())
+            .note(t!("settings.network.password_description").to_string())
             .disabled(!manual),
-            SettingItem::new(
+            Item::new(
                 t!("settings.network.no_proxy").to_string(),
                 text_field(
                     "localhost, 127.0.0.1, .corp",
@@ -745,16 +751,16 @@ fn network(control: f32, manual: bool, design: &Design) -> SettingPage {
     )
     .groups(
         card(t!("settings.network.connection_card").to_string(), design).item(
-            SettingItem::new(
+            Item::new(
                 t!("settings.network.test_connection").to_string(),
-                SettingField::render(test_connection_field),
+                Field::render(test_connection_field),
             )
             .description(t!("settings.network.test_connection_description").to_string()),
         ),
     )
 }
 
-fn privacy(_control: f32, design: &Design) -> SettingPage {
+fn privacy(_control: f32, design: &Design) -> Page {
     shell(
         Section::Privacy,
         t!("settings.privacy.description").to_string(),
@@ -762,7 +768,7 @@ fn privacy(_control: f32, design: &Design) -> SettingPage {
     )
     .groups(
         card(t!("settings.privacy.network").to_string(), design).item(
-            SettingItem::new(
+            Item::new(
                 t!("settings.privacy.avatars").to_string(),
                 toggle(
                     |settings| settings.privacy.external_avatars,
@@ -774,7 +780,7 @@ fn privacy(_control: f32, design: &Design) -> SettingPage {
     )
 }
 
-fn keyboard(design: &Design) -> SettingPage {
+fn keyboard(design: &Design) -> Page {
     shell_no_reset(
         Section::Keyboard,
         t!("settings.keyboard.description").to_string(),
@@ -782,18 +788,18 @@ fn keyboard(design: &Design) -> SettingPage {
     )
     .groups(
         card(t!("settings.keyboard.bindings").to_string(), design)
-            .item(SettingItem::render(keyboard_table)),
+            .item(Item::render(keyboard_table)),
     )
 }
 
-fn commands_page(design: &Design) -> SettingPage {
+fn commands_page(design: &Design) -> Page {
     let file = t!("settings.commands.file").to_string();
     shell_no_reset(
         Section::Commands,
         t!("settings.commands.description").to_string(),
         design,
     )
-    .groups(card(file, design).item(SettingItem::render(|_, _, cx| {
+    .groups(card(file, design).item(Item::render(|_, _, cx| {
         let design = Design::new(cx.theme(), Settings::get(cx));
         let state = crate::commands::CommandState::get(cx);
         let path = state.path.as_ref().map_or_else(
@@ -852,81 +858,72 @@ fn commands_page(design: &Design) -> SettingPage {
             .into_any_element()
     })))
     .groups(
-        card(t!("settings.commands.loaded").to_string(), design).item(SettingItem::render(
-            |_, _, cx| {
-                let design = Design::new(cx.theme(), Settings::get(cx));
-                let state = crate::commands::CommandState::get(cx);
-                let rows = crate::commands::rows(state);
-                if rows.is_empty() {
-                    return crate::ui::empty_state(
-                        t!("settings.commands.empty").to_string(),
+        card(t!("settings.commands.loaded").to_string(), design).item(Item::render(|_, _, cx| {
+            let design = Design::new(cx.theme(), Settings::get(cx));
+            let state = crate::commands::CommandState::get(cx);
+            let rows = crate::commands::rows(state);
+            if rows.is_empty() {
+                return crate::ui::empty_state(t!("settings.commands.empty").to_string(), &design)
+                    .into_any_element();
+            }
+            v_flex()
+                .w_full()
+                .children(rows.into_iter().enumerate().map(|(index, row)| {
+                    crate::ui::list_row(
+                        ("custom-command", index),
+                        crate::ui::RowState::NORMAL,
                         &design,
                     )
-                    .into_any_element();
-                }
-                v_flex()
-                    .w_full()
-                    .children(rows.into_iter().enumerate().map(|(index, row)| {
-                        crate::ui::list_row(
-                            ("custom-command", index),
-                            crate::ui::RowState::NORMAL,
-                            &design,
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .w(design.px(180.0))
-                                .truncate()
-                                .child(row.title.to_owned()),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .w(design.px(74.0))
-                                .text_size(px(design.tiny()))
-                                .text_color(design.muted)
-                                .child(row.context.to_owned()),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .font_family(design.mono.clone())
-                                .text_size(px(design.tiny()))
-                                .text_color(design.muted)
-                                .child(row.line),
-                        )
-                        .child(
-                            div()
-                                .flex_none()
-                                .text_size(px(design.tiny()))
-                                .text_color(design.muted)
-                                .child(if row.confirm {
-                                    t!("settings.commands.asks").to_string()
-                                } else {
-                                    String::new()
-                                }),
-                        )
-                        .when_some(row.key.map(str::to_owned), |this, key| {
-                            this.child(crate::ui::kbd(key, &design))
-                        })
-                        .into_any_element()
-                    }))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(design.px(180.0))
+                            .truncate()
+                            .child(row.title.to_owned()),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(design.px(74.0))
+                            .text_size(px(design.tiny()))
+                            .text_color(design.muted)
+                            .child(row.context.to_owned()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .font_family(design.mono.clone())
+                            .text_size(px(design.tiny()))
+                            .text_color(design.muted)
+                            .child(row.line),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_size(px(design.tiny()))
+                            .text_color(design.muted)
+                            .child(if row.confirm {
+                                t!("settings.commands.asks").to_string()
+                            } else {
+                                String::new()
+                            }),
+                    )
+                    .when_some(row.key.map(str::to_owned), |this, key| {
+                        this.child(crate::ui::kbd(key, &design))
+                    })
                     .into_any_element()
-            },
-        )),
+                }))
+                .into_any_element()
+        })),
     )
 }
 
 /// The keyboard page is a table over the action registry; the search field
 /// and the Edit buttons live in one element so the pending capture can be
 /// shown above the rows.
-fn keyboard_table(
-    options: &gpui_component::setting::RenderOptions,
-    window: &mut Window,
-    cx: &mut App,
-) -> AnyElement {
+fn keyboard_table(options: &ItemCx, window: &mut Window, cx: &mut App) -> AnyElement {
     let design = Design::new(cx.theme(), Settings::get(cx));
     let key = field_key(options, "keyboard-filter");
     let filter = keyboard_filter(key, window, cx);
@@ -1188,228 +1185,55 @@ fn action_row(row: crate::keymap::ActionRow, design: &Design) -> AnyElement {
     element.into_any_element()
 }
 
-/// A card under construction: a label and the outlined group of rows below it.
-///
-/// The label is a group of its own rather than the outlined group's title. The
-/// settings page list turns every titled group into an expandable sub-item, so
-/// a titled card would give the sidebar a chevron with the card's name inside;
-/// untitled groups leave it a flat list of page names. The two groups are
-/// yielded together so a page lists its cards with `page.groups(card(..))`.
-struct Card {
-    title: String,
-    description: Option<String>,
-    group: SettingGroup,
-    card_margin_bottom: gpui::Pixels,
+/// A group of rows under a short heading.
+fn card(title: impl Into<String>, _design: &Design) -> Group {
+    Group::new(title.into())
 }
 
-impl Card {
-    fn item(mut self, item: SettingItem) -> Self {
-        self.group = self.group.item(item);
-        self
+/// Puts a section back to its defaults, from the page title's reset button.
+pub(super) fn reset(section: Section, cx: &mut App) {
+    settings::update(cx, |settings| {
+        change::reset_section(settings, section);
+    });
+    if section == Section::Appearance {
+        settings::apply_theme(None, cx);
+        crate::i18n::apply(cx);
     }
-
-    fn items(mut self, items: impl IntoIterator<Item = SettingItem>) -> Self {
-        self.group = self.group.items(items);
-        self
+    if section == Section::Network {
+        NETWORK_RESET_EPOCH.fetch_add(1, Ordering::Relaxed);
+        cx.spawn(async move |cx| {
+            let _ = cx
+                .background_executor()
+                .spawn(async move { crate::proxy::store_password("") })
+                .await;
+            cx.update(|cx| {
+                cx.update_global::<Settings, _>(|_, _| {});
+                cx.refresh_windows();
+            });
+        })
+        .detach();
     }
-
-    /// Supporting text under the card's label, above its surface.
-    fn description(mut self, description: impl Into<String>) -> Self {
-        self.description = Some(description.into());
-        self
-    }
+    // The zoom is written onto the component theme, not only stored, so the
+    // reset has to apply it.
+    crate::zoom::apply(cx);
+    cx.refresh_windows();
 }
 
-impl IntoIterator for Card {
-    type Item = SettingGroup;
-    type IntoIter = std::array::IntoIter<SettingGroup, 2>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        [
-            card_label(self.title, self.description, self.card_margin_bottom),
-            self.group,
-        ]
-        .into_iter()
-    }
+/// The page every section starts from: its explanation and a reset action.
+fn shell(section: Section, description: impl Into<String>, _design: &Design) -> Page {
+    Page::new(section).description(description.into())
 }
 
-/// A card: a section label above an outlined group, on the 8 px grid.
-///
-/// The page list gives every group [`PAGE_GUTTER`] above and below it, so the
-/// label takes back the space below itself and the card takes back half the
-/// space above it. The label then sits the same [`CARD_LABEL_GAP`] over its
-/// surface, and two cards keep the same 32 px between them, as when the label
-/// was the group's title.
-fn card(title: impl Into<String>, design: &Design) -> Card {
-    Card {
-        title: title.into(),
-        description: None,
-        group: SettingGroup::new().mt(design.px(-CARD_LABEL_GAP)),
-        card_margin_bottom: design.px(-PAGE_GUTTER),
-    }
-}
-
-/// The label above a card, as its own untitled group.
-///
-/// It draws the same element a group title does: muted text on a 1.25 line
-/// height, with the description as small muted text under it.
-fn card_label(
-    title: String,
-    description: Option<String>,
-    margin_bottom: gpui::Pixels,
-) -> SettingGroup {
-    SettingGroup::new()
-        .variant(GroupBoxVariant::Normal)
-        .mb(margin_bottom)
-        .item(SettingItem::render(move |_, _, cx| {
-            div()
-                .text_color(cx.theme().muted_foreground)
-                .line_height(relative(1.25))
-                .child(v_flex().gap_1().child(title.clone()).when_some(
-                    description.clone(),
-                    |this, description| {
-                        this.child(
-                            Label::new(description)
-                                .text_sm()
-                                .text_color(cx.theme().muted_foreground),
-                        )
-                    },
-                ))
-        }))
-}
-
-/// The page heading: the page title, its description and the reset action.
-///
-/// It is page content rather than the settings component's own header because
-/// that header lays its title and suffix out in one left-aligned cluster, which
-/// leaves no way to put an action at the row's right end. Everything here sits
-/// on the same 32 px inset as the rows of the cards below it.
-fn heading(section: Section, description: impl Into<String>, design: &Design) -> SettingGroup {
-    let description = description.into();
-    let design = design.clone();
-    SettingGroup::new()
-        .variant(GroupBoxVariant::Normal)
-        .item(SettingItem::render(move |_, _, _cx| {
-            v_flex()
-                .gap(design.px(8.0))
-                .pt(design.px(8.0))
-                .px(design.px(CARD_PADDING))
-                .child(
-                    h_flex()
-                        .items_center()
-                        .justify_between()
-                        .gap_3()
-                        .child(
-                            div()
-                                .text_size(px(design.ui + design.scale(5.0)))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(design.text)
-                                .child(section.title()),
-                        )
-                        .child(
-                            crate::ui::button(
-                                SharedString::from(format!("reset-{}", section.id())),
-                                t!("settings.keyboard.reset_section").to_string(),
-                            )
-                            .size(crate::ui::ButtonSize::Small)
-                            .ghost()
-                            .on_click(move |_, _, cx| {
-                                settings::update(cx, |settings| {
-                                    change::reset_section(settings, section);
-                                });
-                                if section == Section::Appearance {
-                                    settings::apply_theme(None, cx);
-                                    crate::i18n::apply(cx);
-                                }
-                                if section == Section::Network {
-                                    NETWORK_RESET_EPOCH.fetch_add(1, Ordering::Relaxed);
-                                    cx.spawn(async move |cx| {
-                                        let _ = cx
-                                            .background_executor()
-                                            .spawn(async move { crate::proxy::store_password("") })
-                                            .await;
-                                        cx.update(|cx| {
-                                            cx.update_global::<Settings, _>(|_, _| {});
-                                            cx.refresh_windows();
-                                        });
-                                    })
-                                    .detach();
-                                }
-                                // The zoom is written onto the component theme,
-                                // not only stored, so the reset has to apply it.
-                                crate::zoom::apply(cx);
-                                cx.refresh_windows();
-                            }),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_size(px(design.ui))
-                        .text_color(design.muted)
-                        .child(description.clone()),
-                )
-        }))
-}
-
-/// The page frame every section starts from: a heading, an icon for the
-/// sidebar, and the cards below the heading.
-fn shell(section: Section, description: impl Into<String>, design: &Design) -> SettingPage {
-    SettingPage::new(section.title())
-        .icon(icon(section))
+/// A page whose content is a file the page itself edits, so a reset button
+/// has nothing to restore.
+fn shell_no_reset(section: Section, description: impl Into<String>, _design: &Design) -> Page {
+    Page::new(section)
+        .description(description.into())
         .resettable(false)
-        // The built-in header is replaced by [`heading`], which controls the
-        // title's weight and the reset button's edge.
-        .header_style(&StyleRefinement::default().hidden())
-        .group(heading(section, description, design))
 }
 
-/// A page whose content is a file the page itself edits, so the settings
-/// t!("settings.keyboard.reset_section").to_string() button has nothing to restore.
-fn shell_no_reset(
-    section: Section,
-    description: impl Into<String>,
-    design: &Design,
-) -> SettingPage {
-    SettingPage::new(section.title())
-        .icon(icon(section))
-        .resettable(false)
-        .header_style(&StyleRefinement::default().hidden())
-        .group(heading_no_reset(section, description, design))
-}
-
-fn heading_no_reset(
-    section: Section,
-    description: impl Into<String>,
-    design: &Design,
-) -> SettingGroup {
-    let description = description.into();
-    let design = design.clone();
-    SettingGroup::new()
-        .variant(GroupBoxVariant::Normal)
-        .item(SettingItem::render(move |_, _, _cx| {
-            v_flex()
-                .gap(design.px(8.0))
-                .pt(design.px(8.0))
-                .px(design.px(CARD_PADDING))
-                .child(
-                    div()
-                        .text_size(px(design.ui + design.scale(5.0)))
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_color(design.text)
-                        .child(section.title()),
-                )
-                .child(
-                    div()
-                        .text_size(px(design.ui))
-                        .text_color(design.muted)
-                        .child(description.clone()),
-                )
-                .into_any_element()
-        }))
-}
-
-fn theme_field(control: f32) -> SettingField<SharedString> {
-    SettingField::dropdown(
+fn theme_field() -> Field {
+    Field::segmented(
         pairs(&[
             ("system", t!("settings.theme.follow_system").to_string()),
             ("light", t!("settings.theme.light").to_string()),
@@ -1435,17 +1259,16 @@ fn theme_field(control: f32) -> SettingField<SharedString> {
             settings::apply_theme(None, cx);
         },
     )
-    .w(px(control))
 }
 
-fn palette_field(appearance: ThemeAppearance, control: f32) -> SettingField<SharedString> {
+fn palette_field(appearance: ThemeAppearance, control: f32) -> Field {
     let is_dark = appearance == ThemeAppearance::Dark;
     let element_id: &'static str = if is_dark {
         "dark-theme-picker"
     } else {
         "light-theme-picker"
     };
-    SettingField::render(move |options, _window, cx| {
+    Field::render(move |options, _window, cx| {
         let design = Design::new(cx.theme(), Settings::get(cx));
         let active_id = if is_dark {
             &Settings::get(cx).appearance.dark_theme
@@ -1517,11 +1340,7 @@ fn palette_field(appearance: ThemeAppearance, control: f32) -> SettingField<Shar
     })
 }
 
-fn user_themes_row(
-    _options: &gpui_component::setting::RenderOptions,
-    _window: &mut Window,
-    cx: &mut App,
-) -> AnyElement {
+fn user_themes_row(_options: &ItemCx, _window: &mut Window, cx: &mut App) -> AnyElement {
     let design = Design::new(cx.theme(), Settings::get(cx));
     let dir_label = theme::user_themes_dir().map_or_else(
         || t!("settings.theme.no_config_directory").to_string(),
@@ -1678,7 +1497,7 @@ fn theme_error_banner(error: &theme::ThemeLoadError, design: &Design) -> AnyElem
 
 /// The language dropdown. A change is applied to every open window at once,
 /// rather than waiting for the next launch.
-fn language_field(control: f32) -> SettingField<SharedString> {
+fn language_field(control: f32) -> Field {
     let labels: Vec<(SharedString, SharedString)> = crate::i18n::Language::ALL
         .iter()
         .map(|language| {
@@ -1688,7 +1507,7 @@ fn language_field(control: f32) -> SettingField<SharedString> {
             )
         })
         .collect();
-    SettingField::dropdown(
+    Field::dropdown(
         labels,
         |cx| SharedString::from(Settings::get(cx).appearance.language.id()),
         |value, cx| {
@@ -1703,7 +1522,7 @@ fn language_field(control: f32) -> SettingField<SharedString> {
 
 /// The zoom dropdown. A step applies to every window at once, the way the
 /// keyboard and the menu apply it.
-fn zoom_field(control: f32) -> SettingField<SharedString> {
+fn zoom_field(control: f32) -> Field {
     let labels: Vec<(SharedString, SharedString)> = crate::settings::ZOOM_STEPS
         .iter()
         .map(|percent| {
@@ -1713,7 +1532,7 @@ fn zoom_field(control: f32) -> SettingField<SharedString> {
             )
         })
         .collect();
-    SettingField::dropdown(
+    Field::dropdown(
         labels,
         |cx| SharedString::from(Settings::get(cx).appearance.zoom_percent.to_string()),
         |value, cx| {
@@ -1738,8 +1557,8 @@ fn pairs<L: AsRef<str>>(list: &[(&'static str, L)]) -> Vec<(SharedString, Shared
         .collect()
 }
 
-fn toggle(get: fn(&Settings) -> bool, set: fn(&mut Settings, bool)) -> SettingField<bool> {
-    SettingField::switch(
+fn toggle(get: fn(&Settings) -> bool, set: fn(&mut Settings, bool)) -> Field {
+    Field::switch(
         move |cx| get(Settings::get(cx)),
         move |value, cx| {
             settings::update(cx, |settings| set(settings, value));
@@ -1753,8 +1572,8 @@ fn choice<L: AsRef<str>>(
     control: f32,
     get: fn(&Settings) -> String,
     set: fn(&mut Settings, &str),
-) -> SettingField<SharedString> {
-    SettingField::dropdown(
+) -> Field {
+    Field::dropdown(
         pairs(list),
         move |cx| SharedString::from(get(Settings::get(cx))),
         move |value, cx| {
@@ -1765,6 +1584,22 @@ fn choice<L: AsRef<str>>(
     .w(px(control))
 }
 
+/// Joined buttons for two to four short choices, all visible at once.
+fn segments<L: AsRef<str>>(
+    list: &[(&'static str, L)],
+    get: fn(&Settings) -> String,
+    set: fn(&mut Settings, &str),
+) -> Field {
+    Field::segmented(
+        pairs(list),
+        move |cx| SharedString::from(get(Settings::get(cx))),
+        move |value, cx| {
+            settings::update(cx, |settings| set(settings, &value));
+            cx.refresh_windows();
+        },
+    )
+}
+
 /// A number field whose bounds are the ones [`change`] clamps to, so the two
 /// cannot drift apart.
 fn number(
@@ -1773,9 +1608,9 @@ fn number(
     control: f32,
     get: fn(&Settings) -> f64,
     set: fn(&mut Settings, f64),
-) -> SettingField<f64> {
-    SettingField::number_input(
-        NumberFieldOptions {
+) -> Field {
+    Field::number_input(
+        NumberOptions {
             min: *range.start(),
             max: *range.end(),
             step,
@@ -1822,8 +1657,8 @@ fn font_field(
     get: fn(&Settings) -> Option<String>,
     set: fn(&mut Settings, &str),
     monospace_first: bool,
-) -> SettingField<SharedString> {
-    SettingField::render(move |options, window, cx| {
+) -> Field {
+    Field::render(move |options, window, cx| {
         let key = field_key(options, "font");
         let state = font_state(
             key,
@@ -1940,9 +1775,9 @@ fn text_field(
     control: f32,
     get: fn(&Settings) -> Option<String>,
     set: fn(&mut Settings, &str),
-) -> SettingField<SharedString> {
+) -> Field {
     let placeholder = placeholder.into();
-    SettingField::render(move |options, window, cx| {
+    Field::render(move |options, window, cx| {
         let key = field_key(options, "text");
         let state = text_state(key, placeholder.clone(), get, set, window, cx);
         let input = state.read(cx).input.clone();
@@ -1963,8 +1798,8 @@ fn text_field(
 /// An unusable path is kept and explained inline rather than corrected or
 /// cleared on the spot: the user may be halfway through typing it, and the
 /// error says what to finish.
-fn git_field(control: f32) -> SettingField<SharedString> {
-    SettingField::render(move |options, window, cx| {
+fn git_field(control: f32) -> Field {
+    Field::render(move |options, window, cx| {
         let get = |settings: &Settings| {
             settings
                 .behaviour
@@ -2056,8 +1891,8 @@ fn git_executable_error(path: Option<&Path>) -> Option<String> {
 /// A switch that also runs detection again: turning a tool off must make its
 /// items disappear on the next frame, and turning it on must find it without a
 /// restart.
-fn tool_toggle(get: fn(&Settings) -> bool, set: fn(&mut Settings, bool)) -> SettingField<bool> {
-    SettingField::switch(
+fn tool_toggle(get: fn(&Settings) -> bool, set: fn(&mut Settings, bool)) -> Field {
+    Field::switch(
         move |cx| get(Settings::get(cx)),
         move |value, cx| {
             settings::update(cx, |settings| set(settings, value));
@@ -2071,8 +1906,8 @@ fn tool_toggle(get: fn(&Settings) -> bool, set: fn(&mut Settings, bool)) -> Sett
 /// installed while Strata runs shows up without a restart.
 fn tool_status_row(
     id: &'static str,
-    status: fn(&gpui_component::setting::RenderOptions, &mut Window, &mut App) -> AnyElement,
-) -> impl Fn(&gpui_component::setting::RenderOptions, &mut Window, &mut App) -> AnyElement {
+    status: fn(&ItemCx, &mut Window, &mut App) -> AnyElement,
+) -> impl Fn(&ItemCx, &mut Window, &mut App) -> AnyElement {
     move |options, window, cx| {
         let detecting = Tooling::get(cx).is_some_and(Tooling::detecting);
         h_flex()
@@ -2090,11 +1925,7 @@ fn tool_status_row(
 }
 
 /// What ghq detection found: path, version and the effective root.
-fn ghq_status(
-    _options: &gpui_component::setting::RenderOptions,
-    _window: &mut Window,
-    cx: &mut App,
-) -> AnyElement {
+fn ghq_status(_options: &ItemCx, _window: &mut Window, cx: &mut App) -> AnyElement {
     let design = Design::new(cx.theme(), Settings::get(cx));
     let settings_root = Settings::get(cx).tools.ghq.root.clone();
     let Some(tooling) = Tooling::get(cx) else {
@@ -2126,11 +1957,7 @@ fn ghq_status(
 }
 
 /// What `gh` detection found: path, version and whether it has an account.
-fn gh_status(
-    _options: &gpui_component::setting::RenderOptions,
-    _window: &mut Window,
-    cx: &mut App,
-) -> AnyElement {
+fn gh_status(_options: &ItemCx, _window: &mut Window, cx: &mut App) -> AnyElement {
     let design = Design::new(cx.theme(), Settings::get(cx));
     let Some(tooling) = Tooling::get(cx) else {
         return status_text(
@@ -2173,13 +2000,8 @@ fn status_text(text: String, ok: bool, design: &Design) -> AnyElement {
         .into_any_element()
 }
 
-fn field_key(options: &gpui_component::setting::RenderOptions, prefix: &str) -> SharedString {
-    SharedString::from(format!(
-        "settings-{prefix}-{}-{}-{}",
-        options.page_ix(),
-        options.group_ix(),
-        options.item_ix()
-    ))
+fn field_key(options: &ItemCx, prefix: &str) -> SharedString {
+    options.key(prefix)
 }
 
 fn text_state(
@@ -2235,8 +2057,8 @@ struct PortField {
     _subscription: Subscription,
 }
 
-fn port_field(control: f32) -> SettingField<SharedString> {
-    SettingField::render(move |options, window, cx| {
+fn port_field(control: f32) -> Field {
+    Field::render(move |options, window, cx| {
         let key = field_key(options, "port");
         let state = port_state(key, window, cx);
         let input = state.read(cx).input.clone();
@@ -2335,8 +2157,8 @@ struct PasswordField {
     _subscription: Subscription,
 }
 
-fn password_field(control: f32) -> SettingField<SharedString> {
-    SettingField::render(move |options, window, cx| {
+fn password_field(control: f32) -> Field {
+    Field::render(move |options, window, cx| {
         let state = password_state(window, cx);
         let input = state.read(cx).input.clone();
         let error = state.read(cx).error.clone();
@@ -2512,11 +2334,7 @@ struct TestConnectionState {
     result: Option<Result<(), String>>,
 }
 
-fn test_connection_field(
-    _options: &gpui_component::setting::RenderOptions,
-    window: &mut Window,
-    cx: &mut App,
-) -> AnyElement {
+fn test_connection_field(_options: &ItemCx, window: &mut Window, cx: &mut App) -> AnyElement {
     let key = SharedString::from("settings-network-test");
     let state = window.use_keyed_state(key, cx, |_, _| TestConnectionState::default());
     let password_entity = password_state(window, cx);
@@ -2616,10 +2434,7 @@ fn test_connection_field(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        CARD_PADDING, CONTROL_MAX, LABEL_FRACTION, PAGE_GUTTER, ROW_GAP, SIDEBAR_MAX,
-        control_width, git_executable_error,
-    };
+    use super::{CONTROL_MAX, LABEL_FRACTION, ROW_GAP, control_width, git_executable_error};
     use crate::settings::Settings;
     use crate::style::Design;
     use gpui_component::Theme;
@@ -2631,17 +2446,12 @@ mod tests {
         settings.appearance.zoom_percent = 150;
         let zoomed = Design::new(&Theme::default(), &settings);
 
-        // The row is what the window leaves after the sidebar at its widest and
-        // the gutters on both sides of the card, and the label may take 60% of
-        // it: anything wider than the rest, less the row's gap, spills past the
-        // card's right padding.
+        // The label keeps 60% of the row: a control wider than the rest, less
+        // the row's gap, would push the label into a sliver.
         for design in [&base, &zoomed] {
-            for viewport in [640.0, 900.0, 1200.0, 2400.0] {
-                let row = viewport
-                    - design.scale(SIDEBAR_MAX)
-                    - 2.0 * design.scale(PAGE_GUTTER)
-                    - 2.0 * design.scale(CARD_PADDING);
-                let control = control_width(viewport, design);
+            for row in [300.0, 480.0, 640.0, 2400.0] {
+                let viewport = row;
+                let control = control_width(row, design);
                 assert!(control > 0.0, "{viewport}");
                 assert!(
                     control + design.scale(ROW_GAP) <= row * (1.0 - LABEL_FRACTION) + 0.01,

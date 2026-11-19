@@ -1,356 +1,571 @@
-//! The settings window: one page per section of [`Settings`], opened with
-//! `Ctrl+,` (`Cmd+,` on macOS).
+//! The settings dialog: one page per section of [`Settings`] plus the About
+//! page, over the window it was opened from (`Ctrl+,`, `Cmd+,` on macOS).
 //!
 //! It edits the same [`Settings`] global the rest of the app reads, so a change
-//! is stored, saved in the background and visible in every window on the next
-//! frame; there is no Save button. The pages themselves are built in
-//! [`pages`], and the value rules each control applies live in [`change`].
+//! is stored, saved in the background and visible behind the dialog on the
+//! same frame; there is no Save button. Being a dialog rather than a window of
+//! its own is what lets a theme or zoom change be judged against the real
+//! window, and it leaves nothing to raise, track or lose behind another window.
 //!
-//! The frame follows the main window: the same 44 px chrome title bar with the
-//! app mark, the same [`Design`] sidebar surface behind the page list, and the
-//! same selected-row tint. The page widget is gpui-component's, so the rest of
-//! the palette arrives through [`crate::component_theme`].
+//! The pages are built in [`pages`] from the parts in [`kit`], and the value
+//! rules each control applies live in [`change`].
 
 mod change;
+mod kit;
 mod pages;
 
-use std::path::Path;
-
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyWindowHandle, App, AppContext as _, Bounds, Context, FocusHandle, FontWeight, Global,
-    InteractiveElement as _, IntoElement, ParentElement, Render, StyleRefinement, Styled,
-    Subscription, Window, WindowBounds, WindowDecorations, WindowOptions, actions, div, px,
+    AnyElement, App, AppContext as _, Context, Entity, FocusHandle, Focusable, FontWeight, Global,
+    InteractiveElement as _, IntoElement, ParentElement, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled, Subscription, WeakEntity, Window, actions, div, px,
 };
-use gpui_component::group_box::GroupBoxVariant;
-use gpui_component::setting::Settings as SettingsPages;
-use gpui_component::{ActiveTheme as _, TitleBar, h_flex, v_flex};
+use gpui_component::dialog::DialogEntrance;
+use gpui_component::input::{Input, InputEvent, InputState};
+use gpui_component::{ActiveTheme as _, Icon, Sizable as _, WindowExt as _, h_flex, v_flex};
+use gpui_kit_assets::IconName;
 
+use crate::about::AboutView;
 use crate::actions::OpenSettings;
-use crate::menus::AboutStrata;
-use crate::settings::{self, Appearance, Settings};
+use crate::settings::Settings;
 use crate::style::{self, Design};
 
-/// Key context of the settings window, so its close shortcuts do not fire in
-/// the main window's views.
+pub(crate) use change::Section;
+
+/// Key context of the dialog, so its close shortcuts do not fire in the views
+/// underneath.
 const SETTINGS_VIEW: &str = "SettingsView";
 
 actions!(strata, [CloseSettings]);
 
-/// Size the window opens at, and the smallest it can be dragged to.
-const WIDTH: f32 = 900.0;
-const HEIGHT: f32 = 640.0;
-const MIN_WIDTH: f32 = 640.0;
-const MIN_HEIGHT: f32 = 460.0;
+/// The largest the dialog grows, and the margin it keeps from the window's
+/// edges when the window is smaller than that.
+const MAX_WIDTH: f32 = 880.0;
+const MAX_HEIGHT: f32 = 640.0;
+const EDGE: f32 = 14.0;
 
-/// The page list's width, and how far the divider can be dragged either way.
-const SIDEBAR_WIDTH: f32 = 200.0;
-const SIDEBAR_MIN: f32 = 176.0;
-const SIDEBAR_MAX: f32 = 280.0;
+/// Below this dialog width the page list shows only icons.
+const NARROW: f32 = 640.0;
 
-/// Registers the window and the action that opens it. Call once at startup.
+const SIDEBAR_WIDTH: f32 = 196.0;
+const SIDEBAR_NARROW: f32 = 48.0;
+const CONTENT_PADDING_X: f32 = 28.0;
+const CONTENT_PADDING_Y: f32 = 20.0;
+
+/// What the dialog shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Destination {
+    Section(Section),
+    About,
+}
+
+/// The page the dialog was last left on, so `Cmd+,` returns to it, and the
+/// dialog that is open, so a second request switches its page instead of
+/// stacking another.
+#[derive(Default)]
+struct DialogState {
+    last: Option<Destination>,
+    open: Option<WeakEntity<SettingsDialog>>,
+}
+
+impl Global for DialogState {}
+
+/// Registers the action that opens the dialog. Call once at startup.
 pub fn bind(cx: &mut App) {
-    cx.set_global(OpenSettingsWindow::default());
-    cx.on_action(|_: &OpenSettings, cx: &mut App| open(cx));
+    cx.set_global(DialogState::default());
+    cx.on_action(|_: &OpenSettings, cx: &mut App| show(None, cx));
     crate::keymap::bind_group(cx, crate::keymap::Group::Settings);
 }
 
-/// Which window is showing the settings, so the shortcut raises it instead of
-/// opening a second one. A closed window leaves a stale handle behind, which
-/// [`open`] detects by trying to use it.
-#[derive(Default)]
-struct OpenSettingsWindow(Option<AnyWindowHandle>);
+/// Opens the dialog over the active window, on `destination` or on the page it
+/// was last left on.
+pub(crate) fn show(destination: Option<Destination>, cx: &mut App) {
+    let Some(handle) = cx
+        .active_window()
+        .or_else(|| cx.windows().into_iter().next())
+    else {
+        return;
+    };
+    // The request arrives from a menu, a keystroke or a click, all dispatched
+    // inside that window's own update, so the window cannot be borrowed again
+    // until it ends.
+    cx.defer(move |cx| {
+        let _ = handle.update(cx, |_, window, cx| open(destination, window, cx));
+    });
+}
 
-impl Global for OpenSettingsWindow {}
-
-fn open(cx: &mut App) {
-    if let Some(handle) = cx.global::<OpenSettingsWindow>().0
-        && handle
-            .update(cx, |_, window, _| window.activate_window())
-            .is_ok()
+fn open(destination: Option<Destination>, window: &mut Window, cx: &mut App) {
+    if let Some(dialog) = cx
+        .try_global::<DialogState>()
+        .and_then(|state| state.open.as_ref())
+        .and_then(WeakEntity::upgrade)
     {
+        if let Some(destination) = destination {
+            dialog.update(cx, |dialog, cx| dialog.go(destination, cx));
+        }
+        return;
+    }
+    // Another modal already has the keyboard; opening over it would close it.
+    if window.has_active_dialog(cx) {
         return;
     }
 
-    // This window is where the user looks after installing a program, and the
-    // detection thread keeps the previous answer until the new one arrives.
+    // This is where the user looks after installing a program or dropping a
+    // theme file in, and both probes keep their previous answer until the new
+    // one arrives.
     crate::tools::redetect(cx);
     crate::style::theme::reload(cx);
 
-    let bounds = Bounds::centered(None, crate::zoom::window_size(WIDTH, HEIGHT, cx), cx);
-    let opened = cx.open_window(
-        WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            // The same client-side title bar as the main window, so both read
-            // as one app on every platform.
-            titlebar: Some(crate::style::window_titlebar(
-                t!("app.settings_title").to_string(),
-            )),
-            window_decorations: Some(WindowDecorations::Client),
-            window_min_size: Some(crate::zoom::window_size(MIN_WIDTH, MIN_HEIGHT, cx)),
-            focus: true,
-            ..TitleBar::window_options()
-        },
-        |window, cx| {
-            settings::apply_theme(Some(window), cx);
-            let view = cx.new(|cx| SettingsView::new(window, cx));
-            // `Root` hosts gpui-component's popup, dialog and tooltip layers,
-            // which every dropdown on the pages needs.
-            cx.new(|cx| gpui_component::Root::new(view, window, cx))
-        },
-    );
-
-    match opened {
-        Ok(handle) => {
-            crate::window_registry::track(handle.window_id(), cx);
-            cx.global_mut::<OpenSettingsWindow>().0 = Some(handle.into());
-            cx.activate(true);
-        }
-        Err(error) => log::warn!("cannot open the settings window: {error}"),
+    let destination = destination
+        .or_else(|| cx.try_global::<DialogState>().and_then(|state| state.last))
+        .unwrap_or(Destination::Section(Section::Appearance));
+    let view = cx.new(|cx| SettingsDialog::new(destination, window, cx));
+    if cx.has_global::<DialogState>() {
+        cx.global_mut::<DialogState>().open = Some(view.downgrade());
     }
+    let focus = view.read(cx).focus.clone();
+    window.open_dialog(cx, move |dialog, window, cx| {
+        let content = view.clone();
+        let (width, height) = dialog_size(window, cx);
+        let top = ((f32::from(window.viewport_size().height) - height) / 2.0).max(EDGE);
+        dialog
+            .entrance(DialogEntrance::None)
+            .p_0()
+            .w(px(width))
+            .h(px(height))
+            .margin_top(px(top))
+            .close_button(false)
+            .on_ok(|_, _, _| false)
+            .on_close(|_, _, cx| {
+                if cx.has_global::<DialogState>() {
+                    cx.global_mut::<DialogState>().open = None;
+                }
+            })
+            .content(move |body, _, _| body.size_full().child(content.clone()))
+    });
+    window.defer(cx, move |window, cx| focus.focus(window, cx));
 }
 
-struct SettingsView {
+/// The dialog's size: its largest, or the window less a margin on each side.
+fn dialog_size(window: &Window, cx: &App) -> (f32, f32) {
+    let zoom = Settings::get(cx).appearance.zoom();
+    let viewport = window.viewport_size();
+    let width = (MAX_WIDTH * zoom).min(f32::from(viewport.width) - 2.0 * EDGE);
+    let height = (MAX_HEIGHT * zoom).min(f32::from(viewport.height) - 2.0 * EDGE);
+    (width.max(0.0), height.max(0.0))
+}
+
+struct SettingsDialog {
     focus: FocusHandle,
-    /// The appearance the theme was last applied for, so an unrelated settings
-    /// change does not reload the palette.
-    appearance: Appearance,
-    /// `System` follows the OS; this window has no other reason to hear about
-    /// an appearance change, so it keeps the subscription alive.
-    _appearance: Subscription,
-    /// Another window can change the theme (this one included). Observing the
-    /// settings is what repaints this window against the new palette; the
-    /// global theme refresh alone left it light until the next settings change.
-    _settings: Subscription,
+    current: Destination,
+    search: Entity<InputState>,
+    query: String,
+    about: Entity<AboutView>,
+    scroll: ScrollHandle,
+    _subscriptions: Vec<Subscription>,
 }
 
-impl SettingsView {
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let focus = cx.focus_handle();
-        window.focus(&focus, cx);
-        let appearance =
-            window.observe_window_appearance(|window, cx| settings::apply_theme(Some(window), cx));
-        let current_appearance = Settings::get(cx).appearance.clone();
-        let settings = cx.observe_global::<Settings>(|this, cx| {
-            let next = Settings::get(cx).appearance.clone();
-            if next != this.appearance {
-                this.appearance = next;
-                settings::apply_theme(None, cx);
-            }
-            cx.notify();
+impl SettingsDialog {
+    fn new(destination: Destination, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let search = cx.new(|cx| {
+            InputState::new(window, cx).placeholder(t!("settings.search_placeholder").to_string())
         });
+        let subscriptions = vec![
+            cx.subscribe(&search, |this, search, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.query = search.read(cx).value().trim().to_lowercase();
+                    this.scroll.set_offset(Default::default());
+                    cx.notify();
+                }
+            }),
+            // Another window can change a setting this dialog shows.
+            cx.observe_global::<Settings>(|_, cx| cx.notify()),
+        ];
+        if cx.has_global::<DialogState>() {
+            cx.global_mut::<DialogState>().last = Some(destination);
+        }
         Self {
-            focus,
-            appearance: current_appearance,
-            _appearance: appearance,
-            _settings: settings,
+            focus: cx.focus_handle(),
+            current: destination,
+            search,
+            query: String::new(),
+            about: cx.new(AboutView::new),
+            scroll: ScrollHandle::new(),
+            _subscriptions: subscriptions,
         }
     }
 
-    /// The window's title bar, built like the main window's: the app mark and
-    /// wordmark, a divider, then the name of the window.
-    fn title_bar(&self, design: &Design) -> impl IntoElement {
-        TitleBar::new()
-            .h(design.px(crate::style::TITLE_BAR_HEIGHT))
-            .bg(design.chrome)
-            .border_color(design.border)
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .flex_none()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(design.px(7.0))
-                            .child(style::app_mark(design.scale(style::BRAND_MARK)))
-                            .child(style::wordmark(
-                                design.scale(style::BRAND_WORDMARK),
-                                design.text,
-                            )),
-                    )
-                    .child(div().w(px(1.0)).h(design.px(18.0)).mx_1().bg(design.border))
-                    .child(
-                        div()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .child(t!("settings.window_name").to_string()),
-                    ),
-            )
+    fn go(&mut self, destination: Destination, cx: &mut Context<Self>) {
+        self.current = destination;
+        self.scroll.set_offset(Default::default());
+        if cx.has_global::<DialogState>() {
+            cx.global_mut::<DialogState>().last = Some(destination);
+        }
+        cx.notify();
     }
 
-    fn footer(&self, design: &Design) -> impl IntoElement {
-        let path = settings::settings_file();
-        let label = path.as_ref().map_or_else(
-            || t!("settings.file_unknown").to_string(),
-            |path| path.display().to_string(),
-        );
-
-        h_flex()
-            .flex_none()
+    #[allow(clippy::too_many_arguments)]
+    fn nav_item(
+        &self,
+        id: SharedString,
+        label: String,
+        icon: AnyElement,
+        destination: Destination,
+        narrow: bool,
+        design: &Design,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let selected = self.query.is_empty() && self.current == destination;
+        div()
+            .id(id)
+            .flex()
             .items_center()
-            .justify_between()
-            .gap_3()
-            .h(design.px(40.0))
-            .px_3()
-            .border_t_1()
-            .border_color(design.border)
-            .bg(design.chrome)
-            .text_size(px(design.tiny()))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_color(design.muted)
-                    .child(label),
-            )
-            // Off macOS the menu bar is never drawn, so the Help menu's About
-            // entry is unreachable; this is the one place every platform shows.
-            .child(
-                crate::ui::button("open-about", t!("action.about_strata").to_string())
-                    .size(crate::ui::ButtonSize::Tiny)
-                    .on_click(|_, window, cx| open_about(window, cx)),
-            )
-            .child(
-                crate::ui::button(
-                    "open-settings-folder",
-                    t!("settings.open_folder").to_string(),
-                )
-                .size(crate::ui::ButtonSize::Tiny)
-                .disabled(path.is_none())
-                .on_click(move |_, _, cx| {
-                    if let Some(folder) =
-                        settings::settings_file().as_deref().and_then(Path::parent)
-                    {
-                        cx.open_with_system(folder);
-                    }
-                }),
-            )
+            .gap(design.px(9.0))
+            .px(design.px(8.0))
+            .py(design.px(6.0))
+            .when(narrow, |this| this.justify_center())
+            .rounded(design.px(6.0))
+            .cursor_pointer()
+            .text_color(if selected { design.text } else { design.muted })
+            .when(selected, |this| this.bg(design.row_selected))
+            .when(!selected, |this| {
+                this.hover(|this| this.bg(design.selected))
+            })
+            .child(icon)
+            .when(!narrow, |this| {
+                this.child(div().truncate().child(label.clone()))
+            })
+            .when(narrow, |this| {
+                this.tooltip(move |window, cx| {
+                    gpui_component::tooltip::Tooltip::new(label.clone()).build(window, cx)
+                })
+            })
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if !this.query.is_empty() {
+                    this.search
+                        .update(cx, |search, cx| search.set_value("", window, cx));
+                    this.query.clear();
+                }
+                this.go(destination, cx);
+            }))
+            .into_any_element()
     }
-}
 
-impl Render for SettingsView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let design = Design::new(cx.theme(), Settings::get(cx));
-        // `Sidebar` clears its own border and reads its colours from the theme
-        // tokens, so the style set here is the one that makes the page list the
-        // same surface as the main window's sidebar.
-        let sidebar_style = StyleRefinement::default()
+    fn sidebar(&self, narrow: bool, design: &Design, cx: &mut Context<Self>) -> AnyElement {
+        let icon = |name: IconName| Icon::new(name).size(design.px(15.0)).into_any_element();
+        let mut list = v_flex()
+            .flex_none()
+            .h_full()
+            .w(design.px(if narrow {
+                SIDEBAR_NARROW
+            } else {
+                SIDEBAR_WIDTH
+            }))
+            .gap(design.px(2.0))
+            .px(design.px(if narrow { 6.0 } else { 10.0 }))
+            .py(design.px(14.0))
             .bg(design.sidebar)
             .border_r_1()
             .border_color(design.border);
-
-        let mut root = v_flex()
-            .size_full()
-            .key_context(SETTINGS_VIEW)
-            .track_focus(&self.focus)
-            .on_action(cx.listener(|_, _: &CloseSettings, window, _| window.remove_window()))
-            .bg(design.background)
-            .text_color(design.text)
-            .text_size(px(design.ui))
-            .child(self.title_bar(&design))
+        if !narrow {
+            list = list
+                .child(
+                    div()
+                        .px(design.px(8.0))
+                        .pb(design.px(10.0))
+                        .text_size(px(design.ui + design.scale(2.0)))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(t!("settings.window_name").to_string()),
+                )
+                .child(
+                    div().pb(design.px(10.0)).child(
+                        Input::new(&self.search)
+                            .small()
+                            .prefix(Icon::new(IconName::Search).small())
+                            .cleanable(true),
+                    ),
+                );
+        }
+        for section in Section::ALL {
+            list = list.child(self.nav_item(
+                SharedString::from(format!("settings-nav-{}", section.id())),
+                section.title(),
+                icon(pages::icon(section)),
+                Destination::Section(section),
+                narrow,
+                design,
+                cx,
+            ));
+        }
+        list.child(div().flex_1())
             .child(
-                div().flex_1().min_h_0().child(
-                    SettingsPages::new("settings")
-                        .sidebar_width(design.px(SIDEBAR_WIDTH))
-                        .sidebar_size_range(design.px(SIDEBAR_MIN)..design.px(SIDEBAR_MAX))
-                        .sidebar_style(&sidebar_style)
-                        // Each group is a bordered card on the page surface,
-                        // with its heading and description above it.
-                        .with_group_variant(GroupBoxVariant::Outline)
-                        .pages(pages::pages(
-                            window.viewport_size().width.into(),
-                            &design,
-                            cx,
-                        )),
-                ),
+                div()
+                    .h(px(1.0))
+                    .mx(design.px(4.0))
+                    .my(design.px(6.0))
+                    .bg(design.border),
             )
-            .child(self.footer(&design));
-        // This window is a root of its own, so the CJK chain has to be set
-        // here as well as on the main window's.
-        root.text_style().font_fallbacks = Some(style::font_fallbacks());
-        root
+            .child(self.nav_item(
+                SharedString::from("settings-nav-about"),
+                t!("action.about_strata").to_string(),
+                style::app_mark(design.scale(15.0)).into_any_element(),
+                Destination::About,
+                narrow,
+                design,
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    fn title_row(
+        &self,
+        page: &kit::Page,
+        design: &Design,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let section = page.section;
+        h_flex()
+            .w_full()
+            .items_center()
+            .justify_between()
+            .gap_3()
+            .pb(design.px(14.0))
+            .child(
+                h_flex()
+                    .items_center()
+                    .gap(design.px(6.0))
+                    .child(
+                        div()
+                            .text_size(px(design.ui + design.scale(4.0)))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(section.title()),
+                    )
+                    .children(page.info_icon(design, window, cx)),
+            )
+            .when(page.is_resettable(), |this| {
+                this.child(
+                    crate::ui::button(
+                        SharedString::from(format!("reset-{}", section.id())),
+                        t!("settings.keyboard.reset_section").to_string(),
+                    )
+                    .size(crate::ui::ButtonSize::Small)
+                    .ghost()
+                    .on_click(move |_, _, cx| pages::reset(section, cx)),
+                )
+            })
+            .into_any_element()
+    }
+
+    fn body(
+        &self,
+        content_width: f32,
+        design: &Design,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if !self.query.is_empty() {
+            let query = self.query.clone();
+            let results: Vec<AnyElement> = pages::pages(content_width, design, cx)
+                .iter()
+                .filter_map(|page| {
+                    let body = page.render_body(Some(&query), design, window, cx)?;
+                    Some(
+                        v_flex()
+                            .gap(design.px(10.0))
+                            .child(
+                                div()
+                                    .text_size(px(design.ui + design.scale(2.0)))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(page.section.title()),
+                            )
+                            .child(body)
+                            .into_any_element(),
+                    )
+                })
+                .collect();
+            if results.is_empty() {
+                return div()
+                    .pt(design.px(40.0))
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .text_color(design.muted)
+                    .child(t!("settings.no_results").to_string())
+                    .into_any_element();
+            }
+            return v_flex()
+                .w_full()
+                .gap(design.px(32.0))
+                .children(results)
+                .into_any_element();
+        }
+        match self.current {
+            Destination::About => self.about.clone().into_any_element(),
+            Destination::Section(section) => {
+                let pages = pages::pages(content_width, design, cx);
+                let Some(page) = pages.iter().find(|page| page.section == section) else {
+                    return div().into_any_element();
+                };
+                v_flex()
+                    .w_full()
+                    .child(self.title_row(page, design, window, cx))
+                    .children(page.render_body(None, design, window, cx))
+                    .into_any_element()
+            }
+        }
     }
 }
 
-/// Dispatches About through this window. `App::dispatch_action` would route
-/// it to the active window, which is this one, and GPUI takes a window out of
-/// the app while it runs that window's click handler, so the action was
-/// dropped with only a log line.
-fn open_about(window: &mut Window, cx: &mut App) {
-    window.dispatch_action(Box::new(AboutStrata), cx);
+impl Focusable for SettingsDialog {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus.clone()
+    }
+}
+
+impl Render for SettingsDialog {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let design = Design::new(cx.theme(), Settings::get(cx));
+        let (width, _) = dialog_size(window, cx);
+        let narrow = width < design.scale(NARROW);
+        let sidebar = design.scale(if narrow {
+            SIDEBAR_NARROW
+        } else {
+            SIDEBAR_WIDTH
+        });
+        let padding_x = design.scale(if narrow { 18.0 } else { CONTENT_PADDING_X });
+        let content_width = (width - sidebar - 2.0 * padding_x).max(0.0);
+
+        let search_on_top = narrow.then(|| {
+            div().pb(design.px(12.0)).child(
+                Input::new(&self.search)
+                    .small()
+                    .prefix(Icon::new(IconName::Search).small())
+                    .cleanable(true),
+            )
+        });
+        let body = self.body(content_width, &design, window, cx);
+
+        h_flex()
+            .size_full()
+            .key_context(SETTINGS_VIEW)
+            .track_focus(&self.focus)
+            .on_action(cx.listener(|_, _: &CloseSettings, window, cx| window.close_dialog(cx)))
+            .overflow_hidden()
+            .rounded(design.px(10.0))
+            .bg(design.background)
+            .text_color(design.text)
+            .text_size(px(design.ui))
+            .child(self.sidebar(narrow, &design, cx))
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .child(
+                        div()
+                            .id("settings-content")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.scroll)
+                            .child(
+                                v_flex()
+                                    .w_full()
+                                    .px(px(padding_x))
+                                    .py(design.px(CONTENT_PADDING_Y))
+                                    .children(search_on_top)
+                                    .child(body),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top(design.px(10.0))
+                            .right(design.px(10.0))
+                            .child(
+                                crate::ui::icon_button("settings-close", IconName::X)
+                                    .size(crate::ui::ButtonSize::Small)
+                                    .ghost()
+                                    .tooltip(t!("common.close").to_string())
+                                    .on_click(|_, window, cx| window.close_dialog(cx)),
+                            ),
+                    ),
+            )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::ThemeMode;
-    use gpui::{BorrowAppContext as _, VisualTestContext};
+    use gpui::VisualTestContext;
 
-    #[gpui::test]
-    fn the_settings_window_applies_a_theme_change(cx: &mut gpui::TestAppContext) {
+    struct Probe;
+
+    impl Render for Probe {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full()
+        }
+    }
+
+    fn open_window(cx: &mut gpui::TestAppContext) -> VisualTestContext {
         cx.update(|cx| {
             cx.set_quit_mode(gpui::QuitMode::Explicit);
             gpui_component::init(cx);
             cx.set_global(Settings::default());
+            // Opening runs the tool and theme probes the dialog shows.
+            cx.set_global(crate::tools::Tooling::default());
+            crate::style::theme::init(cx);
+            bind(cx);
+            crate::about::bind(cx);
         });
-
         let window = cx
             .update(|cx| {
                 cx.open_window(Default::default(), |window, cx| {
-                    let view = cx.new(|cx| SettingsView::new(window, cx));
+                    let view = cx.new(|_| Probe);
                     cx.new(|cx| gpui_component::Root::new(view, window, cx))
                 })
             })
-            .expect("open the settings window");
-        let mut visual_cx = VisualTestContext::from_window(window.into(), cx);
+            .expect("open a window");
+        window
+            .update(cx, |_, window, _| window.activate_window())
+            .expect("activate the window");
+        let visual_cx = VisualTestContext::from_window(window.into(), cx);
         visual_cx.run_until_parked();
+        visual_cx
+    }
 
-        // The theme field writes the setting and the window's observer applies
-        // it. Updating only the global is what a change made in another window
-        // looks like, and this window has to turn dark without another edit.
-        visual_cx.update(|_, cx| {
-            cx.update_global::<Settings, _>(|settings, _| {
-                settings.appearance.theme = ThemeMode::Dark;
-            });
-        });
-        visual_cx.run_until_parked();
-
-        assert!(
-            visual_cx.update(|_, cx| cx.theme().is_dark()),
-            "the settings window has to repaint against the new theme"
-        );
+    fn current(cx: &mut VisualTestContext) -> Option<Destination> {
+        cx.update(|_, cx| {
+            cx.global::<DialogState>()
+                .open
+                .as_ref()
+                .and_then(WeakEntity::upgrade)
+                .map(|dialog| dialog.read(cx).current)
+        })
     }
 
     #[gpui::test]
-    fn the_about_button_opens_the_about_window(cx: &mut gpui::TestAppContext) {
-        cx.update(|cx| {
-            cx.set_quit_mode(gpui::QuitMode::Explicit);
-            gpui_component::init(cx);
-            cx.set_global(Settings::default());
-            crate::about::bind(cx);
-        });
+    fn the_settings_action_opens_the_dialog_on_the_last_page(cx: &mut gpui::TestAppContext) {
+        let mut cx = open_window(cx);
+        cx.dispatch_action(OpenSettings);
+        cx.run_until_parked();
+        assert_eq!(
+            current(&mut cx),
+            Some(Destination::Section(Section::Appearance))
+        );
+        assert!(cx.update(|window, cx| window.has_active_dialog(cx)));
+    }
 
-        let window = cx
-            .update(|cx| {
-                cx.open_window(Default::default(), |window, cx| {
-                    let view = cx.new(|cx| SettingsView::new(window, cx));
-                    cx.new(|cx| gpui_component::Root::new(view, window, cx))
-                })
-            })
-            .expect("open the settings window");
-        window
-            .update(cx, |_, window, _| window.activate_window())
-            .expect("activate the settings window");
-        let mut visual_cx = VisualTestContext::from_window(window.into(), cx);
-        visual_cx.run_until_parked();
+    #[gpui::test]
+    fn about_opens_the_same_dialog_on_its_page(cx: &mut gpui::TestAppContext) {
+        let mut cx = open_window(cx);
+        cx.dispatch_action(OpenSettings);
+        cx.run_until_parked();
 
-        // A click handler runs inside an update of its own window, which is
-        // exactly where the button calls this.
-        visual_cx.update(open_about);
-        visual_cx.run_until_parked();
-
-        assert!(visual_cx.update(|_, cx| crate::about::is_open(cx)));
+        // A second request switches the open dialog instead of stacking one.
+        cx.dispatch_action(crate::menus::AboutStrata);
+        cx.run_until_parked();
+        assert_eq!(current(&mut cx), Some(Destination::About));
     }
 }
