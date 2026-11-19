@@ -59,7 +59,7 @@ pub use segmented::segmented_control;
 pub use signature::{CommitSignatureState, signature_badge, signature_details};
 pub use spinner::{Spinner, spinner};
 pub use split::{SplitExtent, clamp_fraction, split_handle, split_pixels};
-pub use swatch::{swatch_label, swatch_label_with_tag, swatch_strip};
+pub use swatch::{swatch_label, swatch_strip};
 #[cfg(feature = "terminal")]
 pub use tab::{COMPACT_TAB_STRIP_HEIGHT, compact_tab_strip};
 pub use tab::{reveal_tab, tab, tab_strip};

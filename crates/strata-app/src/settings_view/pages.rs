@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use super::kit::{
-    Field, Group, Item, ItemCx, NumberOptions, Page, PreviewCard, preview_cards,
+    self, CardOption, Field, Group, Item, ItemCx, NumberOptions, Page, PreviewCard, preview_cards,
     preview_cards_width,
 };
 use gpui::prelude::FluentBuilder as _;
@@ -128,16 +128,8 @@ fn appearance(control: f32, design: &Design) -> Page {
         card(t!("settings.theme.card").to_string(), design).items([
             Item::new(t!("settings.theme.mode").to_string(), theme_field())
                 .description(t!("settings.theme.description").to_string()),
-            Item::new(
-                t!("settings.theme.light_theme").to_string(),
-                palette_field(ThemeAppearance::Light, control),
-            )
-            .description(t!("settings.theme.light_theme_description").to_string()),
-            Item::new(
-                t!("settings.theme.dark_theme").to_string(),
-                palette_field(ThemeAppearance::Dark, control),
-            )
-            .description(t!("settings.theme.dark_theme_description").to_string()),
+            theme_cards(ThemeAppearance::Dark),
+            theme_cards(ThemeAppearance::Light),
             Item::render(user_themes_row).keywords([
                 t!("settings.theme.open_folder").to_string(),
                 t!("settings.theme.export_current").to_string(),
@@ -149,7 +141,7 @@ fn appearance(control: f32, design: &Design) -> Page {
         card(t!("settings.appearance.language").to_string(), design).item(
             Item::new(
                 t!("settings.appearance.language").to_string(),
-                language_field(control),
+                language_field(),
             )
             .description(t!("settings.appearance.language_description").to_string()),
         ),
@@ -1316,83 +1308,99 @@ fn theme_field() -> Field {
     )
 }
 
-fn palette_field(appearance: ThemeAppearance, control: f32) -> Field {
+/// One appearance's themes as a wrapping row of preview cards under a short
+/// heading, in place of the dropdown a theme used to hide behind. A theme is
+/// chosen by look, so every palette of that appearance sits on the page,
+/// drawn from its own colours; the names double as search keywords because a
+/// card row has no title a query can match.
+fn theme_cards(appearance: ThemeAppearance) -> Item {
     let is_dark = appearance == ThemeAppearance::Dark;
-    let element_id: &'static str = if is_dark {
-        "dark-theme-picker"
+    let entries = theme::for_appearance(appearance);
+    let (heading, info) = if is_dark {
+        (
+            t!("settings.theme.dark_heading").to_string(),
+            t!("settings.theme.dark_theme_description").to_string(),
+        )
     } else {
-        "light-theme-picker"
+        (
+            t!("settings.theme.light_heading").to_string(),
+            t!("settings.theme.light_theme_description").to_string(),
+        )
     };
-    Field::render(move |options, _window, cx| {
+    let keywords: Vec<String> = entries
+        .iter()
+        .map(|entry| entry.palette.name.clone())
+        // The heading and the group's own name keep a query that used to
+        // match the removed "Light theme"/"Dark theme" rows finding the
+        // cards, and the info text keeps an explanation queryable.
+        .chain([
+            heading.clone(),
+            info.clone(),
+            t!("settings.theme.card").to_string(),
+        ])
+        .collect();
+    let set = move |value: SharedString, cx: &mut App| {
+        settings::update(cx, |settings| {
+            if is_dark {
+                change::dark_theme(settings, &value);
+            } else {
+                change::light_theme(settings, &value);
+            }
+        });
+        // The theme is a gpui-component global, so it is applied rather than
+        // only stored; that also refreshes every window.
+        settings::apply_theme(None, cx);
+    };
+    Item::render(move |options, window, cx| {
         let design = Design::new(cx.theme(), Settings::get(cx));
-        let active_id = if is_dark {
-            &Settings::get(cx).appearance.dark_theme
+        let stored = if is_dark {
+            Settings::get(cx).appearance.dark_theme.clone()
         } else {
-            &Settings::get(cx).appearance.light_theme
+            Settings::get(cx).appearance.light_theme.clone()
         };
-        let active = theme::resolve_entry(active_id, is_dark);
-        let active_id_owned = active.palette.id.clone();
+        // A stored id that no longer resolves selects the bundled palette
+        // actually drawn, the same one the dropdown fell back to.
+        let current = theme::resolve_entry(&stored, is_dark).palette.id.clone();
         let user_tag = t!("settings.theme.user_tag").to_string();
-        let active_tag = (active.source == ThemeSource::User).then_some(user_tag.clone());
-
-        Button::new(element_id)
-            .w(px(control))
-            .child(crate::ui::swatch_label_with_tag(
-                active.palette.name.clone(),
-                active_tag,
-                active.palette.swatches(),
+        let cards: Vec<CardOption> = entries
+            .iter()
+            .map(|entry| {
+                let palette = entry.palette.as_ref();
+                CardOption {
+                    value: palette.id.clone().into(),
+                    label: palette.name.clone().into(),
+                    fill: palette.background,
+                    bars: vec![
+                        (palette.border, 0.55),
+                        (palette.diff_removed_word, 0.85),
+                        (palette.diff_added_word, 0.75),
+                        (palette.accent, 0.4),
+                    ],
+                    tag: (entry.source == ThemeSource::User).then(|| user_tag.clone().into()),
+                }
+            })
+            .collect();
+        v_flex()
+            .w_full()
+            .gap(design.px(4.0))
+            .child(kit::sub_heading(
+                options,
+                heading.clone().into(),
+                Some(info.clone().into()),
+                &design,
+                window,
+                cx,
+            ))
+            .child(kit::card_picker(
+                options,
+                cards,
+                SharedString::from(current),
+                set,
                 &design,
             ))
-            .dropdown_caret(true)
-            .outline()
-            .disabled(options.is_disabled())
-            .with_size(options.size())
-            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
-                let entries = theme::for_appearance(appearance);
-                let (bundled, user): (Vec<_>, Vec<_>) = entries
-                    .into_iter()
-                    .partition(|entry| entry.source == ThemeSource::Bundled);
-                let add_entry = |menu: gpui_component::menu::PopupMenu,
-                                 entry: theme::ThemeEntry| {
-                    let checked = entry.palette.id == active_id_owned;
-                    let id = entry.palette.id.clone();
-                    let name = entry.palette.name.clone();
-                    let swatches = entry.palette.swatches();
-                    let tag = (entry.source == ThemeSource::User).then_some(user_tag.clone());
-                    menu.item(
-                        PopupMenuItem::element(move |_, cx| {
-                            let design = Design::new(cx.theme(), Settings::get(cx));
-                            crate::ui::swatch_label_with_tag(
-                                name.clone(),
-                                tag.clone(),
-                                swatches,
-                                &design,
-                            )
-                        })
-                        .checked(checked)
-                        .on_click(move |_, _, cx| {
-                            let id = id.clone();
-                            settings::update(cx, |settings| {
-                                if is_dark {
-                                    change::dark_theme(settings, &id);
-                                } else {
-                                    change::light_theme(settings, &id);
-                                }
-                            });
-                            settings::apply_theme(None, cx);
-                        }),
-                    )
-                };
-
-                let mut menu = bundled.into_iter().fold(menu, add_entry);
-                if !user.is_empty() {
-                    menu = menu.separator();
-                    menu = user.into_iter().fold(menu, add_entry);
-                }
-                menu.min_w(px(control))
-            })
             .into_any_element()
     })
+    .keywords(keywords)
 }
 
 fn user_themes_row(_options: &ItemCx, _window: &mut Window, cx: &mut App) -> AnyElement {
@@ -1550,9 +1558,10 @@ fn theme_error_banner(error: &theme::ThemeLoadError, design: &Design) -> AnyElem
     banner.into_any_element()
 }
 
-/// The language dropdown. A change is applied to every open window at once,
-/// rather than waiting for the next launch.
-fn language_field(control: f32) -> Field {
+/// The language segmented control. A change is applied to every open window
+/// at once, rather than waiting for the next launch; three short choices are
+/// all visible without opening anything.
+fn language_field() -> Field {
     let labels: Vec<(SharedString, SharedString)> = crate::i18n::Language::ALL
         .iter()
         .map(|language| {
@@ -1562,7 +1571,7 @@ fn language_field(control: f32) -> Field {
             )
         })
         .collect();
-    Field::dropdown(
+    Field::segmented(
         labels,
         |cx| SharedString::from(Settings::get(cx).appearance.language.id()),
         |value, cx| {
@@ -1572,11 +1581,11 @@ fn language_field(control: f32) -> Field {
             crate::i18n::apply(cx);
         },
     )
-    .w(px(control))
 }
 
 /// The zoom dropdown. A step applies to every window at once, the way the
-/// keyboard and the menu apply it.
+/// keyboard and the menu apply it. Eight steps are too many to line up as
+/// joined buttons, so the list stays behind the caret.
 fn zoom_field(control: f32) -> Field {
     let labels: Vec<(SharedString, SharedString)> = crate::settings::ZOOM_STEPS
         .iter()

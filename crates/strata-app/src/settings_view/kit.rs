@@ -16,9 +16,9 @@ use std::rc::Rc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AppContext as _, Entity, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement, Pixels, SharedString, StatefulInteractiveElement as _, Styled, Subscription,
-    Window, div, px,
+    AnyElement, App, AppContext as _, Entity, FontWeight, Hsla, InteractiveElement as _,
+    IntoElement, ParentElement, Pixels, Role, SharedString, StatefulInteractiveElement as _,
+    Styled, Subscription, Window, div, px, relative,
 };
 use gpui_component::input::{InputEvent, InputState, NumberInput};
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -469,6 +469,130 @@ fn number(
         .into_any_element()
 }
 
+/// One choice of a [`card_picker`]: the look its card draws, and the value
+/// choosing it writes back.
+pub(super) struct CardOption {
+    /// The value written back when this card is chosen.
+    pub value: SharedString,
+    /// The name shown under the card.
+    pub label: SharedString,
+    /// The card's fill, drawn from the palette the choice stands for rather
+    /// than the active one.
+    pub fill: Hsla,
+    /// Horizontal bars over the fill, as `(colour, share of the card width)`.
+    pub bars: Vec<(Hsla, f32)>,
+    /// A small badge beside the name, for choices the user supplied.
+    pub tag: Option<SharedString>,
+}
+
+/// One preview card at 100% zoom: 112 wide, and 60 tall with the standard
+/// four bars, because the border, the padding and the bars sum to it. The
+/// card sizes itself from that content rather than a fixed height, so it
+/// never clips and every card in a row is as tall as its neighbours.
+const CARD_W: f32 = 112.0;
+const CARD_BAR_H: f32 = 8.0;
+const CARD_BAR_GAP: f32 = 4.0;
+const CARD_PAD: f32 = 6.0;
+
+/// The gap between the cards of one row.
+const CARD_GAP: f32 = 10.0;
+
+/// A wrapping row of preview cards, for choices judged by look rather than
+/// by name: every option is visible at once, each drawn in its own colours,
+/// so telling two choices apart takes no round trip through the setting.
+///
+/// The selected card is outlined in the accent colour and its name carries a
+/// check mark; every card also carries its name as an accessibility label,
+/// so the picker can be read without sight.
+pub(super) fn card_picker(
+    item: &ItemCx,
+    options: Vec<CardOption>,
+    current: SharedString,
+    set: impl Fn(SharedString, &mut App) + 'static,
+    design: &Design,
+) -> AnyElement {
+    let disabled = item.is_disabled();
+    let set: Setter<SharedString> = Rc::new(set);
+    div()
+        .flex()
+        .flex_wrap()
+        .items_start()
+        .gap(design.px(CARD_GAP))
+        .when(disabled, |this| this.opacity(0.5))
+        .children(options.into_iter().map(|option| {
+            let selected = option.value == current;
+            let on_click = (!disabled).then(|| {
+                let set = set.clone();
+                let value = option.value.clone();
+                move |_: &gpui::ClickEvent, _: &mut Window, cx: &mut App| set(value.clone(), cx)
+            });
+            v_flex()
+                .flex_none()
+                .w(design.px(CARD_W))
+                .gap(design.px(3.0))
+                .child(
+                    div()
+                        // The element id is the choice's own value, so the
+                        // node a screen reader announces stays the same node
+                        // while the palette around it changes.
+                        .id(item.key(&format!("card-{}", option.value)))
+                        .role(Role::RadioButton)
+                        .aria_label(option.label.clone())
+                        .aria_selected(selected)
+                        .cursor_pointer()
+                        .rounded(design.px(6.0))
+                        // The border width never changes: the colour alone
+                        // says which card is chosen, so choosing one does not
+                        // move the row.
+                        .border_2()
+                        .border_color(if selected {
+                            design.accent
+                        } else {
+                            design.border
+                        })
+                        .bg(option.fill)
+                        .p(design.px(CARD_PAD))
+                        .child(v_flex().gap(design.px(CARD_BAR_GAP)).children(
+                            option.bars.iter().map(|(color, share)| {
+                                div()
+                                    .flex_none()
+                                    .h(design.px(CARD_BAR_H))
+                                    .w(relative(*share))
+                                    .rounded(design.px(2.0))
+                                    .bg(*color)
+                            }),
+                        ))
+                        .when_some(on_click, |this, on_click| this.on_click(on_click)),
+                )
+                .child(
+                    h_flex()
+                        .items_center()
+                        .gap(design.px(4.0))
+                        .when(selected, |this| {
+                            this.text_color(design.text)
+                                .child(Icon::new(IconName::Check).size(design.px(12.0)))
+                        })
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_size(px(design.tiny()))
+                                .text_color(if selected { design.text } else { design.muted })
+                                .child(option.label.clone()),
+                        )
+                        .when_some(option.tag, |this, tag| {
+                            this.child(crate::ui::status_badge(
+                                tag,
+                                crate::ui::BadgeTone::Neutral,
+                                design,
+                            ))
+                        }),
+                )
+                .into_any_element()
+        }))
+        .into_any_element()
+}
+
 enum ItemKind {
     Row {
         title: SharedString,
@@ -673,6 +797,54 @@ fn info_icon(
                 *pinned = !*pinned;
                 cx.notify();
             });
+        })
+        .into_any_element()
+}
+
+/// A short muted heading inside a group, above rows that are not
+/// [`Item::new`] rows — a wrapping card row has no title of its own to name
+/// it. Its explanation sits behind the same info icon as a row title's, so
+/// the heading keeps the group's one-thing-per-line reading.
+pub(super) fn sub_heading(
+    item: &ItemCx,
+    title: SharedString,
+    info: Option<SharedString>,
+    design: &Design,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let pinned = info
+        .as_ref()
+        .map(|_| {
+            *window
+                .use_keyed_state(item.key("info-pinned"), cx, |_, _| false)
+                .read(cx)
+        })
+        .unwrap_or(false);
+    v_flex()
+        .w_full()
+        .child(
+            h_flex()
+                .gap(design.px(6.0))
+                .items_center()
+                .text_size(px(design.tiny()))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(design.muted)
+                .child(title)
+                .when_some(info.clone(), |this, text| {
+                    this.child(info_icon(item, text, design, window, cx))
+                }),
+        )
+        .when(pinned, |this| {
+            this.when_some(info, |this, text| {
+                this.child(
+                    div()
+                        .pt(design.px(2.0))
+                        .text_size(px(design.small()))
+                        .text_color(design.muted)
+                        .child(text),
+                )
+            })
         })
         .into_any_element()
 }
