@@ -19,6 +19,7 @@ pub mod image;
 pub mod lfs;
 pub mod merge;
 pub mod patch;
+pub mod proxy;
 pub mod repo;
 pub mod session;
 pub mod text;

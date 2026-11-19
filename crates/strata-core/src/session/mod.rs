@@ -797,6 +797,8 @@ pub struct SessionOptions {
     /// The `git` executable used for every write. `None` uses the `git` found
     /// on `PATH` when the session opened.
     pub git_executable: Option<PathBuf>,
+    /// Proxy environment policy applied to spawned `git` commands.
+    pub proxy: crate::proxy::ProxyPolicy,
 }
 
 pub struct Session {
@@ -850,7 +852,7 @@ impl Session {
             .workdir()
             .map(Path::to_path_buf)
             .unwrap_or_else(|| repo.git_dir().to_path_buf());
-        let git = Git::new(git_workdir);
+        let git = Git::new(git_workdir).with_proxy(options.proxy);
         // Choosing the executable here, not per command, keeps every write on
         // the same binary even when `PATH` changes later.
         let git = match options.git_executable {
@@ -1227,6 +1229,11 @@ impl Session {
     /// The ref names the current or next history load hides.
     pub fn hidden_refs(&self) -> Vec<String> {
         self.shared.hidden_refs()
+    }
+
+    /// Updates the proxy policy used for subsequent `git` CLI invocations.
+    pub fn set_proxy(&self, policy: crate::proxy::ProxyPolicy) {
+        self.shared.git.set_proxy(policy);
     }
 
     pub fn git(&self) -> &Git {

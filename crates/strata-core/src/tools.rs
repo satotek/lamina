@@ -154,6 +154,11 @@ pub fn detect_ghq(root_override: Option<&Path>) -> Result<GhqInfo> {
 /// a missing or unusable program is an error, so the settings page can tell
 /// "not installed" from "run gh auth login".
 pub fn detect_gh() -> Result<GhInfo> {
+    detect_gh_with_proxy(&crate::proxy::ProxyPolicy::Inherit)
+}
+
+/// Like [`detect_gh`], applying `proxy` to `gh` child processes.
+pub fn detect_gh_with_proxy(proxy: &crate::proxy::ProxyPolicy) -> Result<GhInfo> {
     let binary = find_binary("gh").ok_or_else(|| Error::other("gh is not installed"))?;
     let version_output = run_tool(&binary, &["--version"], None, None)?;
     let version = first_line(&version_output)
@@ -162,6 +167,7 @@ pub fn detect_gh() -> Result<GhInfo> {
         .to_owned();
 
     let mut command = command(&binary, &["auth", "status"], None, None);
+    proxy.apply(&mut command);
     let auth = command
         .output()
         .map_err(|error| Error::other(format!("could not run `gh auth status`: {error}")))?;
@@ -237,8 +243,19 @@ pub fn ghq_destination(root: &Path, url: &str) -> Option<PathBuf> {
 ///
 /// `--web` opens the browser, so the app never handles a token or a form.
 pub fn create_pull_request(gh: &Path, workdir: &Path, branch: &str) -> Result<()> {
+    create_pull_request_with_proxy(gh, workdir, branch, &crate::proxy::ProxyPolicy::Inherit)
+}
+
+/// Like [`create_pull_request`], applying `proxy` to the `gh` child process.
+pub fn create_pull_request_with_proxy(
+    gh: &Path,
+    workdir: &Path,
+    branch: &str,
+    proxy: &crate::proxy::ProxyPolicy,
+) -> Result<()> {
     let mut command = command(gh, &["pr", "create", "--web", "--head", branch], None, None);
     command.current_dir(workdir);
+    proxy.apply(&mut command);
     let output = command
         .output()
         .map_err(|error| Error::other(format!("could not run `gh pr create`: {error}")))?;
@@ -564,5 +581,60 @@ mod tests {
             parse_gh_auth_hosts("You are not logged into any GitHub hosts. Run gh auth login\n")
                 .is_empty()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_pull_request_applies_proxy_policy() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let captured = temp.path().join("env.txt");
+        let fake_gh = temp.path().join("fake-gh");
+        std::fs::write(
+            &fake_gh,
+            format!(
+                "#!/bin/sh\n\
+                 printf 'HTTP_PROXY=%s\\nhttps_proxy=%s\\n' \
+                 \"${{HTTP_PROXY-<unset>}}\" \"${{https_proxy-<unset>}}\" > {}\n",
+                captured.display()
+            ),
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&fake_gh).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_gh, perms).unwrap();
+
+        let config = crate::proxy::ProxyConfig {
+            endpoint: Some(crate::proxy::ProxyEndpoint {
+                scheme: crate::proxy::ProxyScheme::Socks5,
+                host: "127.0.0.1".into(),
+                port: 1080,
+                username: None,
+                password: None,
+            }),
+            no_proxy: Vec::new(),
+        };
+        create_pull_request_with_proxy(
+            &fake_gh,
+            temp.path(),
+            "feat/proxy",
+            &crate::proxy::ProxyPolicy::Set(config),
+        )
+        .unwrap();
+        let env_text = std::fs::read_to_string(&captured).unwrap();
+        assert!(env_text.contains("HTTP_PROXY=socks5://127.0.0.1:1080\n"));
+        assert!(env_text.contains("https_proxy=socks5://127.0.0.1:1080\n"));
+
+        create_pull_request_with_proxy(
+            &fake_gh,
+            temp.path(),
+            "feat/proxy",
+            &crate::proxy::ProxyPolicy::Clear,
+        )
+        .unwrap();
+        let env_text = std::fs::read_to_string(&captured).unwrap();
+        assert!(env_text.contains("HTTP_PROXY=<unset>\n"));
+        assert!(env_text.contains("https_proxy=<unset>\n"));
     }
 }

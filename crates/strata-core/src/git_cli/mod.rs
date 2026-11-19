@@ -45,11 +45,12 @@ use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, PoisonError, RwLock};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
 use crate::askpass::{Answer, AskpassHost, Prompt};
+use crate::proxy::ProxyPolicy;
 use crate::{Error, Result};
 
 /// Oldest git whose `--pathspec-from-file`, `restore --staged` and `switch`
@@ -65,6 +66,7 @@ pub struct Git {
     workdir: PathBuf,
     binary: PathBuf,
     env: Vec<(OsString, OsString)>,
+    proxy: Arc<RwLock<ProxyPolicy>>,
     log: Arc<CommandLog>,
     /// Answers credential prompts for network commands. `None` keeps the old
     /// behaviour: git fails when it cannot ask.
@@ -90,12 +92,32 @@ impl Git {
             // differing between invocations.
             binary: find_git_binary().unwrap_or_else(|| PathBuf::from("git")),
             env: Vec::new(),
+            proxy: Arc::new(RwLock::new(ProxyPolicy::default())),
             log: Arc::new(CommandLog::new()),
             askpass: None,
             // git runs this path in helper mode; a bundle or an AppImage still
             // starts the same executable.
             askpass_helper: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("strata")),
         }
+    }
+
+    /// Configure the proxy environment policy for this handle (and its clones).
+    pub fn with_proxy(self, policy: ProxyPolicy) -> Self {
+        self.set_proxy(policy);
+        self
+    }
+
+    /// Update the proxy environment policy for subsequent `git` invocations.
+    pub fn set_proxy(&self, policy: ProxyPolicy) {
+        *self.proxy.write().unwrap_or_else(PoisonError::into_inner) = policy;
+    }
+
+    /// Current proxy environment policy.
+    pub fn proxy(&self) -> ProxyPolicy {
+        self.proxy
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     /// Use a specific executable instead of the one found on `PATH`.
@@ -803,6 +825,7 @@ impl Git {
             // Avoid touching the index just for a read; the UI watches mtimes.
             command.env("GIT_OPTIONAL_LOCKS", "0");
         }
+        self.proxy().apply(&mut command);
         for (key, value) in &self.env {
             command.env(key, value);
         }
@@ -1130,5 +1153,67 @@ mod askpass_tests {
         let text = String::from_utf8_lossy(&output.stdout).into_owned();
         assert_eq!(value(&text, "GIT_ASKPASS"), "");
         assert_eq!(value(&text, "ENDPOINT"), "");
+    }
+
+    #[test]
+    fn proxy_policy_injects_and_clears_env_without_injecting_git_config() {
+        let temp = TempDir::new().unwrap();
+        let script = temp.path().join("fake-git-proxy");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\n\
+             echo \"ARGS=$*\"\n\
+             echo \"HTTP_PROXY=${HTTP_PROXY-<unset>}\"\n\
+             echo \"http_proxy=${http_proxy-<unset>}\"\n\
+             echo \"HTTPS_PROXY=${HTTPS_PROXY-<unset>}\"\n\
+             echo \"https_proxy=${https_proxy-<unset>}\"\n\
+             echo \"ALL_PROXY=${ALL_PROXY-<unset>}\"\n\
+             echo \"all_proxy=${all_proxy-<unset>}\"\n\
+             echo \"NO_PROXY=${NO_PROXY-<unset>}\"\n\
+             echo \"no_proxy=${no_proxy-<unset>}\"\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&script, permissions).unwrap();
+
+        let config = crate::proxy::ProxyConfig {
+            endpoint: Some(crate::proxy::ProxyEndpoint {
+                scheme: crate::proxy::ProxyScheme::Socks5h,
+                host: "proxy.local".into(),
+                port: 1080,
+                username: Some("u:name".into()),
+                password: Some("p@ss".into()),
+            }),
+            no_proxy: vec!["localhost".into(), "10.0.0.0/8".into()],
+        };
+        let runner = Git::new(temp.path().to_path_buf())
+            .with_git_binary(&script)
+            .with_proxy(crate::proxy::ProxyPolicy::Set(config));
+
+        let output = runner.run(&["fetch", "origin"], None).unwrap();
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        assert_eq!(value(&text, "ARGS"), "fetch origin");
+        assert_eq!(
+            value(&text, "HTTP_PROXY"),
+            "socks5h://u%3Aname:p%40ss@proxy.local:1080"
+        );
+        assert_eq!(
+            value(&text, "https_proxy"),
+            "socks5h://u%3Aname:p%40ss@proxy.local:1080"
+        );
+        assert_eq!(
+            value(&text, "all_proxy"),
+            "socks5h://u%3Aname:p%40ss@proxy.local:1080"
+        );
+        assert_eq!(value(&text, "NO_PROXY"), "localhost,10.0.0.0/8");
+        assert_eq!(value(&text, "no_proxy"), "localhost,10.0.0.0/8");
+
+        runner.set_proxy(crate::proxy::ProxyPolicy::Clear);
+        let output = runner.run(&["fetch", "origin"], None).unwrap();
+        let text = String::from_utf8_lossy(&output.stdout).into_owned();
+        for key in crate::proxy::PROXY_ENV_VARS {
+            assert_eq!(value(&text, key), "<unset>", "{key} must be cleared");
+        }
     }
 }

@@ -1050,6 +1050,7 @@ fn a_missing_git_executable_fails_writes_without_panicking() {
         repo,
         SessionOptions {
             git_executable: Some(missing),
+            ..SessionOptions::default()
         },
     );
     harness.wait_for_complete(1);
@@ -1323,6 +1324,7 @@ fn cancelling_session_blame_kills_in_flight_git_process() {
         repo,
         SessionOptions {
             git_executable: Some(script),
+            ..SessionOptions::default()
         },
     );
     let ticket = harness.session.request_blame(head, "big.txt");
@@ -1583,6 +1585,7 @@ fn cancelling_mid_stream_blame_stops_events() {
         repo,
         SessionOptions {
             git_executable: Some(script),
+            ..SessionOptions::default()
         },
     );
     let ticket = harness.session.request_blame(head, "big.txt");

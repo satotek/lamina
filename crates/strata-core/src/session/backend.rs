@@ -341,6 +341,7 @@ pub trait RepositorySession: Send {
     fn history_scope(&self) -> HistoryScope;
     fn set_hidden_refs(&self, refs: Vec<String>);
     fn hidden_refs(&self) -> Vec<String>;
+    fn set_proxy(&self, _policy: crate::proxy::ProxyPolicy) {}
 }
 
 impl RepositorySession for Session {
@@ -460,5 +461,9 @@ impl RepositorySession for Session {
 
     fn hidden_refs(&self) -> Vec<String> {
         Session::hidden_refs(self)
+    }
+
+    fn set_proxy(&self, policy: crate::proxy::ProxyPolicy) {
+        Session::set_proxy(self, policy);
     }
 }

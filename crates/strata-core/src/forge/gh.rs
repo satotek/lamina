@@ -34,12 +34,14 @@ const LIST_LIMIT: &str = "100";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Gh {
     binary: PathBuf,
+    proxy: crate::proxy::ProxyPolicy,
 }
 
 impl Gh {
     pub fn new(binary: &Path) -> Self {
         Self {
             binary: binary.to_path_buf(),
+            proxy: crate::proxy::ProxyPolicy::Inherit,
         }
     }
 
@@ -48,6 +50,11 @@ impl Gh {
         crate::tools::find_binary("gh")
             .map(|binary| Self::new(&binary))
             .ok_or_else(|| Error::other("gh is not installed"))
+    }
+
+    pub fn with_proxy(mut self, proxy: crate::proxy::ProxyPolicy) -> Self {
+        self.proxy = proxy;
+        self
     }
 
     pub fn binary(&self) -> &Path {
@@ -78,14 +85,14 @@ pub fn checkout_arguments(number: u64) -> [String; 3] {
 impl ForgeCli for Gh {
     fn pull_requests_for_branches(&self, repo_dir: &Path) -> Result<Vec<PullRequestSummary>> {
         let args = list_arguments();
-        let output = run(&self.binary, &args, repo_dir)?;
+        let output = run(&self.binary, &args, repo_dir, &self.proxy)?;
         parse_pull_requests(&String::from_utf8_lossy(&output.stdout))
     }
 
     fn checkout_pull_request(&self, repo_dir: &Path, number: u64) -> Result<()> {
         let args = checkout_arguments(number);
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        run(&self.binary, &refs, repo_dir).map(|_| ())
+        run(&self.binary, &refs, repo_dir, &self.proxy).map(|_| ())
     }
 }
 
@@ -253,7 +260,12 @@ fn status_context_outcome(check: &Value) -> Outcome {
 }
 
 /// Runs one `gh` command in `workdir`, with stdin closed and a hard timeout.
-fn run(binary: &Path, args: &[&str], workdir: &Path) -> Result<Output> {
+fn run(
+    binary: &Path,
+    args: &[&str],
+    workdir: &Path,
+    proxy: &crate::proxy::ProxyPolicy,
+) -> Result<Output> {
     let mut command = Command::new(binary);
     command
         .args(args)
@@ -266,6 +278,7 @@ fn run(binary: &Path, args: &[&str], workdir: &Path) -> Result<Output> {
         .env("GH_PROMPT_DISABLED", "1")
         .env("GH_NO_UPDATE_NOTIFIER", "1")
         .env("GIT_TERMINAL_PROMPT", "0");
+    proxy.apply(&mut command);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt as _;
@@ -653,5 +666,54 @@ mod tests {
             elapsed
         );
         assert!(!prs.is_empty(), "the repository should have pull requests");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn proxy_policy_applies_to_gh_child_process() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let temp = tempfile::TempDir::new().unwrap();
+        let captured = temp.path().join("env.txt");
+        let fake_gh = temp.path().join("fake-gh");
+        std::fs::write(
+            &fake_gh,
+            format!(
+                "#!/bin/sh\n\
+                 printf 'HTTP_PROXY=%s\\nHTTPS_PROXY=%s\\nNO_PROXY=%s\\n' \
+                 \"${{HTTP_PROXY-<unset>}}\" \"${{HTTPS_PROXY-<unset>}}\" \"${{NO_PROXY-<unset>}}\" > {}\n\
+                 printf '[]'\n",
+                captured.display()
+            ),
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&fake_gh).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&fake_gh, perms).unwrap();
+
+        let config = crate::proxy::ProxyConfig {
+            endpoint: Some(crate::proxy::ProxyEndpoint {
+                scheme: crate::proxy::ProxyScheme::Http,
+                host: "proxy.example".into(),
+                port: 8080,
+                username: None,
+                password: None,
+            }),
+            no_proxy: vec!["localhost".into()],
+        };
+        let gh = Gh::new(&fake_gh).with_proxy(crate::proxy::ProxyPolicy::Set(config));
+        let prs = gh.pull_requests_for_branches(temp.path()).unwrap();
+        assert!(prs.is_empty());
+        let env_text = std::fs::read_to_string(&captured).unwrap();
+        assert!(env_text.contains("HTTP_PROXY=http://proxy.example:8080\n"));
+        assert!(env_text.contains("HTTPS_PROXY=http://proxy.example:8080\n"));
+        assert!(env_text.contains("NO_PROXY=localhost\n"));
+
+        let gh = Gh::new(&fake_gh).with_proxy(crate::proxy::ProxyPolicy::Clear);
+        gh.checkout_pull_request(temp.path(), 42).unwrap();
+        let env_text = std::fs::read_to_string(&captured).unwrap();
+        assert!(env_text.contains("HTTP_PROXY=<unset>\n"));
+        assert!(env_text.contains("HTTPS_PROXY=<unset>\n"));
+        assert!(env_text.contains("NO_PROXY=<unset>\n"));
     }
 }
