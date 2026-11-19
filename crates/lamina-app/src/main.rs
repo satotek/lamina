@@ -7,6 +7,8 @@
 //! anything else, so it needs no display and no settings. git itself starts the
 //! executable as `lamina <prompt>` (with the channel in the environment); the
 //! explicit form is for tests and for running it by hand.
+//! `lamina --proxy-connect <host> <port>` is the tunnel ssh runs as its
+//! `ProxyCommand`; it also needs no display or settings.
 //!
 //! Started without a path, Lamina reopens the last repository when the settings
 //! ask it to and it is still there, and otherwise shows the welcome screen:
@@ -93,6 +95,11 @@ use style::MIN_WINDOW_SIZE;
 use workspace::Workspace;
 
 fn main() {
+    // ssh starts this executable as its ProxyCommand. Like the askpass helper,
+    // the tunnel needs no display, settings or window.
+    if let Some(code) = lamina_core::proxy::connector_main(std::env::args_os().skip(1)) {
+        std::process::exit(code);
+    }
     // git starts this executable as its askpass program while it holds a
     // credential prompt. That mode must not touch the display server, the
     // settings or a window, so it is checked before anything else.
