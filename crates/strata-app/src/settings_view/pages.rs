@@ -573,6 +573,7 @@ fn settings_file_row() -> Item {
                 t!("settings.open_folder").to_string(),
             )
             .size(crate::ui::ButtonSize::Small)
+            .kind(crate::ui::ButtonKind::Normal)
             .disabled(settings::settings_file().is_none())
             .on_click(|_, _, cx| {
                 if let Some(folder) = settings::settings_file().as_deref().and_then(Path::parent) {
@@ -659,6 +660,7 @@ fn tools(control: f32, design: &Design) -> Page {
                                 t!("settings.tools.show_git_config").to_string(),
                             )
                             .size(crate::ui::ButtonSize::Small)
+                            .kind(crate::ui::ButtonKind::Normal)
                             .disabled(!available)
                             .on_click(|_, window, cx| {
                                 window.dispatch_action(Box::new(OpenGitConfig), cx);
@@ -870,6 +872,7 @@ fn commands_page(design: &Design) -> Page {
                             t!("settings.commands.open").to_string(),
                         )
                         .size(crate::ui::ButtonSize::Small)
+                        .kind(crate::ui::ButtonKind::Normal)
                         .on_click(|_, _, cx| {
                             match crate::commands::ensure_file() {
                                 Ok(path) => cx.open_with_system(&path),
@@ -1017,6 +1020,7 @@ fn keyboard_table(options: &ItemCx, window: &mut Window, cx: &mut App) -> AnyEle
                         t!("settings.keyboard.open_keymap").to_string(),
                     )
                     .size(crate::ui::ButtonSize::Small)
+                    .kind(crate::ui::ButtonKind::Normal)
                     .on_click(|_, _, cx| match crate::keymap::ensure_file() {
                         Ok(path) => cx.open_with_system(&path),
                         Err(error) => log::warn!("{error}"),
@@ -1425,6 +1429,7 @@ fn user_themes_row(_options: &ItemCx, _window: &mut Window, cx: &mut App) -> Any
                         t!("settings.theme.open_folder").to_string(),
                     )
                     .size(crate::ui::ButtonSize::Small)
+                    .kind(crate::ui::ButtonKind::Normal)
                     .on_click(|_, window, cx| match theme::user_themes_dir() {
                         Some(dir) => {
                             if let Err(error) = std::fs::create_dir_all(&dir) {
@@ -1455,6 +1460,7 @@ fn user_themes_row(_options: &ItemCx, _window: &mut Window, cx: &mut App) -> Any
                         t!("settings.theme.export_current").to_string(),
                     )
                     .size(crate::ui::ButtonSize::Small)
+                    .kind(crate::ui::ButtonKind::Normal)
                     .on_click(|_, window, cx| {
                         let is_dark = cx.theme().is_dark();
                         let settings = Settings::get(cx);
@@ -1493,6 +1499,7 @@ fn user_themes_row(_options: &ItemCx, _window: &mut Window, cx: &mut App) -> Any
                 .child(
                     crate::ui::button("reload-themes", t!("settings.theme.reload").to_string())
                         .size(crate::ui::ButtonSize::Small)
+                        .kind(crate::ui::ButtonKind::Normal)
                         .on_click(|_, _, cx| theme::reload(cx)),
                 ),
         )
@@ -1900,6 +1907,7 @@ fn git_field(control: f32) -> Field {
                         t!("settings.tools.browse").to_string(),
                     )
                     .size(crate::ui::ButtonSize::Small)
+                    .kind(crate::ui::ButtonKind::Normal)
                     .disabled(options.is_disabled())
                     .on_click(move |_, _, cx| {
                         let paths = cx.prompt_for_paths(PathPromptOptions {
@@ -1981,6 +1989,7 @@ fn tool_status_row(
             .child(
                 crate::ui::button(id, t!("settings.tools.redetect").to_string())
                     .size(crate::ui::ButtonSize::Tiny)
+                    .kind(crate::ui::ButtonKind::Normal)
                     .disabled(detecting)
                     .on_click(|_, _, cx| crate::tools::redetect(cx)),
             )
@@ -2528,6 +2537,7 @@ fn test_connection_row(_options: &ItemCx, window: &mut Window, cx: &mut App) -> 
                 },
             )
             .size(crate::ui::ButtonSize::Small)
+            .kind(crate::ui::ButtonKind::Normal)
             .disabled(testing)
             .on_click(move |_, _, cx| {
                 let proxy = Settings::get(cx).proxy.clone();
