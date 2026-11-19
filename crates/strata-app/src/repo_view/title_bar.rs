@@ -213,9 +213,13 @@ impl RepoView {
             .flex()
             .items_center()
             .gap(design.px(6.0))
-            .w(px(fit.search_width))
-            .min_w(design.px(MIN_SEARCH_WIDTH))
-            .max_w_full()
+            // The fit only guarantees a width: it reserves each name chip's
+            // full cap, so with short names it leaves the field far narrower
+            // than the bar allows. The field takes what its pane really has,
+            // up to the design's width, and never less than that guarantee.
+            .w_full()
+            .min_w(px(fit.search_width).max(design.px(MIN_SEARCH_WIDTH)))
+            .max_w(design.px(MAX_SEARCH_WIDTH))
             .h(design.px(28.0))
             .px_2p5()
             .rounded(design.px(7.0))
