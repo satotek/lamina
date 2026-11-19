@@ -35,7 +35,7 @@ use crate::menus::AboutStrata;
 use crate::settings::{self, Settings};
 use crate::style::{self, Design};
 use crate::ui::{ButtonKind, ButtonSize, button, spinner};
-use crate::updater::Status;
+use crate::updater::{Outcome, Status};
 
 /// The project page, the issue form and the release tag are derived from the
 /// manifest's repository so a fork only has to change one file.
@@ -291,9 +291,9 @@ impl AboutView {
             )
     }
 
-    /// The check row and the auto-check switch. The updater keeps only the
-    /// phase in flight in its state; an outcome is a notification, so once
-    /// the row is idle it names when a check last ran instead.
+    /// The check row and the auto-check switch. While a check or install
+    /// runs the row names the phase; once idle it keeps the last outcome, so
+    /// a dismissed notification is not the only place the result lives.
     fn updates_group(
         &self,
         design: &Design,
@@ -301,33 +301,75 @@ impl AboutView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let status = crate::updater::status(cx);
+        let outcome = crate::updater::outcome(cx);
         let checking = matches!(status, Some(Status::Checking));
-        let status_line = match &status {
-            Some(status) => h_flex()
+        let line = |text: String| {
+            div()
+                .min_w_0()
+                .truncate()
+                .text_size(px(design.small()))
+                .child(text)
+        };
+        let status_line = match (&status, &outcome) {
+            (Some(status), _) => h_flex()
+                .min_w_0()
                 .items_center()
                 .gap(design.px(8.0))
                 .when(checking, |this| {
                     this.child(spinner("about-updates-spinner", design, 12.0))
                 })
-                .child(
-                    div()
-                        .min_w_0()
-                        .text_size(px(design.small()))
-                        .child(status.label()),
-                )
+                .child(line(status.label()))
                 .into_any_element(),
-            None => div()
-                .min_w_0()
-                .text_size(px(design.small()))
-                .text_color(design.muted)
-                .child(
-                    last_checked_label(cx).unwrap_or_else(|| t!("about.not_checked").to_string()),
-                )
-                .into_any_element(),
+            (None, Some(outcome)) => {
+                let (text, color) = match outcome {
+                    Outcome::UpToDate => (t!("updater.up_to_date").to_string(), design.text),
+                    Outcome::Available(update) => (
+                        t!("updater.available_title", version = update.version.clone()).to_string(),
+                        design.accent,
+                    ),
+                    Outcome::Failed(message) => (message.clone(), cx.theme().danger),
+                };
+                v_flex()
+                    .min_w_0()
+                    .gap(design.px(2.0))
+                    .child(line(text.clone()).text_color(color))
+                    .children(last_checked_label(cx).map(|when| {
+                        line(when)
+                            .text_size(px(design.tiny()))
+                            .text_color(design.muted)
+                    }))
+                    .id("about-update-outcome")
+                    .tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx))
+                    .into_any_element()
+            }
+            (None, None) => {
+                line(last_checked_label(cx).unwrap_or_else(|| t!("about.not_checked").to_string()))
+                    .text_color(design.muted)
+                    .into_any_element()
+            }
         };
-        let check = row(
-            status_line,
-            button("about-check-updates", t!("about.check_updates").to_string())
+        // A found update turns the check button into the way to take it, so
+        // the page offers what the notification offered.
+        let action = match (&status, outcome) {
+            (None, Some(Outcome::Available(update))) if update.can_install() => button(
+                "about-install-update",
+                t!("updater.install_and_restart").to_string(),
+            )
+            .kind(ButtonKind::Primary)
+            .size(ButtonSize::Small)
+            .on_click(move |_, _, cx| {
+                let update = update.clone();
+                cx.defer(move |cx| crate::updater::install(update, cx));
+            }),
+            (None, Some(Outcome::Available(update))) => {
+                button("about-download-update", t!("updater.download").to_string())
+                    .kind(ButtonKind::Primary)
+                    .size(ButtonSize::Small)
+                    .on_click(move |_, _, cx| {
+                        cx.open_with_system(Path::new(&update.notes_url));
+                    })
+            }
+            _ => button("about-check-updates", t!("about.check_updates").to_string())
                 .kind(ButtonKind::Primary)
                 .size(ButtonSize::Small)
                 // While a check or install runs, the button becomes the
@@ -336,11 +378,9 @@ impl AboutView {
                 .loading(status.is_some())
                 .on_click(|_, window, cx| {
                     window.dispatch_action(Box::new(crate::updater::CheckForUpdates), cx);
-                })
-                .into_any_element(),
-            false,
-            design,
-        );
+                }),
+        };
+        let check = row(status_line, action.into_any_element(), false, design);
         group(
             t!("about.updates").to_string(),
             vec![check.into_any_element(), auto_check_row(design, window, cx)],

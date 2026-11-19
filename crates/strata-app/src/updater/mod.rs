@@ -75,14 +75,13 @@ enum UpdatePhase {
 #[derive(Default)]
 pub(crate) struct UpdaterState {
     phase: UpdatePhase,
+    outcome: Option<Outcome>,
 }
 
 impl Global for UpdaterState {}
 
-/// What the About page draws beside its check-now button: the phase in
-/// flight, as one line. An outcome — up to date, available, failed — is
-/// reported through a notification rather than kept in state, so idle maps
-/// to `None` and the page falls back to when a check last ran.
+/// What the About page draws beside its check-now button while a check or
+/// install runs, as one line. Once idle it shows the last [`Outcome`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Status {
     Checking,
@@ -103,6 +102,28 @@ impl Status {
             }
         }
     }
+}
+
+/// How the last check this session ended. The notification that reports it
+/// can be dismissed or missed, so the About page keeps showing it until the
+/// next check starts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    UpToDate,
+    Available(AvailableUpdate),
+    Failed(String),
+}
+
+/// The last check's outcome this session, or `None` before any check ends.
+pub fn outcome(cx: &App) -> Option<Outcome> {
+    cx.try_global::<UpdaterState>()
+        .and_then(|state| state.outcome.clone())
+}
+
+/// Installs an update the last check found, as the notification's install
+/// button does.
+pub fn install(update: AvailableUpdate, cx: &mut App) {
+    start_install(update, cx);
 }
 
 /// The updater's in-flight phase, or `None` when no check or install runs.
@@ -188,6 +209,7 @@ fn check_now(trigger: CheckTrigger, cx: &mut App) {
         detect_install_kind(Platform::current(), exe.as_deref(), cfg!(debug_assertions));
 
     set_phase(UpdatePhase::Checking, cx);
+    set_outcome(None, cx);
     if trigger == CheckTrigger::Manual {
         push_checking_notification(cx);
     }
@@ -203,10 +225,24 @@ fn check_now(trigger: CheckTrigger, cx: &mut App) {
             match result {
                 Ok(decision) => {
                     settings::update(cx, |s| s.updates.last_checked_at = Some(unix_now()));
+                    set_outcome(
+                        match &decision {
+                            UpdateDecision::Available(update) => {
+                                Some(Outcome::Available(update.clone()))
+                            }
+                            // The newest release is one the user chose to
+                            // skip, so for them this build is current.
+                            UpdateDecision::UpToDate | UpdateDecision::Skipped(_) => {
+                                Some(Outcome::UpToDate)
+                            }
+                        },
+                        cx,
+                    );
                     handle_decision(trigger, decision, cx);
                 }
                 Err(err) => {
                     log::warn!("update check failed: {err}");
+                    set_outcome(Some(Outcome::Failed(error_message(&err))), cx);
                     if trigger == CheckTrigger::Manual {
                         push_error_notification(&err, cx);
                     }
@@ -745,6 +781,12 @@ fn spawn_windows_installer(setup_exe: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn set_outcome(outcome: Option<Outcome>, cx: &mut App) {
+    if cx.has_global::<UpdaterState>() {
+        cx.update_global::<UpdaterState, _>(|state, _| state.outcome = outcome);
+    }
+}
+
 fn set_phase(phase: UpdatePhase, cx: &mut App) {
     if cx.has_global::<UpdaterState>() {
         cx.update_global::<UpdaterState, _>(|state, _| state.phase = phase);
@@ -771,13 +813,17 @@ fn push_checking_notification(cx: &mut App) {
     });
 }
 
-fn push_error_notification(err: &CheckError, cx: &mut App) {
-    let message = match err {
+fn error_message(err: &CheckError) -> String {
+    match err {
         CheckError::Update(UpdateError::PlaceholderKey) => {
             t!("updater.placeholder_key").to_string()
         }
         other => t!("updater.check_failed", error = other.to_string()).to_string(),
-    };
+    }
+}
+
+fn push_error_notification(err: &CheckError, cx: &mut App) {
+    let message = error_message(err);
     push_notification(cx, move || {
         Notification::error(message)
             .title(t!("updater.error_title").to_string())
@@ -954,6 +1000,20 @@ mod tests {
         let fake_bundle = dir.path().join("Strata.app");
         assert!(is_bundle_parent_writable(&fake_bundle));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[gpui::test]
+    fn the_last_outcome_is_kept_while_idle(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(UpdaterState::default()));
+        cx.update(|cx| assert_eq!(outcome(cx), None));
+
+        cx.update(|cx| set_outcome(Some(Outcome::Failed("offline".to_owned())), cx));
+        cx.update(|cx| set_phase(UpdatePhase::Idle, cx));
+        assert_eq!(
+            cx.update(|cx| outcome(cx)),
+            Some(Outcome::Failed("offline".to_owned())),
+            "returning to idle does not drop what the check found"
+        );
     }
 
     #[gpui::test]
