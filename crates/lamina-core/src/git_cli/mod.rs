@@ -834,6 +834,9 @@ impl Git {
     /// still meant to reach.
     fn prepared(&self, args: &[String]) -> Result<(Command, Option<AskpassHost>)> {
         let mut command = self.command(args);
+        if is_network_command(args) {
+            self.apply_ssh_proxy(&mut command);
+        }
         let host = match &self.askpass {
             Some(handler) if is_network_command(args) => {
                 let host = AskpassHost::start_with_handler(
@@ -881,6 +884,58 @@ impl Git {
             command.creation_flags(0x0800_0000);
         }
         command
+    }
+
+    /// Routes git's ssh through the app proxy, which ssh itself does not read
+    /// from the `*_proxy` variables.
+    ///
+    /// A user who named their own ssh command keeps it: proxies are a
+    /// convenience, and `GIT_SSH_COMMAND`, `GIT_SSH` and `core.sshCommand` are
+    /// deliberate choices that a setting elsewhere must not override.
+    ///
+    /// git learns the remote host only after it starts, so `LAMINA_NO_PROXY`
+    /// is applied by the connector for the one host it is asked to reach.
+    fn apply_ssh_proxy(&self, command: &mut Command) {
+        if crate::proxy::proxy_url().is_none() {
+            return;
+        }
+        let own_ssh = ["GIT_SSH_COMMAND", "GIT_SSH"].iter().any(|key| {
+            self.env
+                .iter()
+                .any(|(name, _)| name.as_os_str() == std::ffi::OsStr::new(*key))
+                || std::env::var_os(key).is_some()
+        });
+        if own_ssh || self.core_ssh_command_set() {
+            return;
+        }
+        if let Some(value) = crate::proxy::git_ssh_command() {
+            command.env("GIT_SSH_COMMAND", value);
+        }
+    }
+
+    fn core_ssh_command_set(&self) -> bool {
+        let mut query = Command::new(&self.binary);
+        query
+            .current_dir(&self.workdir)
+            .args(["config", "--get", "core.sshCommand"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        for (key, value) in &self.env {
+            query.env(key, value);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            query.creation_flags(0x0800_0000);
+        }
+        query
+            .output()
+            .map(|output| {
+                output.status.success()
+                    && output.stdout.iter().any(|byte| !byte.is_ascii_whitespace())
+            })
+            .unwrap_or(false)
     }
 
     fn log_output(&self, args: &[String], started_at: SystemTime, output: &Output, internal: bool) {

@@ -408,7 +408,8 @@ pub(crate) fn ssh_argv(
         .iter()
         .map(|arg| shell_quote(arg).into())
         .collect();
-    ssh_argv_with(program, port, host, Tty::None, &quoted)
+    let proxy = proxy_for_host(program, host, port);
+    ssh_argv_with(program, port, host, Tty::None, &quoted, proxy.as_deref())
 }
 
 /// The local `ssh` argv for an interactive login shell in `repo_path`.
@@ -423,12 +424,14 @@ pub fn terminal_argv(
     host: &str,
     repo_path: &str,
 ) -> Vec<std::ffi::OsString> {
+    let proxy = proxy_for_host(program, host, port);
     ssh_argv_with(
         program,
         port,
         host,
         Tty::Interactive,
         &[login_command(repo_path).into()],
+        proxy.as_deref(),
     )
 }
 
@@ -466,8 +469,9 @@ fn ssh_argv_with(
     host: &str,
     tty: Tty,
     remote: &[std::ffi::OsString],
+    proxy: Option<&str>,
 ) -> Vec<std::ffi::OsString> {
-    let mut argv = Vec::with_capacity(16 + remote.len());
+    let mut argv = Vec::with_capacity(18 + remote.len());
     argv.push(program.as_os_str().to_os_string());
     argv.push(match tty {
         Tty::None => "-T".into(),
@@ -483,6 +487,10 @@ fn ssh_argv_with(
         "-o".into(),
         "NumberOfPasswordPrompts=1".into(),
     ]);
+    if let Some(proxy) = proxy {
+        argv.push("-o".into());
+        argv.push(format!("ProxyCommand={proxy}").into());
+    }
     if let Some(port) = port {
         argv.push("-p".into());
         argv.push(port.to_string().into());
@@ -491,6 +499,63 @@ fn ssh_argv_with(
     argv.push("--".into());
     argv.extend(remote.iter().cloned());
     argv
+}
+
+/// The `ProxyCommand` value for `host`, or `None` when the connection goes
+/// direct.
+///
+/// The app publishes the proxy in the environment; `LAMINA_NO_PROXY` decides
+/// which hosts bypass it. `ssh` on Windows has no `nc`, so the tunnel is this
+/// executable's hidden connector rather than an external program.
+fn proxy_for_host(program: &Path, host: &str, port: Option<u16>) -> Option<String> {
+    if !lamina_core::proxy::applies_to(host, port.unwrap_or(22)) {
+        return None;
+    }
+    // A ProxyCommand or ProxyJump in the user's own ssh config is a deliberate
+    // route to that host (a bastion, a jump host); the app proxy must not
+    // silently replace it.
+    if ssh_config_already_forwards(program, host, port) {
+        return None;
+    }
+    let executable = std::env::current_exe().ok()?;
+    Some(lamina_core::proxy::proxy_command(&executable))
+}
+
+/// Reads `ssh -G` for the effective configuration. Anything unexpected is
+/// treated as "the user configured something", so an unreadable config leaves
+/// the user's own route in place instead of overriding it.
+fn ssh_config_already_forwards(program: &Path, host: &str, port: Option<u16>) -> bool {
+    let mut command = Command::new(program);
+    command.arg("-G");
+    if let Some(port) = port {
+        command.arg("-p").arg(port.to_string());
+    }
+    command.arg(host);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    hide_console(&mut command);
+    let Ok(output) = command.output() else {
+        return true;
+    };
+    config_forwards(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Reads the keys `ssh -G` prints. An unset `ProxyCommand` or `ProxyJump`
+/// prints as `none` on some releases and is omitted on others; either way it
+/// is not a user route.
+fn config_forwards(config: &str) -> bool {
+    config
+        .lines()
+        .filter_map(|line| line.trim().split_once(' '))
+        .filter(|(key, _)| {
+            key.eq_ignore_ascii_case("proxycommand") || key.eq_ignore_ascii_case("proxyjump")
+        })
+        .any(|(_, value)| {
+            let value = value.trim();
+            !value.is_empty() && !value.eq_ignore_ascii_case("none")
+        })
 }
 
 /// POSIX single quotes. Safe tokens are left alone so the command line stays
@@ -728,6 +793,50 @@ mod tests {
             "cd '/srv/my repo' && exec \"$SHELL\" -l",
             "sshd joins the arguments after `--` into one command line"
         );
+    }
+
+    #[test]
+    fn a_proxy_command_is_inserted_before_the_host() {
+        let proxy = "/opt/lamina --proxy-connect %h %p";
+        let argv = ssh_argv_with(
+            Path::new("ssh"),
+            Some(2222),
+            "example.test",
+            Tty::None,
+            &["/opt/lamina-remote".into(), "--stdio".into()],
+            Some(proxy),
+        );
+        let text: Vec<String> = argv
+            .iter()
+            .map(|part| part.to_string_lossy().into_owned())
+            .collect();
+        let option = text
+            .iter()
+            .position(|arg| arg == &format!("ProxyCommand={proxy}"))
+            .expect("the tunnel is an ssh option");
+        assert_eq!(text[option - 1], "-o");
+        let host = text
+            .iter()
+            .position(|arg| arg == "example.test")
+            .expect("host");
+        assert!(option < host, "options must precede the destination");
+        assert_eq!(text[host + 1], "--");
+        assert_eq!(text[host + 2], "/opt/lamina-remote");
+    }
+
+    #[test]
+    fn the_users_own_forwarding_wins_over_the_app_proxy() {
+        assert!(!config_forwards("host example.test\nproxycommand none\n"));
+        assert!(!config_forwards("host example.test\nport 22\n"));
+        assert!(config_forwards(
+            "host example.test\nproxyjump bastion.example\n"
+        ));
+        assert!(config_forwards(
+            "host example.test\nproxycommand /usr/bin/nc %h %p\n"
+        ));
+        assert!(config_forwards(
+            "host example.test\nProxyCommand ssh -W %h:%p bastion\n"
+        ));
     }
 
     #[test]
