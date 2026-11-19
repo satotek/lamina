@@ -210,7 +210,7 @@ impl SettingsView {
             .child(
                 crate::ui::button("open-about", t!("action.about_strata").to_string())
                     .size(crate::ui::ButtonSize::Tiny)
-                    .on_click(|_, _, cx| cx.dispatch_action(&AboutStrata)),
+                    .on_click(|_, window, cx| open_about(window, cx)),
             )
             .child(
                 crate::ui::button(
@@ -270,6 +270,14 @@ impl Render for SettingsView {
     }
 }
 
+/// Dispatches About through this window. `App::dispatch_action` would route
+/// it to the active window, which is this one, and GPUI takes a window out of
+/// the app while it runs that window's click handler, so the action was
+/// dropped with only a log line.
+fn open_about(window: &mut Window, cx: &mut App) {
+    window.dispatch_action(Box::new(AboutStrata), cx);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,5 +317,36 @@ mod tests {
             visual_cx.update(|_, cx| cx.theme().is_dark()),
             "the settings window has to repaint against the new theme"
         );
+    }
+
+    #[gpui::test]
+    fn the_about_button_opens_the_about_window(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            gpui_component::init(cx);
+            cx.set_global(Settings::default());
+            crate::about::bind(cx);
+        });
+
+        let window = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), |window, cx| {
+                    let view = cx.new(|cx| SettingsView::new(window, cx));
+                    cx.new(|cx| gpui_component::Root::new(view, window, cx))
+                })
+            })
+            .expect("open the settings window");
+        window
+            .update(cx, |_, window, _| window.activate_window())
+            .expect("activate the settings window");
+        let mut visual_cx = VisualTestContext::from_window(window.into(), cx);
+        visual_cx.run_until_parked();
+
+        // A click handler runs inside an update of its own window, which is
+        // exactly where the button calls this.
+        visual_cx.update(|window, cx| open_about(window, cx));
+        visual_cx.run_until_parked();
+
+        assert!(visual_cx.update(|_, cx| crate::about::is_open(cx)));
     }
 }

@@ -76,6 +76,14 @@ struct OpenAboutWindow {
 
 impl Global for OpenAboutWindow {}
 
+/// Whether the About window is open, for tests outside this module.
+#[cfg(test)]
+pub(crate) fn is_open(cx: &App) -> bool {
+    cx.try_global::<OpenAboutWindow>()
+        .and_then(|open| open.view.as_ref())
+        .is_some_and(|view| view.upgrade().is_some())
+}
+
 fn open(cx: &mut App) {
     if let Some(view) = cx
         .try_global::<OpenAboutWindow>()
