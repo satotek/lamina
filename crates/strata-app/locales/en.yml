@@ -311,7 +311,7 @@ settings.network.server_description: "The protocol, hostname, and port of the pr
 settings.network.port_invalid: "Enter a port between 1 and 65535."
 settings.network.username: "Username"
 settings.network.password: "Password"
-settings.network.password_description: "Stored in your operating system's credential store, never in settings.json."
+settings.network.password_description: "Stored in your operating system's credential store."
 settings.network.optional: "Optional"
 settings.network.no_proxy: "Bypass list (NO_PROXY)"
 settings.network.no_proxy_description: "Comma-separated hosts, domains, or CIDRs that bypass the proxy."
