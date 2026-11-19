@@ -9,7 +9,7 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::kit::{Field, Group, Item, ItemCx, NumberOptions, Page};
 use gpui::prelude::FluentBuilder as _;
@@ -50,6 +50,12 @@ const LABEL_FRACTION: f32 = 0.6;
 
 /// Widest a control gets: wide enough for a font name, not a slab of the page.
 const CONTROL_MAX: f32 = 260.0;
+
+/// The protocol and port parts of the proxy server row: both hold short
+/// values, so they keep a fixed width and the host field between them flexes.
+const SERVER_PROTOCOL_WIDTH: f32 = 92.0;
+const SERVER_PORT_WIDTH: f32 = 72.0;
+const SERVER_PART_GAP: f32 = 6.0;
 
 /// The icon the sidebar shows beside a section, matching the main sidebar's
 /// use of one per list. Every name here is in the asset bundle the app embeds,
@@ -643,13 +649,12 @@ fn network(control: f32, manual: bool, design: &Design) -> Page {
         card(t!("settings.network.proxy_card").to_string(), design).item(
             Item::new(
                 t!("settings.network.mode").to_string(),
-                choice(
+                segments(
                     &[
                         ("system", t!("settings.network.mode_system").to_string()),
                         ("none", t!("settings.network.mode_none").to_string()),
                         ("manual", t!("settings.network.mode_manual").to_string()),
                     ],
-                    control,
                     |settings| match settings.proxy.mode {
                         ProxyMode::System => "system".to_owned(),
                         ProxyMode::None => "none".to_owned(),
@@ -672,47 +677,11 @@ fn network(control: f32, manual: bool, design: &Design) -> Page {
     .groups(
         card(t!("settings.network.manual_card").to_string(), design).items([
             Item::new(
-                t!("settings.network.scheme").to_string(),
-                choice(
-                    &[
-                        ("http", "HTTP"),
-                        ("https", "HTTPS"),
-                        ("socks4", "SOCKS4"),
-                        ("socks5", "SOCKS5"),
-                        ("socks5h", "SOCKS5h"),
-                    ],
-                    control,
-                    |settings| settings.proxy.scheme.as_str().to_owned(),
-                    |settings, value| {
-                        let scheme = match value {
-                            "https" => ProxyScheme::Https,
-                            "socks4" => ProxyScheme::Socks4,
-                            "socks5" => ProxyScheme::Socks5,
-                            "socks5h" => ProxyScheme::Socks5h,
-                            _ => ProxyScheme::Http,
-                        };
-                        change::proxy_scheme(settings, scheme);
-                    },
-                ),
+                t!("settings.network.server").to_string(),
+                server_field(control),
             )
-            .description(t!("settings.network.scheme_description").to_string())
+            .description(t!("settings.network.server_description").to_string())
             .disabled(!manual),
-            Item::new(
-                t!("settings.network.host").to_string(),
-                text_field(
-                    "proxy.example.com",
-                    control,
-                    |settings| {
-                        (!settings.proxy.host.is_empty()).then(|| settings.proxy.host.clone())
-                    },
-                    change::proxy_host,
-                ),
-            )
-            .description(t!("settings.network.host_description").to_string())
-            .disabled(!manual),
-            Item::new(t!("settings.network.port").to_string(), port_field(control))
-                .description(t!("settings.network.port_description").to_string())
-                .disabled(!manual),
             Item::new(
                 t!("settings.network.username").to_string(),
                 text_field(
@@ -725,7 +694,6 @@ fn network(control: f32, manual: bool, design: &Design) -> Page {
                     change::proxy_username,
                 ),
             )
-            .description(t!("settings.network.username_description").to_string())
             .disabled(!manual),
             Item::new(
                 t!("settings.network.password").to_string(),
@@ -751,11 +719,10 @@ fn network(control: f32, manual: bool, design: &Design) -> Page {
     )
     .groups(
         card(t!("settings.network.connection_card").to_string(), design).item(
-            Item::new(
+            Item::render(test_connection_row).keywords([
                 t!("settings.network.test_connection").to_string(),
-                Field::render(test_connection_field),
-            )
-            .description(t!("settings.network.test_connection_description").to_string()),
+                t!("settings.network.test_connection_description").to_string(),
+            ]),
         ),
     )
 }
@@ -2057,25 +2024,93 @@ struct PortField {
     _subscription: Subscription,
 }
 
-fn port_field(control: f32) -> Field {
+/// The protocols a manual proxy can speak, with the label the dropdown shows.
+const PROXY_SCHEMES: [(ProxyScheme, &str); 5] = [
+    (ProxyScheme::Http, "HTTP"),
+    (ProxyScheme::Https, "HTTPS"),
+    (ProxyScheme::Socks4, "SOCKS4"),
+    (ProxyScheme::Socks5, "SOCKS5"),
+    (ProxyScheme::Socks5h, "SOCKS5h"),
+];
+
+/// The proxy server's endpoint as one control: a narrow protocol dropdown, a
+/// flexible host field and a narrow port field share the row's control width,
+/// so what is really one address does not take three rows.
+fn server_field(control: f32) -> Field {
     Field::render(move |options, window, cx| {
-        let key = field_key(options, "port");
-        let state = port_state(key, window, cx);
-        let input = state.read(cx).input.clone();
-        let invalid = state.read(cx).invalid;
+        let design = Design::new(cx.theme(), Settings::get(cx));
+        let host = text_state(
+            field_key(options, "host"),
+            "proxy.example.com".into(),
+            |settings| (!settings.proxy.host.is_empty()).then(|| settings.proxy.host.clone()),
+            change::proxy_host,
+            window,
+            cx,
+        );
+        let port = port_state(field_key(options, "port"), window, cx);
+        let port_input = port.read(cx).input.clone();
+        let invalid = port.read(cx).invalid;
+
+        let current = Settings::get(cx).proxy.scheme;
+        let label = PROXY_SCHEMES
+            .iter()
+            .find(|(scheme, _)| *scheme == current)
+            .map_or_else(
+                || current.as_str().to_uppercase(),
+                |(_, label)| (*label).to_owned(),
+            );
+        let protocol = Button::new(field_key(options, "scheme"))
+            .w(design.px(SERVER_PROTOCOL_WIDTH))
+            .accessibility_label(format!("{}: {label}", t!("settings.network.server")))
+            .label(label)
+            .dropdown_caret(true)
+            .outline()
+            .disabled(options.is_disabled())
+            .with_size(options.size())
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                PROXY_SCHEMES
+                    .into_iter()
+                    .fold(menu, |menu, (scheme, label)| {
+                        menu.item(
+                            PopupMenuItem::new(label)
+                                .checked(scheme == current)
+                                .on_click(move |_, _, cx| {
+                                    settings::update(cx, |settings| {
+                                        change::proxy_scheme(settings, scheme);
+                                    });
+                                    cx.refresh_windows();
+                                }),
+                        )
+                    })
+            });
 
         let mut field = v_flex().gap_1().w(px(control)).child(
-            Input::new(&input)
-                .with_size(options.size())
-                .disabled(options.is_disabled()),
+            h_flex()
+                .gap(design.px(SERVER_PART_GAP))
+                .items_center()
+                .child(protocol)
+                .child(
+                    Input::new(&host.read(cx).input)
+                        .flex_1()
+                        .min_w_0()
+                        .with_size(options.size())
+                        .disabled(options.is_disabled()),
+                )
+                .child(
+                    Input::new(&port_input)
+                        .w(design.px(SERVER_PORT_WIDTH))
+                        .with_size(options.size())
+                        .disabled(options.is_disabled()),
+                ),
         );
         if invalid && !options.is_disabled() {
-            let design = Design::new(cx.theme(), Settings::get(cx));
             field = field.child(
-                div()
-                    .text_size(design.px(11.0))
-                    .text_color(design.remove_text)
-                    .child(t!("settings.network.port_invalid").to_string()),
+                h_flex().justify_end().child(
+                    div()
+                        .text_size(design.px(11.0))
+                        .text_color(design.remove_text)
+                        .child(t!("settings.network.port_invalid").to_string()),
+                ),
             );
         }
         field.into_any_element()
@@ -2331,10 +2366,15 @@ fn password_state(window: &mut Window, cx: &mut App) -> Entity<PasswordField> {
 struct TestConnectionState {
     testing: bool,
     generation: u64,
-    result: Option<Result<(), String>>,
+    /// `Ok` carries how long the request took, so a success can be shown with
+    /// its timing.
+    result: Option<Result<Duration, String>>,
 }
 
-fn test_connection_field(_options: &ItemCx, window: &mut Window, cx: &mut App) -> AnyElement {
+/// The diagnostics row: the latest outcome on the left (a dot plus the text)
+/// and the button on the right, so one row carries both the action and its
+/// result.
+fn test_connection_row(_options: &ItemCx, window: &mut Window, cx: &mut App) -> AnyElement {
     let key = SharedString::from("settings-network-test");
     let state = window.use_keyed_state(key, cx, |_, _| TestConnectionState::default());
     let password_entity = password_state(window, cx);
@@ -2344,8 +2384,44 @@ fn test_connection_field(_options: &ItemCx, window: &mut Window, cx: &mut App) -
     let result = snapshot.result.clone();
     let state_entity = state.clone();
 
-    let mut body = v_flex().gap_1().child(
-        h_flex().gap_2().items_center().child(
+    let mut outcome_row = h_flex().gap_2().items_center().min_w_0();
+    if let Some(outcome) = result {
+        let (text, color) = match outcome {
+            Ok(elapsed) => (
+                t!("settings.network.test_success", ms = elapsed.as_millis()).to_string(),
+                design.add_text,
+            ),
+            Err(error) => (
+                t!("settings.network.test_failed", error = error).to_string(),
+                design.remove_text,
+            ),
+        };
+        outcome_row = outcome_row
+            .child(
+                div()
+                    .flex_none()
+                    .w(design.px(7.0))
+                    .h(design.px(7.0))
+                    .rounded_full()
+                    .bg(color),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(design.small()))
+                    .text_color(color)
+                    .child(text),
+            );
+    }
+
+    h_flex()
+        .w_full()
+        .items_center()
+        .justify_between()
+        .gap(design.px(16.0))
+        .child(outcome_row)
+        .child(
             crate::ui::button(
                 "test-proxy-connection",
                 if testing {
@@ -2385,9 +2461,13 @@ fn test_connection_field(_options: &ItemCx, window: &mut Window, cx: &mut App) -
                                     Err(error) => pw_error = Some(error),
                                 }
                             }
+                            // The timing is measured around the request only, so
+                            // storing a pending password does not count as
+                            // connect time.
+                            let started = Instant::now();
                             let outcome =
                                 crate::proxy::test_connection("https://github.com", &proxy);
-                            (pw_saved, pw_error, outcome)
+                            (pw_saved, pw_error, outcome.map(|()| started.elapsed()))
                         })
                         .await;
                     cx.update(|cx| {
@@ -2408,28 +2488,8 @@ fn test_connection_field(_options: &ItemCx, window: &mut Window, cx: &mut App) -
                 })
                 .detach();
             }),
-        ),
-    );
-    if let Some(outcome) = result {
-        let (text, color) = match outcome {
-            Ok(()) => (
-                t!("settings.network.test_success").to_string(),
-                design.add_text,
-            ),
-            Err(error) => (
-                t!("settings.network.test_failed", error = error).to_string(),
-                design.remove_text,
-            ),
-        };
-        body = body.child(
-            div()
-                .max_w(design.px(420.0))
-                .text_size(px(design.tiny()))
-                .text_color(color)
-                .child(text),
-        );
-    }
-    body.into_any_element()
+        )
+        .into_any_element()
 }
 
 #[cfg(test)]
