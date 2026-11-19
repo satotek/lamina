@@ -178,6 +178,7 @@ fn parse_windows_bypass(raw: Option<&str>) -> Vec<String> {
 /// expressed. `*.corp` becomes `corp`, the suffix-match form NO_PROXY
 /// consumers understand; `<local>` ("bypass dotless hostnames") has no
 /// NO_PROXY token, so it is dropped rather than mistranslated.
+#[cfg(any(target_os = "windows", target_os = "macos", test))]
 fn normalize_bypass_entry(entry: &str) -> Option<String> {
     let entry = entry.trim();
     if entry.eq_ignore_ascii_case("<local>") {
