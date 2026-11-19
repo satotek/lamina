@@ -516,39 +516,21 @@ impl Render for SettingsDialog {
             .text_size(px(design.ui))
             .child(self.sidebar(narrow, &design, cx))
             .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .min_w_0()
-                    .h_full()
-                    .child(
-                        div()
-                            .id("settings-content")
-                            .size_full()
-                            .overflow_y_scroll()
-                            .track_scroll(&self.scroll)
-                            .child(
-                                v_flex()
-                                    .w_full()
-                                    .px(px(padding_x))
-                                    .py(design.px(CONTENT_PADDING_Y))
-                                    .children(search_on_top)
-                                    .child(body),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .top(design.px(10.0))
-                            .right(design.px(10.0))
-                            .child(
-                                crate::ui::icon_button("settings-close", IconName::X)
-                                    .size(crate::ui::ButtonSize::Small)
-                                    .ghost()
-                                    .tooltip(t!("common.close").to_string())
-                                    .on_click(|_, window, cx| window.close_dialog(cx)),
-                            ),
-                    ),
+                div().flex_1().min_w_0().h_full().child(
+                    div()
+                        .id("settings-content")
+                        .size_full()
+                        .overflow_y_scroll()
+                        .track_scroll(&self.scroll)
+                        .child(
+                            v_flex()
+                                .w_full()
+                                .px(px(padding_x))
+                                .py(design.px(CONTENT_PADDING_Y))
+                                .children(search_on_top)
+                                .child(body),
+                        ),
+                ),
             )
     }
 }
