@@ -6,8 +6,10 @@
 //! executor; until they arrive the page draws the rest, because the About
 //! page must open even when git is missing or slow.
 //!
-//! The page lives in the settings dialog; [`AboutStrata`] opens that dialog on
-//! this page.
+//! The page lives in the settings dialog; [`AboutStrata`] opens that dialog
+//! on this page. The Overview borrows the settings pages' look — a hero, a
+//! row of links, then groups of flat rows — so it reads as one more page of
+//! the same dialog rather than a second window.
 //!
 //! The licence texts are embedded, so they are always readable. The
 //! third-party notices are generated per release and copied next to the
@@ -15,20 +17,25 @@
 //! has no such file and shows a link to the repository instead.
 
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    App, ClipboardItem, Context, Div, FontWeight, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Window, actions, div,
-    px,
+    AnyElement, App, ClipboardItem, Context, Div, FontWeight, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Window, actions, div, px,
 };
-use gpui_component::{ActiveTheme as _, WindowExt as _, h_flex, v_flex};
+use gpui_component::switch::Switch;
+use gpui_component::tooltip::Tooltip;
+use gpui_component::{ActiveTheme as _, Icon, WindowExt as _, h_flex, v_flex};
+use gpui_kit_assets::IconName;
 use strata_core::git_cli::Git;
 
 use crate::menus::AboutStrata;
-use crate::settings::Settings;
+use crate::settings::{self, Settings};
 use crate::style::{self, Design};
-use crate::ui::{ButtonKind, ButtonSize, button};
+use crate::ui::{ButtonKind, ButtonSize, button, spinner};
+use crate::updater::Status;
 
 /// The project page, the issue form and the release tag are derived from the
 /// manifest's repository so a fork only has to change one file.
@@ -43,6 +50,9 @@ const BUILD_DATE: &str = env!("STRATA_BUILD_DATE");
 pub(crate) const ABOUT_VIEW: &str = "AboutView";
 /// How long the copy button says that it copied.
 const COPIED_FOR: Duration = Duration::from_secs(2);
+
+/// Keyed state under the auto-check row's pinned description.
+const AUTO_CHECK_INFO: &str = "about-auto-check-info";
 
 const MIT_LICENSE: &str = include_str!("../../../LICENSE-MIT");
 const APACHE_LICENSE: &str = include_str!("../../../LICENSE-APACHE");
@@ -68,6 +78,7 @@ pub(crate) struct AboutView {
     notices: Notices,
     git_version: Option<String>,
     copied: bool,
+    _subscriptions: Vec<Subscription>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,11 +128,18 @@ impl Notices {
 
 impl AboutView {
     pub(crate) fn new(cx: &mut Context<Self>) -> Self {
+        // The switch reads the settings and the status row follows a check
+        // the menu, the startup schedule or a notification started, so both
+        // globals have to repaint the page when they change under it.
+        let subscriptions = vec![
+            cx.observe_global::<Settings>(|_, cx| cx.notify()),
+            cx.observe_global::<crate::updater::UpdaterState>(|_, cx| cx.notify()),
+        ];
         let executable = std::env::current_exe().ok();
         let workdir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let task = cx.background_executor().spawn(async move {
             // The same handle the rest of the app writes with, and the same
-            // `--version` probe, so the About window and the session agree on
+            // `--version` probe, so the About page and the session agree on
             // which git is in use.
             let git_version = Git::new(workdir)
                 .version()
@@ -150,6 +168,7 @@ impl AboutView {
             notices: Notices::Loading,
             git_version: None,
             copied: false,
+            _subscriptions: subscriptions,
         }
     }
 
@@ -184,55 +203,42 @@ impl AboutView {
         }
     }
 
-    fn header(&self, design: &Design) -> impl IntoElement {
+    /// The app mark beside the name, the one-line description and the build
+    /// lines. Every line wraps rather than overflows, so the hero survives the
+    /// dialog's narrow widths.
+    fn hero(&self, design: &Design) -> Div {
         h_flex()
+            .flex_wrap()
             .items_center()
-            .gap(design.px(18.0))
-            .child(style::app_mark(design.scale(64.0)))
+            .gap(design.px(14.0))
+            .child(style::app_mark(design.scale(52.0)))
             .child(
                 v_flex()
-                    .gap(design.px(2.0))
+                    .min_w_0()
+                    .flex_1()
+                    .gap(design.px(3.0))
                     .child(
                         div()
-                            .text_size(px(design.scale(28.0)))
-                            .font_weight(FontWeight::BOLD)
-                            .child("Strata"),
+                            .text_size(px(design.ui + design.scale(6.0)))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(t!("about.app_and_version", version = VERSION).to_string()),
                     )
                     .child(
                         div()
                             .text_size(px(design.small()))
                             .text_color(design.muted)
-                            .child(t!("about.version", version = VERSION).to_string()),
+                            .child(t!("about.description").to_string()),
                     )
                     .child(
                         div()
+                            .font_family(design.mono.clone())
                             .text_size(px(design.tiny()))
                             .text_color(design.muted)
                             .child(
-                                t!("about.build", commit = COMMIT, date = BUILD_DATE).to_string(),
+                                t!("about.build_line", commit = COMMIT, date = BUILD_DATE)
+                                    .to_string(),
                             ),
-                    ),
-            )
-    }
-
-    fn overview(&self, design: &Design, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
-            .id("about-overview")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .p(design.px(24.0))
-            .gap(design.px(18.0))
-            .child(self.header(design))
-            .child(
-                div()
-                    .text_size(px(design.small()))
-                    .child(t!("about.description").to_string()),
-            )
-            .child(
-                v_flex()
-                    .gap(design.px(5.0))
-                    .child(section_heading(t!("about.environment").to_string(), design))
+                    )
                     .child(
                         div()
                             .text_size(px(design.tiny()))
@@ -240,106 +246,185 @@ impl AboutView {
                             .child(environment_line(self.git_version.as_deref())),
                     ),
             )
+    }
+
+    /// The links out of the page: the release the user is on, where it is
+    /// developed, where to report what does not work, and the copy button
+    /// that carries all of it into a bug report.
+    fn links(&self, design: &Design, cx: &mut Context<Self>) -> Div {
+        h_flex()
+            .flex_wrap()
+            .items_center()
+            .gap(design.px(8.0))
             .child(
-                h_flex()
-                    .flex_wrap()
-                    .items_center()
-                    .gap(design.px(8.0))
-                    .child(
-                        button("about-github", t!("about.github").to_string())
-                            .kind(ButtonKind::Normal)
-                            .size(ButtonSize::Small)
-                            .on_click(|_, _, cx| cx.open_with_system(Path::new(REPOSITORY))),
-                    )
-                    .child(
-                        button("about-release-notes", t!("about.release_notes").to_string())
-                            .kind(ButtonKind::Normal)
-                            .size(ButtonSize::Small)
-                            .on_click(|_, _, cx| {
-                                cx.open_with_system(Path::new(&release_notes_url()))
-                            }),
-                    )
-                    .child(
-                        button("about-report-issue", t!("about.report_issue").to_string())
-                            .kind(ButtonKind::Normal)
-                            .size(ButtonSize::Small)
-                            .on_click(|_, _, cx| cx.open_with_system(Path::new(ISSUES))),
-                    )
-                    .child(
-                        button("about-check-updates", t!("about.check_updates").to_string())
-                            .kind(ButtonKind::Normal)
-                            .size(ButtonSize::Small)
-                            .on_click(|_, window, cx| {
-                                window
-                                    .dispatch_action(Box::new(crate::updater::CheckForUpdates), cx);
-                            }),
-                    )
-                    .child(
-                        button(
-                            "about-copy",
-                            if self.copied {
-                                t!("about.copied").to_string()
-                            } else {
-                                t!("about.copy_info").to_string()
-                            },
-                        )
-                        .kind(ButtonKind::Normal)
-                        .size(ButtonSize::Small)
-                        .on_click(cx.listener(|this, _, _, cx| this.copy(cx))),
-                    ),
+                button("about-release-notes", t!("about.release_notes").to_string())
+                    .kind(ButtonKind::Normal)
+                    .size(ButtonSize::Small)
+                    .on_click(|_, _, cx| {
+                        cx.open_with_system(Path::new(&release_notes_url()));
+                    }),
             )
             .child(
-                v_flex()
-                    .gap(design.px(8.0))
-                    .child(section_heading(t!("about.licenses").to_string(), design))
-                    .child(
-                        h_flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap(design.px(8.0))
-                            .child(
-                                div()
-                                    .text_size(px(design.tiny()))
-                                    .text_color(design.muted)
-                                    .child(
-                                        t!("about.license", license = "MIT OR Apache-2.0")
-                                            .to_string(),
-                                    ),
-                            )
-                            .child(
-                                div()
-                                    .id("about-license-mit")
-                                    .debug_selector(|| "about-license-mit".to_string())
-                                    .flex_none()
-                                    .child(
-                                        button("about-mit", t!("about.license_mit").to_string())
-                                            .kind(ButtonKind::Normal)
-                                            .size(ButtonSize::Small)
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.show(Page::License(License::Mit), cx)
-                                            })),
-                                    ),
-                            )
-                            .child(
-                                div().id("about-license-apache").flex_none().child(
-                                    button("about-apache", t!("about.license_apache").to_string())
-                                        .kind(ButtonKind::Normal)
-                                        .size(ButtonSize::Small)
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.show(Page::License(License::Apache), cx)
-                                        })),
-                                ),
-                            ),
-                    ),
+                button("about-github", t!("about.github").to_string())
+                    .kind(ButtonKind::Normal)
+                    .size(ButtonSize::Small)
+                    .on_click(|_, _, cx| cx.open_with_system(Path::new(REPOSITORY))),
             )
             .child(
-                div().flex_none().child(
-                    button("about-third-party", t!("about.third_party").to_string())
+                button("about-report-issue", t!("about.report_issue").to_string())
+                    .kind(ButtonKind::Normal)
+                    .size(ButtonSize::Small)
+                    .on_click(|_, _, cx| cx.open_with_system(Path::new(ISSUES))),
+            )
+            .child(
+                button(
+                    "about-copy",
+                    if self.copied {
+                        t!("about.copied").to_string()
+                    } else {
+                        t!("about.copy_info").to_string()
+                    },
+                )
+                .kind(ButtonKind::Normal)
+                .size(ButtonSize::Small)
+                .on_click(cx.listener(|this, _, _, cx| this.copy(cx))),
+            )
+    }
+
+    /// The check row and the auto-check switch. The updater keeps only the
+    /// phase in flight in its state; an outcome is a notification, so once
+    /// the row is idle it names when a check last ran instead.
+    fn updates_group(
+        &self,
+        design: &Design,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let status = crate::updater::status(cx);
+        let checking = matches!(status, Some(Status::Checking));
+        let status_line = match &status {
+            Some(status) => h_flex()
+                .items_center()
+                .gap(design.px(8.0))
+                .when(checking, |this| {
+                    this.child(spinner("about-updates-spinner", design, 12.0))
+                })
+                .child(
+                    div()
+                        .min_w_0()
+                        .text_size(px(design.small()))
+                        .child(status.label()),
+                )
+                .into_any_element(),
+            None => div()
+                .min_w_0()
+                .text_size(px(design.small()))
+                .text_color(design.muted)
+                .child(
+                    last_checked_label(cx).unwrap_or_else(|| t!("about.not_checked").to_string()),
+                )
+                .into_any_element(),
+        };
+        let check = row(
+            status_line,
+            button("about-check-updates", t!("about.check_updates").to_string())
+                .kind(ButtonKind::Primary)
+                .size(ButtonSize::Small)
+                // While a check or install runs, the button becomes the
+                // spinner and refuses the click, which is what the action's own
+                // re-entry guard would show as a notification anyway.
+                .loading(status.is_some())
+                .on_click(|_, window, cx| {
+                    window.dispatch_action(Box::new(crate::updater::CheckForUpdates), cx);
+                })
+                .into_any_element(),
+            false,
+            design,
+        );
+        group(
+            t!("about.updates").to_string(),
+            vec![check.into_any_element(), auto_check_row(design, window, cx)],
+            design,
+        )
+        .into_any_element()
+    }
+
+    /// The licence texts the app ships under, and the notices for everything
+    /// it bundles.
+    fn licenses_group(&self, design: &Design, cx: &mut Context<Self>) -> AnyElement {
+        let strata = row(
+            t!("about.app_name").to_string().into_any_element(),
+            h_flex()
+                .flex_none()
+                .items_center()
+                .gap(design.px(8.0))
+                .child(
+                    div()
+                        .id("about-license-mit")
+                        .debug_selector(|| "about-license-mit".to_string())
+                        .flex_none()
+                        .child(
+                            button("about-mit", t!("about.license_mit_short").to_string())
+                                .kind(ButtonKind::Normal)
+                                .size(ButtonSize::Small)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.show(Page::License(License::Mit), cx)
+                                })),
+                        ),
+                )
+                .child(
+                    div().id("about-license-apache").flex_none().child(
+                        button("about-apache", t!("about.license_apache_short").to_string())
+                            .kind(ButtonKind::Normal)
+                            .size(ButtonSize::Small)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.show(Page::License(License::Apache), cx)
+                            })),
+                    ),
+                )
+                .into_any_element(),
+            false,
+            design,
+        );
+        let notices = row(
+            t!("about.third_party").to_string().into_any_element(),
+            div()
+                .id("about-third-party-show")
+                .debug_selector(|| "about-third-party-show".to_string())
+                .flex_none()
+                .child(
+                    button("about-third-party", t!("common.show").to_string())
                         .kind(ButtonKind::Normal)
                         .size(ButtonSize::Small)
                         .on_click(cx.listener(|this, _, _, cx| this.show(Page::Notices, cx))),
-                ),
-            )
+                )
+                .into_any_element(),
+            true,
+            design,
+        );
+        group(
+            t!("about.licenses").to_string(),
+            vec![strata.into_any_element(), notices.into_any_element()],
+            design,
+        )
+        .into_any_element()
+    }
+
+    fn overview(
+        &self,
+        design: &Design,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        // The dialog already pads and scrolls this column, so the page is a
+        // plain column and adds nothing window-like of its own.
+        v_flex()
+            .w_full()
+            .gap(design.px(24.0))
+            .child(self.hero(design))
+            .child(self.links(design, cx))
+            .child(self.updates_group(design, window, cx))
+            .child(self.licenses_group(design, cx))
     }
 
     fn document_page(
@@ -356,16 +441,24 @@ impl AboutView {
                 h_flex()
                     .flex_none()
                     .items_center()
-                    .gap(design.px(12.0))
-                    .px(design.px(20.0))
-                    .py(design.px(12.0))
+                    .gap(design.px(8.0))
+                    .pb(design.px(10.0))
                     .border_b_1()
                     .border_color(design.border)
                     .child(
-                        button("about-back", t!("common.back").to_string())
-                            .kind(ButtonKind::Ghost)
-                            .size(ButtonSize::Small)
-                            .on_click(cx.listener(|this, _, _, cx| this.show(Page::Overview, cx))),
+                        div()
+                            .id("about-back")
+                            .debug_selector(|| "about-back".to_string())
+                            .flex_none()
+                            .child(
+                                button("about-back-button", t!("common.back").to_string())
+                                    .icon(IconName::ArrowLeft)
+                                    .kind(ButtonKind::Ghost)
+                                    .size(ButtonSize::Small)
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.show(Page::Overview, cx)),
+                                    ),
+                            ),
                     )
                     .child(div().font_weight(FontWeight::SEMIBOLD).child(title)),
             )
@@ -375,7 +468,7 @@ impl AboutView {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .p(design.px(20.0))
+                    .pt(design.px(12.0))
                     .text_size(px(design.tiny()))
                     .child(body),
             )
@@ -411,10 +504,10 @@ impl AboutView {
 }
 
 impl Render for AboutView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let design = Design::new(cx.theme(), Settings::get(cx));
         let page = match self.page {
-            Page::Overview => self.overview(&design, cx).into_any_element(),
+            Page::Overview => self.overview(&design, window, cx).into_any_element(),
             Page::License(license) => self
                 .document_page(
                     &design,
@@ -439,12 +532,140 @@ impl Render for AboutView {
     }
 }
 
-fn section_heading(text: String, design: &Design) -> Div {
+/// The auto-check switch, with its explanation behind an info icon the way
+/// the settings pages hide theirs. The switch replaces the row the Behaviour
+/// page used to carry, so the setting lives where it is used.
+fn auto_check_row(design: &Design, window: &mut Window, cx: &mut App) -> AnyElement {
+    let title = t!("about.auto_check").to_string();
+    let description = t!("about.auto_check_description").to_string();
+    let pinned = *window
+        .use_keyed_state(SharedString::from(AUTO_CHECK_INFO), cx, |_, _| false)
+        .read(cx);
+    v_flex()
+        .w_full()
+        .py(design.px(9.0))
+        .child(
+            h_flex()
+                .w_full()
+                .items_center()
+                .justify_between()
+                .gap(design.px(16.0))
+                .child(
+                    h_flex()
+                        .min_w_0()
+                        .flex_1()
+                        .items_center()
+                        .gap(design.px(6.0))
+                        .child(title.clone())
+                        .child(info_icon(
+                            AUTO_CHECK_INFO,
+                            description.clone().into(),
+                            design,
+                            window,
+                            cx,
+                        )),
+                )
+                .child(
+                    div().flex_none().child(
+                        Switch::new("about-auto-check")
+                            .accessibility_label(title)
+                            .checked(Settings::get(cx).updates.auto_check)
+                            .on_click(|checked: &bool, _, cx| {
+                                settings::update(cx, |settings| {
+                                    crate::settings_view::auto_check_updates(settings, *checked)
+                                });
+                                cx.refresh_windows();
+                            }),
+                    ),
+                ),
+        )
+        .when(pinned, |this| {
+            this.child(
+                div()
+                    .pt(design.px(6.0))
+                    .text_size(px(design.small()))
+                    .text_color(design.muted)
+                    .child(description),
+            )
+        })
+        .into_any_element()
+}
+
+/// A settings row: the name on the left, the control on the right, separated
+/// from the next row by the same 1px line the settings pages draw.
+fn row(left: AnyElement, right: AnyElement, last: bool, design: &Design) -> Div {
+    div()
+        .w_full()
+        .py(design.px(9.0))
+        .when(!last, |this| this.border_b_1().border_color(design.border))
+        .child(
+            h_flex()
+                .w_full()
+                .items_center()
+                .justify_between()
+                .gap(design.px(16.0))
+                .child(div().flex_1().min_w_0().child(left))
+                .child(div().flex_none().child(right)),
+        )
+}
+
+/// The short muted semibold heading every settings page puts over its rows.
+fn group_heading(text: String, design: &Design) -> Div {
     div()
         .text_size(px(design.tiny()))
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(design.muted)
         .child(text)
+}
+
+fn group(title: String, rows: Vec<AnyElement>, design: &Design) -> Div {
+    v_flex()
+        .gap(design.px(2.0))
+        .child(group_heading(title, design))
+        .children(rows)
+}
+
+/// The explanation behind the auto-check row's info icon: hover to read it,
+/// click to pin it under the row for anyone not using a mouse.
+fn info_icon(
+    key: &'static str,
+    text: SharedString,
+    design: &Design,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let pinned = window.use_keyed_state(SharedString::from(key), cx, |_, _| false);
+    div()
+        .id(SharedString::from(format!("{key}-icon")))
+        .flex_none()
+        .cursor_pointer()
+        .text_color(design.muted)
+        .hover(|this| this.text_color(design.text))
+        .child(Icon::new(IconName::Info).size(design.px(14.0)))
+        .tooltip(move |window, cx| Tooltip::new(text.clone()).build(window, cx))
+        .on_click(move |_, _, cx| {
+            pinned.update(cx, |pinned, cx| {
+                *pinned = !*pinned;
+                cx.notify();
+            });
+        })
+        .into_any_element()
+}
+
+/// When no check is in flight, the status row names when a check last ran.
+fn last_checked_label(cx: &App) -> Option<String> {
+    let checked = Settings::get(cx).updates.last_checked_at? as i64;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|since| since.as_secs() as i64)
+        .unwrap_or(checked);
+    Some(
+        t!(
+            "about.last_checked",
+            when = crate::style::relative_time(checked, now)
+        )
+        .to_string(),
+    )
 }
 
 fn release_notes_url() -> String {
@@ -554,6 +775,35 @@ mod tests {
 
     use super::*;
 
+    fn open_view(cx: &mut TestAppContext) -> (gpui::Entity<AboutView>, VisualTestContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.set_global(Settings::default());
+        });
+        let window = cx.add_window(|_, cx| AboutView::new(cx));
+        let view = window.root(cx).expect("the About view");
+        let mut about = VisualTestContext::from_window(window.into(), cx);
+        about.update(|window, cx| window.draw(cx).clear(cx));
+        (view, about)
+    }
+
+    fn click_center(about: &mut VisualTestContext, selector: &'static str) {
+        // The click needs the page laid out as it stands now, not as it stood
+        // before the previous click changed the page.
+        about.update(|window, cx| window.draw(cx).clear(cx));
+        let bounds = about
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} was laid out"));
+        about.simulate_click(
+            point(
+                bounds.origin.x + bounds.size.width / 2.0,
+                bounds.origin.y + bounds.size.height / 2.0,
+            ),
+            Default::default(),
+        );
+        about.run_until_parked();
+    }
+
     #[test]
     fn build_info_is_known() {
         assert!(!VERSION.is_empty(), "the crate version is empty");
@@ -609,32 +859,41 @@ mod tests {
     }
 
     #[gpui::test]
-    fn the_mit_button_shows_its_license(cx: &mut TestAppContext) {
+    fn the_status_row_names_the_last_check_once_one_ran(cx: &mut TestAppContext) {
         cx.update(|cx| {
-            gpui_component::init(cx);
             cx.set_global(Settings::default());
         });
+        cx.update(|cx| assert_eq!(last_checked_label(cx), None));
 
-        let window = cx.add_window(|_, cx| AboutView::new(cx));
-        let view = window.root(cx).expect("the About view");
-        let mut about = VisualTestContext::from_window(window.into(), cx);
-        about.update(|window, cx| window.draw(cx).clear(cx));
+        cx.update(|cx| {
+            let mut settings = Settings::default();
+            settings.updates.last_checked_at = Some(1);
+            cx.set_global(settings);
+        });
+        let label = cx.update(|cx| last_checked_label(cx));
+        assert!(label.is_some(), "a stored check time draws a line");
+    }
+
+    #[gpui::test]
+    fn the_mit_button_shows_its_license(cx: &mut TestAppContext) {
+        let (view, mut about) = open_view(cx);
         assert_eq!(view.read_with(&about, |view, _| view.page), Page::Overview);
 
-        let bounds = about
-            .debug_bounds("about-license-mit")
-            .expect("the MIT licence button was laid out");
-        about.simulate_click(
-            point(
-                bounds.origin.x + bounds.size.width / 2.0,
-                bounds.origin.y + bounds.size.height / 2.0,
-            ),
-            Default::default(),
-        );
-        about.run_until_parked();
+        click_center(&mut about, "about-license-mit");
 
         let (page, text) = view.read_with(&about, |view, _| (view.page, view.document_text()));
         assert_eq!(page, Page::License(License::Mit));
         assert_eq!(text.as_deref(), Some(MIT_LICENSE));
+    }
+
+    #[gpui::test]
+    fn the_show_button_opens_the_notices_and_back_returns(cx: &mut TestAppContext) {
+        let (view, mut about) = open_view(cx);
+
+        click_center(&mut about, "about-third-party-show");
+        assert_eq!(view.read_with(&about, |view, _| view.page), Page::Notices);
+
+        click_center(&mut about, "about-back");
+        assert_eq!(view.read_with(&about, |view, _| view.page), Page::Overview);
     }
 }

@@ -31,6 +31,9 @@ use crate::settings::Settings;
 use crate::style::{self, Design};
 
 pub(crate) use change::Section;
+// The About page hosts the update switch, but it writes through the same
+// value rule the Behaviour page's controls use.
+pub(crate) use change::auto_check_updates;
 
 /// Key context of the dialog, so its close shortcuts do not fire in the views
 /// underneath.

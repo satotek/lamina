@@ -73,11 +73,51 @@ enum UpdatePhase {
 }
 
 #[derive(Default)]
-struct UpdaterState {
+pub(crate) struct UpdaterState {
     phase: UpdatePhase,
 }
 
 impl Global for UpdaterState {}
+
+/// What the About page draws beside its check-now button: the phase in
+/// flight, as one line. An outcome — up to date, available, failed — is
+/// reported through a notification rather than kept in state, so idle maps
+/// to `None` and the page falls back to when a check last ran.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Status {
+    Checking,
+    Downloading { version: String },
+    Installing { version: String },
+}
+
+impl Status {
+    /// The localized one-line status.
+    pub fn label(&self) -> String {
+        match self {
+            Status::Checking => t!("updater.checking").to_string(),
+            Status::Downloading { version } => {
+                t!("updater.downloading", version = version.clone()).to_string()
+            }
+            Status::Installing { version } => {
+                t!("updater.installing", version = version.clone()).to_string()
+            }
+        }
+    }
+}
+
+/// The updater's in-flight phase, or `None` when no check or install runs.
+pub fn status(cx: &App) -> Option<Status> {
+    let phase = cx
+        .try_global::<UpdaterState>()
+        .map(|state| state.phase.clone())
+        .unwrap_or_default();
+    match phase {
+        UpdatePhase::Idle => None,
+        UpdatePhase::Checking => Some(Status::Checking),
+        UpdatePhase::Downloading { version, .. } => Some(Status::Downloading { version }),
+        UpdatePhase::Installing { version } => Some(Status::Installing { version }),
+    }
+}
 
 /// Registers updater state and the `CheckForUpdates` action. Call once at startup.
 pub fn bind(cx: &mut App) {
@@ -914,5 +954,53 @@ mod tests {
         let fake_bundle = dir.path().join("Strata.app");
         assert!(is_bundle_parent_writable(&fake_bundle));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[gpui::test]
+    fn status_reports_only_the_phase_in_flight(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(UpdaterState::default());
+        });
+        cx.update(|cx| assert_eq!(status(cx), None));
+
+        for phase in [
+            UpdatePhase::Checking,
+            UpdatePhase::Downloading {
+                version: "0.2.0".to_owned(),
+                received: 10,
+                total: Some(100),
+            },
+            UpdatePhase::Installing {
+                version: "0.2.0".to_owned(),
+            },
+        ] {
+            cx.update(|cx| set_phase(phase.clone(), cx));
+            let reported = cx.update(|cx| status(cx));
+            assert_eq!(
+                reported,
+                Some(match &phase {
+                    UpdatePhase::Checking => Status::Checking,
+                    UpdatePhase::Downloading { version, .. } => {
+                        Status::Downloading {
+                            version: version.clone(),
+                        }
+                    }
+                    UpdatePhase::Installing { version } => {
+                        Status::Installing {
+                            version: version.clone(),
+                        }
+                    }
+                    UpdatePhase::Idle => unreachable!("the phase was just set"),
+                })
+            );
+            cx.update(|_| {
+                assert!(
+                    reported
+                        .as_ref()
+                        .is_some_and(|status| !status.label().is_empty()),
+                    "every phase draws a line"
+                );
+            });
+        }
     }
 }
