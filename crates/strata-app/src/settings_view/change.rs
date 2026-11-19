@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 use crate::settings::{
     Appearance, Behaviour, DateFormat, DiffLayout, DiffSettings, HistorySettings, Privacy,
-    Settings, ThemeMode, Tools,
+    ProxyMode, ProxySettings, Settings, ThemeMode, Tools,
 };
 
 /// One page of the settings window. It is also the unit of "Reset section".
@@ -20,18 +20,20 @@ pub enum Section {
     History,
     Behaviour,
     Tools,
+    Network,
     Privacy,
     Keyboard,
     Commands,
 }
 
 impl Section {
-    pub const ALL: [Section; 8] = [
+    pub const ALL: [Section; 9] = [
         Section::Appearance,
         Section::Diff,
         Section::History,
         Section::Behaviour,
         Section::Tools,
+        Section::Network,
         Section::Privacy,
         Section::Keyboard,
         Section::Commands,
@@ -45,6 +47,7 @@ impl Section {
             Section::History => "history",
             Section::Behaviour => "behaviour",
             Section::Tools => "tools",
+            Section::Network => "network",
             Section::Privacy => "privacy",
             Section::Keyboard => "keyboard",
             Section::Commands => "commands",
@@ -59,6 +62,7 @@ impl Section {
             Section::History => t!("settings.history.title").into_owned(),
             Section::Behaviour => t!("settings.behaviour.title").into_owned(),
             Section::Tools => t!("settings.tools.title").into_owned(),
+            Section::Network => t!("settings.network.title").into_owned(),
             Section::Privacy => t!("settings.privacy.title").into_owned(),
             Section::Keyboard => t!("settings.keyboard.title").into_owned(),
             Section::Commands => t!("settings.commands.title").into_owned(),
@@ -77,6 +81,7 @@ pub fn reset_section(settings: &mut Settings, section: Section) {
             settings.updates.auto_check = true;
         }
         Section::Tools => settings.tools = Tools::default(),
+        Section::Network => settings.proxy = ProxySettings::default(),
         Section::Privacy => settings.privacy = Privacy::default(),
         // The keymap and the command list are files of their own; the page's
         // buttons reset them where the user can see the result.
@@ -268,6 +273,30 @@ pub fn gh_enabled(settings: &mut Settings, enabled: bool) {
     settings.tools.gh.enabled = enabled;
 }
 
+pub fn proxy_mode(settings: &mut Settings, mode: ProxyMode) {
+    settings.proxy.mode = mode;
+}
+
+pub fn proxy_scheme(settings: &mut Settings, scheme: strata_core::proxy::ProxyScheme) {
+    settings.proxy.scheme = scheme;
+}
+
+pub fn proxy_host(settings: &mut Settings, host: &str) {
+    settings.proxy.host = host.trim().to_owned();
+}
+
+pub fn proxy_port(settings: &mut Settings, port: u16) {
+    settings.proxy.port = port;
+}
+
+pub fn proxy_username(settings: &mut Settings, username: &str) {
+    settings.proxy.username = username.trim().to_owned();
+}
+
+pub fn proxy_no_proxy(settings: &mut Settings, no_proxy: &str) {
+    settings.proxy.no_proxy = no_proxy.trim().to_owned();
+}
+
 pub fn external_avatars(settings: &mut Settings, load: bool) {
     settings.privacy.external_avatars = load;
 }
@@ -317,6 +346,12 @@ mod tests {
         editor(&mut settings, "code --goto {path}:{line}");
         terminal(&mut settings, "alacritty --working-directory {path}");
         embedded_shell(&mut settings, "/bin/zsh -l");
+        proxy_mode(&mut settings, ProxyMode::Manual);
+        proxy_scheme(&mut settings, strata_core::proxy::ProxyScheme::Socks5h);
+        proxy_host(&mut settings, " 127.0.0.1 ");
+        proxy_port(&mut settings, 1080);
+        proxy_username(&mut settings, " alice ");
+        proxy_no_proxy(&mut settings, " localhost, .corp ");
         external_avatars(&mut settings, true);
 
         let loaded = round_trip(&settings);
@@ -334,6 +369,15 @@ mod tests {
             Some("code --goto {path}:{line}")
         );
         assert_eq!(loaded.tools.embedded_shell.as_deref(), Some("/bin/zsh -l"));
+        assert_eq!(loaded.proxy.mode, ProxyMode::Manual);
+        assert_eq!(
+            loaded.proxy.scheme,
+            strata_core::proxy::ProxyScheme::Socks5h
+        );
+        assert_eq!(loaded.proxy.host, "127.0.0.1");
+        assert_eq!(loaded.proxy.port, 1080);
+        assert_eq!(loaded.proxy.username, "alice");
+        assert_eq!(loaded.proxy.no_proxy, "localhost, .corp");
         assert!(loaded.privacy.external_avatars);
     }
 
@@ -408,11 +452,14 @@ mod tests {
         show_whitespace(&mut settings, true);
         theme(&mut settings, ThemeMode::Light);
         auto_fetch_minutes(&mut settings, 30);
+        proxy_mode(&mut settings, ProxyMode::Manual);
+        proxy_host(&mut settings, "proxy.example");
 
         reset_section(&mut settings, Section::Diff);
         assert_eq!(settings.diff, DiffSettings::default());
         assert_eq!(settings.appearance.theme, ThemeMode::Light);
         assert_eq!(settings.behaviour.auto_fetch_minutes, 30);
+        assert_eq!(settings.proxy.mode, ProxyMode::Manual);
 
         for section in Section::ALL {
             reset_section(&mut settings, section);
@@ -422,7 +469,7 @@ mod tests {
 
     #[test]
     fn every_section_has_a_title() {
-        assert_eq!(Section::ALL.len(), 8);
+        assert_eq!(Section::ALL.len(), 9);
         for section in Section::ALL {
             assert!(!section.title().is_empty());
         }
@@ -461,5 +508,32 @@ mod tests {
             settings.appearance.dark_theme,
             crate::style::theme::DEFAULT_DARK_THEME_ID
         );
+    }
+
+    #[test]
+    fn proxy_settings_update_and_reset() {
+        let mut settings = Settings::default();
+        proxy_mode(&mut settings, ProxyMode::None);
+        assert_eq!(settings.proxy.mode, ProxyMode::None);
+
+        proxy_mode(&mut settings, ProxyMode::Manual);
+        proxy_scheme(&mut settings, strata_core::proxy::ProxyScheme::Https);
+        proxy_host(&mut settings, "  proxy.corp.local  ");
+        proxy_port(&mut settings, 3128);
+        proxy_username(&mut settings, "  user  ");
+        proxy_no_proxy(&mut settings, "  localhost, 127.0.0.1  ");
+
+        assert_eq!(settings.proxy.mode, ProxyMode::Manual);
+        assert_eq!(
+            settings.proxy.scheme,
+            strata_core::proxy::ProxyScheme::Https
+        );
+        assert_eq!(settings.proxy.host, "proxy.corp.local");
+        assert_eq!(settings.proxy.port, 3128);
+        assert_eq!(settings.proxy.username, "user");
+        assert_eq!(settings.proxy.no_proxy, "localhost, 127.0.0.1");
+
+        reset_section(&mut settings, Section::Network);
+        assert_eq!(settings.proxy, ProxySettings::default());
     }
 }

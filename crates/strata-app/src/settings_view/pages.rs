@@ -8,12 +8,14 @@
 //! [`super::change`].
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Anchor, AnyElement, App, AppContext as _, Entity, FontWeight, IntoElement, ParentElement,
-    PathPromptOptions, SharedString, StyleRefinement, Styled, Subscription, Window, div, px,
-    relative,
+    Anchor, AnyElement, App, AppContext as _, BorrowAppContext as _, Entity, FontWeight,
+    IntoElement, ParentElement, PathPromptOptions, SharedString, StyleRefinement, Styled,
+    Subscription, Task, Window, div, px, relative,
 };
 use gpui_component::button::Button;
 use gpui_component::group_box::GroupBoxVariant;
@@ -30,15 +32,20 @@ use gpui_component::{
     ActiveTheme as _, Disableable as _, IndexPath, Sizable as _, WindowExt as _, h_flex, v_flex,
 };
 use gpui_kit_assets::IconName;
+use strata_core::proxy::ProxyScheme;
 
 use super::SIDEBAR_MAX;
 use super::change::{self, Section};
 use crate::actions::OpenGitConfig;
 use crate::fonts::{self, FontChoice};
-use crate::settings::{self, DateFormat, DiffLayout, Settings, ThemeMode};
+use crate::settings::{self, DateFormat, DiffLayout, ProxyMode, Settings, ThemeMode};
 use crate::style::Design;
 use crate::style::theme::{self, ThemeAppearance, ThemeErrorKind, ThemeSource};
 use crate::tools::Tooling;
+
+/// Incremented whenever the Network section is reset so [`PasswordField`]
+/// clears its masked input and any pending save.
+static NETWORK_RESET_EPOCH: AtomicU64 = AtomicU64::new(0);
 
 /// The gutter the page list gives its cards, and the padding a card gives its
 /// rows. Both come from gpui-component; they are named here because the width a
@@ -71,6 +78,7 @@ fn icon(section: Section) -> IconName {
         Section::History => IconName::FileText,
         Section::Behaviour => IconName::Settings2,
         Section::Tools => IconName::SquareTerminal,
+        Section::Network => IconName::Globe,
         Section::Privacy => IconName::EyeOff,
         Section::Keyboard => IconName::Keyboard,
         Section::Commands => IconName::ListChecks,
@@ -82,11 +90,12 @@ fn icon(section: Section) -> IconName {
 /// `viewport_width` is the settings window's width. The right-hand controls are
 /// sized from it because the page list and its cards are only as wide as the
 /// window leaves them.
-pub(super) fn pages(viewport_width: f32, design: &Design) -> Vec<SettingPage> {
+pub(super) fn pages(viewport_width: f32, design: &Design, cx: &App) -> Vec<SettingPage> {
     let control = control_width(viewport_width, design);
+    let manual_proxy = Settings::get(cx).proxy.mode == ProxyMode::Manual;
     Section::ALL
         .into_iter()
-        .map(|section| page(section, control, design))
+        .map(|section| page(section, control, manual_proxy, design))
         .collect()
 }
 
@@ -105,13 +114,14 @@ fn control_width(viewport_width: f32, design: &Design) -> f32 {
     room.clamp(0.0, design.scale(CONTROL_MAX))
 }
 
-fn page(section: Section, control: f32, design: &Design) -> SettingPage {
+fn page(section: Section, control: f32, manual_proxy: bool, design: &Design) -> SettingPage {
     match section {
         Section::Appearance => appearance(control, design),
         Section::Diff => diff(control, design),
         Section::History => history(control, design),
         Section::Behaviour => behaviour(control, design),
         Section::Tools => tools(control, design),
+        Section::Network => network(control, manual_proxy, design),
         Section::Privacy => privacy(control, design),
         Section::Keyboard => keyboard(design),
         Section::Commands => commands_page(design),
@@ -616,6 +626,132 @@ fn tools(control: f32, design: &Design) -> SettingPage {
         );
         card(t!("settings.tools.editor_terminal").to_string(), design).items(items)
     })
+}
+
+fn network(control: f32, manual: bool, design: &Design) -> SettingPage {
+    shell(
+        Section::Network,
+        t!("settings.network.description").to_string(),
+        design,
+    )
+    .groups(
+        card(t!("settings.network.proxy_card").to_string(), design).item(
+            SettingItem::new(
+                t!("settings.network.mode").to_string(),
+                choice(
+                    &[
+                        ("system", t!("settings.network.mode_system").to_string()),
+                        ("none", t!("settings.network.mode_none").to_string()),
+                        ("manual", t!("settings.network.mode_manual").to_string()),
+                    ],
+                    control,
+                    |settings| match settings.proxy.mode {
+                        ProxyMode::System => "system".to_owned(),
+                        ProxyMode::None => "none".to_owned(),
+                        ProxyMode::Manual => "manual".to_owned(),
+                    },
+                    |settings, value| {
+                        let mode = match value {
+                            "none" => ProxyMode::None,
+                            "manual" => ProxyMode::Manual,
+                            _ => ProxyMode::System,
+                        };
+                        change::proxy_mode(settings, mode);
+                    },
+                ),
+            )
+            .description(t!("settings.network.mode_description").to_string()),
+        ),
+    )
+    .groups(
+        card(t!("settings.network.manual_card").to_string(), design).items([
+            SettingItem::new(
+                t!("settings.network.scheme").to_string(),
+                choice(
+                    &[
+                        ("http", "HTTP"),
+                        ("https", "HTTPS"),
+                        ("socks4", "SOCKS4"),
+                        ("socks5", "SOCKS5"),
+                        ("socks5h", "SOCKS5h"),
+                    ],
+                    control,
+                    |settings| settings.proxy.scheme.as_str().to_owned(),
+                    |settings, value| {
+                        let scheme = match value {
+                            "https" => ProxyScheme::Https,
+                            "socks4" => ProxyScheme::Socks4,
+                            "socks5" => ProxyScheme::Socks5,
+                            "socks5h" => ProxyScheme::Socks5h,
+                            _ => ProxyScheme::Http,
+                        };
+                        change::proxy_scheme(settings, scheme);
+                    },
+                ),
+            )
+            .description(t!("settings.network.scheme_description").to_string())
+            .disabled(!manual),
+            SettingItem::new(
+                t!("settings.network.host").to_string(),
+                text_field(
+                    "proxy.example.com",
+                    control,
+                    |settings| {
+                        (!settings.proxy.host.is_empty()).then(|| settings.proxy.host.clone())
+                    },
+                    change::proxy_host,
+                ),
+            )
+            .description(t!("settings.network.host_description").to_string())
+            .disabled(!manual),
+            SettingItem::new(t!("settings.network.port").to_string(), port_field(control))
+                .description(t!("settings.network.port_description").to_string())
+                .disabled(!manual),
+            SettingItem::new(
+                t!("settings.network.username").to_string(),
+                text_field(
+                    t!("settings.network.optional").to_string(),
+                    control,
+                    |settings| {
+                        (!settings.proxy.username.is_empty())
+                            .then(|| settings.proxy.username.clone())
+                    },
+                    change::proxy_username,
+                ),
+            )
+            .description(t!("settings.network.username_description").to_string())
+            .disabled(!manual),
+            SettingItem::new(
+                t!("settings.network.password").to_string(),
+                password_field(control),
+            )
+            .description(t!("settings.network.password_description").to_string())
+            .disabled(!manual),
+            SettingItem::new(
+                t!("settings.network.no_proxy").to_string(),
+                text_field(
+                    "localhost, 127.0.0.1, .corp",
+                    control,
+                    |settings| {
+                        (!settings.proxy.no_proxy.is_empty())
+                            .then(|| settings.proxy.no_proxy.clone())
+                    },
+                    change::proxy_no_proxy,
+                ),
+            )
+            .description(t!("settings.network.no_proxy_description").to_string())
+            .disabled(!manual),
+        ]),
+    )
+    .groups(
+        card(t!("settings.network.connection_card").to_string(), design).item(
+            SettingItem::new(
+                t!("settings.network.test_connection").to_string(),
+                SettingField::render(test_connection_field),
+            )
+            .description(t!("settings.network.test_connection_description").to_string()),
+        ),
+    )
 }
 
 fn privacy(_control: f32, design: &Design) -> SettingPage {
@@ -1184,6 +1320,20 @@ fn heading(section: Section, description: impl Into<String>, design: &Design) ->
                                 if section == Section::Appearance {
                                     settings::apply_theme(None, cx);
                                     crate::i18n::apply(cx);
+                                }
+                                if section == Section::Network {
+                                    NETWORK_RESET_EPOCH.fetch_add(1, Ordering::Relaxed);
+                                    cx.spawn(async move |cx| {
+                                        let _ = cx
+                                            .background_executor()
+                                            .spawn(async move { crate::proxy::store_password("") })
+                                            .await;
+                                        cx.update(|cx| {
+                                            cx.update_global::<Settings, _>(|_, _| {});
+                                            cx.refresh_windows();
+                                        });
+                                    })
+                                    .detach();
                                 }
                                 // The zoom is written onto the component theme,
                                 // not only stored, so the reset has to apply it.
@@ -2076,6 +2226,392 @@ fn text_state(
         }
     });
     state
+}
+
+struct PortField {
+    input: Entity<InputState>,
+    last_port: u16,
+    invalid: bool,
+    _subscription: Subscription,
+}
+
+fn port_field(control: f32) -> SettingField<SharedString> {
+    SettingField::render(move |options, window, cx| {
+        let key = field_key(options, "port");
+        let state = port_state(key, window, cx);
+        let input = state.read(cx).input.clone();
+        let invalid = state.read(cx).invalid;
+
+        let mut field = v_flex().gap_1().w(px(control)).child(
+            Input::new(&input)
+                .with_size(options.size())
+                .disabled(options.is_disabled()),
+        );
+        if invalid && !options.is_disabled() {
+            let design = Design::new(cx.theme(), Settings::get(cx));
+            field = field.child(
+                div()
+                    .text_size(design.px(11.0))
+                    .text_color(design.remove_text)
+                    .child(t!("settings.network.port_invalid").to_string()),
+            );
+        }
+        field.into_any_element()
+    })
+}
+
+fn port_state(key: SharedString, window: &mut Window, cx: &mut App) -> Entity<PortField> {
+    let state = window.use_keyed_state(key, cx, move |window, cx| {
+        let current = Settings::get(cx).proxy.port;
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("8080")
+                .default_value(current.to_string())
+        });
+        let window_handle = window.window_handle();
+        let subscription = cx.subscribe(
+            &input,
+            move |state: &mut PortField, input, event: &InputEvent, cx| match event {
+                InputEvent::Change => {
+                    let raw = input.read(cx).value().to_string();
+                    let trimmed = raw.trim();
+                    if let Ok(port) = trimmed.parse::<u16>()
+                        && port > 0
+                    {
+                        state.invalid = false;
+                        if state.last_port != port {
+                            state.last_port = port;
+                            settings::update(cx, |settings| change::proxy_port(settings, port));
+                            cx.refresh_windows();
+                        }
+                    } else {
+                        state.invalid = true;
+                        cx.refresh_windows();
+                    }
+                }
+                InputEvent::Blur if state.invalid => {
+                    let fallback = state.last_port.to_string();
+                    state.invalid = false;
+                    let entity = input.clone();
+                    let _ = window_handle.update(cx, |_, window, cx| {
+                        entity.update(cx, |input, cx| {
+                            input.set_value(fallback, window, cx);
+                        });
+                    });
+                    cx.refresh_windows();
+                }
+                _ => {}
+            },
+        );
+        PortField {
+            input,
+            last_port: current,
+            invalid: false,
+            _subscription: subscription,
+        }
+    });
+
+    let stored = Settings::get(cx).proxy.port;
+    state.update(cx, |state, cx| {
+        if state.last_port != stored {
+            state.last_port = stored;
+            state.invalid = false;
+            state.input.update(cx, |input, cx| {
+                input.set_value(stored.to_string(), window, cx);
+            });
+        }
+    });
+    state
+}
+
+struct PasswordField {
+    input: Entity<InputState>,
+    generation: u64,
+    reset_epoch: u64,
+    syncing: bool,
+    pending_save: Option<String>,
+    save_task: Option<Task<()>>,
+    error: Option<String>,
+    _subscription: Subscription,
+}
+
+fn password_field(control: f32) -> SettingField<SharedString> {
+    SettingField::render(move |options, window, cx| {
+        let state = password_state(window, cx);
+        let input = state.read(cx).input.clone();
+        let error = state.read(cx).error.clone();
+
+        let mut field = v_flex().gap_1().w(px(control)).child(
+            Input::new(&input)
+                .mask_toggle()
+                .with_size(options.size())
+                .disabled(options.is_disabled()),
+        );
+        if let Some(error) = error {
+            let design = Design::new(cx.theme(), Settings::get(cx));
+            field = field.child(
+                div()
+                    .text_size(design.px(11.0))
+                    .text_color(design.remove_text)
+                    .child(error),
+            );
+        }
+        field.into_any_element()
+    })
+}
+
+fn password_state(window: &mut Window, cx: &mut App) -> Entity<PasswordField> {
+    let key = SharedString::from("settings-network-password");
+    let state = window.use_keyed_state(key, cx, move |window, cx| {
+        let epoch = NETWORK_RESET_EPOCH.load(Ordering::Relaxed);
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(t!("settings.network.optional").to_string())
+                .masked(true)
+        });
+        let window_handle = window.window_handle();
+        cx.spawn(async move |this, cx| {
+            let loaded = cx
+                .background_executor()
+                .spawn(async move { crate::proxy::load_password() })
+                .await;
+            let Some(password) = loaded else {
+                return;
+            };
+            let should_apply = this
+                .read_with(cx, |state: &PasswordField, _| {
+                    state.generation == 0 && NETWORK_RESET_EPOCH.load(Ordering::Relaxed) == epoch
+                })
+                .unwrap_or(false);
+            if !should_apply {
+                return;
+            }
+            let _ = window_handle.update(cx, |_, window, cx| {
+                let _ = this.update(cx, |state: &mut PasswordField, cx| {
+                    if state.generation == 0 && NETWORK_RESET_EPOCH.load(Ordering::Relaxed) == epoch
+                    {
+                        state.syncing = true;
+                        state.input.update(cx, |input, cx| {
+                            input.set_value(password, window, cx);
+                        });
+                        state.syncing = false;
+                    }
+                });
+            });
+        })
+        .detach();
+
+        let subscription = cx.subscribe(
+            &input,
+            move |state: &mut PasswordField, input, event: &InputEvent, cx| match event {
+                InputEvent::Change => {
+                    if state.syncing {
+                        return;
+                    }
+                    state.generation = state.generation.wrapping_add(1);
+                    let generation = state.generation;
+                    let value = input.read(cx).value().to_string();
+                    state.pending_save = Some(value.clone());
+                    state.save_task = Some(cx.spawn(async move |this, cx| {
+                        cx.background_executor()
+                            .timer(Duration::from_millis(150))
+                            .await;
+                        let should_write = this
+                            .read_with(cx, |state, _| state.generation == generation)
+                            .unwrap_or(false);
+                        if !should_write {
+                            return;
+                        }
+                        let result = cx
+                            .background_executor()
+                            .spawn(async move { crate::proxy::store_password(&value) })
+                            .await;
+                        let _ = this.update(cx, |state, cx| {
+                            if state.generation != generation {
+                                return;
+                            }
+                            state.pending_save = None;
+                            match result {
+                                Ok(()) => {
+                                    state.error = None;
+                                    cx.update_global::<Settings, _>(|_, _| {});
+                                }
+                                Err(error) => {
+                                    state.error = Some(error);
+                                }
+                            }
+                            cx.refresh_windows();
+                        });
+                    }));
+                }
+                InputEvent::Blur => {
+                    if let Some(value) = state.pending_save.take() {
+                        state.save_task.take();
+                        state.generation = state.generation.wrapping_add(1);
+                        let generation = state.generation;
+                        state.save_task = Some(cx.spawn(async move |this, cx| {
+                            let result = cx
+                                .background_executor()
+                                .spawn(async move { crate::proxy::store_password(&value) })
+                                .await;
+                            let _ = this.update(cx, |state, cx| {
+                                if state.generation != generation {
+                                    return;
+                                }
+                                match result {
+                                    Ok(()) => {
+                                        state.error = None;
+                                        cx.update_global::<Settings, _>(|_, _| {});
+                                    }
+                                    Err(error) => {
+                                        state.error = Some(error);
+                                    }
+                                }
+                                cx.refresh_windows();
+                            });
+                        }));
+                    }
+                }
+                _ => {}
+            },
+        );
+        PasswordField {
+            input,
+            generation: 0,
+            reset_epoch: epoch,
+            syncing: false,
+            pending_save: None,
+            save_task: None,
+            error: None,
+            _subscription: subscription,
+        }
+    });
+
+    let current_epoch = NETWORK_RESET_EPOCH.load(Ordering::Relaxed);
+    state.update(cx, |state, cx| {
+        if state.reset_epoch != current_epoch {
+            state.reset_epoch = current_epoch;
+            state.generation = state.generation.wrapping_add(1);
+            state.pending_save = None;
+            state.save_task = None;
+            state.error = None;
+            state.syncing = true;
+            state
+                .input
+                .update(cx, |input, cx| input.set_value(String::new(), window, cx));
+            state.syncing = false;
+        }
+    });
+    state
+}
+
+#[derive(Default)]
+struct TestConnectionState {
+    testing: bool,
+    generation: u64,
+    result: Option<Result<(), String>>,
+}
+
+fn test_connection_field(
+    _options: &gpui_component::setting::RenderOptions,
+    window: &mut Window,
+    cx: &mut App,
+) -> AnyElement {
+    let key = SharedString::from("settings-network-test");
+    let state = window.use_keyed_state(key, cx, |_, _| TestConnectionState::default());
+    let password_entity = password_state(window, cx);
+    let design = Design::new(cx.theme(), Settings::get(cx));
+    let snapshot = state.read(cx);
+    let testing = snapshot.testing;
+    let result = snapshot.result.clone();
+    let state_entity = state.clone();
+
+    let mut body = v_flex().gap_1().child(
+        h_flex().gap_2().items_center().child(
+            crate::ui::button(
+                "test-proxy-connection",
+                if testing {
+                    t!("settings.network.testing").to_string()
+                } else {
+                    t!("settings.network.test_button").to_string()
+                },
+            )
+            .size(crate::ui::ButtonSize::Small)
+            .disabled(testing)
+            .on_click(move |_, _, cx| {
+                let proxy = Settings::get(cx).proxy.clone();
+                let pending_password = password_entity.update(cx, |pw, _| {
+                    pw.save_task.take();
+                    pw.generation = pw.generation.wrapping_add(1);
+                    pw.pending_save.take()
+                });
+                let generation = state_entity.update(cx, |state, _| {
+                    state.testing = true;
+                    state.result = None;
+                    state.generation = state.generation.wrapping_add(1);
+                    state.generation
+                });
+                cx.refresh_windows();
+
+                let target = state_entity.clone();
+                let pw_entity = password_entity.clone();
+                cx.spawn(async move |cx| {
+                    let (pw_saved, pw_error, outcome) = cx
+                        .background_executor()
+                        .spawn(async move {
+                            let mut pw_saved = false;
+                            let mut pw_error = None;
+                            if let Some(password) = pending_password {
+                                match crate::proxy::store_password(&password) {
+                                    Ok(()) => pw_saved = true,
+                                    Err(error) => pw_error = Some(error),
+                                }
+                            }
+                            let outcome =
+                                crate::proxy::test_connection("https://github.com", &proxy);
+                            (pw_saved, pw_error, outcome)
+                        })
+                        .await;
+                    cx.update(|cx| {
+                        if let Some(error) = pw_error {
+                            pw_entity.update(cx, |pw, _| pw.error = Some(error));
+                        } else if pw_saved {
+                            pw_entity.update(cx, |pw, _| pw.error = None);
+                            cx.update_global::<Settings, _>(|_, _| {});
+                        }
+                        target.update(cx, |state, _| {
+                            if state.generation == generation {
+                                state.testing = false;
+                                state.result = Some(outcome);
+                            }
+                        });
+                        cx.refresh_windows();
+                    });
+                })
+                .detach();
+            }),
+        ),
+    );
+    if let Some(outcome) = result {
+        let (text, color) = match outcome {
+            Ok(()) => (
+                t!("settings.network.test_success").to_string(),
+                design.add_text,
+            ),
+            Err(error) => (
+                t!("settings.network.test_failed", error = error).to_string(),
+                design.remove_text,
+            ),
+        };
+        body = body.child(
+            div()
+                .max_w(design.px(420.0))
+                .text_size(px(design.tiny()))
+                .text_color(color)
+                .child(text),
+        );
+    }
+    body.into_any_element()
 }
 
 #[cfg(test)]

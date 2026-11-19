@@ -259,7 +259,11 @@ impl Render for SettingsView {
                         // Each group is a bordered card on the page surface,
                         // with its heading and description above it.
                         .with_group_variant(GroupBoxVariant::Outline)
-                        .pages(pages::pages(window.viewport_size().width.into(), &design)),
+                        .pages(pages::pages(
+                            window.viewport_size().width.into(),
+                            &design,
+                            cx,
+                        )),
                 ),
             )
             .child(self.footer(&design));
