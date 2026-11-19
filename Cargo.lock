@@ -7973,7 +7973,7 @@ checksum = "d08889ec5408683408db66ad89e0e1f93dff55c73a4ccc71c427d5b277ee47e6"
 
 [[package]]
 name = "strata-app"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "env_logger",
  "futures",
@@ -8002,7 +8002,7 @@ dependencies = [
 
 [[package]]
 name = "strata-core"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "chardetng",
  "encoding_rs",
@@ -8038,7 +8038,7 @@ dependencies = [
 
 [[package]]
 name = "strata-remote"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "strata-core",
  "strata-remote-client",
@@ -8047,7 +8047,7 @@ dependencies = [
 
 [[package]]
 name = "strata-remote-client"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "strata-core",
  "strata-remote-protocol",
@@ -8055,7 +8055,7 @@ dependencies = [
 
 [[package]]
 name = "strata-remote-protocol"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "postcard",
  "serde",
@@ -8066,7 +8066,7 @@ dependencies = [
 
 [[package]]
 name = "strata-term"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "flate2",
  "futures",
