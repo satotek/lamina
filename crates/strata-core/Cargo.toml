@@ -40,6 +40,19 @@ tree-sitter-typescript = "0.23.2"
 tree-sitter-yaml = "0.7.2"
 unicode-width = "0.2"
 
+# Proxy detection reads the OS settings store on each platform that has one.
+# Both versions are already in the lockfile through other crates, so this
+# only adds the direct dependency edge.
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.9"
+system-configuration = "0.6"
+
+# WinHTTP: the documented way to resolve the per-user Internet Options and
+# PAC scripts. `Win32_Foundation` supplies GlobalFree, which every buffer
+# WinHTTP hands out must be released with.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Networking_WinHttp"] }
+
 [dev-dependencies]
 insta = "1.49.0"
 tempfile = "3.27.0"

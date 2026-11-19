@@ -8146,6 +8146,7 @@ name = "strata-core"
 version = "0.1.8"
 dependencies = [
  "chardetng",
+ "core-foundation 0.9.4",
  "encoding_rs",
  "gix",
  "imara-diff",
@@ -8156,6 +8157,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "system-configuration",
  "tempfile",
  "thiserror 2.0.21",
  "tree-sitter",
@@ -8175,6 +8177,7 @@ dependencies = [
  "tree-sitter-typescript",
  "tree-sitter-yaml",
  "unicode-width",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
