@@ -568,7 +568,9 @@ fn open(window: &mut Window, cx: &mut App) {
             // A palette is a keyboard surface: it has to be there the moment
             // the shortcut is pressed, and gone the moment Enter is.
             .entrance(DialogEntrance::None)
-            .centered()
+            // Anchored at the top, not centred: the list shrinks as the query
+            // narrows it, and a centred card would move the field being typed
+            // into with every keystroke.
             .w(px(WIDTH * zoom))
             .close_button(false)
             // The field owns Enter: its `PressEnter` runs the command and
