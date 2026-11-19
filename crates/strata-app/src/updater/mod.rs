@@ -12,6 +12,7 @@ use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::Path;
 #[cfg(target_os = "macos")]
 use std::path::PathBuf;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -391,6 +392,9 @@ fn launch_download_and_install(
     .detach();
 }
 
+// Only the macOS and Windows installers finish by quitting; elsewhere the
+// updater just points at the release page and never builds this.
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
 enum InstallOutcome {
     QuitToComplete,
 }
