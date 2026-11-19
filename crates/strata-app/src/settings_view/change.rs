@@ -77,8 +77,9 @@ pub fn reset_section(settings: &mut Settings, section: Section) {
         Section::Diff => settings.diff = DiffSettings::default(),
         Section::History => settings.history = HistorySettings::default(),
         Section::Behaviour => {
+            // The update check belongs to the About page, which offers no
+            // reset; resetting this page must not flip a switch shown there.
             settings.behaviour = Behaviour::default();
-            settings.updates.auto_check = true;
         }
         Section::Tools => settings.tools = Tools::default(),
         Section::Network => settings.proxy = ProxySettings::default(),

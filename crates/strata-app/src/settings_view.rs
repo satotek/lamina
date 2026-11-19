@@ -369,7 +369,7 @@ impl SettingsDialog {
     ) -> AnyElement {
         if !self.query.is_empty() {
             let query = self.query.clone();
-            let results: Vec<AnyElement> = pages::pages(content_width, design, cx)
+            let mut results: Vec<AnyElement> = pages::pages(content_width, design, cx)
                 .iter()
                 .filter_map(|page| {
                     let body = page.render_body(Some(&query), design, window, cx)?;
@@ -387,6 +387,9 @@ impl SettingsDialog {
                     )
                 })
                 .collect();
+            if about_matches(&query) {
+                results.push(self.about_result(design, cx));
+            }
             if results.is_empty() {
                 return div()
                     .pt(design.px(40.0))
@@ -418,6 +421,58 @@ impl SettingsDialog {
             }
         }
     }
+}
+
+impl SettingsDialog {
+    /// The About page holds settings of its own (update checks), so a query
+    /// for them leads there instead of finding nothing.
+    fn about_result(&self, design: &Design, cx: &mut Context<Self>) -> AnyElement {
+        v_flex()
+            .gap(design.px(10.0))
+            .child(
+                div()
+                    .text_size(px(design.ui + design.scale(2.0)))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(t!("action.about_strata").to_string()),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .items_center()
+                    .justify_between()
+                    .gap(design.px(16.0))
+                    .py(design.px(9.0))
+                    .child(t!("about.updates").to_string())
+                    .child(
+                        crate::ui::button(
+                            "settings-search-about",
+                            t!("settings.open_page").to_string(),
+                        )
+                        .size(crate::ui::ButtonSize::Small)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.search
+                                .update(cx, |search, cx| search.set_value("", window, cx));
+                            this.query.clear();
+                            this.go(Destination::About, cx);
+                        })),
+                    ),
+            )
+            .into_any_element()
+    }
+}
+
+/// Whether a search query is about something only the About page offers.
+fn about_matches(query: &str) -> bool {
+    [
+        t!("about.updates"),
+        t!("about.auto_check"),
+        t!("about.auto_check_description"),
+        t!("about.licenses"),
+        t!("about.third_party"),
+        t!("action.about_strata"),
+    ]
+    .iter()
+    .any(|text| text.to_lowercase().contains(query))
 }
 
 impl Focusable for SettingsDialog {
