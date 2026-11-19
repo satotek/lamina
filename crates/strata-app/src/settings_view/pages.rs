@@ -11,7 +11,10 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use super::kit::{Field, Group, Item, ItemCx, NumberOptions, Page};
+use super::kit::{
+    Field, Group, Item, ItemCx, NumberOptions, Page, PreviewCard, preview_cards,
+    preview_cards_width,
+};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, BorrowAppContext as _, Entity, IntoElement,
@@ -77,13 +80,14 @@ pub(super) fn icon(section: Section) -> IconName {
 /// Every page, in the order the sidebar lists them.
 ///
 /// `content_width` is the width the dialog leaves the page body; the controls
-/// on the right of the rows are sized from it.
+/// on the right of the rows are sized from it, and a control wider than a
+/// row offers a compact fallback instead of squeezing the label.
 pub(super) fn pages(content_width: f32, design: &Design, cx: &App) -> Vec<Page> {
     let control = control_width(content_width, design);
     let manual_proxy = Settings::get(cx).proxy.mode == ProxyMode::Manual;
     Section::ALL
         .into_iter()
-        .map(|section| page(section, control, manual_proxy, design))
+        .map(|section| page(section, control, content_width, manual_proxy, design))
         .collect()
 }
 
@@ -94,10 +98,16 @@ fn control_width(row: f32, design: &Design) -> f32 {
     room.clamp(0.0, design.scale(CONTROL_MAX))
 }
 
-fn page(section: Section, control: f32, manual_proxy: bool, design: &Design) -> Page {
+fn page(
+    section: Section,
+    control: f32,
+    content_width: f32,
+    manual_proxy: bool,
+    design: &Design,
+) -> Page {
     match section {
         Section::Appearance => appearance(control, design),
-        Section::Diff => diff(control, design),
+        Section::Diff => diff(control, content_width, design),
         Section::History => history(design),
         Section::Behaviour => behaviour(control, design),
         Section::Tools => tools(control, design),
@@ -212,45 +222,28 @@ fn appearance(control: f32, design: &Design) -> Page {
     )
 }
 
-fn diff(control: f32, design: &Design) -> Page {
+fn diff(control: f32, content_width: f32, design: &Design) -> Page {
     shell(
         Section::Diff,
         t!("settings.diff.description").to_string(),
         design,
     )
     .groups(
-        card(t!("settings.diff.layout.card").to_string(), design).items([
+        card(t!("settings.diff.layout.card").to_string(), design).item(
             Item::new(
                 t!("settings.diff.layout.card").to_string(),
-                choice(
-                    &[
-                        ("unified", t!("settings.diff.layout.unified").to_string()),
-                        ("split", t!("settings.diff.layout.split").to_string()),
-                    ],
-                    control,
-                    |settings| match settings.diff.layout {
-                        DiffLayout::Unified => "unified".to_owned(),
-                        DiffLayout::Split => "split".to_owned(),
-                    },
-                    |settings, value| {
-                        let layout = match value {
-                            "split" => DiffLayout::Split,
-                            _ => DiffLayout::Unified,
-                        };
-                        change::diff_layout(settings, layout);
-                    },
-                ),
+                diff_layout_field(content_width, design),
             )
             .description(t!("settings.diff.layout.description").to_string()),
+        ),
+    )
+    .groups(
+        card(t!("settings.diff.display.card").to_string(), design).items([
             Item::new(
                 t!("settings.diff.wrap").to_string(),
                 toggle(|settings| settings.diff.wrap_lines, change::wrap_lines),
             )
             .description(t!("settings.diff.wrap_description").to_string()),
-        ]),
-    )
-    .groups(
-        card(t!("settings.diff.text.card").to_string(), design).items([
             Item::new(
                 t!("settings.diff.syntax").to_string(),
                 toggle(
@@ -297,6 +290,98 @@ fn diff(control: f32, design: &Design) -> Page {
     )
 }
 
+/// The diff layout, offered as two cards that each show the layout as a small
+/// picture of itself. A dialog too narrow to hold the cards offers the same
+/// two choices as joined buttons instead.
+fn diff_layout_field(content_width: f32, design: &Design) -> Field {
+    let labels = [
+        ("unified", t!("settings.diff.layout.unified").to_string()),
+        ("split", t!("settings.diff.layout.split").to_string()),
+    ];
+    if preview_cards_width(labels.len(), design) > content_width {
+        return segments(
+            &labels,
+            |settings| match settings.diff.layout {
+                DiffLayout::Unified => "unified".to_owned(),
+                DiffLayout::Split => "split".to_owned(),
+            },
+            |settings, value| change::diff_layout(settings, diff_layout_value(value)),
+        );
+    }
+    Field::render(move |item, _window, cx| {
+        let design = Design::new(cx.theme(), Settings::get(cx));
+        let current = match Settings::get(cx).diff.layout {
+            DiffLayout::Unified => "unified",
+            DiffLayout::Split => "split",
+        };
+        let cards = vec![
+            PreviewCard::new("unified", labels[0].1.clone(), unified_preview),
+            PreviewCard::new("split", labels[1].1.clone(), split_preview),
+        ];
+        preview_cards(
+            item,
+            cards,
+            SharedString::from(current),
+            |value, cx| {
+                settings::update(cx, |settings| {
+                    change::diff_layout(settings, diff_layout_value(&value));
+                });
+                cx.refresh_windows();
+            },
+            &design,
+        )
+    })
+}
+
+/// The layout a stored choice names. Anything but "split" keeps the default,
+/// the way a hand-edited file is read.
+fn diff_layout_value(value: &str) -> DiffLayout {
+    match value {
+        "split" => DiffLayout::Split,
+        _ => DiffLayout::Unified,
+    }
+}
+
+/// The unified card's picture: each line a full-width bar, the removed one
+/// above the added one, over the context lines around them.
+fn unified_preview(design: &Design) -> AnyElement {
+    v_flex()
+        .size_full()
+        .justify_center()
+        .gap(design.px(4.0))
+        .child(preview_bar(design.diff_removed_word, design))
+        .child(preview_bar(design.diff_added_word, design))
+        .child(preview_bar(design.border, design))
+        .child(preview_bar(design.border, design))
+        .into_any_element()
+}
+
+/// The split card's picture: the old file on the left of a dividing line, the
+/// new one on the right, the removed and the added bar on the first row.
+fn split_preview(design: &Design) -> AnyElement {
+    let column = |first: gpui::Hsla| {
+        v_flex()
+            .flex_1()
+            .min_w_0()
+            .justify_center()
+            .gap(design.px(4.0))
+            .child(preview_bar(first, design))
+            .child(preview_bar(design.border, design))
+            .child(preview_bar(design.border, design))
+    };
+    h_flex()
+        .size_full()
+        .child(column(design.diff_removed_word))
+        .child(div().flex_none().w(px(1.0)).h_full().bg(design.border))
+        .child(column(design.diff_added_word))
+        .into_any_element()
+}
+
+/// One line of a layout card's picture: a flat bar in a diff colour.
+fn preview_bar(color: gpui::Hsla, design: &Design) -> gpui::Div {
+    div().w_full().h(design.px(7.0)).bg(color)
+}
+
 fn history(design: &Design) -> Page {
     shell(
         Section::History,
@@ -332,25 +417,12 @@ fn history(design: &Design) -> Page {
         card(t!("settings.history.dates").to_string(), design).item(
             Item::new(
                 t!("settings.history.date_format").to_string(),
-                segments(
-                    &[
-                        ("relative", t!("settings.history.relative").to_string()),
-                        ("absolute", t!("settings.history.absolute").to_string()),
-                    ],
-                    |settings| match settings.history.date_format {
-                        DateFormat::Relative => "relative".to_owned(),
-                        DateFormat::Absolute => "absolute".to_owned(),
-                    },
-                    |settings, value| {
-                        let format = match value {
-                            "absolute" => DateFormat::Absolute,
-                            _ => DateFormat::Relative,
-                        };
-                        change::date_format(settings, format);
-                    },
-                ),
+                date_format_field(),
             )
-            .description(t!("settings.history.date_format_description").to_string()),
+            .keywords([
+                t!("settings.history.relative").to_string(),
+                t!("settings.history.absolute").to_string(),
+            ]),
         ),
     )
     .groups(
@@ -384,6 +456,34 @@ fn history(design: &Design) -> Page {
             )
             .description(t!("settings.history.changed_file_count_description").to_string()),
         ]),
+    )
+}
+
+/// The date format, offered as the two renderings of one moment two hours
+/// ago. The buttons are their own live example, so no description is needed;
+/// the words the old labels used stay behind as search keywords.
+fn date_format_field() -> Field {
+    let now = crate::style::now_epoch();
+    let example = now - 2 * 3600;
+    segments(
+        &[
+            ("relative", crate::style::relative_time(example, now)),
+            (
+                "absolute",
+                crate::style::date_label(example, now, DateFormat::Absolute),
+            ),
+        ],
+        |settings| match settings.history.date_format {
+            DateFormat::Relative => "relative".to_owned(),
+            DateFormat::Absolute => "absolute".to_owned(),
+        },
+        |settings, value| {
+            let format = match value {
+                "absolute" => DateFormat::Absolute,
+                _ => DateFormat::Relative,
+            };
+            change::date_format(settings, format);
+        },
     )
 }
 

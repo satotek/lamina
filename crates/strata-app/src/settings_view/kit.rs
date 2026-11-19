@@ -285,6 +285,120 @@ fn segmented(
         .into_any_element()
 }
 
+/// One preview card's outer size, its padding, its border and the gap between
+/// two cards, at 100% zoom. The card's content box is sized to leave room for
+/// its padding and border, so the outer card keeps this size whatever the
+/// theme draws inside it.
+const PREVIEW_CARD_W: f32 = 140.0;
+const PREVIEW_CARD_H: f32 = 60.0;
+const PREVIEW_CARD_PADDING: f32 = 8.0;
+const PREVIEW_CARD_BORDER: f32 = 1.0;
+const PREVIEW_CARD_GAP: f32 = 12.0;
+
+/// The width [`preview_cards`] draws for `count` cards with their gaps, for a
+/// page deciding whether the cards fit before it offers them.
+pub(super) fn preview_cards_width(count: usize, design: &Design) -> f32 {
+    let gaps = count.saturating_sub(1) as f32;
+    count as f32 * design.scale(PREVIEW_CARD_W) + gaps * design.scale(PREVIEW_CARD_GAP)
+}
+
+type PreviewFn = Rc<dyn Fn(&Design) -> AnyElement>;
+
+/// One choice of a [`preview_cards`] row: the value a click writes, the label
+/// under the card and the picture that tells the choices apart.
+pub(super) struct PreviewCard {
+    value: SharedString,
+    label: SharedString,
+    preview: PreviewFn,
+}
+
+impl PreviewCard {
+    pub fn new(
+        value: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        preview: impl Fn(&Design) -> AnyElement + 'static,
+    ) -> Self {
+        Self {
+            value: value.into(),
+            label: label.into(),
+            preview: Rc::new(preview),
+        }
+    }
+}
+
+/// A choice picked by look rather than by name: one card per option, side by
+/// side, each showing a small picture of what choosing it means, its label
+/// under it and a check on the selected one. Dropdowns and segmented buttons
+/// name a choice; these show it.
+pub(super) fn preview_cards(
+    item: &ItemCx,
+    cards: Vec<PreviewCard>,
+    current: SharedString,
+    set: impl Fn(SharedString, &mut App) + 'static,
+    design: &Design,
+) -> AnyElement {
+    let disabled = item.is_disabled();
+    let inset = PREVIEW_CARD_PADDING + PREVIEW_CARD_BORDER;
+    let set = Rc::new(set);
+    let mut row = h_flex().gap(design.px(PREVIEW_CARD_GAP)).flex_none();
+    for (index, card) in cards.into_iter().enumerate() {
+        let selected = card.value == current;
+        let value = card.value.clone();
+        let on_click = set.clone();
+        let frame = div()
+            .id(SharedString::from(format!(
+                "{}-{index}",
+                item.id("preview")
+            )))
+            .cursor_pointer()
+            .w(design.px(PREVIEW_CARD_W - 2.0 * inset))
+            .h(design.px(PREVIEW_CARD_H - 2.0 * inset))
+            .p(design.px(PREVIEW_CARD_PADDING))
+            .rounded(design.px(6.0))
+            .bg(design.background)
+            .overflow_hidden()
+            .border_1()
+            .border_color(if selected {
+                design.accent
+            } else {
+                design.border
+            })
+            .when(selected, |this| this.border_2())
+            .when(!selected && !disabled, |this| {
+                this.hover(|this| this.border_color(design.accent))
+            })
+            .child((card.preview)(design))
+            .on_click(move |_, _, cx| {
+                if !disabled {
+                    on_click(value.clone(), cx);
+                }
+            });
+        row = row.child(
+            v_flex().flex_none().gap(design.px(4.0)).child(frame).child(
+                h_flex()
+                    .w(design.px(PREVIEW_CARD_W))
+                    .justify_center()
+                    .gap(design.px(4.0))
+                    .when(selected, |this| {
+                        this.child(
+                            Icon::new(IconName::Check)
+                                .size(design.px(12.0))
+                                .text_color(design.accent),
+                        )
+                    })
+                    .child(
+                        div()
+                            .text_size(px(design.tiny()))
+                            .text_color(if selected { design.text } else { design.muted })
+                            .child(card.label),
+                    ),
+            ),
+        );
+    }
+    row.when(disabled, |this| this.opacity(0.5))
+        .into_any_element()
+}
+
 struct NumberState {
     input: Entity<InputState>,
     value: f64,
