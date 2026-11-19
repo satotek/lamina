@@ -539,6 +539,12 @@ pub(super) fn card_picker(
                         .role(Role::RadioButton)
                         .aria_label(option.label.clone())
                         .aria_selected(selected)
+                        // The name under the card truncates at the card's
+                        // width, so the full one is a hover away.
+                        .tooltip({
+                            let label = option.label.clone();
+                            move |window, cx| Tooltip::new(label.clone()).build(window, cx)
+                        })
                         .cursor_pointer()
                         .rounded(design.px(6.0))
                         // The border width never changes: the colour alone
