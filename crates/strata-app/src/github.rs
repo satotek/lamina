@@ -311,9 +311,12 @@ fn create_pull_request(
     window: &mut Window,
     cx: &mut App,
 ) {
+    let proxy = Settings::get(cx).proxy.clone();
     let handle = window.window_handle();
     let task = cx.background_executor().spawn(async move {
-        core_tools::create_pull_request(&gh, &workdir, &branch).map_err(|error| error.to_string())
+        let policy = crate::proxy::resolve_policy("https://github.com", &proxy);
+        core_tools::create_pull_request_with_proxy(&gh, &workdir, &branch, &policy)
+            .map_err(|error| error.to_string())
     });
     cx.spawn(async move |cx| {
         let Err(error) = task.await else {

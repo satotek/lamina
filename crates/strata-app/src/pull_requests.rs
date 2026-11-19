@@ -546,10 +546,16 @@ impl RepoView {
             return;
         }
 
+        let proxy = Settings::get(cx).proxy.clone();
+        let url = format!("https://{}", remote.host);
         let generation = self.pull_requests.begin();
         self.notify_if_active(cx);
         let task = cx.background_executor().spawn(async move {
-            strata_core::forge::pull_requests_for_branches_with(&gh, &workdir)
+            use strata_core::forge::ForgeCli as _;
+            let policy = crate::proxy::resolve_policy(&url, &proxy);
+            strata_core::forge::Gh::new(&gh)
+                .with_proxy(policy)
+                .pull_requests_for_branches(&workdir)
                 .map_err(|error| error.to_string())
         });
         cx.spawn(async move |this, cx| {
@@ -673,13 +679,19 @@ impl RepoView {
             return;
         }
 
+        let proxy = Settings::get(cx).proxy.clone();
+        let url = format!("https://{}", remote.host);
         self.pull_requests.checkout_running = true;
         self.status_error = None;
         self.status_note = Some(t!("pr.checking_out", number = number).to_string());
         cx.notify();
 
         let task = cx.background_executor().spawn(async move {
-            strata_core::forge::checkout_pull_request_with(&gh, &workdir, number)
+            use strata_core::forge::ForgeCli as _;
+            let policy = crate::proxy::resolve_policy(&url, &proxy);
+            strata_core::forge::Gh::new(&gh)
+                .with_proxy(policy)
+                .checkout_pull_request(&workdir, number)
                 .map_err(|error| error.to_string())
         });
         cx.spawn(async move |this, cx| {

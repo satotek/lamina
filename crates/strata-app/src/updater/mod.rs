@@ -142,6 +142,7 @@ fn check_now(trigger: CheckTrigger, cx: &mut App) {
     }
 
     let skipped_version = Settings::get(cx).updates.skipped_version.clone();
+    let proxy = Settings::get(cx).proxy.clone();
     let exe = std::env::current_exe().ok();
     let install_kind =
         detect_install_kind(Platform::current(), exe.as_deref(), cfg!(debug_assertions));
@@ -152,7 +153,7 @@ fn check_now(trigger: CheckTrigger, cx: &mut App) {
     }
 
     let task = cx.background_executor().spawn(async move {
-        fetch_and_evaluate(trigger, skipped_version.as_deref(), install_kind)
+        fetch_and_evaluate(trigger, skipped_version.as_deref(), install_kind, &proxy)
     });
 
     cx.spawn(async move |cx| {
@@ -180,12 +181,13 @@ fn fetch_and_evaluate(
     trigger: CheckTrigger,
     skipped_version: Option<&str>,
     install_kind: InstallKind,
+    proxy: &settings::ProxySettings,
 ) -> Result<UpdateDecision, CheckError> {
     if let Err(err) = parse_public_key(UPDATE_PUBLIC_KEY) {
         return Err(CheckError::Update(err));
     }
 
-    let agent = http_agent();
+    let agent = crate::proxy::http_agent(MANIFEST_URL, proxy, Duration::from_secs(30));
     let manifest_bytes = fetch_bytes(&agent, MANIFEST_URL, MAX_MANIFEST_BYTES)?;
     let sig_bytes = fetch_bytes(&agent, MANIFEST_SIG_URL, MAX_SIG_BYTES)?;
     let sig_text = String::from_utf8(sig_bytes)
@@ -360,9 +362,10 @@ fn launch_download_and_install(
     })
     .detach();
 
+    let proxy = Settings::get(cx).proxy.clone();
     let bg_progress = Arc::clone(&progress);
     let task = cx.background_executor().spawn(async move {
-        let result = download_verify_and_install(&tag, &asset, target, &bg_progress);
+        let result = download_verify_and_install(&tag, &asset, target, &proxy, &bg_progress);
         bg_progress.done.store(true, Ordering::Relaxed);
         result
     });
@@ -403,6 +406,7 @@ fn download_verify_and_install(
     tag: &str,
     asset: &ManifestAsset,
     target: InstallTarget,
+    proxy: &settings::ProxySettings,
     progress: &DownloadProgress,
 ) -> Result<InstallOutcome, String> {
     if let Err(err) = parse_public_key(UPDATE_PUBLIC_KEY) {
@@ -413,7 +417,7 @@ fn download_verify_and_install(
     }
 
     let url = asset_download_url(tag, &asset.name).map_err(|err| err.to_string())?;
-    let agent = http_agent();
+    let agent = crate::proxy::http_agent(&url, proxy, Duration::from_secs(30));
 
     let staging_dir = tempfile::Builder::new()
         .prefix("strata-update-")
@@ -512,20 +516,6 @@ fn download_and_verify(
 
     verify_reader_against_asset(UPDATE_PUBLIC_KEY, &mut file, &asset.minisig, &asset.sha256)
         .map_err(|err| err.to_string())
-}
-
-fn http_agent() -> ureq::Agent {
-    let tls = ureq::tls::TlsConfig::builder()
-        .root_certs(ureq::tls::RootCerts::PlatformVerifier)
-        .unversioned_rustls_crypto_provider(Arc::new(rustls::crypto::ring::default_provider()))
-        .build();
-    ureq::Agent::config_builder()
-        .tls_config(tls)
-        .user_agent(format!("Strata/{CURRENT_VERSION}"))
-        .timeout_connect(Some(Duration::from_secs(30)))
-        .timeout_recv_response(Some(Duration::from_secs(30)))
-        .build()
-        .into()
 }
 
 fn fetch_bytes(agent: &ureq::Agent, url: &str, limit: usize) -> Result<Vec<u8>, CheckError> {

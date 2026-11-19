@@ -81,7 +81,9 @@ pub fn init(cx: &mut App) {
 /// Runs both detections again, off the UI thread. Called at startup, when a
 /// tool's on/off setting changes, and when the settings window opens.
 pub fn redetect(cx: &mut App) {
-    let root = Settings::get(cx).tools.ghq.root.clone();
+    let settings = Settings::get(cx);
+    let root = settings.tools.ghq.root.clone();
+    let proxy = settings.proxy.clone();
     let generation = {
         let tooling = cx.global_mut::<Tooling>();
         tooling.generation += 1;
@@ -94,9 +96,10 @@ pub fn redetect(cx: &mut App) {
         // what tells "not installed" from "installed but unusable".
         let ghq_installed = core_tools::find_binary("ghq").is_some();
         let gh_installed = core_tools::find_binary("gh").is_some();
+        let gh_proxy = crate::proxy::resolve_policy("https://github.com", &proxy);
         (
             install_state(ghq_installed, core_tools::detect_ghq(root.as_deref())),
-            install_state(gh_installed, core_tools::detect_gh()),
+            install_state(gh_installed, core_tools::detect_gh_with_proxy(&gh_proxy)),
         )
     });
     cx.spawn(async move |cx| {

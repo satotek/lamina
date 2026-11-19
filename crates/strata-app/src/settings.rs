@@ -33,6 +33,7 @@ pub struct Settings {
     pub privacy: Privacy,
     pub commit_graph: CommitGraphSettings,
     pub updates: UpdateSettings,
+    pub proxy: ProxySettings,
 }
 
 impl Global for Settings {}
@@ -474,6 +475,48 @@ impl Default for UpdateSettings {
     }
 }
 
+/// How Strata routes network traffic through a proxy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyMode {
+    /// Follow OS proxy settings (with fallback to standard proxy env vars).
+    #[default]
+    System,
+    /// Disable proxy usage and clear inherited proxy environment variables.
+    None,
+    /// Route traffic through an explicitly configured proxy endpoint.
+    Manual,
+}
+
+/// App-wide network proxy configuration.
+///
+/// The manual proxy password is stored in the OS credential store via
+/// `crate::proxy`, never in `settings.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProxySettings {
+    pub mode: ProxyMode,
+    pub scheme: strata_core::proxy::ProxyScheme,
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    /// Comma-separated hosts, domains, or CIDRs that bypass the proxy.
+    pub no_proxy: String,
+}
+
+impl Default for ProxySettings {
+    fn default() -> Self {
+        Self {
+            mode: ProxyMode::System,
+            scheme: strata_core::proxy::ProxyScheme::Http,
+            host: String::new(),
+            port: 8080,
+            username: String::new(),
+            no_proxy: String::new(),
+        }
+    }
+}
+
 impl Settings {
     pub fn get(cx: &App) -> &Settings {
         cx.global::<Settings>()
@@ -610,6 +653,14 @@ pub fn settings_file() -> Option<PathBuf> {
 pub fn saved_git_executable() -> Option<PathBuf> {
     settings_path()
         .map(|path| Settings::load(&path).behaviour.git_executable)
+        .unwrap_or_default()
+}
+
+/// The proxy mode in the saved settings file, used when opening a repository
+/// before GPUI's [`Settings`] global is initialised.
+pub fn saved_proxy_mode() -> ProxyMode {
+    settings_path()
+        .map(|path| Settings::load(&path).proxy.mode)
         .unwrap_or_default()
 }
 
@@ -956,5 +1007,37 @@ mod tests {
         let mut coalescer = SaveCoalescer::new();
         assert!(!coalescer.pending());
         assert!(!coalescer.take(0));
+    }
+
+    #[test]
+    fn proxy_settings_round_trip_and_omit_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+
+        // Missing `proxy` key defaults to System mode.
+        std::fs::write(&path, r#"{"appearance":{"theme":"dark"}}"#).unwrap();
+        let loaded = Settings::load(&path);
+        assert_eq!(loaded.proxy, ProxySettings::default());
+        assert_eq!(loaded.proxy.mode, ProxyMode::System);
+
+        let settings = Settings {
+            proxy: ProxySettings {
+                mode: ProxyMode::Manual,
+                scheme: strata_core::proxy::ProxyScheme::Socks5h,
+                host: "proxy.example.com".into(),
+                port: 1080,
+                username: "alice".into(),
+                no_proxy: "localhost,10.0.0.0/8".into(),
+            },
+            ..Settings::default()
+        };
+        settings.save(&path).unwrap();
+
+        let json = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !json.contains("\"password\""),
+            "password must never be stored in settings.json: {json}"
+        );
+        assert_eq!(Settings::load(&path), settings);
     }
 }

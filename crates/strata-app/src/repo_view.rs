@@ -159,7 +159,18 @@ impl Launch {
         on_event: impl Fn(SessionEvent) + Send + Sync + 'static,
         events: UnboundedReceiver<SessionEvent>,
     ) -> Self {
-        match Session::open_with(path, SessionOptions { git_executable }, on_event) {
+        let proxy = match crate::settings::saved_proxy_mode() {
+            crate::settings::ProxyMode::None => strata_core::proxy::ProxyPolicy::Clear,
+            _ => strata_core::proxy::ProxyPolicy::Inherit,
+        };
+        match Session::open_with(
+            path,
+            SessionOptions {
+                git_executable,
+                proxy,
+            },
+            on_event,
+        ) {
             Ok(session) => {
                 let session: Box<dyn RepositorySession> = Box::new(session);
                 let name = repo_name(session.as_ref());
@@ -549,6 +560,8 @@ pub struct RepoView {
     window_handle: Option<AnyWindowHandle>,
     autofetch: Option<Task<()>>,
     last_autofetch: Instant,
+    synced_proxy: Option<(crate::settings::ProxySettings, String, u64)>,
+    proxy_sync_generation: u64,
     #[cfg(feature = "terminal")]
     pub(crate) terminal: Option<Entity<crate::terminal_panel::TerminalPanel>>,
     #[cfg(feature = "terminal")]
@@ -730,6 +743,8 @@ impl RepoView {
             window_handle: Some(window.window_handle()),
             autofetch: None,
             last_autofetch: Instant::now(),
+            synced_proxy: None,
+            proxy_sync_generation: 0,
             #[cfg(feature = "terminal")]
             terminal: None,
             #[cfg(feature = "terminal")]
@@ -801,6 +816,7 @@ impl RepoView {
                 // rows are read before the reflog pane is ever opened.
                 view.refresh_reflog(cx);
                 view.sync_autofetch(cx);
+                view.sync_proxy(cx);
                 view.check_lfs_notice(cx);
                 if view.active {
                     view.publish_repository(cx);
@@ -872,6 +888,61 @@ impl RepoView {
         } else {
             self.autofetch = None;
         }
+    }
+
+    /// Resolves the active proxy policy for this repository's remotes on a
+    /// background thread and pushes it to the session's `git` runner.
+    fn sync_proxy(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let settings = crate::settings::Settings::get(cx).proxy.clone();
+        let probe_url = Self::proxy_probe_url(session.as_ref());
+        let password_rev = crate::proxy::password_revision();
+        if self.synced_proxy.as_ref() == Some(&(settings.clone(), probe_url.clone(), password_rev))
+        {
+            return;
+        }
+        self.synced_proxy = Some((settings.clone(), probe_url.clone(), password_rev));
+        self.proxy_sync_generation = self.proxy_sync_generation.wrapping_add(1);
+        let generation = self.proxy_sync_generation;
+        cx.spawn(async move |this, cx| {
+            let policy = cx
+                .background_executor()
+                .spawn(async move { crate::proxy::resolve_policy(&probe_url, &settings) })
+                .await;
+            let _ = this.update(cx, |this, _cx| {
+                if this.proxy_sync_generation != generation {
+                    return;
+                }
+                if let Some(session) = this.session.as_ref() {
+                    session.set_proxy(policy);
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn proxy_probe_url(session: &dyn RepositorySession) -> String {
+        let snapshot = session.snapshot();
+        let ordered = snapshot
+            .remotes
+            .iter()
+            .filter(|remote| remote.name == "origin")
+            .chain(
+                snapshot
+                    .remotes
+                    .iter()
+                    .filter(|remote| remote.name != "origin"),
+            );
+        for remote in ordered {
+            for url in [&remote.fetch_url, &remote.push_url].into_iter().flatten() {
+                if !url.trim().is_empty() {
+                    return url.clone();
+                }
+            }
+        }
+        "https://github.com".to_owned()
     }
 
     /// Tells the config viewer which repository the next command opens.
@@ -1148,6 +1219,7 @@ impl RepoView {
     fn on_event(&mut self, event: SessionEvent, cx: &mut Context<Self>) {
         match event {
             SessionEvent::SnapshotUpdated { .. } => {
+                self.sync_proxy(cx);
                 if !self.active {
                     self.pending_sync = true;
                     return;
@@ -2288,6 +2360,7 @@ impl RepoView {
     /// changed, so a new context size or ignore-whitespace shows at once.
     fn settings_changed(&mut self, cx: &mut Context<Self>) {
         self.sync_autofetch(cx);
+        self.sync_proxy(cx);
         self.pull_requests_setting_changed(crate::settings::Settings::get(cx).tools.gh.enabled, cx);
         let show_signatures = crate::settings::Settings::get(cx)
             .history

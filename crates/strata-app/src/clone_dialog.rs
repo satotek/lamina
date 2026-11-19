@@ -513,7 +513,9 @@ impl CloneDialog {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let binary = Settings::get(cx).behaviour.git_executable.clone();
+        let settings = Settings::get(cx);
+        let binary = settings.behaviour.git_executable.clone();
+        let proxy = settings.proxy.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         self.cancel = Some(Arc::clone(&cancel));
         self.attempt = Some(target.clone());
@@ -533,27 +535,30 @@ impl CloneDialog {
             // The dialog can be closed while git waits for a credential, so the
             // handler watches the same flag the clone itself does.
             let prompt_sender = sender.clone();
-            let runner = runner_for(&worker_target, binary).with_askpass(move |prompt| {
-                let (reply, answer) = mpsc::channel();
-                let message = Message::Askpass {
-                    prompt: prompt.text,
-                    secret: prompt.secret,
-                    reply,
-                };
-                if prompt_sender.send(message).is_err() {
-                    return None;
-                }
-                loop {
-                    if prompt_cancel.load(Ordering::SeqCst) {
+            let policy = crate::proxy::resolve_policy(&url, &proxy);
+            let runner = runner_for(&worker_target, binary)
+                .with_proxy(policy)
+                .with_askpass(move |prompt| {
+                    let (reply, answer) = mpsc::channel();
+                    let message = Message::Askpass {
+                        prompt: prompt.text,
+                        secret: prompt.secret,
+                        reply,
+                    };
+                    if prompt_sender.send(message).is_err() {
                         return None;
                     }
-                    match answer.recv_timeout(PROMPT_POLL) {
-                        Ok(answer) => return answer.map(Answer::from_string),
-                        Err(mpsc::RecvTimeoutError::Timeout) => {}
-                        Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+                    loop {
+                        if prompt_cancel.load(Ordering::SeqCst) {
+                            return None;
+                        }
+                        match answer.recv_timeout(PROMPT_POLL) {
+                            Ok(answer) => return answer.map(Answer::from_string),
+                            Err(mpsc::RecvTimeoutError::Timeout) => {}
+                            Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+                        }
                     }
-                }
-            });
+                });
             let result = clone_repository(
                 &runner,
                 &url,

@@ -56,9 +56,16 @@ log = "0.4"
 
 # Blocking HTTP client for checking and downloading updates on the background
 # executor; rustls with the platform verifier avoids an async runtime, system
-# OpenSSL dependencies, and bundled root-certificate crates.
-ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "platform-verifier", "gzip"] }
+# OpenSSL dependencies, and bundled root-certificate crates. `socks-proxy`
+# lets ureq route updates through configured SOCKS4/SOCKS5 proxies.
+ureq = { version = "3", default-features = false, features = ["rustls-no-provider", "platform-verifier", "gzip", "socks-proxy"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+
+# Stores the manual proxy password in the OS credential store rather than
+# plaintext `settings.json`. Only `v1` is enabled, keeping the backend set to
+# macOS Keychain, Windows Credential Manager, and pure-Rust zbus Secret Service
+# on Linux without pulling in extra cloud/hardware or system-dbus bindings.
+keyring = { version = "4", default-features = false, features = ["v1"] }
 
 # Verifies release manifests and downloaded installers against the embedded
 # Ed25519 minisign public key before offering or installing any update.
