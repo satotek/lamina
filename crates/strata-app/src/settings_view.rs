@@ -344,7 +344,7 @@ mod tests {
 
         // A click handler runs inside an update of its own window, which is
         // exactly where the button calls this.
-        visual_cx.update(|window, cx| open_about(window, cx));
+        visual_cx.update(open_about);
         visual_cx.run_until_parked();
 
         assert!(visual_cx.update(|_, cx| crate::about::is_open(cx)));
