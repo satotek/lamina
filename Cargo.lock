@@ -5115,6 +5115,117 @@ dependencies = [
 ]
 
 [[package]]
+name = "lamina-app"
+version = "0.1.10"
+dependencies = [
+ "env_logger",
+ "futures",
+ "gpui-component",
+ "gpui-kit-assets",
+ "gpui-pre",
+ "gpui-pre-platform",
+ "hex",
+ "image",
+ "keyring",
+ "lamina-core",
+ "lamina-term",
+ "log",
+ "minisign",
+ "minisign-verify",
+ "rust-i18n",
+ "rustls",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
+ "toml 1.2.1+spec-1.1.0",
+ "ureq",
+ "winresource",
+]
+
+[[package]]
+name = "lamina-core"
+version = "0.1.10"
+dependencies = [
+ "chardetng",
+ "core-foundation 0.9.4",
+ "encoding_rs",
+ "gix",
+ "imara-diff",
+ "insta",
+ "log",
+ "memchr",
+ "notify",
+ "regex",
+ "serde",
+ "serde_json",
+ "system-configuration",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tree-sitter",
+ "tree-sitter-bash",
+ "tree-sitter-c",
+ "tree-sitter-cpp",
+ "tree-sitter-css",
+ "tree-sitter-go",
+ "tree-sitter-highlight",
+ "tree-sitter-html",
+ "tree-sitter-javascript",
+ "tree-sitter-json",
+ "tree-sitter-md",
+ "tree-sitter-python",
+ "tree-sitter-rust",
+ "tree-sitter-toml-ng",
+ "tree-sitter-typescript",
+ "tree-sitter-yaml",
+ "unicode-width",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "lamina-remote"
+version = "0.1.10"
+dependencies = [
+ "lamina-core",
+ "lamina-remote-client",
+ "lamina-remote-protocol",
+]
+
+[[package]]
+name = "lamina-remote-client"
+version = "0.1.10"
+dependencies = [
+ "lamina-core",
+ "lamina-remote-protocol",
+]
+
+[[package]]
+name = "lamina-remote-protocol"
+version = "0.1.10"
+dependencies = [
+ "lamina-core",
+ "postcard",
+ "serde",
+ "thiserror 2.0.21",
+ "zstd",
+]
+
+[[package]]
+name = "lamina-term"
+version = "0.1.10"
+dependencies = [
+ "flate2",
+ "futures",
+ "gpui-pre",
+ "gpui-pre-platform",
+ "libc",
+ "portable-pty",
+ "sha2 0.11.1",
+ "tar",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8110,117 +8221,6 @@ name = "str_indices"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d08889ec5408683408db66ad89e0e1f93dff55c73a4ccc71c427d5b277ee47e6"
-
-[[package]]
-name = "strata-app"
-version = "0.1.10"
-dependencies = [
- "env_logger",
- "futures",
- "gpui-component",
- "gpui-kit-assets",
- "gpui-pre",
- "gpui-pre-platform",
- "hex",
- "image",
- "keyring",
- "log",
- "minisign",
- "minisign-verify",
- "rust-i18n",
- "rustls",
- "semver",
- "serde",
- "serde_json",
- "sha2 0.11.1",
- "strata-core",
- "strata-term",
- "tempfile",
- "toml 1.2.1+spec-1.1.0",
- "ureq",
- "winresource",
-]
-
-[[package]]
-name = "strata-core"
-version = "0.1.10"
-dependencies = [
- "chardetng",
- "core-foundation 0.9.4",
- "encoding_rs",
- "gix",
- "imara-diff",
- "insta",
- "log",
- "memchr",
- "notify",
- "regex",
- "serde",
- "serde_json",
- "system-configuration",
- "tempfile",
- "thiserror 2.0.21",
- "tree-sitter",
- "tree-sitter-bash",
- "tree-sitter-c",
- "tree-sitter-cpp",
- "tree-sitter-css",
- "tree-sitter-go",
- "tree-sitter-highlight",
- "tree-sitter-html",
- "tree-sitter-javascript",
- "tree-sitter-json",
- "tree-sitter-md",
- "tree-sitter-python",
- "tree-sitter-rust",
- "tree-sitter-toml-ng",
- "tree-sitter-typescript",
- "tree-sitter-yaml",
- "unicode-width",
- "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "strata-remote"
-version = "0.1.10"
-dependencies = [
- "strata-core",
- "strata-remote-client",
- "strata-remote-protocol",
-]
-
-[[package]]
-name = "strata-remote-client"
-version = "0.1.10"
-dependencies = [
- "strata-core",
- "strata-remote-protocol",
-]
-
-[[package]]
-name = "strata-remote-protocol"
-version = "0.1.10"
-dependencies = [
- "postcard",
- "serde",
- "strata-core",
- "thiserror 2.0.21",
- "zstd",
-]
-
-[[package]]
-name = "strata-term"
-version = "0.1.10"
-dependencies = [
- "flate2",
- "futures",
- "gpui-pre",
- "gpui-pre-platform",
- "libc",
- "portable-pty",
- "sha2 0.11.1",
- "tar",
-]
 
 [[package]]
 name = "streaming-iterator"

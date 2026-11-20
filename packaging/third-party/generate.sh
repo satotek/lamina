@@ -1,7 +1,7 @@
 #!/bin/sh
 # Writes the third-party notices file that ships in every release artifact:
 # the Rust crate licences collected by cargo-about, followed by the Zig-native
-# dependencies that crates/strata-term/build.rs compiles into libghostty-vt.
+# dependencies that crates/lamina-term/build.rs compiles into libghostty-vt.
 #
 #     packaging/third-party/generate.sh dist/THIRD-PARTY-NOTICES.md
 #
@@ -16,7 +16,7 @@ usage() {
     cat <<'EOF'
 Writes the third-party notices file that ships in every release artifact: the
 Rust crate licences collected by cargo-about, followed by the Zig-native
-dependencies that crates/strata-term/build.rs compiles into libghostty-vt.
+dependencies that crates/lamina-term/build.rs compiles into libghostty-vt.
 
     packaging/third-party/generate.sh dist/THIRD-PARTY-NOTICES.md
 

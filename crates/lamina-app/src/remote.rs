@@ -1,0 +1,1709 @@
+//! Fetch, pull and push from the title bar.
+//!
+//! Nothing here runs git. Each command becomes an [`Operation`] on the window's
+//! session, whose operations worker runs it and reports progress and outcome
+//! through [`SessionEvent`]s; `RepoView::on_event` forwards those to [`Remote`].
+//! This module owns only the UI state around them: which of its operations is
+//! running, the progress the status bar shows, and the two decisions that need
+//! a dialog (which remote to publish to, and whether to force a rejected push).
+//!
+//! Authentication is git's business: user credential helpers run first, and
+//! when none answers, the session's askpass bridge asks the window for a
+//! username, password or passphrase (`GIT_TERMINAL_PROMPT=0` still keeps git
+//! off a terminal nobody can see). A failure after that is classified here and
+//! reported with a hint about credential helpers and ssh-agent.
+
+use std::collections::BTreeSet;
+
+use gpui::prelude::*;
+use gpui::{
+    AnyElement, App, Context, Entity, FontWeight, Hsla, IntoElement, Window, actions, div, px,
+    relative,
+};
+use gpui_component::dialog::DialogFooter;
+use gpui_component::notification::Notification;
+use gpui_component::{Icon, Sizable as _, WindowExt as _};
+use gpui_kit_assets::IconName;
+use lamina_core::session::{Operation, OperationId, RepoSnapshot};
+use lamina_core::{HeadInfo, RefInfo, RefKind, RepoState, UpstreamInfo};
+
+use crate::activity::ActivityKind;
+use crate::data::Source;
+use crate::repo_view::RepoView;
+
+/// Width of the slim progress bar in the status bar.
+const PROGRESS_WIDTH: f32 = 90.0;
+
+/// Width of a remote button with its icon and label. The title bar counts it
+/// when it works out how much room the search field has left.
+pub(crate) const LABELLED_BUTTON_WIDTH: f32 = 52.0;
+
+/// The same button as an icon alone, with the label in the tooltip. The
+/// narrowest title bar uses this form.
+pub(crate) const ICON_BUTTON_WIDTH: f32 = 32.0;
+
+/// These are read on the UI thread, so they go through the catalogue instead
+/// of being constants.
+fn detached_head() -> String {
+    t!("remote.detached_head").to_string()
+}
+
+fn busy_reason() -> String {
+    t!("remote.busy").to_string()
+}
+
+fn no_session() -> String {
+    t!("remote.no_session").to_string()
+}
+
+/// Shown with an authentication failure. Lamina did ask for credentials, so
+/// the fix is either correcting them or letting a helper store them.
+fn auth_hint() -> String {
+    t!("remote.auth_hint").to_string()
+}
+
+actions!(lamina, [FetchRemotes, PullBranch, PushBranch]);
+
+/// The platform's primary modifier, spelled the way its menus spell it.
+#[cfg(target_os = "macos")]
+const MODIFIER: &str = "Cmd";
+#[cfg(not(target_os = "macos"))]
+const MODIFIER: &str = "Ctrl";
+
+/// Binds the remote commands to the view's key context. `RepoView`'s root
+/// element handles them, like every other view command.
+pub fn bind(cx: &mut App) {
+    crate::keymap::bind_group(cx, crate::keymap::Group::Remote);
+}
+
+/// What a title-bar button, its key binding or the force offer asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Command {
+    Fetch,
+    Pull,
+    Push,
+}
+
+/// Who asked for a remote command. An automatic fetch runs on a timer, so it
+/// stays quiet on success and never waits on a person for credentials.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Trigger {
+    Manual,
+    Automatic,
+}
+
+/// The operation a running command is; it names the progress line and the
+/// notification.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    Fetch,
+    Pull,
+    Push,
+}
+
+impl Kind {
+    fn label(self) -> String {
+        match self {
+            Kind::Fetch => t!("remote.kind.fetch").to_string(),
+            Kind::Pull => t!("remote.kind.pull").to_string(),
+            Kind::Push => t!("remote.kind.push").to_string(),
+        }
+    }
+
+    /// Title of a failure notification.
+    fn failed(self) -> String {
+        match self {
+            Kind::Fetch => t!("remote.failed.fetch").to_string(),
+            Kind::Pull => t!("remote.failed.pull").to_string(),
+            Kind::Push => t!("remote.failed.push").to_string(),
+        }
+    }
+}
+
+/// Whether a finished operation reports a success or a stop it left behind.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Outcome {
+    Success,
+    /// A pull stopped on conflicts; the repository stays mid-merge or mid-rebase
+    /// for the user to resolve. Core reports it as a normal outcome, not an
+    /// error, so the notification has to name the stop itself.
+    Stopped,
+}
+
+/// A pull that left a merge or rebase in progress stopped on conflicts; any
+/// other successful operation is a success. `Git::pull` deliberately reports a
+/// conflicted stop as `Ok`, so the repository state is what tells them apart.
+fn outcome(kind: Kind, state: RepoState) -> Outcome {
+    if kind == Kind::Pull && matches!(state, RepoState::Merging | RepoState::Rebasing) {
+        Outcome::Stopped
+    } else {
+        Outcome::Success
+    }
+}
+
+/// What the remote controls may act on, read from one snapshot.
+#[derive(Debug, Default)]
+struct Targets {
+    /// False before the first snapshot and in `--fake`, where there is no
+    /// session to run anything on.
+    ready: bool,
+    detached: bool,
+    branch: Option<String>,
+    upstream: Option<UpstreamInfo>,
+    /// Remote names, derived from `refs/remotes`.
+    remotes: Vec<String>,
+}
+
+impl Targets {
+    fn read(snapshot: &RepoSnapshot) -> Self {
+        let (branch, detached) = match snapshot.head.as_ref() {
+            // An unborn branch has no commit to push or pull.
+            Some(HeadInfo::Branch { short_name, target }) => {
+                (target.map(|_| short_name.clone()), false)
+            }
+            Some(HeadInfo::Detached { .. }) => (None, true),
+            None => (None, false),
+        };
+        let upstream = branch
+            .as_ref()
+            .and_then(|branch| snapshot.upstreams.get(branch).cloned());
+        Self {
+            ready: true,
+            detached,
+            branch,
+            upstream,
+            remotes: remotes_of(&snapshot.refs),
+        }
+    }
+
+    /// The branch the buttons act on, or why there is none.
+    fn branch(&self) -> Result<&str, String> {
+        if !self.ready {
+            return Err(no_session());
+        }
+        match &self.branch {
+            Some(branch) => Ok(branch),
+            None if self.detached => Err(detached_head()),
+            None => Err(t!("remote.no_commits").to_string()),
+        }
+    }
+}
+
+/// The remotes a snapshot knows about, from its `refs/remotes` short names.
+///
+/// A remote that was configured but never fetched has no tracking ref, so it
+/// does not appear here; the publish dialog keeps `origin` as its fallback for
+/// exactly that case.
+fn remotes_of(refs: &[RefInfo]) -> Vec<String> {
+    let remotes: BTreeSet<&str> = refs
+        .iter()
+        .filter(|reference| reference.kind == RefKind::RemoteBranch)
+        // `origin/HEAD` and `origin/feature/x` both name the remote `origin`.
+        .filter_map(|reference| remote_of(&reference.short_name))
+        .collect();
+    remotes.into_iter().map(str::to_owned).collect()
+}
+
+/// `origin/main` -> `origin`.
+fn remote_of(reference: &str) -> Option<&str> {
+    reference
+        .split_once('/')
+        .map(|(remote, _)| remote)
+        .filter(|remote| !remote.is_empty())
+}
+
+/// What the Push button will do for the current branch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PushPlan {
+    /// The branch tracks an upstream. `remote` is that upstream's remote when
+    /// its name carries one, which is what a force push needs.
+    Upstream {
+        branch: String,
+        remote: Option<String>,
+    },
+    /// The branch has no upstream: ask which remote to publish it to.
+    Publish { branch: String },
+}
+
+fn push_plan(targets: &Targets) -> Result<PushPlan, String> {
+    let branch = targets.branch()?.to_owned();
+    match &targets.upstream {
+        // A gone upstream behaves like no upstream: pushing recreates it, and
+        // that is exactly what publishing does.
+        Some(upstream) if !upstream.gone => Ok(PushPlan::Upstream {
+            remote: remote_of(&upstream.name).map(str::to_owned),
+            branch,
+        }),
+        _ => Ok(PushPlan::Publish { branch }),
+    }
+}
+
+/// `Pushed feat/x to origin`.
+fn push_message(branch: &str, remote: &str) -> String {
+    t!("remote.pushed", branch = branch, remote = remote).to_string()
+}
+
+/// `Pulled origin/main`: the upstream is git's own name for what arrived.
+fn pull_message(upstream: Option<&str>) -> String {
+    match upstream {
+        Some(upstream) => t!("remote.pulled", upstream = upstream).to_string(),
+        None => t!("remote.pulled_current").to_string(),
+    }
+}
+
+fn commits(count: u32) -> String {
+    if count == 1 {
+        t!("remote.commit.one", count = count).to_string()
+    } else {
+        t!("remote.commit.other", count = count).to_string()
+    }
+}
+
+/// What git's failure means for the UI.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Failure {
+    /// git could not authenticate, even after the askpass prompt.
+    Auth,
+    /// The remote has commits the local branch does not have.
+    NonFastForward,
+    /// The branch has no upstream, so there is nothing to pull from.
+    NoUpstream,
+    Other,
+}
+
+/// git's own words for the conditions the UI reacts to.
+const AUTH: [&str; 7] = [
+    "authentication failed",
+    "could not read username",
+    "could not read password",
+    "terminal prompts disabled",
+    "permission denied (publickey",
+    "host key verification failed",
+    "access denied",
+];
+
+fn classify(error: &str) -> Failure {
+    let lower = error.to_ascii_lowercase();
+    if AUTH.iter().any(|hint| lower.contains(hint)) {
+        return Failure::Auth;
+    }
+    // A rejected lease (`stale info`) is not a non-fast-forward: offering the
+    // same force again would fail the same way, so it stays an ordinary error.
+    let rejected = lower.contains("[rejected]") && !lower.contains("stale info");
+    if rejected || lower.contains("non-fast-forward") || lower.contains("fetch first") {
+        return Failure::NonFastForward;
+    }
+    if lower.contains("has no upstream branch")
+        || lower.contains("no upstream configured for branch")
+    {
+        return Failure::NoUpstream;
+    }
+    Failure::Other
+}
+
+/// git's line for a transport failure that says nothing about the cause; ssh
+/// printed the line above it, and that one names what actually went wrong.
+const GENERIC_REMOTE_FAILURE: &str = "could not read from remote repository";
+
+/// ssh's own explanations for a failed connection. git leaves them untagged
+/// above its generic fatal line, so the picker reaches back for them.
+const TRANSPORT_CAUSES: [&str; 9] = [
+    "permission denied",
+    "host key verification failed",
+    "could not resolve hostname",
+    "connection refused",
+    "connection timed out",
+    "no route to host",
+    "connection closed by",
+    "connection reset by",
+    "network is unreachable",
+];
+
+/// The one line of git's stderr worth reporting.
+///
+/// Progress counters and `hint:` lines are noise in a notification. A push the
+/// remote refused names the branch and the reason on its `! [rejected]` line,
+/// which is more useful than the generic `error: failed to push some refs`;
+/// for everything else git names the problem on a `fatal:`/`error:` line.
+///
+/// An ssh failure is the exception: git reports it as `fatal: Could not read
+/// from remote repository`, which says nothing a person can act on. The cause
+/// (`Permission denied (publickey)`, a host key mismatch, DNS, a port that
+/// refuses connections) is the untagged line ssh printed above it.
+fn first_error_line(error: &str) -> String {
+    let lines: Vec<&str> = error
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("remote:"))
+        .collect();
+    for prefix in ["! [rejected]", "! [remote rejected]", "fatal:", "error:"] {
+        if let Some(index) = lines.iter().position(|line| line.starts_with(prefix)) {
+            if lines[index]
+                .to_ascii_lowercase()
+                .contains(GENERIC_REMOTE_FAILURE)
+                && let Some(cause) = lines[..index]
+                    .iter()
+                    .rev()
+                    .find(|line| explains_transport(line))
+                    .copied()
+            {
+                return squash(cause);
+            }
+            return squash(lines[index]);
+        }
+    }
+    lines
+        .iter()
+        .find(|line| !line.starts_with("hint:"))
+        .map_or_else(|| t!("remote.git_failed").to_string(), |line| squash(line))
+}
+
+fn explains_transport(line: &str) -> bool {
+    let line = line.to_ascii_lowercase();
+    TRANSPORT_CAUSES.iter().any(|cause| line.contains(cause))
+}
+
+/// git pads the rejected-ref line into columns; a notification has one line.
+fn squash(line: &str) -> String {
+    line.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The notification text for a failed operation.
+fn failure_message(failure: Failure, line: &str) -> String {
+    match failure {
+        Failure::Auth => format!("{line} — {}", auth_hint()),
+        Failure::NoUpstream => {
+            format!("{line} — {}", t!("remote.no_upstream_hint"))
+        }
+        Failure::NonFastForward | Failure::Other => line.to_owned(),
+    }
+}
+
+/// The detail line for a failed operation. An automatic fetch cannot ask for
+/// credentials, so its authentication failure says what to do instead of
+/// leaving the user without a next step.
+fn failure_detail(trigger: Trigger, failure: Failure, line: &str) -> String {
+    let detail = failure_message(failure, line);
+    if trigger == Trigger::Automatic && failure == Failure::Auth {
+        format!("{detail} {}", t!("remote.auto_fetch_hint"))
+    } else {
+        detail
+    }
+}
+
+/// Whether an automatic failure has already been announced.
+///
+/// One notification per failing streak; the next successful fetch, manual or
+/// automatic, starts a new streak. Manual commands always announce, because a
+/// person just asked for one and is waiting on its outcome.
+#[derive(Default)]
+struct FailureStreak {
+    failing: bool,
+}
+
+impl FailureStreak {
+    fn announces(&mut self, trigger: Trigger, kind: Kind, failed: bool) -> bool {
+        // The streak is about fetch failures only; a pull or push says nothing
+        // about whether the automatic fetch can reach the remote.
+        if kind != Kind::Fetch {
+            return trigger == Trigger::Manual;
+        }
+        if !failed {
+            self.failing = false;
+            return trigger == Trigger::Manual;
+        }
+        let first = !std::mem::replace(&mut self.failing, true);
+        trigger == Trigger::Manual || first
+    }
+}
+
+/// The retry that turns a rejected push into a force push with lease.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ForceOffer {
+    remote: String,
+    branch: String,
+    set_upstream: bool,
+}
+
+/// One of this module's operations that has not reported back yet.
+struct Running {
+    id: OperationId,
+    kind: Kind,
+    /// Whether a person asked for it or the timer did.
+    trigger: Trigger,
+    /// What a success notification says.
+    success: String,
+    /// The push to retry with `--force-with-lease`, when one is possible.
+    retry: Option<ForceOffer>,
+    /// The branch a successful push may offer a pull request for.
+    pull_request_branch: Option<String>,
+    /// git's latest progress line.
+    text: Option<String>,
+    percent: Option<u8>,
+}
+
+/// Everything the remote UI remembers between frames.
+#[derive(Default)]
+pub(crate) struct Remote {
+    running: Option<Running>,
+    /// Automatic failures are announced once per streak, not on every tick.
+    streak: FailureStreak,
+}
+
+/// Palette subset the remote controls paint with, taken from the window
+/// chrome's palette so the title bar and status bar read as one surface.
+pub(crate) struct Colors {
+    pub(crate) foreground: Hsla,
+    pub(crate) muted_foreground: Hsla,
+    pub(crate) border: Hsla,
+    pub(crate) accent: Hsla,
+    pub(crate) accent_foreground: Hsla,
+    pub(crate) zoom: f32,
+}
+
+impl Colors {
+    fn px(&self, value: f32) -> gpui::Pixels {
+        px(value * self.zoom)
+    }
+}
+
+impl Remote {
+    pub(crate) fn is_running(&self) -> bool {
+        self.running.is_some()
+    }
+
+    /// True when `id` is the automatic fetch, which must never open a
+    /// credential prompt. The askpass path asks this before it touches a
+    /// window, so the timer cannot stop on a modal nobody is looking at.
+    pub(crate) fn cancels_prompt(&self, id: OperationId) -> bool {
+        self.running
+            .as_ref()
+            .is_some_and(|running| running.id == id && running.trigger == Trigger::Automatic)
+    }
+
+    /// An operation of this module started; nothing else to record, the
+    /// progress and the outcome arrive separately.
+    pub(crate) fn on_started(&mut self, id: OperationId, cx: &mut Context<RepoView>, active: bool) {
+        if self
+            .running
+            .as_ref()
+            .is_some_and(|running| running.id == id)
+            && active
+        {
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn on_progress(
+        &mut self,
+        id: OperationId,
+        text: &str,
+        percent: Option<u8>,
+        cx: &mut Context<RepoView>,
+        active: bool,
+    ) {
+        let Some(running) = self.running.as_mut().filter(|running| running.id == id) else {
+            return;
+        };
+        running.text = Some(text.trim().to_owned()).filter(|text| !text.is_empty());
+        // A line without a counter (`From /tmp/origin.git`) must not blank a
+        // bar that is still mid-transfer.
+        if percent.is_some() {
+            running.percent = percent;
+        }
+        if active {
+            cx.notify();
+        }
+    }
+
+    /// Records the end of an operation this module started and works out what
+    /// to tell the user. Operations from other modules are ignored.
+    ///
+    /// The caller shows the [`Finished::announcement`] with [`Announcement::show`].
+    /// It cannot happen here: this runs inside the repository view's update,
+    /// and the pull-request action has to read that same view.
+    pub(crate) fn on_finished(
+        &mut self,
+        id: OperationId,
+        error: Option<&str>,
+        state: RepoState,
+        cx: &mut Context<RepoView>,
+        active: bool,
+    ) -> Finished {
+        let Some(running) = self.running.take() else {
+            return Finished::default();
+        };
+        if running.id != id {
+            self.running = Some(running);
+            return Finished::default();
+        }
+
+        let failure = error.map(|error| (classify(error), first_error_line(error)));
+        // A fetch or push changes the upstreams and pull requests the badges
+        // describe. A failed one leaves them as they were.
+        let refresh = failure.is_none() && matches!(running.kind, Kind::Fetch | Kind::Push);
+        // Recorded before the notification decision so a failure that cannot
+        // be shown still counts as announced, and the streak is judged the same
+        // way whether or not a window is left.
+        let announces = self
+            .streak
+            .announces(running.trigger, running.kind, failure.is_some());
+        let note = match &failure {
+            Some((failure, line)) => {
+                let title = match running.trigger {
+                    Trigger::Automatic => t!("remote.failed.fetch_auto").to_string(),
+                    Trigger::Manual => running.kind.failed(),
+                };
+                Notification::error(failure_detail(running.trigger, *failure, line)).title(title)
+            }
+            None if outcome(running.kind, state) == Outcome::Stopped => {
+                Notification::warning(t!("remote.pull_stopped").to_string())
+                    .title(running.kind.label())
+            }
+            None => Notification::success(running.success.clone()).title(running.kind.label()),
+        };
+        // A branch just pushed is the moment the pull-request form is useful.
+        let pull_request_branch = match &failure {
+            None => running.pull_request_branch.clone(),
+            Some(_) => None,
+        };
+        // A push the remote refused as non-fast-forward is the one failure the
+        // user can resolve in place.
+        let offer = match failure {
+            Some((Failure::NonFastForward, _)) if running.kind == Kind::Push => {
+                running.retry.clone()
+            }
+            _ => None,
+        };
+        // Clear the status-bar segment even when there is no window left to
+        // announce the outcome in.
+        if active {
+            cx.notify();
+        }
+        // An automatic fetch stays quiet while it works and after it succeeds;
+        // only the first failure of a streak is worth interrupting for.
+        let announcement = announces.then_some(Announcement {
+            note,
+            pull_request_branch,
+            offer,
+        });
+        Finished {
+            refresh,
+            announcement,
+        }
+    }
+
+    /// Pretends a push of `branch` is running under `id`, so a test can finish
+    /// it without git.
+    #[cfg(test)]
+    pub(crate) fn start_push_for_test(&mut self, id: OperationId, branch: &str) {
+        self.running = Some(Running {
+            id,
+            kind: Kind::Push,
+            trigger: Trigger::Manual,
+            success: "pushed".to_owned(),
+            retry: None,
+            pull_request_branch: Some(branch.to_owned()),
+            text: None,
+            percent: None,
+        });
+    }
+
+    /// The status bar's operation segment, and nothing while idle.
+    fn status(&self, colors: &Colors) -> Option<AnyElement> {
+        let running = self.running.as_ref()?;
+        let mut row = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .flex_none()
+            .max_w(colors.px(560.0))
+            .child(
+                div()
+                    .flex_none()
+                    .text_color(colors.accent)
+                    .child(running.kind.label()),
+            );
+        if let Some(text) = &running.text {
+            row = row.child(div().min_w_0().truncate().child(text.clone()));
+        }
+        if let Some(percent) = running.percent {
+            row = row
+                .child(
+                    div()
+                        .flex_none()
+                        .w(colors.px(PROGRESS_WIDTH))
+                        .h(colors.px(4.0))
+                        .rounded_full()
+                        .bg(colors.border)
+                        .child(
+                            div()
+                                .h_full()
+                                .rounded_full()
+                                .bg(colors.accent)
+                                .w(relative(percent as f32 / 100.0)),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(colors.muted_foreground)
+                        .child(format!("{percent}%")),
+                );
+        }
+        Some(row.into_any_element())
+    }
+}
+
+/// The window to put notifications and dialogs into.
+///
+/// Session events arrive on the foreground executor, so no window update is in
+/// progress when this runs and the handle can be updated here.
+/// What [`Remote::on_finished`] decided about a finished operation.
+#[derive(Default)]
+pub(crate) struct Finished {
+    /// The command changed the remote state the pull-request badges describe
+    /// (a successful fetch or push).
+    pub(crate) refresh: bool,
+    /// The notification to show, if the outcome is worth one.
+    pub(crate) announcement: Option<Announcement>,
+}
+
+/// A finished operation's notification, shown once the repository view's
+/// update can lend the view out.
+pub(crate) struct Announcement {
+    note: Notification,
+    pull_request_branch: Option<String>,
+    offer: Option<ForceOffer>,
+}
+
+impl Announcement {
+    /// Shows the notification, with the pull-request action when gh can open
+    /// one for the pushed branch, and the force-push offer for a rejected push.
+    pub(crate) fn show(self, view: &RepoView, active: bool, cx: &mut Context<RepoView>) {
+        let note = match self.pull_request_branch.as_deref() {
+            Some(branch) => crate::github::with_create_pr(self.note, view, branch, cx),
+            None => self.note,
+        };
+        let Some(window) = window_handle(cx) else {
+            return;
+        };
+        let entity = cx.entity();
+        let offer = self.offer;
+        let _ = window.update(cx, |_, window, cx| {
+            window.push_notification(note, cx);
+            if active && let Some(offer) = offer {
+                open_force_dialog(entity, offer, window, cx);
+            }
+        });
+    }
+}
+
+fn window_handle(cx: &mut Context<RepoView>) -> Option<gpui::AnyWindowHandle> {
+    cx.active_window()
+        .or_else(|| cx.windows().into_iter().next())
+}
+
+/// Asks before rewriting a remote branch with `--force-with-lease`.
+fn open_force_dialog(
+    entity: Entity<RepoView>,
+    offer: ForceOffer,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let entity = entity.downgrade();
+    crate::ui::confirm(
+        window,
+        cx,
+        crate::ui::Confirm::new(
+            t!("remote.push_rejected").to_string(),
+            t!(
+                "remote.force_detail",
+                remote = offer.remote,
+                branch = offer.branch
+            )
+            .to_string(),
+        )
+        .ok_label(t!("remote.force_push").to_string()),
+        move |_, cx| {
+            let confirmed = offer.clone();
+            let _ = entity.update(cx, |view, cx| view.force_push(confirmed, cx));
+        },
+    );
+}
+
+impl RepoView {
+    /// The Fetch / Pull / Push buttons in the title bar.
+    ///
+    /// `compact` draws each as an icon alone for the narrowest title bar; the
+    /// tooltip then carries the label, and the ahead/behind count stays on the
+    /// button as a badge.
+    pub(crate) fn remote_buttons(
+        &self,
+        source: Option<&Source>,
+        colors: &Colors,
+        compact: bool,
+    ) -> AnyElement {
+        let targets = source.map_or_else(Targets::default, |source| match source {
+            Source::Repo(snapshot) => Targets::read(snapshot),
+            Source::Fake(_) => Targets::default(),
+        });
+        let blocked = self.remote_blocked();
+
+        let entity = self.entity();
+        // The design stacks a 16 px icon over a 10 px label; the badge sits in
+        // the button's top-right corner so it cannot shift the label.
+        let button = |id: &'static str,
+                      icon_name: IconName,
+                      label: gpui::SharedString,
+                      tooltip: String,
+                      enabled: bool,
+                      badge: Option<String>,
+                      command: Command| {
+            let entity = entity.clone();
+            let tooltip = if compact {
+                named_tooltip(&label, tooltip)
+            } else {
+                tooltip
+            };
+            let mut content = div()
+                .relative()
+                .size_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(colors.px(2.0))
+                .text_size(colors.px(10.0))
+                .child(Icon::new(icon_name).with_size(colors.px(16.0)));
+            if !compact {
+                content = content.child(label.clone());
+            }
+            if let Some(count) = badge {
+                // An icon-only button has no label under the icon, so its
+                // badge moves into the corner the label would have left free.
+                let (top, right) = if compact { (1.0, 2.0) } else { (2.0, 8.0) };
+                content = content.child(
+                    div()
+                        .absolute()
+                        .top(colors.px(top))
+                        .right(colors.px(right))
+                        .min_w(colors.px(14.0))
+                        .h(colors.px(14.0))
+                        .px(colors.px(3.0))
+                        .rounded_full()
+                        .bg(colors.accent)
+                        .text_color(colors.accent_foreground)
+                        .text_size(colors.px(9.0))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(count.to_string()),
+                );
+            }
+            crate::ui::content_button(id)
+                .ghost()
+                .w(colors.px(if compact {
+                    ICON_BUTTON_WIDTH
+                } else {
+                    LABELLED_BUTTON_WIDTH
+                }))
+                .h(colors.px(40.0))
+                .p_0()
+                .text_color(if enabled {
+                    colors.foreground
+                } else {
+                    colors.muted_foreground
+                })
+                .disabled(!enabled)
+                .tooltip(tooltip)
+                .on_click(move |_, window, cx| {
+                    entity.update(cx, |view, cx| {
+                        view.remote_command(command, Trigger::Manual, window, cx);
+                    });
+                })
+                .child(content)
+        };
+
+        let tracked = targets.upstream.as_ref().filter(|upstream| !upstream.gone);
+        // An unknown count gets a "?" badge: omitting it would read as level,
+        // which is exactly what the shallow history cannot promise.
+        let badge = |count: Option<u32>| match count {
+            Some(count) if count > 0 => Some(count.to_string()),
+            None => Some("?".to_owned()),
+            Some(_) => None,
+        };
+        let behind = tracked.and_then(|upstream| badge(upstream.behind));
+        let ahead = tracked.and_then(|upstream| badge(upstream.ahead));
+
+        let fetch_label = t!("remote.kind.fetch").to_string();
+        let pull_label = t!("remote.kind.pull").to_string();
+        let push_label = t!("remote.kind.push").to_string();
+        let fetch = button(
+            "remote-fetch",
+            IconName::RefreshCw,
+            fetch_label.clone().into(),
+            fetch_tooltip(blocked.as_deref()),
+            blocked.is_none(),
+            None,
+            Command::Fetch,
+        );
+
+        let pull = button(
+            "remote-pull",
+            IconName::ArrowDown,
+            pull_label.clone().into(),
+            pull_tooltip(&targets, blocked.as_deref()),
+            blocked.is_none() && targets.branch().is_ok(),
+            behind,
+            Command::Pull,
+        );
+
+        let push = button(
+            "remote-push",
+            IconName::ArrowUp,
+            push_label.clone().into(),
+            push_tooltip(&targets, blocked.as_deref()),
+            blocked.is_none() && push_plan(&targets).is_ok(),
+            ahead,
+            Command::Push,
+        );
+
+        div()
+            .flex()
+            .items_center()
+            .gap(colors.px(2.0))
+            .flex_none()
+            .child(fetch)
+            .child(pull)
+            .child(push)
+            .into_any_element()
+    }
+
+    /// The status bar's running-operation segment.
+    pub(crate) fn remote_status(&self, colors: &Colors) -> Option<AnyElement> {
+        self.remote.status(colors)
+    }
+
+    /// Why a remote command cannot run right now, if it cannot.
+    pub(crate) fn remote_blocked(&self) -> Option<String> {
+        if self.session.is_none() {
+            return Some(no_session());
+        }
+        if self.remote.is_running()
+            || self.branches.is_running()
+            || self
+                .session
+                .as_ref()
+                .is_some_and(|session| session.snapshot().busy.is_some())
+        {
+            return Some(busy_reason());
+        }
+        None
+    }
+
+    /// Runs what a button or its key binding asked for.
+    pub(crate) fn remote_command(
+        &mut self,
+        command: Command,
+        trigger: Trigger,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.remote_blocked().is_some() {
+            return;
+        }
+        match command {
+            Command::Fetch => self.fetch_remotes(trigger, cx),
+            Command::Pull => self.pull(cx),
+            Command::Push => self.push(window, cx),
+        }
+    }
+
+    /// Fetches every remote, pruning branches that were deleted on it unless
+    /// the user turned pruning off.
+    ///
+    /// Fetching only the current branch's remote would leave every other
+    /// remote's badges stale, and prune is what stops a branch deleted on the
+    /// server from keeping its remote-tracking ref forever.
+    fn fetch_remotes(&mut self, trigger: Trigger, cx: &mut Context<Self>) {
+        self.start_remote(
+            Operation::Fetch {
+                remote: None,
+                prune: crate::settings::Settings::get(cx).behaviour.prune_on_fetch,
+            },
+            Kind::Fetch,
+            t!("remote.fetched_all").to_string(),
+            None,
+            None,
+            trigger,
+            cx,
+        );
+    }
+
+    /// Fetches the history below a shallow clone's boundary.
+    ///
+    /// The commit details offer this when the selected commit is the boundary;
+    /// it runs through the same progress bar and outcome notification as Fetch.
+    pub(crate) fn fetch_full_history(&mut self, cx: &mut Context<Self>) {
+        if self.remote_blocked().is_some() {
+            return;
+        }
+        self.start_remote(
+            Operation::FetchUnshallow,
+            Kind::Fetch,
+            t!("remote.fetched_full").to_string(),
+            None,
+            None,
+            Trigger::Manual,
+            cx,
+        );
+    }
+
+    /// Pulls the current branch's upstream, with the merge or rebase behaviour
+    /// the repository's own git config asks for.
+    fn pull(&mut self, cx: &mut Context<Self>) {
+        let targets = self.remote_targets();
+        if targets.branch().is_err() {
+            return;
+        }
+        let upstream = targets
+            .upstream
+            .as_ref()
+            .filter(|upstream| !upstream.gone)
+            .map(|upstream| upstream.name.as_str());
+        self.start_remote(
+            Operation::Pull { rebase: None },
+            Kind::Pull,
+            pull_message(upstream),
+            None,
+            None,
+            Trigger::Manual,
+            cx,
+        );
+    }
+
+    fn push(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let targets = self.remote_targets();
+        match push_plan(&targets) {
+            Err(_) => {}
+            Ok(PushPlan::Upstream { branch, remote }) => {
+                let pull_request_branch = Some(branch.clone());
+                let (success, retry) = match remote {
+                    Some(remote) => (
+                        push_message(&branch, &remote),
+                        Some(ForceOffer {
+                            remote,
+                            branch,
+                            set_upstream: false,
+                        }),
+                    ),
+                    None => (
+                        t!("remote.pushed_branch", branch = branch).to_string(),
+                        None,
+                    ),
+                };
+                self.start_remote(
+                    Operation::Push {
+                        remote: None,
+                        branch: None,
+                        set_upstream: false,
+                        force_with_lease: false,
+                    },
+                    Kind::Push,
+                    success,
+                    retry,
+                    pull_request_branch,
+                    Trigger::Manual,
+                    cx,
+                );
+            }
+            Ok(PushPlan::Publish { branch }) => {
+                self.open_publish_dialog(branch, targets.remotes, window, cx)
+            }
+        }
+    }
+
+    /// Asks which remote a branch without an upstream should be published to.
+    fn open_publish_dialog(
+        &mut self,
+        branch: String,
+        remotes: Vec<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // `refs/remotes` is the only remote list a snapshot carries, and a
+        // remote configured but never fetched has none, so `origin` stays the
+        // fallback choice.
+        let remotes = if remotes.is_empty() {
+            vec!["origin".to_owned()]
+        } else {
+            remotes
+        };
+        let entity = cx.weak_entity();
+        window.open_alert_dialog(cx, move |dialog, _, _| {
+            let mut footer = DialogFooter::new().child(
+                crate::ui::button("publish-cancel", t!("common.cancel").to_string())
+                    .size(crate::ui::ButtonSize::Medium)
+                    .on_click(|_, window, cx| window.close_dialog(cx)),
+            );
+            for remote in &remotes {
+                let entity = entity.clone();
+                let branch = branch.clone();
+                let target = remote.clone();
+                footer = footer.child(
+                    crate::ui::button(
+                        format!("publish-{remote}"),
+                        t!("remote.push_to", remote = remote).to_string(),
+                    )
+                    .size(crate::ui::ButtonSize::Medium)
+                    .kind(if remote == "origin" {
+                        crate::ui::ButtonKind::Primary
+                    } else {
+                        crate::ui::ButtonKind::Normal
+                    })
+                    .on_click(move |_, window, cx| {
+                        window.close_dialog(cx);
+                        let remote = target.clone();
+                        let branch = branch.clone();
+                        let _ = entity.update(cx, |view, cx| {
+                            view.publish_branch(remote, branch, cx);
+                        });
+                    }),
+                );
+            }
+            dialog
+                .title(t!("remote.publish_title", branch = branch).to_string())
+                .description(t!("remote.publish_detail").to_string())
+                .footer(footer)
+        });
+    }
+
+    /// Pushes a branch for the first time and records the upstream.
+    fn publish_branch(&mut self, remote: String, branch: String, cx: &mut Context<Self>) {
+        let success = push_message(&branch, &remote);
+        let pull_request_branch = Some(branch.clone());
+        let retry = Some(ForceOffer {
+            remote: remote.clone(),
+            branch: branch.clone(),
+            set_upstream: true,
+        });
+        self.start_remote(
+            Operation::Push {
+                remote: Some(remote),
+                branch: Some(branch),
+                set_upstream: true,
+                force_with_lease: false,
+            },
+            Kind::Push,
+            success,
+            retry,
+            pull_request_branch,
+            Trigger::Manual,
+            cx,
+        );
+    }
+
+    /// Reruns a rejected push with `--force-with-lease`, after confirmation.
+    fn force_push(&mut self, offer: ForceOffer, cx: &mut Context<Self>) {
+        let success = push_message(&offer.branch, &offer.remote);
+        self.start_remote(
+            Operation::Push {
+                remote: Some(offer.remote),
+                branch: Some(offer.branch),
+                set_upstream: offer.set_upstream,
+                force_with_lease: true,
+            },
+            Kind::Push,
+            success,
+            // A rejected lease is reported, not offered again.
+            None,
+            None,
+            Trigger::Manual,
+            cx,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_remote(
+        &mut self,
+        operation: Operation,
+        kind: Kind,
+        success: String,
+        retry: Option<ForceOffer>,
+        pull_request_branch: Option<String>,
+        trigger: Trigger,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let id = session.run(operation);
+        self.activity.begin(id, ActivityKind::Remote, cx);
+        self.remote.running = Some(Running {
+            id,
+            kind,
+            trigger,
+            success,
+            retry,
+            pull_request_branch,
+            text: None,
+            percent: None,
+        });
+        cx.notify();
+    }
+
+    fn remote_targets(&self) -> Targets {
+        self.session
+            .as_ref()
+            .map_or_else(Targets::default, |session| {
+                Targets::read(&session.snapshot())
+            })
+    }
+}
+
+fn shortcut(key: char) -> String {
+    format!("{MODIFIER}+Alt+{key}")
+}
+
+/// An icon-only button has no visible label, so its tooltip has to name it.
+///
+/// The tooltip builders normally open with the button's verb already; the
+/// prefix covers the states that do not, such as a blocked button.
+fn named_tooltip(label: &str, tooltip: String) -> String {
+    if tooltip.starts_with(label) {
+        tooltip
+    } else {
+        t!("remote.tooltip.named", label = label, tooltip = tooltip).to_string()
+    }
+}
+
+fn fetch_tooltip(blocked: Option<&str>) -> String {
+    blocked.map_or_else(
+        || t!("remote.tooltip.fetch", key = shortcut('F')).to_string(),
+        str::to_owned,
+    )
+}
+
+fn pull_tooltip(targets: &Targets, blocked: Option<&str>) -> String {
+    if let Some(blocked) = blocked {
+        return blocked.to_owned();
+    }
+    if let Err(reason) = targets.branch() {
+        return reason.to_owned();
+    }
+    let mut tip = match &targets.upstream {
+        Some(upstream) if !upstream.gone => {
+            t!("remote.tooltip.pull", upstream = upstream.name).to_string()
+        }
+        Some(_) => t!("remote.tooltip.pull_gone").to_string(),
+        None => t!("remote.tooltip.pull_current").to_string(),
+    };
+    if let Some(upstream) = targets.upstream.as_ref().filter(|upstream| !upstream.gone) {
+        match upstream.behind {
+            Some(behind) if behind > 0 => {
+                tip.push_str(&t!("remote.tooltip.behind", commits = commits(behind)));
+            }
+            None => tip.push_str(&t!("remote.tooltip.shallow")),
+            Some(_) => {}
+        }
+    }
+    tip.push_str(&format!(" · {}", shortcut('L')));
+    tip
+}
+
+fn push_tooltip(targets: &Targets, blocked: Option<&str>) -> String {
+    if let Some(blocked) = blocked {
+        return blocked.to_owned();
+    }
+    match push_plan(targets) {
+        Err(reason) => reason.to_owned(),
+        Ok(PushPlan::Upstream { branch, remote }) => {
+            let mut tip = match remote {
+                Some(remote) => {
+                    t!("remote.tooltip.push_to", branch = branch, remote = remote).to_string()
+                }
+                None => t!("remote.tooltip.push_upstream", branch = branch).to_string(),
+            };
+            if let Some(upstream) = targets.upstream.as_ref().filter(|upstream| !upstream.gone) {
+                match upstream.ahead {
+                    Some(ahead) if ahead > 0 => {
+                        tip.push_str(&t!("remote.tooltip.ahead", commits = commits(ahead)));
+                    }
+                    None => tip.push_str(&t!("remote.tooltip.shallow")),
+                    Some(_) => {}
+                }
+            }
+            tip.push_str(&format!(" · {}", shortcut('P')));
+            tip
+        }
+        Ok(PushPlan::Publish { branch }) => t!(
+            "remote.tooltip.publish",
+            branch = branch,
+            key = shortcut('P')
+        )
+        .to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lamina_core::session::CommitList;
+    use lamina_core::{Oid, RepoState, StashInfo, WorktreeStatus};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn oid(byte: u8) -> Oid {
+        format!("{byte:02x}")
+            .repeat(20)
+            .parse()
+            .expect("hex object id")
+    }
+
+    fn reference(short_name: &str, kind: RefKind) -> RefInfo {
+        RefInfo {
+            full_name: match kind {
+                RefKind::LocalBranch => format!("refs/heads/{short_name}"),
+                RefKind::RemoteBranch => format!("refs/remotes/{short_name}"),
+                RefKind::Tag => format!("refs/tags/{short_name}"),
+            },
+            short_name: short_name.to_owned(),
+            kind,
+            target: oid(1),
+        }
+    }
+
+    fn snapshot(head: Option<HeadInfo>, upstreams: &[(&str, UpstreamInfo)]) -> RepoSnapshot {
+        RepoSnapshot {
+            generation: 1,
+            head,
+            refs: Arc::new(Vec::new()),
+            refs_by_commit: Arc::new(HashMap::new()),
+            commits: CommitList::default(),
+            commit_index: Arc::new(HashMap::new()),
+            status: Arc::new(WorktreeStatus::default()),
+            stashes: Arc::new(Vec::<StashInfo>::new()),
+            upstreams: Arc::new(
+                upstreams
+                    .iter()
+                    .map(|(name, upstream)| ((*name).to_owned(), upstream.clone()))
+                    .collect(),
+            ),
+            state: RepoState::Normal,
+            conflicts: Arc::new(Vec::new()),
+            busy: None,
+            remotes: Vec::new(),
+        }
+    }
+
+    fn upstream(name: &str, ahead: u32, behind: u32, gone: bool) -> UpstreamInfo {
+        UpstreamInfo {
+            name: name.to_owned(),
+            ahead: Some(ahead),
+            behind: Some(behind),
+            gone,
+        }
+    }
+
+    fn unknown_upstream(name: &str) -> UpstreamInfo {
+        UpstreamInfo {
+            name: name.to_owned(),
+            ahead: None,
+            behind: None,
+            gone: false,
+        }
+    }
+
+    fn branch_head(name: &str) -> HeadInfo {
+        HeadInfo::Branch {
+            short_name: name.to_owned(),
+            target: Some(oid(2)),
+        }
+    }
+
+    #[test]
+    fn remotes_come_from_remote_tracking_refs_once_each() {
+        let refs = vec![
+            reference("main", RefKind::LocalBranch),
+            reference("v1.0", RefKind::Tag),
+            reference("origin/main", RefKind::RemoteBranch),
+            reference("origin/HEAD", RefKind::RemoteBranch),
+            reference("origin/feature/login", RefKind::RemoteBranch),
+            reference("upstream/main", RefKind::RemoteBranch),
+        ];
+        assert_eq!(remotes_of(&refs), ["origin", "upstream"]);
+        assert!(
+            remotes_of(&[reference("main", RefKind::LocalBranch)]).is_empty(),
+            "a repository without remote refs lists no remotes"
+        );
+    }
+
+    #[test]
+    fn an_upstream_name_carries_its_remote() {
+        assert_eq!(remote_of("origin/main"), Some("origin"));
+        assert_eq!(remote_of("upstream/feature/login"), Some("upstream"));
+        assert_eq!(remote_of("main"), None);
+        assert_eq!(remote_of("/main"), None);
+    }
+
+    #[test]
+    fn git_failures_are_classified_for_the_ui() {
+        assert_eq!(
+            classify(
+                "fatal: could not read Username for 'https://example.com': terminal prompts disabled"
+            ),
+            Failure::Auth
+        );
+        assert_eq!(
+            classify(
+                "git@example.com: Permission denied (publickey).\nfatal: Could not read from remote repository."
+            ),
+            Failure::Auth
+        );
+        assert_eq!(
+            classify(
+                "To /tmp/origin.git\n ! [rejected]        main -> main (fetch first)\nerror: failed to push some refs"
+            ),
+            Failure::NonFastForward
+        );
+        assert_eq!(
+            classify(" ! [rejected]        main -> main (non-fast-forward)"),
+            Failure::NonFastForward
+        );
+        assert_eq!(
+            classify("fatal: The current branch feat/x has no upstream branch"),
+            Failure::NoUpstream
+        );
+        assert_eq!(
+            classify(" ! [rejected]        main -> main (stale info)"),
+            Failure::Other,
+            "a rejected lease must not offer the same force again"
+        );
+        assert_eq!(classify("fatal: not a git repository"), Failure::Other);
+    }
+
+    #[test]
+    fn the_most_useful_error_line_is_the_one_reported() {
+        let push = "To /tmp/origin.git\n ! [rejected]        main -> main (fetch first)\nerror: failed to push some refs to '/tmp/origin.git'\nhint: Updates were rejected because the remote contains work\nhint: See the 'Note about fast-forwards' section";
+        let cases: &[(&str, &str)] = &[
+            (push, "! [rejected] main -> main (fetch first)"),
+            (
+                "remote: progress\nfatal: Authentication failed for 'https://example.com/repo.git'",
+                "fatal: Authentication failed for 'https://example.com/repo.git'",
+            ),
+            // `unable to access` already carries the cause git found.
+            (
+                "fatal: unable to access 'https://example.com/repo.git/': Could not resolve host: example.com",
+                "fatal: unable to access 'https://example.com/repo.git/': Could not resolve host: example.com",
+            ),
+            // ssh's cause arrives untagged above git's generic fatal line.
+            (
+                "azureuser@127.0.0.1: Permission denied (publickey,password).\nfatal: Could not read from remote repository.\n\nPlease make sure you have the correct access rights\nand the repository exists.",
+                "azureuser@127.0.0.1: Permission denied (publickey,password).",
+            ),
+            (
+                "Host key verification failed.\nfatal: Could not read from remote repository.",
+                "Host key verification failed.",
+            ),
+            (
+                "ssh: Could not resolve hostname nope.invalid: nodename nor servname provided, or not known\nfatal: Could not read from remote repository.",
+                "ssh: Could not resolve hostname nope.invalid: nodename nor servname provided, or not known",
+            ),
+            (
+                "ssh: connect to host 127.0.0.1 port 22: Connection refused\nfatal: Could not read from remote repository.",
+                "ssh: connect to host 127.0.0.1 port 22: Connection refused",
+            ),
+            (
+                "ssh: connect to host 10.0.0.1 port 22: Connection timed out\nfatal: Could not read from remote repository.",
+                "ssh: connect to host 10.0.0.1 port 22: Connection timed out",
+            ),
+            (
+                "ssh: connect to host 10.0.0.1 port 22: No route to host\nfatal: Could not read from remote repository.",
+                "ssh: connect to host 10.0.0.1 port 22: No route to host",
+            ),
+            (
+                "ssh_exchange_identification: Connection closed by remote host\nfatal: Could not read from remote repository.",
+                "ssh_exchange_identification: Connection closed by remote host",
+            ),
+            // Nothing above the generic line explains it: keep git's own words.
+            (
+                "fatal: Could not read from remote repository.",
+                "fatal: Could not read from remote repository.",
+            ),
+            ("  \n only chatter here \n", "only chatter here"),
+            ("hint: nothing but guidance", "git failed"),
+            ("", "git failed"),
+        ];
+        for (error, expected) in cases {
+            assert_eq!(
+                first_error_line(error),
+                *expected,
+                "wrong line for this git output:\n{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_push_names_the_branch_it_could_not_rewrite() {
+        assert_eq!(
+            failure_message(
+                Failure::NonFastForward,
+                "! [rejected] main -> main (fetch first)"
+            ),
+            "! [rejected] main -> main (fetch first)"
+        );
+        let auth = failure_message(Failure::Auth, "fatal: Authentication failed");
+        assert!(auth.starts_with("fatal: Authentication failed — "));
+        assert!(
+            auth.contains("credential helper") && auth.contains("ssh-agent"),
+            "the hint has to say what to configure: {auth}"
+        );
+        assert!(
+            failure_message(Failure::NoUpstream, "fatal: no upstream").contains("publish"),
+            "a missing upstream points at the publish flow"
+        );
+    }
+
+    #[test]
+    fn notifications_name_what_moved() {
+        assert_eq!(push_message("feat/x", "origin"), "Pushed feat/x to origin");
+        assert_eq!(pull_message(Some("origin/main")), "Pulled origin/main");
+        assert_eq!(pull_message(None), "Pulled the current branch");
+        assert_eq!(commits(1), "1 commit");
+        assert_eq!(commits(2), "2 commits");
+    }
+
+    #[test]
+    fn a_pull_that_stopped_on_conflicts_is_not_a_success() {
+        // Core reports a conflicted pull stop as `Ok`, in both merge and rebase
+        // mode, so the state left behind is what tells the two outcomes apart.
+        assert_eq!(
+            outcome(Kind::Pull, RepoState::Merging),
+            Outcome::Stopped,
+            "a merge conflict stop must not be announced as a successful pull"
+        );
+        assert_eq!(
+            outcome(Kind::Pull, RepoState::Rebasing),
+            Outcome::Stopped,
+            "a rebase conflict stop must not be announced as a successful pull"
+        );
+        assert_eq!(outcome(Kind::Pull, RepoState::Normal), Outcome::Success);
+        // Other operations do not stop with a merge or rebase in progress.
+        assert_eq!(outcome(Kind::Fetch, RepoState::Merging), Outcome::Success);
+        assert_eq!(outcome(Kind::Push, RepoState::Rebasing), Outcome::Success);
+    }
+
+    #[test]
+    fn a_detached_head_blocks_pull_and_push() {
+        let targets = Targets::read(&snapshot(Some(HeadInfo::Detached { target: oid(3) }), &[]));
+        assert_eq!(targets.branch(), Err(detached_head()));
+        assert_eq!(push_plan(&targets), Err(detached_head()));
+        assert!(pull_tooltip(&targets, None).contains("Detached HEAD"));
+        assert!(push_tooltip(&targets, None).contains("Detached HEAD"));
+    }
+
+    #[test]
+    fn a_fake_or_loading_view_cannot_run_remotes() {
+        let targets = Targets::default();
+        assert_eq!(targets.branch(), Err(no_session()));
+        assert!(push_plan(&targets).is_err());
+        assert!(pull_tooltip(&Targets::default(), None).contains("--fake"));
+
+        // The first snapshot has no HEAD yet.
+        let loading = Targets::read(&snapshot(None, &[]));
+        assert!(loading.ready);
+        assert_eq!(
+            pull_tooltip(&loading, None),
+            "This branch has no commits yet."
+        );
+    }
+
+    #[test]
+    fn push_follows_the_upstream_or_publishes() {
+        let tracking = Targets::read(&snapshot(
+            Some(branch_head("feat/x")),
+            &[("feat/x", upstream("origin/feat/x", 2, 1, false))],
+        ));
+        assert_eq!(
+            push_plan(&tracking),
+            Ok(PushPlan::Upstream {
+                branch: "feat/x".to_owned(),
+                remote: Some("origin".to_owned()),
+            })
+        );
+        let tip = push_tooltip(&tracking, None);
+        assert!(tip.starts_with("Push feat/x to origin"), "{tip}");
+        assert!(tip.contains("2 commits ahead"), "{tip}");
+        let pull_tip = pull_tooltip(&tracking, None);
+        assert!(pull_tip.starts_with("Pull origin/feat/x"), "{pull_tip}");
+        assert!(pull_tip.contains("1 commit behind"), "{pull_tip}");
+
+        let untracked = Targets::read(&snapshot(Some(branch_head("feat/x")), &[]));
+        assert_eq!(
+            push_plan(&untracked),
+            Ok(PushPlan::Publish {
+                branch: "feat/x".to_owned()
+            })
+        );
+        assert!(push_tooltip(&untracked, None).contains("Publish feat/x"));
+
+        let gone = Targets::read(&snapshot(
+            Some(branch_head("feat/x")),
+            &[("feat/x", upstream("origin/feat/x", 0, 0, true))],
+        ));
+        assert!(
+            matches!(push_plan(&gone), Ok(PushPlan::Publish { .. })),
+            "a gone upstream is republished"
+        );
+    }
+
+    #[test]
+    fn unknown_counts_do_not_read_as_up_to_date() {
+        let targets = Targets::read(&snapshot(
+            Some(branch_head("feat/x")),
+            &[("feat/x", unknown_upstream("origin/feat/x"))],
+        ));
+        let pull_tip = pull_tooltip(&targets, None);
+        let push_tip = push_tooltip(&targets, None);
+        for tip in [&pull_tip, &push_tip] {
+            assert!(
+                tip.contains("counts unavailable: history is shallow"),
+                "an unknown count must say so: {tip}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_icon_only_button_names_itself_in_the_tooltip() {
+        let fetch = fetch_tooltip(None);
+        assert_eq!(
+            named_tooltip("Fetch", fetch.clone()),
+            fetch,
+            "a tooltip that already opens with the verb needs no prefix"
+        );
+        assert_eq!(
+            named_tooltip("Pull", busy_reason()),
+            format!("Pull · {}", busy_reason()),
+            "a blocked button still says which command it is"
+        );
+        assert_eq!(
+            named_tooltip("Push", push_tooltip(&Targets::default(), None)),
+            format!("Push · {}", no_session())
+        );
+    }
+
+    #[test]
+    fn one_running_operation_blocks_another() {
+        assert!(fetch_tooltip(Some(&busy_reason())).contains("already running"));
+        assert!(
+            push_tooltip(&Targets::default(), Some(&busy_reason())).contains("already running")
+        );
+        assert!(
+            fetch_tooltip(None).contains(&shortcut('F')),
+            "an enabled button names its key"
+        );
+    }
+
+    fn running(id: u64, trigger: Trigger) -> Running {
+        Running {
+            id: OperationId(id),
+            kind: Kind::Fetch,
+            trigger,
+            success: String::new(),
+            retry: None,
+            pull_request_branch: None,
+            text: None,
+            percent: None,
+        }
+    }
+
+    #[test]
+    fn an_automatic_fetch_notifies_once_per_failing_streak() {
+        let mut streak = FailureStreak::default();
+        assert!(
+            !streak.announces(Trigger::Automatic, Kind::Fetch, false),
+            "a fetch on a timer stays quiet when it works"
+        );
+        assert!(streak.announces(Trigger::Automatic, Kind::Fetch, true));
+        assert!(
+            !streak.announces(Trigger::Automatic, Kind::Fetch, true),
+            "later failures in the same streak are not announced"
+        );
+
+        // A successful fetch, automatic here, ends the streak.
+        assert!(!streak.announces(Trigger::Automatic, Kind::Fetch, false));
+        assert!(
+            streak.announces(Trigger::Automatic, Kind::Fetch, true),
+            "the first failure after a success is announced again"
+        );
+        assert!(!streak.announces(Trigger::Automatic, Kind::Fetch, true));
+    }
+
+    #[test]
+    fn a_manual_command_always_reports_its_outcome() {
+        let mut streak = FailureStreak::default();
+        assert!(streak.announces(Trigger::Manual, Kind::Fetch, false));
+        assert!(streak.announces(Trigger::Manual, Kind::Fetch, true));
+        assert!(streak.announces(Trigger::Manual, Kind::Fetch, true));
+        assert!(
+            !streak.announces(Trigger::Automatic, Kind::Fetch, true),
+            "a manual failure already announced this streak"
+        );
+    }
+
+    #[test]
+    fn a_successful_pull_does_not_reset_the_fetch_streak() {
+        let mut streak = FailureStreak::default();
+        assert!(streak.announces(Trigger::Automatic, Kind::Fetch, true));
+        assert!(streak.announces(Trigger::Manual, Kind::Pull, false));
+        assert!(
+            !streak.announces(Trigger::Automatic, Kind::Fetch, true),
+            "only a successful fetch says the remote is reachable again"
+        );
+    }
+
+    #[test]
+    fn an_automatic_fetch_never_opens_a_credential_prompt() {
+        let automatic = Remote {
+            running: Some(running(1, Trigger::Automatic)),
+            ..Remote::default()
+        };
+        assert!(automatic.cancels_prompt(OperationId(1)));
+        assert!(
+            !automatic.cancels_prompt(OperationId(2)),
+            "another operation's prompt is still the user's to answer"
+        );
+
+        let manual = Remote {
+            running: Some(running(1, Trigger::Manual)),
+            ..Remote::default()
+        };
+        assert!(
+            !manual.cancels_prompt(OperationId(1)),
+            "a manual Fetch keeps prompting as before"
+        );
+    }
+
+    #[test]
+    fn an_automatic_auth_failure_says_to_fetch_manually() {
+        let line = "fatal: could not read Username: terminal prompts disabled";
+        let automatic = failure_detail(Trigger::Automatic, Failure::Auth, line);
+        assert!(
+            automatic.starts_with(line),
+            "git's own line is kept: {automatic}"
+        );
+        assert!(
+            automatic.contains("Run Fetch manually"),
+            "the automatic failure points at the manual command: {automatic}"
+        );
+        assert_eq!(
+            failure_detail(Trigger::Manual, Failure::Auth, line),
+            failure_message(Failure::Auth, line),
+            "a manual failure keeps its existing hint"
+        );
+        assert_eq!(
+            failure_detail(Trigger::Automatic, Failure::Other, line),
+            line,
+            "only a credential failure needs the manual hint"
+        );
+    }
+}

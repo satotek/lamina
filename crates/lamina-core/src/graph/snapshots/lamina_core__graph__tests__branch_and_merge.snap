@@ -1,0 +1,24 @@
+---
+source: crates/lamina-core/src/graph/tests.rs
+expression: render(&branch_and_merge())
+---
+....
+*0..
+  c10
+|0\1
+|0|1
+*0|1
+  c11
+|0|1
+|0|1
+|0*1
+  c12
+|0|1
+|0|1
+*0|1
+  c13
+|0|1
+|0|1
+*0/1
+  c14
+....

@@ -1,6 +1,6 @@
 #!/bin/sh
-# Turns dist/Strata.app (from bundle.sh) into the disk image the release
-# publishes: dist/Strata-<version>-macos-<arch>.dmg, with Strata.app and an
+# Turns dist/Lamina.app (from bundle.sh) into the disk image the release
+# publishes: dist/Lamina-<version>-macos-<arch>.dmg, with Lamina.app and an
 # /Applications symlink so the image can be dragged into place.
 #
 #     direnv exec . packaging/macos/dmg.sh
@@ -15,8 +15,8 @@ root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
 
 usage() {
     cat <<'EOF'
-Turns dist/Strata.app (from bundle.sh) into the disk image the release
-publishes: dist/Strata-<version>-macos-<arch>.dmg, with Strata.app and an
+Turns dist/Lamina.app (from bundle.sh) into the disk image the release
+publishes: dist/Lamina-<version>-macos-<arch>.dmg, with Lamina.app and an
 /Applications symlink so the image can be dragged into place.
 
     direnv exec . packaging/macos/dmg.sh
@@ -48,9 +48,9 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-app="$root/dist/Strata.app"
-version=$(strata_version "$root")
-arch=$(strata_arch "$target")
+app="$root/dist/Lamina.app"
+version=$(lamina_version "$root")
+arch=$(lamina_arch "$target")
 
 if [ ! -d "$app" ]; then
     echo "dmg.sh: $app does not exist; run packaging/macos/bundle.sh first" >&2
@@ -61,12 +61,12 @@ command -v hdiutil >/dev/null 2>&1 || {
     exit 1
 }
 
-dmg="$root/dist/Strata-$version-macos-$arch.dmg"
+dmg="$root/dist/Lamina-$version-macos-$arch.dmg"
 staging=$(mktemp -d "$root/dist/dmg.XXXXXX")
 trap 'rm -rf "$staging"' EXIT
 
 # ditto rather than cp: it keeps the bundle's symlinks and metadata intact.
-ditto "$app" "$staging/Strata.app"
+ditto "$app" "$staging/Lamina.app"
 ln -s /Applications "$staging/Applications"
 
 # The bundle already carries these, but they are also worth seeing without
@@ -78,6 +78,6 @@ for doc in LICENSE-MIT LICENSE-APACHE THIRD-PARTY-NOTICES.md; do
 done
 
 rm -f "$dmg"
-hdiutil create -quiet -volname Strata -srcfolder "$staging" -ov -format UDZO "$dmg"
+hdiutil create -quiet -volname Lamina -srcfolder "$staging" -ov -format UDZO "$dmg"
 
 echo "wrote $dmg"

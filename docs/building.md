@@ -1,21 +1,21 @@
-# Building Strata
+# Building Lamina
 
-Strata is a Rust workspace with three crates:
+Lamina is a Rust workspace with three crates:
 
-- `crates/strata-core` — UI-independent Git core
-- `crates/strata-term` — UI-independent embedded terminal core (`libghostty-vt` + `portable-pty`)
-- `crates/strata-app` — GPUI desktop application (`strata` binary)
+- `crates/lamina-core` — UI-independent Git core
+- `crates/lamina-term` — UI-independent embedded terminal core (`libghostty-vt` + `portable-pty`)
+- `crates/lamina-app` — GPUI desktop application (`lamina` binary)
 
 ## Common Prerequisites
 
 - **Rust:** [rust-toolchain.toml](../rust-toolchain.toml) selects the `stable` channel with `rustfmt` and `clippy`. Install Rust via [rustup](https://rustup.rs) (or use the Nix dev shell below).
 - **Git (`>= 2.30.0`):** Must be on `PATH` at runtime for all write operations and for running tests.
-- **Zig `0.17.1` (for the embedded terminal):** Enabled by default via the `terminal` Cargo feature on `strata-app`. On first build, `crates/strata-term/build.rs` downloads the `libghostty-vt` `1.0.1` source and dependency tarballs with `curl` (verified by SHA-256) and compiles them with `zig`.
+- **Zig `0.17.1` (for the embedded terminal):** Enabled by default via the `terminal` Cargo feature on `lamina-app`. On first build, `crates/lamina-term/build.rs` downloads the `libghostty-vt` `1.0.1` source and dependency tarballs with `curl` (verified by SHA-256) and compiles them with `zig`.
   - To build **without** the embedded terminal (and without Zig):
     ```sh
-    cargo build --release -p strata-app --no-default-features
+    cargo build --release -p lamina-app --no-default-features
     ```
-  - For custom or offline terminal builds, `crates/strata-term/build.rs` also recognizes `ZIG` (path to the `zig` `0.17.1` binary), `LIBGHOSTTY_VT_LIB_DIR` (directory containing a prebuilt `libghostty-vt.a` or `ghostty-vt-static.lib`), or both `LIBGHOSTTY_VT_SOURCE_DIR` and `LIBGHOSTTY_VT_ZIG_SYSTEM_DIR`.
+  - For custom or offline terminal builds, `crates/lamina-term/build.rs` also recognizes `ZIG` (path to the `zig` `0.17.1` binary), `LIBGHOSTTY_VT_LIB_DIR` (directory containing a prebuilt `libghostty-vt.a` or `ghostty-vt-static.lib`), or both `LIBGHOSTTY_VT_SOURCE_DIR` and `LIBGHOSTTY_VT_ZIG_SYSTEM_DIR`.
 
 ## macOS
 
@@ -26,13 +26,13 @@ Strata is a Rust workspace with three crates:
 2. Install Rust with `rustup` and Zig `0.17.1` (for example via Homebrew or the Nix dev shell).
 3. Build and run:
    ```sh
-   cargo run --release -p strata-app
+   cargo run --release -p lamina-app
    ```
    Or build without the embedded terminal:
    ```sh
-   cargo run --release -p strata-app --no-default-features
+   cargo run --release -p lamina-app --no-default-features
    ```
-4. To assemble a standalone `dist/Strata.app` bundle (minimum macOS 14.0, ad-hoc signed), see [packaging/README.md](../packaging/README.md):
+4. To assemble a standalone `dist/Lamina.app` bundle (minimum macOS 14.0, ad-hoc signed), see [packaging/README.md](../packaging/README.md):
    ```sh
    packaging/macos/bundle.sh
    ```
@@ -45,23 +45,23 @@ Build natively on Windows. GPUI compiles its HLSL shaders with `fxc.exe` from th
 2. Install Rust with [rustup](https://rustup.rs) (default `x86_64-pc-windows-msvc` host).
 3. Install [Git for Windows](https://git-scm.com/download/win) and ensure `git` is on `PATH`.
 4. Install **Zig `0.17.1`** and put it on `PATH` (or set `ZIG=C:\path\to\zig.exe`). Alternatively, build with `--no-default-features` to omit the embedded terminal.
-5. Clone the repository into a short path such as `C:\src\strata` (deep paths can hit Windows' 260-character path limit inside `target\`):
+5. Clone the repository into a short path such as `C:\src\lamina` (deep paths can hit Windows' 260-character path limit inside `target\`):
    ```powershell
    git config --global core.longpaths true
-   git clone <repo-url> C:\src\strata
-   cd C:\src\strata
+   git clone <repo-url> C:\src\lamina
+   cd C:\src\lamina
    ```
 6. Build and run from **"Developer PowerShell for VS"** (so `fxc.exe` and the MSVC toolchain are in the environment):
    ```powershell
-   cargo build --release -p strata-app
-   .\target\release\strata.exe
+   cargo build --release -p lamina-app
+   .\target\release\lamina.exe
    ```
    Or without the embedded terminal:
    ```powershell
-   cargo build --release -p strata-app --no-default-features
-   .\target\release\strata.exe
+   cargo build --release -p lamina-app --no-default-features
+   .\target\release\lamina.exe
    ```
-7. To create the release zip (`dist\strata-<version>-windows-x86_64.zip`):
+7. To create the release zip (`dist\lamina-<version>-windows-x86_64.zip`):
    ```powershell
    powershell -ExecutionPolicy Bypass -File packaging\windows\package.ps1
    ```
@@ -76,13 +76,13 @@ With `direnv`:
 
 ```sh
 direnv allow
-direnv exec . cargo run --release -p strata-app
+direnv exec . cargo run --release -p lamina-app
 ```
 
 Or directly with `nix develop`:
 
 ```sh
-nix develop -c cargo run --release -p strata-app
+nix develop -c cargo run --release -p lamina-app
 ```
 
 ### Option 2: System Packages (Debian / Ubuntu)
@@ -128,13 +128,13 @@ sudo apt-get install -y \
 Install Rust via `rustup` and Zig `0.17.1` on `PATH` (or pass `--no-default-features` to skip the embedded terminal), then run:
 
 ```sh
-cargo run --release -p strata-app
+cargo run --release -p lamina-app
 ```
 
 ## Where Build Artifacts Land
 
-- **Outside the Nix dev shell:** Cargo writes artifacts to `./target` (`./target/release/strata` or `.\target\release\strata.exe`).
-- **Inside the Nix dev shell:** [flake.nix](../flake.nix) sets `CARGO_TARGET_DIR` to `${XDG_CACHE_HOME:-$HOME/.cache}/strata/target` so multiple worktrees share a single build cache. Because binaries are not written under `./target`, launch via `cargo run` or read from `$CARGO_TARGET_DIR` (the scripts under `packaging/` resolve `CARGO_TARGET_DIR` automatically).
+- **Outside the Nix dev shell:** Cargo writes artifacts to `./target` (`./target/release/lamina` or `.\target\release\lamina.exe`).
+- **Inside the Nix dev shell:** [flake.nix](../flake.nix) sets `CARGO_TARGET_DIR` to `${XDG_CACHE_HOME:-$HOME/.cache}/lamina/target` so multiple worktrees share a single build cache. Because binaries are not written under `./target`, launch via `cargo run` or read from `$CARGO_TARGET_DIR` (the scripts under `packaging/` resolve `CARGO_TARGET_DIR` automatically).
 - **Downloaded `libghostty-vt` tarballs and cached static archives:** Stored under `<target_dir>/ghostty-vt-cache`.
 - **Packaged bundles and archives:** Written to `dist/` (git-ignored).
 
@@ -146,33 +146,33 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-To verify `strata-app` without the embedded terminal:
+To verify `lamina-app` without the embedded terminal:
 
 ```sh
-cargo clippy -p strata-app --no-default-features --all-targets -- -D warnings
+cargo clippy -p lamina-app --no-default-features --all-targets -- -D warnings
 ```
 
-For headless Linux UI smoke runs (`STRATA_SMOKE=1` under `Xvfb`) and CLI debug flags, see [crates/strata-app/README.md](../crates/strata-app/README.md).
+For headless Linux UI smoke runs (`LAMINA_SMOKE=1` under `Xvfb`) and CLI debug flags, see [crates/lamina-app/README.md](../crates/lamina-app/README.md).
 
 ## Remote helper binaries
 
-Opening a repository over SSH uploads `strata-remote` and runs it on the host.
+Opening a repository over SSH uploads `lamina-remote` and runs it on the host.
 The file has to be a musl build: the machine that built the app may be macOS
 or Windows, and the host must be able to execute the helper without that
 machine's C library. This repository does not yet bundle those binaries or
 cross-compile them in the release workflow. A release still needs to:
 
-- Build `strata-remote` for `x86_64-unknown-linux-musl` and
-  `aarch64-unknown-linux-musl` with the same `STRATA_BUILD_ID` the app was
-  built with. The id the client checks is `<version>+<STRATA_BUILD_ID>`, or
+- Build `lamina-remote` for `x86_64-unknown-linux-musl` and
+  `aarch64-unknown-linux-musl` with the same `LAMINA_BUILD_ID` the app was
+  built with. The id the client checks is `<version>+<LAMINA_BUILD_ID>`, or
   `<version>+dev` when the variable is unset. A mismatch makes the client
   delete its upload and try once more; it will not keep a helper from a
   different build.
-- Name the files `strata-remote-<target>` and point the launcher at their
-  directory with `STRATA_REMOTE_HELPER_DIR`.
+- Name the files `lamina-remote-<target>` and point the launcher at their
+  directory with `LAMINA_REMOTE_HELPER_DIR`.
 - Leave every other operating system and architecture unsupported. The client
   reports an error. It does not compile on the remote host.
 
-`STRATA_REMOTE_HELPER`, set in the remote user's environment to an executable
+`LAMINA_REMOTE_HELPER`, set in the remote user's environment to an executable
 path, skips the upload. The client still checks the build id and does not
 delete that file when the id does not match.

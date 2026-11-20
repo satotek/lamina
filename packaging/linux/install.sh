@@ -24,11 +24,11 @@ command -v install >/dev/null 2>&1 || {
     exit 1
 }
 
-if [ -x "$here/strata" ] && [ -d "$here/icons" ]; then
+if [ -x "$here/lamina" ] && [ -d "$here/icons" ]; then
     # Release archive: the binary, desktop entry and icons sit next to this
     # script, so nothing has to be built.
-    bin=$here/strata
-    desktop=$here/strata.desktop
+    bin=$here/lamina
+    desktop=$here/lamina.desktop
     icons=$here/icons
     docs=$here
 else
@@ -38,28 +38,28 @@ else
         echo "install.sh: cargo not found; run through the dev shell: direnv exec . $0" >&2
         exit 1
     }
-    (cd "$root" && cargo build --release --locked -p strata-app)
-    bin=$(strata_release_dir "$root" "")/strata
-    desktop=$root/packaging/linux/strata.desktop
-    icons=$root/crates/strata-app/resources/icon/hicolor
+    (cd "$root" && cargo build --release --locked -p lamina-app)
+    bin=$(lamina_release_dir "$root" "")/lamina
+    desktop=$root/packaging/linux/lamina.desktop
+    icons=$root/crates/lamina-app/resources/icon/hicolor
     docs=$root
 fi
 
-install -Dm755 "$bin" "$prefix/bin/strata"
-install -Dm644 "$desktop" "$prefix/share/applications/strata.desktop"
+install -Dm755 "$bin" "$prefix/bin/lamina"
+install -Dm644 "$desktop" "$prefix/share/applications/lamina.desktop"
 
 # The window icon is the 128px file embedded in the binary; the desktop entry
 # needs the whole hicolor ladder for panels, task switchers and file managers.
 for size in 16 32 48 64 128 256 512; do
     install -Dm644 "$icons/$size.png" \
-        "$prefix/share/icons/hicolor/${size}x${size}/apps/strata.png"
+        "$prefix/share/icons/hicolor/${size}x${size}/apps/lamina.png"
 done
 
 # Licences and third-party notices are required next to a distributed binary;
 # a fresh checkout has them at the root as well.
 for doc in LICENSE-MIT LICENSE-APACHE THIRD-PARTY-NOTICES.md; do
     if [ -f "$docs/$doc" ]; then
-        install -Dm644 "$docs/$doc" "$prefix/share/doc/strata/$doc"
+        install -Dm644 "$docs/$doc" "$prefix/share/doc/lamina/$doc"
     fi
 done
 
@@ -69,4 +69,4 @@ command -v update-desktop-database >/dev/null 2>&1 &&
 command -v gtk-update-icon-cache >/dev/null 2>&1 &&
     gtk-update-icon-cache -q "$prefix/share/icons/hicolor" || true
 
-echo "installed Strata into $prefix"
+echo "installed Lamina into $prefix"

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Packages the Linux build into dist/strata-<version>-linux-<arch>.tar.gz: the
+# Packages the Linux build into dist/lamina-<version>-linux-<arch>.tar.gz: the
 # binary, the desktop entry, the hicolor icons, install.sh, both licences and
 # the third-party notices. The archive unpacks into one directory and needs no
 # build tools on the machine that installs it.
@@ -13,7 +13,7 @@ root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
 
 usage() {
     cat <<'EOF'
-Packages the Linux build into dist/strata-<version>-linux-<arch>.tar.gz: the
+Packages the Linux build into dist/lamina-<version>-linux-<arch>.tar.gz: the
 binary, the desktop entry, the hicolor icons, install.sh, both licences and
 the third-party notices. The archive unpacks into one directory and needs no
 build tools on the machine that installs it.
@@ -53,7 +53,7 @@ done
 cd "$root"
 
 notices=${NOTICES:-$root/dist/THIRD-PARTY-NOTICES.md}
-version=$(strata_version "$root")
+version=$(lamina_version "$root")
 # The archive name uses the plain machine architecture (x86_64, aarch64), the
 # same spelling the target triples use.
 if [ -n "$target" ]; then
@@ -61,8 +61,8 @@ if [ -n "$target" ]; then
 else
     arch=$(uname -m)
 fi
-release=$(strata_release_dir "$root" "$target")
-icons=crates/strata-app/resources/icon/hicolor
+release=$(lamina_release_dir "$root" "$target")
+icons=crates/lamina-app/resources/icon/hicolor
 
 if [ -z "$version" ]; then
     echo "package.sh: could not read [workspace.package] version from Cargo.toml" >&2
@@ -78,28 +78,28 @@ if [ "$build" = 1 ]; then
         echo "package.sh: cargo not found; run through the dev shell: direnv exec . $0" >&2
         exit 1
     }
-    set -- --release --locked -p strata-app
+    set -- --release --locked -p lamina-app
     if [ -n "$target" ]; then
         set -- "$@" --target "$target"
     fi
     cargo build "$@"
 fi
 
-if [ ! -f "$release/strata" ]; then
-    echo "package.sh: no binary at $release/strata; build it or drop --no-build" >&2
+if [ ! -f "$release/lamina" ]; then
+    echo "package.sh: no binary at $release/lamina; build it or drop --no-build" >&2
     exit 1
 fi
 
-name="strata-$version-linux-$arch"
+name="lamina-$version-linux-$arch"
 dist="$root/dist"
 stage="$dist/$name"
 archive="$dist/$name.tar.gz"
 
 rm -rf "$stage"
 mkdir -p "$stage/icons"
-cp "$release/strata" "$stage/strata"
-chmod 755 "$stage/strata"
-cp packaging/linux/strata.desktop "$stage/strata.desktop"
+cp "$release/lamina" "$stage/lamina"
+chmod 755 "$stage/lamina"
+cp packaging/linux/lamina.desktop "$stage/lamina.desktop"
 cp packaging/linux/install.sh "$stage/install.sh"
 chmod 755 "$stage/install.sh"
 cp LICENSE-MIT LICENSE-APACHE "$stage/"

@@ -1,14 +1,14 @@
-# GPUI UI レイヤ設計 (`crates/strata-app`)
+# GPUI UI レイヤ設計 (`crates/lamina-app`)
 
-本書は Strata のデスクトップ UI クレート `crates/strata-app` の全体設計を解説する。起動シーケンスからウィンドウ・タブ管理、`RepoView` の状態と非同期データフロー、各種専用ビューの描画戦略、共通 UI キット、テーマ・キーマップ・設定・国際化・外部連携、およびヘッドレス検証手法までを扱う。リポジトリ全体の構造とコア層については [設計ドキュメント一覧](README.md)・[アーキテクチャ概要](architecture.md)・[コア設計](core.md)、埋め込みターミナルについては [埋め込みターミナル設計](terminal.md) を参照。
+本書は Lamina のデスクトップ UI クレート `crates/lamina-app` の全体設計を解説する。起動シーケンスからウィンドウ・タブ管理、`RepoView` の状態と非同期データフロー、各種専用ビューの描画戦略、共通 UI キット、テーマ・キーマップ・設定・国際化・外部連携、およびヘッドレス検証手法までを扱う。リポジトリ全体の構造とコア層については [設計ドキュメント一覧](README.md)・[アーキテクチャ概要](architecture.md)・[コア設計](core.md)、埋め込みターミナルについては [埋め込みターミナル設計](terminal.md) を参照。
 
 ---
 
 ## 1. 起動フロー・ウィンドウ構成・タブ管理
 
-### 1.1 エントリポイントと初期化順序 (`crates/strata-app/src/main.rs`)
+### 1.1 エントリポイントと初期化順序 (`crates/lamina-app/src/main.rs`)
 
-`main()` は最初に `strata_core::askpass::helper_main(...)` を呼び出す。git が資格情報ヘルパとして自身を再起動した場合、UI や GPUI アプリケーションを一切立ち上げず標準入力/プロンプト経由の応答だけを行って即座に終了する (askpass 短絡起動)。
+`main()` は最初に `lamina_core::askpass::helper_main(...)` を呼び出す。git が資格情報ヘルパとして自身を再起動した場合、UI や GPUI アプリケーションを一切立ち上げず標準入力/プロンプト経由の応答だけを行って即座に終了する (askpass 短絡起動)。
 
 通常起動時は `env_logger::init()` のあと `debug_launch::parse_args()` でコマンドライン引数を解析 (`--help` 時はヘルプを表示して終了) し、`gpui_platform::application().with_assets(assets::AppAssets)` を構築する。macOS では `app.on_reopen` で全ウィンドウ閉鎖後の Dock クリックからの再オープンを登録し、`app.run` コールバック内で以下の順に初期化する。
 
@@ -21,9 +21,9 @@
 
 ### 1.2 ウィンドウ・ワークスペース・タブ (`workspace.rs`, `tabs.rs`)
 
-GPUI の `gpui_component::Root` はウィンドウ作成時に単一のルート子要素を持つ前提のため、`Workspace` (`crates/strata-app/src/workspace.rs`) が `Root` 直下に常駐し、内部の `Content` 列挙体 (`Welcome(Entity<Picker>)` または `Tabs(TabDeck<RepoSlot>)`) を差し替える構造を採る。
+GPUI の `gpui_component::Root` はウィンドウ作成時に単一のルート子要素を持つ前提のため、`Workspace` (`crates/lamina-app/src/workspace.rs`) が `Root` 直下に常駐し、内部の `Content` 列挙体 (`Welcome(Entity<Picker>)` または `Tabs(TabDeck<RepoSlot>)`) を差し替える構造を採る。
 
-- **タブ管理モデル (`crates/strata-app/src/tabs.rs`)**:
+- **タブ管理モデル (`crates/lamina-app/src/tabs.rs`)**:
   - `TabDeck<T>` は GPUI 非依存の純粋なコレクションとして切り出されており、タブ追加 (`open`)・選択 (`select`)・1..=9 ジャンプ (`jump`)・循環 (`cycle`)・末尾閉鎖判定 (`CloseOutcome::ClosedLast` 等) を単体テストできる。
   - `SessionRegistry` が全ウィンドウの開閉と `session.json` 永続化 (`SavedSession`, `SavedWindow`) を追跡する。アプリ終了時 (`quitting = true`) に閉じられる個別ウィンドウが `session.json` を上書き消去しないよう保護する仕組みを持つ。
 - **タブごとの親子ナビゲーション (`NavigationStack`, `ParentRepo`)**:
@@ -31,7 +31,7 @@ GPUI の `gpui_component::Root` はウィンドウ作成時に単一のルート
   - サブモジュールやリンク済みワークツリーを「現在のタブ内で開く」(`OpenDisposition::PushParent`) と元のリポジトリが `parents` スタックへ積まれ、タイトルバーの戻る操作で元のリポジトリへ戻れる。
 - **非アクティブタブの抑制とバックグラウンド破棄**:
   - ウィンドウ上に描画されるのは `TabDeck::active()` の `RepoView` のみである。裏に回ったタブは `set_active(false)` によって自動フェッチタイマーと `cx.notify()` 再描画を止め、バックグラウンドのファイルウォッチャ (`Session`) のみを維持して切り替えを即時にする。タブ側で受信したスナップショット更新は `pending_sync` / `pending_reveal_conflicts` に記録され、再アクティブ化時に反映される。
-  - タブ閉じやリポジトリ切り替え時は `RepoView::detach_session` でイベントブリッジと進行中クエリチケットをすべてキャンセルしたうえで、`Session` を `drop_session_in_background` (`std::thread::spawn` 名 `strata-session-drop`) へ渡して破棄する。`Session::drop` はワーカースレッドを `join()` するため、UI スレッドでのフリーズを防ぐ必須の設計である。
+  - タブ閉じやリポジトリ切り替え時は `RepoView::detach_session` でイベントブリッジと進行中クエリチケットをすべてキャンセルしたうえで、`Session` を `drop_session_in_background` (`std::thread::spawn` 名 `lamina-session-drop`) へ渡して破棄する。`Session::drop` はワーカースレッドを `join()` するため、UI スレッドでのフリーズを防ぐ必須の設計である。
 
 ---
 
@@ -39,7 +39,7 @@ GPUI の `gpui_component::Root` はウィンドウ作成時に単一のルート
 
 ### 2.1 所有状態とモジュール分割
 
-`RepoView` (`crates/strata-app/src/repo_view.rs`) は 1 つのリポジトリ (または `--fake` の合成データ) に対応するメインビューであり、責務ごとに `crates/strata-app/src/repo_view/` サブモジュールへ分割されている。
+`RepoView` (`crates/lamina-app/src/repo_view.rs`) は 1 つのリポジトリ (または `--fake` の合成データ) に対応するメインビューであり、責務ごとに `crates/lamina-app/src/repo_view/` サブモジュールへ分割されている。
 
 | サブモジュール / 要素 | 責務 |
 |---|---|
@@ -60,11 +60,11 @@ GPUI の `gpui_component::Root` はウィンドウ作成時に単一のルート
 
 ### 2.2 スナップショット受信と操作ライフサイクル
 
-`strata_core::session::Session` のバックグラウンドスレッドから届く `SessionEvent` は、`mpsc::unbounded` チャネル経由で `RepoView::new_in_workspace_active` が起動した `cx.spawn` タスク (`_bridge`) に渡され、フォアグラウンドエグゼキュータ上で `RepoView::on_event` を実行する。
+`lamina_core::session::Session` のバックグラウンドスレッドから届く `SessionEvent` は、`mpsc::unbounded` チャネル経由で `RepoView::new_in_workspace_active` が起動した `cx.spawn` タスク (`_bridge`) に渡され、フォアグラウンドエグゼキュータ上で `RepoView::on_event` を実行する。
 
 ```mermaid
 flowchart TD
-    UI["RepoView Action (run_operation)"] -->|"Operation + label"| Sess["strata_core::Session::run"]
+    UI["RepoView Action (run_operation)"] -->|"Operation + label"| Sess["lamina_core::Session::run"]
     Sess -->|"Returns OperationId"| Track["in_progress.submitted + branches.start"]
     Sess -->|"SessionEvent::OperationStarted(id)"| Bridge["mpsc::unbounded -> _bridge (cx.spawn)"]
     Sess -->|"SessionEvent::AskpassPrompt(id, prompt, secret)"| Ask["Modal askpass_prompt -> session.answer_askpass"]
@@ -84,7 +84,7 @@ flowchart TD
 
 ### 2.3 弱参照ルールとメモリリーク防止
 
-`RepoView` 自身は `entity: WeakEntity<RepoView>` を保持し、レンダー中の要素コールバックが `Entity<RepoView>` を必要とする場合のみ `RepoView::entity()` で `upgrade()` する (`crates/strata-app/src/repo_view.rs`)。非同期タスク (`cx.spawn` 等) やダイアログコールバックが `Entity<RepoView>` (強参照) を直接キャプチャすると、ウィンドウを閉じた後も `RepoView` が解放されず `Session` ワーカーも残り続けるため、すべて `WeakEntity` 経由に統一されている。この不変条件はテスト `closing_a_window_releases_its_repo_view` で自動検証されている。
+`RepoView` 自身は `entity: WeakEntity<RepoView>` を保持し、レンダー中の要素コールバックが `Entity<RepoView>` を必要とする場合のみ `RepoView::entity()` で `upgrade()` する (`crates/lamina-app/src/repo_view.rs`)。非同期タスク (`cx.spawn` 等) やダイアログコールバックが `Entity<RepoView>` (強参照) を直接キャプチャすると、ウィンドウを閉じた後も `RepoView` が解放されず `Session` ワーカーも残り続けるため、すべて `WeakEntity` 経由に統一されている。この不変条件はテスト `closing_a_window_releases_its_repo_view` で自動検証されている。
 
 ---
 
@@ -107,7 +107,7 @@ flowchart TB
     WS --> Overlay["Modals: CommandPalette / CloneDialog / MergeEditorWindow / SettingsView"]
 ```
 
-### 3.1 コミットグラフ描画 (`crates/strata-app/src/graph_canvas.rs`)
+### 3.1 コミットグラフ描画 (`crates/lamina-app/src/graph_canvas.rs`)
 
 コミット履歴の各行左側に描画されるグラフは、GPUI の `canvas` 要素 (`GraphCell`) として実装されている。
 
@@ -117,20 +117,20 @@ flowchart TB
 
 ### 3.2 仮想化リストと差分表示 (`commit_list.rs`, `diff_view.rs`, `scrollbar.rs`)
 
-- **履歴リスト (`crates/strata-app/src/repo_view/commit_list.rs`)**: 全行が固定高であるため GPUI の `uniform_list` を用い、数万件のコミットがあっても可視範囲外の行は要素生成されない。
-- **差分ビュー (`crates/strata-app/src/diff_view.rs`)**:
+- **履歴リスト (`crates/lamina-app/src/repo_view/commit_list.rs`)**: 全行が固定高であるため GPUI の `uniform_list` を用い、数万件のコミットがあっても可視範囲外の行は要素生成されない。
+- **差分ビュー (`crates/lamina-app/src/diff_view.rs`)**:
   - **2 系統の仮想化エンジン**: 行折り返しが無効 (`wrap = false`) かつ等高行のときは高速な `uniform_list` を使う。行折り返しが有効 (`wrap = true`) なときは行ごとに高さが不定となるため、分割表示の左右が同じ行で高さを揃える `WrappedLists` と可変高仮想リスト `gpui::list` を採用し、`ListState` をキャッシュする。
   - **再計算抑制 (`DiffStyle::fingerprint`)**: フォント・行高・タブ幅・表示モード (`Unified` / `Split`)・折り返し設定・テーマ等からフィンガープリントを計算し、設定が変わらない限りキャッシュ済みリスト計測を破棄しない。
   - **展開可能コンテキスト (`DiffContext`)**: hunk 間の隠れたコンテキスト行を「上下 20 行展開 / 全て展開」できるギャップ行 (`GapHandler`) を差し込み、`DiffRow` 列を再構築する。シンタックスハイライトおよび行内単語差分ハイライトもフラット化時に解決されたスパンとして描画される。
-- **統一スクロールバー (`crates/strata-app/src/scrollbar.rs`)**: `WithScrollbar` ラッパが `gpui-component` の `Scrollbar` を右端オーバーレイとして重ね、縦スクロールバーを常に同じ操作感とスタイルで提供する。
+- **統一スクロールバー (`crates/lamina-app/src/scrollbar.rs`)**: `WithScrollbar` ラッパが `gpui-component` の `Scrollbar` を右端オーバーレイとして重ね、縦スクロールバーを常に同じ操作感とスタイルで提供する。
 
 ### 3.3 画像差分・マージエディタ・各種ビュー
 
-- **画像差分 (`crates/strata-app/src/image_diff.rs`)**: 旧・新リビジョンの画像バイト列を読み込み、**Side-by-Side** / **Swipe** (ドラッグ可能な境界線による比較) / **OnionSkin** (透過オーバーレイ) の 3 モード、`1:1` 等倍またはフィット拡大率、SVG のベクタ描画とソーステキスト diff のトグルを提供する。チェッカーボード背景はピクセル単位で描画する。
-- **3-way マージエディタ (`crates/strata-app/src/merge_editor.rs`, `crates/strata-app/src/conflicts.rs`)**:
+- **画像差分 (`crates/lamina-app/src/image_diff.rs`)**: 旧・新リビジョンの画像バイト列を読み込み、**Side-by-Side** / **Swipe** (ドラッグ可能な境界線による比較) / **OnionSkin** (透過オーバーレイ) の 3 モード、`1:1` 等倍またはフィット拡大率、SVG のベクタ描画とソーステキスト diff のトグルを提供する。チェッカーボード背景はピクセル単位で描画する。
+- **3-way マージエディタ (`crates/lamina-app/src/merge_editor.rs`, `crates/lamina-app/src/conflicts.rs`)**:
   - 独立ウィンドウとして開くフルスクリーンクラスの解決エディタであり、コンテキスト負荷を抑えるためテキストサイズ上限 **1 MiB**・コンフリクトブロック上限 **200 件** のガードを備える。
-  - 中核モデル `MergeModel` (`merge_editor.rs`) は 3-way 解析 (`strata_core::merge::MergeAnalysis`) の各セグメントをスロット列として保持し、競合箇所ごとの `Choice` (`Ours`, `Theirs`, `OursThenTheirs`, `TheirsThenOurs`, `Base`) やペイン側のチェックボックス (`Side::A` / `Side::B` を表す `Ticked`) を押すと該当スロットだけが即座に差し替わる。さらに結果ペインでの手編集 (`EditorState`, 行ごとの変更種別 `LineMark`) も同一スロット列上の行編集として反映されるため、未解決カウンタと「すべて解決済み」判定が手動編集と整合したまま維持される。
-- **作業ツリーパネル (`crates/strata-app/src/worktree_panel/`)**: `WorktreePanel` (`mod.rs`), `file_list.rs` (Staged / Unstaged / Untracked / Conflicted 分類と検索), `hunks.rs` (hunk / 行単位の部分ステージ・破棄), `commit_box.rs` (コミットメッセージ入力、amend、テンプレート/履歴、署名オプション) から構成され、セクション・ファイル・ハンク単位のキーボード選択モデル (`Selection`) を持つ。
+  - 中核モデル `MergeModel` (`merge_editor.rs`) は 3-way 解析 (`lamina_core::merge::MergeAnalysis`) の各セグメントをスロット列として保持し、競合箇所ごとの `Choice` (`Ours`, `Theirs`, `OursThenTheirs`, `TheirsThenOurs`, `Base`) やペイン側のチェックボックス (`Side::A` / `Side::B` を表す `Ticked`) を押すと該当スロットだけが即座に差し替わる。さらに結果ペインでの手編集 (`EditorState`, 行ごとの変更種別 `LineMark`) も同一スロット列上の行編集として反映されるため、未解決カウンタと「すべて解決済み」判定が手動編集と整合したまま維持される。
+- **作業ツリーパネル (`crates/lamina-app/src/worktree_panel/`)**: `WorktreePanel` (`mod.rs`), `file_list.rs` (Staged / Unstaged / Untracked / Conflicted 分類と検索), `hunks.rs` (hunk / 行単位の部分ステージ・破棄), `commit_box.rs` (コミットメッセージ入力、amend、テンプレート/履歴、署名オプション) から構成され、セクション・ファイル・ハンク単位のキーボード選択モデル (`Selection`) を持つ。
 - **Tree / Blame / File History**: `repo_view/tree_view.rs` は任意コミットのファイルツリー閲覧とソースプレビュー・コピー・履歴ジャンプを担い、`repo_view/blame_view.rs` は `BlameProgress` ストリーミングを受信してコミット年代別の行背景ヒートマップ付きでアノテーションを描画し、`file_history.rs` は特定パスに絞った履歴リストと差分ペインを独立して管理する。
 - **プロポーショナルスプリット (`repo_view/split.rs`) とフレーム計測 (`metrics.rs`)**: `SplitExtents` はサイドバー幅やコミット一覧比率を設定から復元しつつウィンドウリサイズ時は比率を保ってクランプする。`FrameMetrics` (`F12` または `--smoke` で表示) は直近フレーム時間と P95・ドロップフレーム率を収集し、ステータスバーまたはオーバーレイに表示する。
 
@@ -138,7 +138,7 @@ flowchart TB
 
 ## 4. `crate::ui` キットとデザインシステム
 
-### 4.1 `crate::ui` キットの設計方針 (`crates/strata-app/src/ui/mod.rs`, `ui/gallery.rs`)
+### 4.1 `crate::ui` キットの設計方針 (`crates/lamina-app/src/ui/mod.rs`, `ui/gallery.rs`)
 
 `crate::ui` は `gpui-component` と `Design` トークンを繋ぐ薄いアダプタ層である。機能モジュール (Feature Views) では生の `div()` に直接カラー・パディング・ボーダー等をベタ書きするのではなく、原則として `crate::ui` のコンポーネントおよびヘルパを経由する規約を採っている。
 
@@ -151,9 +151,9 @@ flowchart TB
 
 ### 4.2 テーマ・デザイントークン・フォント (`style.rs`, `component_theme.rs`, `assets.rs`)
 
-- **デザイントークン (`crates/strata-app/src/style.rs`)**: `Design` 構造体がサーフェス階層 (`surface`, `surface_raised`, `sidebar`, `hover`, `selected`)、テキスト階層、セマンティック色 (追加・削除・変更・警告・エラー)、グラフの 12 レーン色、余白・角丸・フォントサイズを集約する。ライト/ダーク両方における前景色と背景色のコントラスト比を検証する単体テストを持つ。
-- **`gpui-component` との同期 (`crates/strata-app/src/component_theme.rs`)**: `component_theme::sync` が Strata 独自の `Design` トークンから `gpui_component::Theme` の各種色スロットへ値を書き戻すことで、`Input`・`Dropdown`・`Dialog`・`SettingsPages` などのライブラリ部品も Strata と完全に同じトーンで描画される。
-- **アセットと CJK フォールバック (`crates/strata-app/src/assets.rs`)**: 埋め込み SVG アイコンを `AssetSource` 経由で提供するほか、`font_fallbacks()` により各 OS (macOS / Windows / Linux) 向けのプロポーショナルおよび等幅 CJK フォールバックフォント列 (`Hiragino Sans` / `Yu Gothic` / `Noto Sans CJK JP` 等) を組み立て、`TextSystem` に渡している。
+- **デザイントークン (`crates/lamina-app/src/style.rs`)**: `Design` 構造体がサーフェス階層 (`surface`, `surface_raised`, `sidebar`, `hover`, `selected`)、テキスト階層、セマンティック色 (追加・削除・変更・警告・エラー)、グラフの 12 レーン色、余白・角丸・フォントサイズを集約する。ライト/ダーク両方における前景色と背景色のコントラスト比を検証する単体テストを持つ。
+- **`gpui-component` との同期 (`crates/lamina-app/src/component_theme.rs`)**: `component_theme::sync` が Lamina 独自の `Design` トークンから `gpui_component::Theme` の各種色スロットへ値を書き戻すことで、`Input`・`Dropdown`・`Dialog`・`SettingsPages` などのライブラリ部品も Lamina と完全に同じトーンで描画される。
+- **アセットと CJK フォールバック (`crates/lamina-app/src/assets.rs`)**: 埋め込み SVG アイコンを `AssetSource` 経由で提供するほか、`font_fallbacks()` により各 OS (macOS / Windows / Linux) 向けのプロポーショナルおよび等幅 CJK フォールバックフォント列 (`Hiragino Sans` / `Yu Gothic` / `Noto Sans CJK JP` 等) を組み立て、`TextSystem` に渡している。
 
 ---
 
@@ -161,31 +161,31 @@ flowchart TB
 
 ### 5.1 アクションとキーマップレジストリ (`actions.rs`, `keymap.rs`)
 
-- **一元レジストリ (`ACTIONS`)**: `crates/strata-app/src/actions.rs` でアクション型を定義し、`crates/strata-app/src/keymap.rs` の `ACTIONS: &[ActionSpec]` テーブルが各アクションの ID・`Group` (`Actions`, `Settings`, `GitConfig`, `Worktree`, `Branches`, `BranchSwitcher`, `Conflicts`, `Remote`, `Search`, `Picker`, `Palette` の 11 グループ)・翻訳キー・既定キー割り当て (`secondary-` によるプラットフォーム修飾子抽象化、`macos_only`、グループ末尾登録用の `deferred`)・コマンドパレット配置 (`PaletteSlot`) を一元管理する。
+- **一元レジストリ (`ACTIONS`)**: `crates/lamina-app/src/actions.rs` でアクション型を定義し、`crates/lamina-app/src/keymap.rs` の `ACTIONS: &[ActionSpec]` テーブルが各アクションの ID・`Group` (`Actions`, `Settings`, `GitConfig`, `Worktree`, `Branches`, `BranchSwitcher`, `Conflicts`, `Remote`, `Search`, `Picker`, `Palette` の 11 グループ)・翻訳キー・既定キー割り当て (`secondary-` によるプラットフォーム修飾子抽象化、`macos_only`、グループ末尾登録用の `deferred`)・コマンドパレット配置 (`PaletteSlot`) を一元管理する。
 - **ユーザー上書き (`keymap.json`)**: 設定ディレクトリ内の `keymap.json` でアクション ID ごとにキー文字列配列を指定でき、`null` や空配列 (`Unbind`) で既定ショートカットを無効化できる。`keymap::watch` がファイル変更をポーリング監視し、再起動なしで既定バインディングの再構築とユーザー上書き (`apply_user`) を実行する。また設定画面 (`settings_view`) では実際のキー入力をリアルタイムにキャプチャして割り当てを変更できる。
 
 ### 5.2 コマンドパレット (`palette.rs`) とカスタムコマンド (`commands.rs`)
 
-- **コマンドパレット (`crates/strata-app/src/palette.rs`)**: `Ctrl+Shift+P` (`Cmd+Shift+P`) または `F1` で開くモーダル。`ACTIONS` テーブルおよびロード済みカスタムコマンドから動的に候補一覧を生成し、現在のコンテキスト (ウェルカム画面ではリポジトリ操作を除外) と現在の `keymap.json` 反映済みショートカット表示を連動させる。セッション内の直近実行コマンド最大 5 件 (`MAX_RECENT = 5`) を先頭に並べる。
-- **カスタムコマンド (`crates/strata-app/src/commands.rs`)**: 設定ディレクトリの `commands.json` にユーザーが任意コマンドを定義できる (`commands::watch` でホットリロード)。実行時はシェル文字列を介さず `argv` を直接組み立てて起動するためコマンドインジェクションを防ぎつつ、`${repo}`・`${branch}`・`${commit}`・`${file}`・`${remote}` のプレースホルダ変数展開に対応する。
+- **コマンドパレット (`crates/lamina-app/src/palette.rs`)**: `Ctrl+Shift+P` (`Cmd+Shift+P`) または `F1` で開くモーダル。`ACTIONS` テーブルおよびロード済みカスタムコマンドから動的に候補一覧を生成し、現在のコンテキスト (ウェルカム画面ではリポジトリ操作を除外) と現在の `keymap.json` 反映済みショートカット表示を連動させる。セッション内の直近実行コマンド最大 5 件 (`MAX_RECENT = 5`) を先頭に並べる。
+- **カスタムコマンド (`crates/lamina-app/src/commands.rs`)**: 設定ディレクトリの `commands.json` にユーザーが任意コマンドを定義できる (`commands::watch` でホットリロード)。実行時はシェル文字列を介さず `argv` を直接組み立てて起動するためコマンドインジェクションを防ぎつつ、`${repo}`・`${branch}`・`${commit}`・`${file}`・`${remote}` のプレースホルダ変数展開に対応する。
 
 ### 5.3 外部ツール連携 (`external_tools.rs`, `tools.rs`)
 
-`crates/strata-app/src/external_tools.rs` および `crates/strata-app/src/tools.rs` はエディタ・マージツール・外部シェル・`ghq`・`gh` CLI との連携を担う。`split_command` による引用符を考慮したコマンドライン分割と、プラットフォーム別実行・`PATH` 探索・`ghq` ルート検出を提供する。
+`crates/lamina-app/src/external_tools.rs` および `crates/lamina-app/src/tools.rs` はエディタ・マージツール・外部シェル・`ghq`・`gh` CLI との連携を担う。`split_command` による引用符を考慮したコマンドライン分割と、プラットフォーム別実行・`PATH` 探索・`ghq` ルート検出を提供する。
 
 ---
 
 ## 6. 設定永続化と設定画面 (`settings.rs`, `settings_view/`)
 
-- **保存形式と場所 (`crates/strata-app/src/settings.rs`)**: `Settings` グローバルが JSON 形式 (`settings.json`) として保存される。保存先は環境変数 `STRATA_CONFIG_DIR` が優先され、未設定時は各 OS の標準設定ディレクトリ (`~/Library/Application Support/Strata`, `%APPDATA%\Strata`, `$XDG_CONFIG_HOME/strata`) となる。
+- **保存形式と場所 (`crates/lamina-app/src/settings.rs`)**: `Settings` グローバルが JSON 形式 (`settings.json`) として保存される。保存先は環境変数 `LAMINA_CONFIG_DIR` が優先され、未設定時は各 OS の標準設定ディレクトリ (`~/Library/Application Support/Lamina`, `%APPDATA%\Lamina`, `$XDG_CONFIG_HOME/lamina`) となる。
 - **デバウンス保存とライブ反映**: UI 変更は `settings::update` によって即座に `Settings` グローバルへ反映され、`cx.observe_global::<Settings>` を購読している全ウィンドウへ次フレームから適用される。ディスク書込は `SaveCoalescer` が **300 ms** (`SAVE_DEBOUNCE`) のデバウンスを行ってまとめ、`on_app_quit` で未書込分を `flush` する。
-- **設定セクション (`Section::ALL`, 8 セクション)**: `Appearance`, `Diff`, `History`, `Behaviour`, `Tools`, `Privacy`, `Keyboard`, `Commands` の 8 ページを `crates/strata-app/src/settings_view/pages.rs` と `change.rs` が描画・検証する。設定画面 (`crates/strata-app/src/settings_view.rs`) は独立ウィンドウ (`SettingsView`) として開き、1 インスタンスのみアクティブに保つ。
+- **設定セクション (`Section::ALL`, 8 セクション)**: `Appearance`, `Diff`, `History`, `Behaviour`, `Tools`, `Privacy`, `Keyboard`, `Commands` の 8 ページを `crates/lamina-app/src/settings_view/pages.rs` と `change.rs` が描画・検証する。設定画面 (`crates/lamina-app/src/settings_view.rs`) は独立ウィンドウ (`SettingsView`) として開き、1 インスタンスのみアクティブに保つ。
 
 ---
 
-## 7. 国際化 (`i18n.rs`, `crates/strata-app/locales/*.yml`)
+## 7. 国際化 (`i18n.rs`, `crates/lamina-app/locales/*.yml`)
 
-- **仕組み**: `rust-i18n` クレートをクレートルート (`crates/strata-app/src/main.rs`) で初期化し、`crates/strata-app/locales/en.yml` と `ja.yml` から翻訳マクロ `t!` を提供する (`crates/strata-app/src/i18n.rs`)。起動時 (`i18n::apply`) および設定変更時 (`Language::System` / `En` / `Ja`) にロケールを切り替える。
+- **仕組み**: `rust-i18n` クレートをクレートルート (`crates/lamina-app/src/main.rs`) で初期化し、`crates/lamina-app/locales/en.yml` と `ja.yml` から翻訳マクロ `t!` を提供する (`crates/lamina-app/src/i18n.rs`)。起動時 (`i18n::apply`) および設定変更時 (`Language::System` / `En` / `Ja`) にロケールを切り替える。
 - **OS ごとの自動言語判定 (`detect_os_locale`)**:
   - **macOS**: CoreFoundation の `AppleLanguages` 配列を読み取る。
   - **Windows**: `GetUserDefaultUILanguage` でプライマリ言語 ID を判定する。
@@ -205,26 +205,26 @@ flowchart TB
 
 ## 9. デバッグ起動・Fake/Gallery モード・ヘッドレス UI テスト
 
-### 9.1 デバッグ起動フラグ (`crates/strata-app/src/debug_launch.rs`, `fake.rs`)
+### 9.1 デバッグ起動フラグ (`crates/lamina-app/src/debug_launch.rs`, `fake.rs`)
 
 UI の特定状態をコマンドラインから即座に再現し、目視確認やベンチマーク・スクリーンショット採取を容易にするため豊富な CLI フラグを備えている。
 
 | フラグ | 用途 |
 |---|---|
-| `--fake` | `crates/strata-app/src/fake.rs` が生成する合成コミットグラフ・差分データで起動 (実リポジトリ不要) |
+| `--fake` | `crates/lamina-app/src/fake.rs` が生成する合成コミットグラフ・差分データで起動 (実リポジトリ不要) |
 | `--gallery` | `ui/gallery.rs` のコンポーネントギャラリーウィンドウを起動 |
 | `--select <rev[,rev...]>` | 指定リビジョン (単一または複数) のロード完了を待って自動選択 |
 | `--tree <rev>` / `--tree-file <path>` | 指定コミットのツリーブラウザを開き、特定ファイルを選択 |
 | `--blame <rev>:<path>` | 指定コミット・パスの Blame ビューを自動オープン |
 | `--worktree` | 起動時に作業ツリーモードへ切り替え |
 | `--dialog <name>` | `create-branch`, `stash`, `add-worktree`, `create-tag`, `open-repository`, `settings`, `palette` を開く |
-| `--window-size <W>x<H>` | ウィンドウ初期サイズを指定 (環境変数 `STRATA_SMOKE` で描画フレーム計測オーバーレイも有効化) |
+| `--window-size <W>x<H>` | ウィンドウ初期サイズを指定 (環境変数 `LAMINA_SMOKE` で描画フレーム計測オーバーレイも有効化) |
 
-`RepoView` 内の `DebugLaunchRunner` (`crates/strata-app/src/repo_view.rs`) はスナップショット更新ごとにリビジョン解決を進め、履歴ウォーク上に該当コミットが到達した時点で選択・ビューオープンを実行する。
+`RepoView` 内の `DebugLaunchRunner` (`crates/lamina-app/src/repo_view.rs`) はスナップショット更新ごとにリビジョン解決を進め、履歴ウォーク上に該当コミットが到達した時点で選択・ビューオープンを実行する。
 
 ### 9.2 ヘッドレス UI テスト手法
 
-`crates/strata-app` の統合・UI テストは `#[gpui::test]` と GPUI の `TestAppContext` / `VisualTestContext` を用いて OS ウィンドウサーバーなしで実行する設計になっている。
+`crates/lamina-app` の統合・UI テストは `#[gpui::test]` と GPUI の `TestAppContext` / `VisualTestContext` を用いて OS ウィンドウサーバーなしで実行する設計になっている。
 
 - **`Launch::open_quiet`**: 通常起動と同じ `Session`・`RepoView` をバックグラウンドで生成しつつテスト側で同期・検証し、完了時にはテストウィンドウ閉鎖によって `RepoView` が確実にドロップされること (`closing_a_window_releases_its_repo_view`) まで検証する。
 - **純粋状態モジュール分離**: タブ操作 (`tabs.rs`)、マージ競合スロット (`merge_editor.rs`)、差分フラット化 (`diff_view.rs`)、キーマップ解析 (`keymap.rs`)、ターミナルグリッド座標計算 (`ui/terminal_grid.rs`) といったロジックは GPUI ウィンドウ非依存の関数・構造体として書かれており、軽量な `#[test]` で境界ケースを網羅している。

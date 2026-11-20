@@ -1,6 +1,6 @@
 # Signing the macOS app
 
-`bundle.sh` signs `Strata.app` ad hoc unless it is given an identity. An ad-hoc
+`bundle.sh` signs `Lamina.app` ad hoc unless it is given an identity. An ad-hoc
 signature is computed over the binary, so macOS sees every release as a
 different app: the Keychain forgets "Always Allow" choices and privacy grants
 are asked for again after each update. Signing with a certificate gives the app
@@ -13,12 +13,12 @@ and the first launch still needs the Finder's "Open" bypass.
 
 ## Create the certificate
 
-The identity is `Strata Code Signing`, which is the common name of the
+The identity is `Lamina Code Signing`, which is the common name of the
 certificate. Either route works; long validity is what matters, because a
 replacement certificate is a new identity to macOS.
 
 Keychain Access: Certificate Assistant → Create a Certificate…, name
-`Strata Code Signing`, identity type "Self Signed Root", certificate type "Code
+`Lamina Code Signing`, identity type "Self Signed Root", certificate type "Code
 Signing", 3650 days, then export the certificate and its private key as a
 `.p12` with a password.
 
@@ -26,20 +26,20 @@ Or with `openssl`:
 
 ```sh
 openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
-  -keyout StrataSigning.key -out StrataSigning.crt \
-  -subj "/CN=Strata Code Signing" \
+  -keyout LaminaSigning.key -out LaminaSigning.crt \
+  -subj "/CN=Lamina Code Signing" \
   -addext "basicConstraints=critical,CA:false" \
   -addext "keyUsage=critical,digitalSignature" \
   -addext "extendedKeyUsage=critical,codeSigning"
-openssl pkcs12 -export -inkey StrataSigning.key -in StrataSigning.crt \
-  -out StrataSigning.p12 -name "Strata Code Signing"
+openssl pkcs12 -export -inkey LaminaSigning.key -in LaminaSigning.crt \
+  -out LaminaSigning.p12 -name "Lamina Code Signing"
 ```
 
 OpenSSL 3 and later default to a PKCS#12 encryption that macOS refuses with
 `MAC verification failed during PKCS12 import`; add `-legacy` to the `pkcs12`
 command there. The `/usr/bin/openssl` that ships with macOS needs no flag.
 
-Keep `StrataSigning.p12` and the password out of the repository; commit
+Keep `LaminaSigning.p12` and the password out of the repository; commit
 neither.
 
 ## Sign locally
@@ -48,15 +48,15 @@ Import the archive into a keychain that `codesign` searches, for example by
 opening the `.p12` in Keychain Access and allowing access to the key. Then:
 
 ```sh
-direnv exec . packaging/macos/bundle.sh --sign "Strata Code Signing"
-codesign -dr - dist/Strata.app
+direnv exec . packaging/macos/bundle.sh --sign "Lamina Code Signing"
+codesign -dr - dist/Lamina.app
 ```
 
 The designated requirement should name the certificate, not a hash of the
 binary:
 
 ```
-designated => identifier "dev.strata.Strata" and certificate leaf = H"…"
+designated => identifier "dev.lamina.Lamina" and certificate leaf = H"…"
 ```
 
 `security find-identity -v -p codesigning` does not list the certificate, since
@@ -69,8 +69,8 @@ and passes the identity to `bundle.sh`. Without them it logs a warning and
 falls back to the ad-hoc signature.
 
 ```sh
-base64 < StrataSigning.p12 | tr -d '\n' | gh secret set STRATA_SIGNING_P12
-gh secret set STRATA_SIGNING_P12_PASSWORD
+base64 < LaminaSigning.p12 | tr -d '\n' | gh secret set LAMINA_SIGNING_P12
+gh secret set LAMINA_SIGNING_P12_PASSWORD
 ```
 
 The first command pipes the base64 of the archive; the second prompts for the

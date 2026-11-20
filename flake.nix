@@ -1,5 +1,5 @@
 {
-  description = "Strata — GPUI performance validation (phase 0)";
+  description = "Lamina — GPUI performance validation (phase 0)";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -23,10 +23,10 @@
           # ~600 crates, several GB) instead of one per worktree. Cargo gives a
           # workspace crate the same artifact name in every worktree, though, so
           # a build in one worktree can leave another with a stale
-          # strata-core; touch its sources and rebuild when errors contradict
+          # lamina-core; touch its sources and rebuild when errors contradict
           # the code.
           sharedTarget = ''
-            export CARGO_TARGET_DIR="''${XDG_CACHE_HOME:-$HOME/.cache}/strata/target"
+            export CARGO_TARGET_DIR="''${XDG_CACHE_HOME:-$HOME/.cache}/lamina/target"
           '';
 
           # GPUI's Linux backend (wayland / x11 / wgpu) loads most of these at
@@ -73,8 +73,8 @@
             # without it the GPUI build fails minutes in. Warn up front instead.
             shellHook = sharedTarget + ''
               if ! /usr/bin/xcrun metal --version >/dev/null 2>&1; then
-                echo "strata: the Metal Toolchain is missing; GPUI cannot compile its shaders." >&2
-                echo "strata: install it once with: xcodebuild -downloadComponent MetalToolchain" >&2
+                echo "lamina: the Metal Toolchain is missing; GPUI cannot compile its shaders." >&2
+                echo "lamina: install it once with: xcodebuild -downloadComponent MetalToolchain" >&2
               fi
             '';
           };

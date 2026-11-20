@@ -1,13 +1,13 @@
-# `strata-core` モジュール設計
+# `lamina-core` モジュール設計
 
-`crates/strata-core` は Strata の UI 非依存コアライブラリである（`crates/strata-core/src/lib.rs`）。外部の非同期ランタイムに依存せず、標準ライブラリのスレッドとチャネルを中心に構成される。読取は `gix`（`repo/`）、書込は外部 `git` CLI（`git_cli/`）へ分離し、それらを `session/` が調停して不変スナップショットとして UI へ供給する。
+`crates/lamina-core` は Lamina の UI 非依存コアライブラリである（`crates/lamina-core/src/lib.rs`）。外部の非同期ランタイムに依存せず、標準ライブラリのスレッドとチャネルを中心に構成される。読取は `gix`（`repo/`）、書込は外部 `git` CLI（`git_cli/`）へ分離し、それらを `session/` が調停して不変スナップショットとして UI へ供給する。
 
 ---
 
 ## 1. 共通型・エラー型（`types.rs`, `error.rs`）
 
 ### 責務
-UI とコア各モジュール間で受け渡すデータモデル（`crates/strata-core/src/types.rs`）および統一エラー型（`crates/strata-core/src/error.rs`）を提供する。
+UI とコア各モジュール間で受け渡すデータモデル（`crates/lamina-core/src/types.rs`）および統一エラー型（`crates/lamina-core/src/error.rs`）を提供する。
 
 ### 主要な型
 - `Oid`: `gix::ObjectId` の再エクスポート。
@@ -26,7 +26,7 @@ UI とコア各モジュール間で受け渡すデータモデル（`crates/str
 
 ## 2. リポジトリ読取層（`repo/`）
 
-`crates/strata-core/src/repo/` は `gix::ThreadSafeRepository` を保持する `Repo`（`repo/mod.rs`）を起点とし、各サブモジュールで読み取り機能を分担する。`Repo` は `Clone` が低コストでスレッド間共有可能であり、`CommitDiffCache`（`Arc<Mutex<CommitDiffCache>>`）を共有してコミット行数統計（`stat.rs`）と変更ファイル一覧の重複ツリーウォークを防ぐ。
+`crates/lamina-core/src/repo/` は `gix::ThreadSafeRepository` を保持する `Repo`（`repo/mod.rs`）を起点とし、各サブモジュールで読み取り機能を分担する。`Repo` は `Clone` が低コストでスレッド間共有可能であり、`CommitDiffCache`（`Arc<Mutex<CommitDiffCache>>`）を共有してコミット行数統計（`stat.rs`）と変更ファイル一覧の重複ツリーウォークを防ぐ。
 
 | サブモジュール | 責務・主要型 / 関数 | アルゴリズム・性能上の工夫と制約 |
 | --- | --- | --- |
@@ -55,7 +55,7 @@ UI とコア各モジュール間で受け渡すデータモデル（`crates/str
 
 ## 3. `git` CLI 実行層（`git_cli/`）
 
-`crates/strata-core/src/git_cli/` は `Git` ハンドル（`git_cli/mod.rs`）を中心に、外部 `git` バイナリ（最低要件 `MIN_GIT_VERSION = (2, 30, 0)`: `--pathspec-from-file`, `restore --staged`, `switch` が必要）を呼び出す。
+`crates/lamina-core/src/git_cli/` は `Git` ハンドル（`git_cli/mod.rs`）を中心に、外部 `git` バイナリ（最低要件 `MIN_GIT_VERSION = (2, 30, 0)`: `--pathspec-from-file`, `restore --staged`, `switch` が必要）を呼び出す。
 
 ### 共通実行基盤（`git_cli/mod.rs`）
 - **環境固定**: 常に `GIT_TERMINAL_PROMPT=0` と `LC_ALL=C` を注入し、読取補助コマンドには `GIT_OPTIONAL_LOCKS=0` を付与してバックグラウンド実行による `index` の mtime 更新（不要なファイル監視発火）を抑止する。
@@ -82,21 +82,21 @@ UI とコア各モジュール間で受け渡すデータモデル（`crates/str
 
 ## 4. セッション調停層（`session/`）
 
-`crates/strata-core/src/session/` は UI からの操作・要求を受け取り、9 種類（ワーカー 10 スレッド構成）のバックグラウンドスレッドとファイル監視を統括して不変スナップショット `RepoSnapshot` と `SessionEvent` を発行する。
+`crates/lamina-core/src/session/` は UI からの操作・要求を受け取り、9 種類（ワーカー 10 スレッド構成）のバックグラウンドスレッドとファイル監視を統括して不変スナップショット `RepoSnapshot` と `SessionEvent` を発行する。
 
 ```mermaid
 flowchart TD
-    UI["strata-app (UI スレッド)"]
+    UI["lamina-app (UI スレッド)"]
     Sess["Session (API 入口 / Shared)"]
-    Watch["strata-repo-watcher (RepoWatcher)"]
-    Hist["strata-session-history (history.rs)"]
-    Stat["strata-session-status (refresh.rs)"]
-    Ops["strata-session-operations (operations.rs)"]
-    Diff["strata-session-diff-0 / 1 (diffs.rs)"]
-    Qry["strata-session-queries (queries.rs)"]
-    Blame["strata-session-blame (blame.rs)"]
-    CSearch["strata-session-content-search (content_search.rs)"]
-    Sig["strata-session-signatures (signatures.rs)"]
+    Watch["lamina-repo-watcher (RepoWatcher)"]
+    Hist["lamina-session-history (history.rs)"]
+    Stat["lamina-session-status (refresh.rs)"]
+    Ops["lamina-session-operations (operations.rs)"]
+    Diff["lamina-session-diff-0 / 1 (diffs.rs)"]
+    Qry["lamina-session-queries (queries.rs)"]
+    Blame["lamina-session-blame (blame.rs)"]
+    CSearch["lamina-session-content-search (content_search.rs)"]
+    Sig["lamina-session-signatures (signatures.rs)"]
 
     UI -- "reload / set_history_scope" --> Sess
     UI -- "run(Operation)" --> Ops
@@ -135,7 +135,7 @@ flowchart TD
 
 ## 5. コミットグラフレイアウト（`graph/mod.rs`）
 
-`crates/strata-core/src/graph/mod.rs` はトポロジカル順（最新コミット先頭）に並んだコミット列を 1 行ずつ逐次処理（`GraphLayout::push`）し、描画用の幾何情報 `GraphRows` を構築する。
+`crates/lamina-core/src/graph/mod.rs` はトポロジカル順（最新コミット先頭）に並んだコミット列を 1 行ずつ逐次処理（`GraphLayout::push`）し、描画用の幾何情報 `GraphRows` を構築する。
 
 ### 幾何モデルとストレージ最適化
 - 各行（`GraphRow<'a>`）はノード位置 `(node_lane, node_color)`、必要な横幅 `width`、`passes: &[PassThrough]`、`edges: &[Segment]` からなる。
@@ -231,7 +231,7 @@ flowchart TD
 - **責務**: GUI から実行するリモート操作（`clone`, `fetch`, `pull`, `push` 等）で `git` が認証プロンプトを求めた際、対話端末なしに UI へ問い合わせて応答を返す。
 - **構造とセキュリティ**:
   - `AskpassHost::start`: コマンド実行期間中のみ一時的な IPC サーバーを起動。Unix 系 OS では `0o700` 一時ディレクトリ内の Unix ドメインソケット、Windows では `127.0.0.1:0` の TCP リスナを開く。
-  - ヘルパープロセス（`strata --askpass <prompt>` → `helper_main`）は `ENDPOINT_ENV` とワンタイムトークン `TOKEN_ENV` を受け取り、`strata-askpass/1` プロトコルでプロンプトを転送する。
+  - ヘルパープロセス（`lamina --askpass <prompt>` → `helper_main`）は `ENDPOINT_ENV` とワンタイムトークン `TOKEN_ENV` を受け取り、`lamina-askpass/1` プロトコルでプロンプトを転送する。
   - `is_secret` はプロンプト文字列（`"password"`, `"passphrase"`, `"passwd"`, `"pin "`, `"secret"`, `"token"`）からマスク表示の要否を判定する。
   - 通信プロトコル保護のため長さ上限（`MAX_PROMPT_BYTES = 4096`, `MAX_ANSWER_BYTES = 8192`, `MAX_HEADER_BYTES = 512`）と I/O タイムアウト（`IO_TIMEOUT = 10s`, `HELPER_RESPONSE_TIMEOUT = 150s`）を設け、回答を包む `Answer` 型は `Drop` 時にバッファをゼロクリアし、ディスクや `CommandLog` には一切記録しない。
 
@@ -252,4 +252,4 @@ flowchart TD
 - **`lfs.rs`**: Git LFS ポインタファイル（`MAX_POINTER_BYTES = 1024` 以下の仕様形式）をパースする `LfsPointer::parse`、ローカルオブジェクトパス解決（`<common_dir>/lfs/objects/aa/bb/<hex>`）、差分両側の解決を行う `resolve_diff`、`git lfs locks --json` 出力のパーサ `parse_locks_json` を提供。
 - **`tools.rs`**: 外部ツール（`ghq`, `gh`）の検出、クローン先パスの解決（`ghq_destination`）、リモート URL からのブラウザリンク生成（`GitHubRemote::parse`）。ホスト誤認を防ぐため、許可ホストは `github.com` と `gh auth status` から取得した既知ホスト集合に明示的に限定している。
 - **`image.rs`**: PNG / GIF / JPEG / BMP / ICO / WebP / SVG のヘッダバイト列のみからピクセル寸法とフォーマット情報（`ImageFormat`）を抽出する（ピクセルデコードを行わない軽量実装、上限 `MAX_IMAGE_BYTES = 20 MiB`）。SVG は `ImageKind::Svg` としてテキスト差分とプレビュー表示の両方を可能にする。
-- **`watch.rs`**: `RepoWatcher` と `Changes`。`notify::recommended_watcher` からの生イベントを専用ワーカースレッド `strata-repo-watcher` へ流し、`LEADING_SETTLE` (30ms) / `debounce` (150ms) / `MAX_LATENCY` (1s) の 3 パラメータでバースト集約を行う。バッチごとに `gix::Repository::excludes` スタックを生成して `.gitignore` 対象ファイルのイベントを除外し、`MAX_PATHS = 1000` 超過やオーバーフロー・ignore/attributes 変更時は `rescan = true` を立てて安全にフルスキャンへ倒す。また Drop 時は macOS FSEvents の停止待ちハングを避けるため、ワーカー join 後にプラットフォームバックエンドを別スレッドで破棄する。
+- **`watch.rs`**: `RepoWatcher` と `Changes`。`notify::recommended_watcher` からの生イベントを専用ワーカースレッド `lamina-repo-watcher` へ流し、`LEADING_SETTLE` (30ms) / `debounce` (150ms) / `MAX_LATENCY` (1s) の 3 パラメータでバースト集約を行う。バッチごとに `gix::Repository::excludes` スタックを生成して `.gitignore` 対象ファイルのイベントを除外し、`MAX_PATHS = 1000` 超過やオーバーフロー・ignore/attributes 変更時は `rescan = true` を立てて安全にフルスキャンへ倒す。また Drop 時は macOS FSEvents の停止待ちハングを避けるため、ワーカー join 後にプラットフォームバックエンドを別スレッドで破棄する。

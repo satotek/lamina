@@ -1,7 +1,7 @@
 ## Catppuccin
 
-Strata bundles the four Catppuccin colour palettes (Latte, Frappe, Macchiato
-and Mocha) under `crates/strata-app/resources/themes/`, derived from
+Lamina bundles the four Catppuccin colour palettes (Latte, Frappe, Macchiato
+and Mocha) under `crates/lamina-app/resources/themes/`, derived from
 <https://github.com/catppuccin/catppuccin>.
 
 ```

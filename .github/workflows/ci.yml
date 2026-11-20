@@ -14,7 +14,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
-  # crates/strata-term/build.rs refuses any other Zig version.
+  # crates/lamina-term/build.rs refuses any other Zig version.
   ZIG_VERSION: "0.17.1"
   # The caches below ship `target/` between runs, so artifact size is upload
   # and storage time. Line tables still give file:line in a panic backtrace and
@@ -104,7 +104,7 @@ jobs:
       - name: Install Rust toolchain
         run: rustup show
 
-      # libghostty-vt is built from source by crates/strata-term/build.rs, which
+      # libghostty-vt is built from source by crates/lamina-term/build.rs, which
       # checks the toolchain version before downloading anything.
       # This setup action runs on Node 24; the more common one still targets
       # the deprecated Node 20 runtime.
@@ -118,10 +118,10 @@ jobs:
         shell: bash
         run: |
           echo "rustc=$(rustc -vV | sed -n 's/^release: //p')" >> "$GITHUB_OUTPUT"
-          echo "sources=${{ hashFiles('Cargo.toml', '**/Cargo.toml', 'Cargo.lock', 'crates/strata-term/build.rs', 'rust-toolchain.toml', '.github/workflows/ci.yml', 'scripts/ci-sources') }}" >> "$GITHUB_OUTPUT"
+          echo "sources=${{ hashFiles('Cargo.toml', '**/Cargo.toml', 'Cargo.lock', 'crates/lamina-term/build.rs', 'rust-toolchain.toml', '.github/workflows/ci.yml', 'scripts/ci-sources') }}" >> "$GITHUB_OUTPUT"
 
       # The whole `target/` is cached, not just resolved dependencies: without
-      # the workspace artifacts every run recompiles strata-app from scratch,
+      # the workspace artifacts every run recompiles lamina-app from scratch,
       # which is most of the job. build.rs keeps its libghostty-vt archive and
       # tarballs under target/ghostty-vt-cache, so they ride along.
       #
@@ -137,9 +137,9 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: strata-${{ runner.os }}-${{ runner.arch }}-${{ env.CI_LANE }}-${{ env.CI_CACHE_VERSION }}-${{ steps.cache-key.outputs.rustc }}-${{ env.ZIG_VERSION }}-${{ steps.cache-key.outputs.sources }}
+          key: lamina-${{ runner.os }}-${{ runner.arch }}-${{ env.CI_LANE }}-${{ env.CI_CACHE_VERSION }}-${{ steps.cache-key.outputs.rustc }}-${{ env.ZIG_VERSION }}-${{ steps.cache-key.outputs.sources }}
           restore-keys: |
-            strata-${{ runner.os }}-${{ runner.arch }}-${{ env.CI_LANE }}-${{ env.CI_CACHE_VERSION }}-${{ steps.cache-key.outputs.rustc }}-
+            lamina-${{ runner.os }}-${{ runner.arch }}-${{ env.CI_LANE }}-${{ env.CI_CACHE_VERSION }}-${{ steps.cache-key.outputs.rustc }}-
 
       # Checkout stamps every file with the current time, which makes cargo
       # consider every cached artifact stale. Rewind the mtimes of unchanged
@@ -155,8 +155,8 @@ jobs:
       # identity, and commits without one fail.
       - name: Configure git
         run: |
-          git config --global user.name "Strata CI"
-          git config --global user.email "ci@strata.invalid"
+          git config --global user.name "Lamina CI"
+          git config --global user.email "ci@lamina.invalid"
 
       - name: Install cargo-nextest
         uses: taiki-e/install-action@v2.90.5
@@ -187,7 +187,7 @@ jobs:
         if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6.1.0
         with:
-          key: strata-${{ runner.os }}-${{ runner.arch }}-${{ env.CI_LANE }}-${{ env.CI_CACHE_VERSION }}-${{ steps.cache-key.outputs.rustc }}-${{ env.ZIG_VERSION }}-${{ steps.cache-key.outputs.sources }}
+          key: lamina-${{ runner.os }}-${{ runner.arch }}-${{ env.CI_LANE }}-${{ env.CI_CACHE_VERSION }}-${{ steps.cache-key.outputs.rustc }}-${{ env.ZIG_VERSION }}-${{ steps.cache-key.outputs.sources }}
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
@@ -219,7 +219,7 @@ jobs:
         shell: bash
         run: |
           echo "rustc=$(rustc -vV | sed -n 's/^release: //p')" >> "$GITHUB_OUTPUT"
-          echo "sources=${{ hashFiles('Cargo.toml', '**/Cargo.toml', 'Cargo.lock', 'crates/strata-term/build.rs', 'rust-toolchain.toml', '.github/workflows/ci.yml', 'scripts/ci-sources') }}" >> "$GITHUB_OUTPUT"
+          echo "sources=${{ hashFiles('Cargo.toml', '**/Cargo.toml', 'Cargo.lock', 'crates/lamina-term/build.rs', 'rust-toolchain.toml', '.github/workflows/ci.yml', 'scripts/ci-sources') }}" >> "$GITHUB_OUTPUT"
 
       # The feature set differs from the test lane, so the artifacts do too;
       # sharing a cache would make both lanes rebuild each other's work.
@@ -232,9 +232,9 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: strata-${{ runner.os }}-${{ runner.arch }}-${{ env.CI_LANE }}-${{ env.CI_CACHE_VERSION }}-${{ steps.cache-key.outputs.rustc }}-${{ env.ZIG_VERSION }}-${{ steps.cache-key.outputs.sources }}
+          key: lamina-${{ runner.os }}-${{ runner.arch }}-${{ env.CI_LANE }}-${{ env.CI_CACHE_VERSION }}-${{ steps.cache-key.outputs.rustc }}-${{ env.ZIG_VERSION }}-${{ steps.cache-key.outputs.sources }}
           restore-keys: |
-            strata-${{ runner.os }}-${{ runner.arch }}-${{ env.CI_LANE }}-${{ env.CI_CACHE_VERSION }}-${{ steps.cache-key.outputs.rustc }}-
+            lamina-${{ runner.os }}-${{ runner.arch }}-${{ env.CI_LANE }}-${{ env.CI_CACHE_VERSION }}-${{ steps.cache-key.outputs.rustc }}-
 
       - name: Restore source mtimes
         shell: bash
@@ -247,7 +247,7 @@ jobs:
       # still builds when the terminal feature, and with it libghostty-vt, is
       # turned off.
       - name: Check without the terminal feature
-        run: cargo check -p strata-app --no-default-features --all-targets
+        run: cargo check -p lamina-app --no-default-features --all-targets
 
       - name: Record source mtimes
         if: always()
@@ -261,7 +261,7 @@ jobs:
         if: always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cargo-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v6.1.0
         with:
-          key: strata-${{ runner.os }}-${{ runner.arch }}-${{ env.CI_LANE }}-${{ env.CI_CACHE_VERSION }}-${{ steps.cache-key.outputs.rustc }}-${{ env.ZIG_VERSION }}-${{ steps.cache-key.outputs.sources }}
+          key: lamina-${{ runner.os }}-${{ runner.arch }}-${{ env.CI_LANE }}-${{ env.CI_CACHE_VERSION }}-${{ steps.cache-key.outputs.rustc }}-${{ env.ZIG_VERSION }}-${{ steps.cache-key.outputs.sources }}
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache

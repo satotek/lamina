@@ -4,7 +4,7 @@
 # this after every build artifact has landed in one directory and before
 # SHA256SUMS.txt is written, so the sums cover the signatures and the manifest.
 #
-#     packaging/release/update-manifest.sh --key ~/strata-update.key dist 0.1.7 v0.1.7
+#     packaging/release/update-manifest.sh --key ~/lamina-update.key dist 0.1.7 v0.1.7
 #
 # Without --key nothing is signed and no manifest is written; that keeps forks
 # and runs without the signing secret working.
@@ -14,7 +14,7 @@ usage() {
     cat <<'EOF'
 Signs the release archives and writes latest.json for the app's updater.
 
-    packaging/release/update-manifest.sh --key ~/strata-update.key dist 0.1.7 v0.1.7
+    packaging/release/update-manifest.sh --key ~/lamina-update.key dist 0.1.7 v0.1.7
 
 Each archive is signed into <archive>.minisig, and latest.json is signed into
 latest.json.minisig. A platform with no archive in the directory is left out of
@@ -97,10 +97,10 @@ sha256() {
 # Maps an archive name to its platform key in latest.json.
 asset_key() {
     case $1 in
-    Strata-*-macos-arm64.dmg) echo macos-aarch64 ;;
-    Strata-*-windows-x64-setup.exe) echo windows-x86_64 ;;
-    Strata-*-windows-x64.zip) echo windows-x86_64-portable ;;
-    strata-*-linux-x86_64.tar.gz) echo linux-x86_64 ;;
+    Lamina-*-macos-arm64.dmg) echo macos-aarch64 ;;
+    Lamina-*-windows-x64-setup.exe) echo windows-x86_64 ;;
+    Lamina-*-windows-x64.zip) echo windows-x86_64-portable ;;
+    lamina-*-linux-x86_64.tar.gz) echo linux-x86_64 ;;
     *) return 1 ;;
     esac
 }
@@ -125,7 +125,7 @@ for file in "$dist"/*; do
     # An archive from another release would otherwise be signed and published
     # under this version, which the updater cannot make sense of.
     case $name in
-    "Strata-$version"-* | "strata-$version"-*) ;;
+    "Lamina-$version"-* | "lamina-$version"-*) ;;
     *)
         echo "update-manifest.sh: $name does not belong to version $version" >&2
         exit 1
@@ -148,7 +148,7 @@ if [ -n "$duplicate" ]; then
     exit 1
 fi
 
-notes_url="https://github.com/satotek/strata/releases/tag/$tag"
+notes_url="https://github.com/satotek/lamina/releases/tag/$tag"
 assets='{}'
 # Fixed order keeps the manifest stable between runs; a key with no archive is
 # simply absent, which is how a platform without an installer drops out.

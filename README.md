@@ -1,14 +1,14 @@
-# Strata
+# Lamina
 
 [日本語](README.ja.md)
 
-Strata is a fast, lightweight native Git client for macOS and Windows (with Linux supported on a best-effort basis), built in Rust with GPUI. It reads repositories directly with gitoxide (`gix`) and performs every write operation through the `git` CLI so hooks, commit signing, credential helpers, and Git LFS behave identically to running `git` in a terminal. The interface is available in English and Japanese.
+Lamina is a fast, lightweight native Git client for macOS and Windows (with Linux supported on a best-effort basis), built in Rust with GPUI. It reads repositories directly with gitoxide (`gix`) and performs every write operation through the `git` CLI so hooks, commit signing, credential helpers, and Git LFS behave identically to running `git` in a terminal. The interface is available in English and Japanese.
 
 <!-- Screenshot placeholder: add a screenshot once available -->
 
 ## Status
 
-Strata is in early (`0.x`) development as a personal open-source project—expect rough edges and breaking changes.
+Lamina is in early (`0.x`) development as a personal open-source project—expect rough edges and breaking changes.
 
 ## Features
 
@@ -53,18 +53,18 @@ Strata is in early (`0.x`) development as a personal open-source project—expec
 ### Workspace, Customization & Embedded Terminal
 - Multi-tab and multi-window workspace with session restore, recent repository picker, light/dark/system theme (with bundled and user-provided TOML palettes), customizable UI and code fonts, and English/Japanese UI (`System` follows the OS language).
 - Command palette, customizable keybindings (`keymap.json` and Keyboard settings), and custom commands (`commands.json` with `${repo}`, `${branch}`, `${commit}`, `${file}`, and `${remote}` variables).
-- Embedded PTY terminal panel per repository tab (`strata-term`, built on `libghostty-vt` and `portable-pty`, optional via the Cargo `terminal` feature).
+- Embedded PTY terminal panel per repository tab (`lamina-term`, built on `libghostty-vt` and `portable-pty`, optional via the Cargo `terminal` feature).
 - Japanese and legacy text encoding support: UTF-8, UTF-16LE/BE (BOM), `.gitattributes` `working-tree-encoding`, and automatic detection (`Shift_JIS`, `EUC-JP`, `ISO-2022-JP`, etc.) for display while preserving original bytes on writes and patches.
 
 ## Customization
 
 ### Custom Themes
 
-Strata loads user-defined `*.toml` colour themes from the `themes/` subdirectory of your configuration folder (or `$STRATA_CONFIG_DIR/themes/` when `STRATA_CONFIG_DIR` is set):
+Lamina loads user-defined `*.toml` colour themes from the `themes/` subdirectory of your configuration folder (or `$LAMINA_CONFIG_DIR/themes/` when `LAMINA_CONFIG_DIR` is set):
 
-- **macOS:** `~/Library/Application Support/Strata/themes/`
-- **Windows:** `%APPDATA%\Strata\themes\`
-- **Linux:** `$XDG_CONFIG_HOME/strata/themes/` (defaults to `~/.config/strata/themes/`)
+- **macOS:** `~/Library/Application Support/Lamina/themes/`
+- **Windows:** `%APPDATA%\Lamina\themes\`
+- **Linux:** `$XDG_CONFIG_HOME/lamina/themes/` (defaults to `~/.config/lamina/themes/`)
 
 To start from a complete working file, open **Settings → Appearance** and click **Export current theme as a file**. That writes `<id>-custom.toml` into your themes folder with every token populated, and **Open themes folder** opens that directory. Saving edits to an active user theme re-applies it live across open windows.
 
@@ -84,16 +84,16 @@ Prebuilt binaries are published on GitHub Releases.
 - Optional: `gh` (GitHub CLI), `git-lfs`, and `ghq`.
 
 ### macOS
-Download the `.dmg` (Apple silicon, macOS 14.0 or later), open it, and drag `Strata.app` to `/Applications`. Intel Macs are not supported.
+Download the `.dmg` (Apple silicon, macOS 14.0 or later), open it, and drag `Lamina.app` to `/Applications`. Intel Macs are not supported.
 
-Release builds carry a self-signed signature and are **not notarized**. On first launch, right-click `Strata.app` and choose **Open**, or clear the quarantine attribute:
+Release builds carry a self-signed signature and are **not notarized**. On first launch, right-click `Lamina.app` and choose **Open**, or clear the quarantine attribute:
 
 ```sh
-xattr -dr com.apple.quarantine /Applications/Strata.app
+xattr -dr com.apple.quarantine /Applications/Lamina.app
 ```
 
 ### Windows (x86_64)
-Download and extract the `.zip` archive, then run `strata.exe`.
+Download and extract the `.zip` archive, then run `lamina.exe`.
 
 Release builds are **unsigned**. If Windows SmartScreen displays a warning, click **More info → Run anyway**.
 
@@ -105,20 +105,20 @@ Download and extract the release tarball. Make sure the following runtime shared
 
 ## Building from Source
 
-Building Strata requires Rust (stable, selected by [rust-toolchain.toml](rust-toolchain.toml)) and `git`. Building with the embedded terminal enabled (the default) also requires **Zig `0.17.1`** for `libghostty-vt`. To build without the embedded terminal (and without Zig), pass `--no-default-features`:
+Building Lamina requires Rust (stable, selected by [rust-toolchain.toml](rust-toolchain.toml)) and `git`. Building with the embedded terminal enabled (the default) also requires **Zig `0.17.1`** for `libghostty-vt`. To build without the embedded terminal (and without Zig), pass `--no-default-features`:
 
 ```sh
 # macOS (with Xcode / Metal Toolchain installed)
-cargo run --release -p strata-app
+cargo run --release -p lamina-app
 
 # Windows (from "Developer PowerShell for VS")
-cargo build --release -p strata-app
+cargo build --release -p lamina-app
 
 # Linux (via the Nix dev shell)
-direnv allow && direnv exec . cargo run --release -p strata-app
+direnv allow && direnv exec . cargo run --release -p lamina-app
 
 # Without the embedded terminal (no Zig required)
-cargo build --release -p strata-app --no-default-features
+cargo build --release -p lamina-app --no-default-features
 ```
 
 See [docs/building.md](docs/building.md) for platform-specific prerequisites, Linux package lists, Windows setup, and Nix dev shell details.

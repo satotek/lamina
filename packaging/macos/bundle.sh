@@ -1,6 +1,6 @@
 #!/bin/sh
-# Builds dist/Strata.app: the release binary, a bundle Info.plist and the
-# checked-in Strata.icns, then signs it so it launches on this Mac. Without an
+# Builds dist/Lamina.app: the release binary, a bundle Info.plist and the
+# checked-in Lamina.icns, then signs it so it launches on this Mac. Without an
 # identity the signature is ad hoc; the release workflow imports a self-signed
 # certificate and passes its name so the app keeps one identity across
 # releases. Nothing here notarises the app; dmg.sh turns the result into a disk
@@ -11,7 +11,7 @@
 #
 #     direnv exec . packaging/macos/bundle.sh
 #     packaging/macos/bundle.sh --target x86_64-apple-darwin
-#     packaging/macos/bundle.sh --sign "Strata Code Signing"
+#     packaging/macos/bundle.sh --sign "Lamina Code Signing"
 set -eu
 
 root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
@@ -19,14 +19,14 @@ root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
 
 usage() {
     cat <<'EOF'
-Builds dist/Strata.app: the release binary, a bundle Info.plist and the
-checked-in Strata.icns, then signs it so it launches on this Mac. Nothing here
+Builds dist/Lamina.app: the release binary, a bundle Info.plist and the
+checked-in Lamina.icns, then signs it so it launches on this Mac. Nothing here
 notarises the app; dmg.sh turns the result into the disk image the release
 publishes.
 
     direnv exec . packaging/macos/bundle.sh
     packaging/macos/bundle.sh --target x86_64-apple-darwin
-    packaging/macos/bundle.sh --sign "Strata Code Signing"
+    packaging/macos/bundle.sh --sign "Lamina Code Signing"
 
 Options:
     --target <triple>  build and bundle that target instead of the host
@@ -35,7 +35,7 @@ Options:
 
 Environment:
     NOTICES  notices file to embed (default: dist/THIRD-PARTY-NOTICES.md)
-    STRATA_SIGNING_IDENTITY  identity to sign with when --sign is absent
+    LAMINA_SIGNING_IDENTITY  identity to sign with when --sign is absent
 EOF
 }
 
@@ -65,18 +65,18 @@ while [ $# -gt 0 ]; do
 done
 
 # The flag wins so a caller can override an exported default.
-identity=${identity:-${STRATA_SIGNING_IDENTITY:-}}
+identity=${identity:-${LAMINA_SIGNING_IDENTITY:-}}
 
 cd "$root"
 
-app="$root/dist/Strata.app"
-icon=crates/strata-app/resources/icon/Strata.icns
+app="$root/dist/Lamina.app"
+icon=crates/lamina-app/resources/icon/Lamina.icns
 notices=${NOTICES:-$root/dist/THIRD-PARTY-NOTICES.md}
 # Resolve the binary through CARGO_TARGET_DIR and the optional --target, because
 # the dev shell points cargo at one target directory shared by every worktree
 # and cross builds add a triple directory.
-release=$(strata_release_dir "$root" "$target")
-version=$(strata_version "$root")
+release=$(lamina_release_dir "$root" "$target")
+version=$(lamina_version "$root")
 
 if [ -z "$version" ]; then
     echo "bundle.sh: could not read [workspace.package] version from Cargo.toml" >&2
@@ -92,7 +92,7 @@ if [ "$build" = 1 ]; then
         echo "bundle.sh: cargo not found; run through the dev shell: direnv exec . $0" >&2
         exit 1
     }
-    set -- --release --locked -p strata-app
+    set -- --release --locked -p lamina-app
     if [ -n "$target" ]; then
         set -- "$@" --target "$target"
     fi
@@ -104,15 +104,15 @@ command -v codesign >/dev/null 2>&1 || {
     exit 1
 }
 
-if [ ! -f "$release/strata" ]; then
-    echo "bundle.sh: no binary at $release/strata; build it or drop --no-build" >&2
+if [ ! -f "$release/lamina" ]; then
+    echo "bundle.sh: no binary at $release/lamina; build it or drop --no-build" >&2
     exit 1
 fi
 
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp "$release/strata" "$app/Contents/MacOS/strata"
-cp "$icon" "$app/Contents/Resources/Strata.icns"
+cp "$release/lamina" "$app/Contents/MacOS/lamina"
+cp "$icon" "$app/Contents/Resources/Lamina.icns"
 # Licences travel inside the bundle; dmg.sh also copies them to the image root.
 cp LICENSE-MIT LICENSE-APACHE "$app/Contents/Resources/"
 cp "$notices" "$app/Contents/Resources/THIRD-PARTY-NOTICES.md"
@@ -127,17 +127,17 @@ cat >"$app/Contents/Info.plist" <<PLIST
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleDisplayName</key>
-    <string>Strata</string>
+    <string>Lamina</string>
     <key>CFBundleExecutable</key>
-    <string>strata</string>
+    <string>lamina</string>
     <key>CFBundleIconFile</key>
-    <string>Strata.icns</string>
+    <string>Lamina.icns</string>
     <key>CFBundleIdentifier</key>
-    <string>dev.strata.Strata</string>
+    <string>dev.lamina.Lamina</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
     <key>CFBundleName</key>
-    <string>Strata</string>
+    <string>Lamina</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>

@@ -1,10 +1,10 @@
 ## libghostty-vt and its bundled dependencies
 
-The terminal panel is backed by `strata-term`, which links a static
-libghostty-vt 1.0.1. That library is not a Rust crate: `crates/strata-term/build.rs`
+The terminal panel is backed by `lamina-term`, which links a static
+libghostty-vt 1.0.1. That library is not a Rust crate: `crates/lamina-term/build.rs`
 downloads the pinned libghostty-vt source and dependency tarballs (verifying
 their SHA-256 sums) and compiles the static library with Zig 0.17.1, so the
-code below ends up inside the Strata binaries but never appears in the crate
+code below ends up inside the Lamina binaries but never appears in the crate
 graph that `cargo-about` walks.
 
 libghostty-vt is MIT licensed. Its build pulls in the following projects;

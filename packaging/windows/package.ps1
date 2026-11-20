@@ -1,6 +1,6 @@
 # Builds the release executable and zips it with a short README, the licences
 # and the third-party notices. -Installer additionally compiles the Inno Setup
-# installer dist\Strata-<version>-windows-x64-setup.exe from the same staged
+# installer dist\Lamina-<version>-windows-x64-setup.exe from the same staged
 # files, so both artifacts always carry identical bits.
 #
 #     powershell -ExecutionPolicy Bypass -File packaging\windows\package.ps1
@@ -9,7 +9,7 @@
 #
 # -Installer needs iscc (Inno Setup 6.3 or newer) on PATH or in
 # C:\Program Files (x86)\Inno Setup 6. The icon is already embedded in
-# strata.exe by crates\strata-app\build.rs, so the zip needs no extra icon
+# lamina.exe by crates\lamina-app\build.rs, so the zip needs no extra icon
 # files. Build on Windows: GPUI compiles its shaders with fxc.exe, which only
 # the Windows SDK provides.
 param(
@@ -29,18 +29,18 @@ $targetRoot = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-P
 $release = if ($Target) { Join-Path $targetRoot "$Target\release" } else { Join-Path $targetRoot "release" }
 
 if (-not $NoBuild) {
-    $buildArgs = @("build", "--release", "--locked", "-p", "strata-app")
+    $buildArgs = @("build", "--release", "--locked", "-p", "lamina-app")
     if ($Target) { $buildArgs += @("--target", $Target) }
     & cargo @buildArgs
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed" }
 }
 
-if (-not (Test-Path (Join-Path $release "strata.exe"))) {
-    throw "no binary at $release\strata.exe; build it or drop -NoBuild"
+if (-not (Test-Path (Join-Path $release "lamina.exe"))) {
+    throw "no binary at $release\lamina.exe; build it or drop -NoBuild"
 }
 
 $metadata = cargo metadata --no-deps --format-version 1 --quiet | ConvertFrom-Json
-$version = ($metadata.packages | Where-Object name -eq "strata-app" | Select-Object -First 1).version
+$version = ($metadata.packages | Where-Object name -eq "lamina-app" | Select-Object -First 1).version
 
 if (-not $Notices) { $Notices = Join-Path $root "dist\THIRD-PARTY-NOTICES.md" }
 if (-not (Test-Path $Notices)) {
@@ -49,14 +49,14 @@ if (-not (Test-Path $Notices)) {
 
 $dist = Join-Path $root "dist"
 $stage = Join-Path $dist "windows-x64"
-$zip = Join-Path $dist "Strata-$version-windows-x64.zip"
-$setup = Join-Path $dist "Strata-$version-windows-x64-setup.exe"
+$zip = Join-Path $dist "Lamina-$version-windows-x64.zip"
+$setup = Join-Path $dist "Lamina-$version-windows-x64-setup.exe"
 
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
-Copy-Item (Join-Path $release "strata.exe") $stage
+Copy-Item (Join-Path $release "lamina.exe") $stage
 Copy-Item (Join-Path $PSScriptRoot "README.txt") $stage
 Copy-Item (Join-Path $root "LICENSE-MIT") $stage
 Copy-Item (Join-Path $root "LICENSE-APACHE") $stage
@@ -78,7 +78,7 @@ if ($Installer) {
     }
 
     if (Test-Path $setup) { Remove-Item -Force $setup }
-    & $iscc "/DAppVersion=$version" "/DStageDir=$stage" "/O$dist" "/FStrata-$version-windows-x64-setup" (Join-Path $PSScriptRoot "strata.iss")
+    & $iscc "/DAppVersion=$version" "/DStageDir=$stage" "/O$dist" "/FLamina-$version-windows-x64-setup" (Join-Path $PSScriptRoot "lamina.iss")
     if ($LASTEXITCODE -ne 0) { throw "iscc failed" }
     if (-not (Test-Path $setup)) { throw "iscc wrote no setup at $setup" }
 }

@@ -1,12 +1,12 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/strata-core",
-    "crates/strata-app",
-    "crates/strata-term",
-    "crates/strata-remote-protocol",
-    "crates/strata-remote-client",
-    "crates/strata-remote",
+    "crates/lamina-core",
+    "crates/lamina-app",
+    "crates/lamina-term",
+    "crates/lamina-remote-protocol",
+    "crates/lamina-remote-client",
+    "crates/lamina-remote",
 ]
 
 [workspace.package]
@@ -14,13 +14,13 @@ version = "0.1.10"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Lightweight cross-platform git client"
-repository = "https://github.com/satotek/strata"
-homepage = "https://github.com/satotek/strata"
+repository = "https://github.com/satotek/lamina"
+homepage = "https://github.com/satotek/lamina"
 
 [workspace.dependencies]
-strata-core = { path = "crates/strata-core" }
-strata-remote-protocol = { path = "crates/strata-remote-protocol" }
-strata-remote-client = { path = "crates/strata-remote-client" }
+lamina-core = { path = "crates/lamina-core" }
+lamina-remote-protocol = { path = "crates/lamina-remote-protocol" }
+lamina-remote-client = { path = "crates/lamina-remote-client" }
 
 # The phase-0 benchmark has to be judged on release builds, where frame pacing
 # is not dominated by unoptimised element layout.

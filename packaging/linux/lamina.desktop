@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Lamina
+GenericName=Git Client
+Comment=A lightweight git client
+Exec=lamina %f
+Icon=lamina
+Terminal=false
+Categories=Development;RevisionControl;
+Keywords=git;repository;commit;diff;
+StartupWMClass=lamina

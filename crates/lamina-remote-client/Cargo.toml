@@ -1,0 +1,12 @@
+[package]
+name = "lamina-remote-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Client-side remote repository session for Lamina"
+
+[dependencies]
+lamina-core = { workspace = true }
+lamina-remote-protocol = { workspace = true }

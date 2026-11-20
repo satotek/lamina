@@ -17,8 +17,8 @@ env:
   RUST_BACKTRACE: "1"
   # The About window embeds this rather than asking git, because a packaged
   # checkout may not carry a .git directory.
-  STRATA_BUILD_COMMIT: ${{ github.sha }}
-  # crates/strata-term/build.rs refuses any other Zig version.
+  LAMINA_BUILD_COMMIT: ${{ github.sha }}
+  # crates/lamina-term/build.rs refuses any other Zig version.
   ZIG_VERSION: "0.17.1"
   # Linux releases build on ubuntu-22.04 for an older glibc floor. Its newest
   # libstdc++ headers are version 12, matching the gcc 12 clang picks there.
@@ -82,7 +82,7 @@ jobs:
             echo "tag ${GITHUB_REF_NAME} does not match [workspace.package] version ${version}" >&2
             exit 1
           fi
-          echo "building Strata ${version}"
+          echo "building Lamina ${version}"
 
   build:
     name: build (${{ matrix.name }})
@@ -95,7 +95,7 @@ jobs:
       HAS_SIGNING_P12: ${{ secrets.STRATA_SIGNING_P12 != '' }}
       # Self-signed, so signing needs no Apple Developer Program membership.
       # packaging/macos/SIGNING.md describes the certificate and the secrets.
-      SIGNING_IDENTITY: Strata Code Signing
+      SIGNING_IDENTITY: Lamina Code Signing
     strategy:
       fail-fast: false
       matrix:
@@ -129,7 +129,7 @@ jobs:
       - name: Add the target triple
         run: rustup target add ${{ matrix.target }}
 
-      # libghostty-vt is compiled from source by crates/strata-term/build.rs,
+      # libghostty-vt is compiled from source by crates/lamina-term/build.rs,
       # which checks the toolchain version before downloading anything.
       # This setup action runs on Node 24; the more common one still targets
       # the deprecated Node 20 runtime.
@@ -142,7 +142,7 @@ jobs:
         uses: actions/cache@v6.1.0
         with:
           path: target/ghostty-vt-cache
-          key: ghostty-vt-${{ env.ZIG_VERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('crates/strata-term/build.rs') }}
+          key: ghostty-vt-${{ env.ZIG_VERSION }}-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('crates/lamina-term/build.rs') }}
 
       - uses: Swatinem/rust-cache@v2.9.3
 
@@ -191,7 +191,7 @@ jobs:
       - name: Note the ad-hoc signing fallback
         if: runner.os == 'macOS' && env.HAS_SIGNING_P12 != 'true'
         run: |
-          echo "::warning::STRATA_SIGNING_P12 is not set, so Strata.app is signed ad hoc and its identity changes with every release"
+          echo "::warning::LAMINA_SIGNING_P12 is not set, so Lamina.app is signed ad hoc and its identity changes with every release"
 
       - name: Build, bundle and create the disk image
         if: runner.os == 'macOS'
@@ -209,8 +209,8 @@ jobs:
       - name: Verify the app signature
         if: runner.os == 'macOS' && env.HAS_SIGNING_P12 == 'true'
         run: |
-          codesign --verify --deep --strict --verbose=2 dist/Strata.app
-          codesign -dr - dist/Strata.app
+          codesign --verify --deep --strict --verbose=2 dist/Lamina.app
+          codesign -dr - dist/Lamina.app
 
       # The runner image also carries Inno Setup, but its version drifts with
       # image updates; a pinned choco package keeps the installer's build
@@ -231,14 +231,14 @@ jobs:
           set -euo pipefail
           packaging/linux/package.sh --target ${{ matrix.target }}
           tmp=$(mktemp -d)
-          tar -xzf dist/strata-*-linux-*.tar.gz -C "$tmp"
-          # The archive unpacks into strata-<version>-linux-<arch>/.
-          package=$(find "$tmp" -mindepth 1 -maxdepth 1 -type d -name 'strata-*')
+          tar -xzf dist/lamina-*-linux-*.tar.gz -C "$tmp"
+          # The archive unpacks into lamina-<version>-linux-<arch>/.
+          package=$(find "$tmp" -mindepth 1 -maxdepth 1 -type d -name 'lamina-*')
           PREFIX="$tmp/prefix" "$package/install.sh"
-          test -x "$tmp/prefix/bin/strata"
-          test -f "$tmp/prefix/share/applications/strata.desktop"
-          test -f "$tmp/prefix/share/icons/hicolor/512x512/apps/strata.png"
-          test -f "$tmp/prefix/share/doc/strata/THIRD-PARTY-NOTICES.md"
+          test -x "$tmp/prefix/bin/lamina"
+          test -f "$tmp/prefix/share/applications/lamina.desktop"
+          test -f "$tmp/prefix/share/icons/hicolor/512x512/apps/lamina.png"
+          test -f "$tmp/prefix/share/doc/lamina/THIRD-PARTY-NOTICES.md"
 
       - uses: actions/upload-artifact@v7.0.2
         with:
@@ -297,12 +297,12 @@ jobs:
         run: |
           set -euo pipefail
           if [ -z "$UPDATE_KEY" ]; then
-            echo "::warning::STRATA_UPDATE_KEY is not set; the archives are unsigned and latest.json is skipped"
+            echo "::warning::LAMINA_UPDATE_KEY is not set; the archives are unsigned and latest.json is skipped"
             exit 0
           fi
           # The key only ever exists as a file: passing it as an argument would
           # put it in the process list and in the step log.
-          key="$RUNNER_TEMP/strata-update.key"
+          key="$RUNNER_TEMP/lamina-update.key"
           trap 'rm -f "$key"' EXIT
           (umask 077 && printf '%s\n' "$UPDATE_KEY" >"$key")
           chmod 600 "$key"
@@ -328,5 +328,5 @@ jobs:
             gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
           else
             gh release create "${GITHUB_REF_NAME}" --draft \
-              --title "Strata ${VERSION}" --generate-notes dist/*
+              --title "Lamina ${VERSION}" --generate-notes dist/*
           fi

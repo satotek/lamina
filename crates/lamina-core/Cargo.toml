@@ -1,0 +1,58 @@
+[package]
+name = "lamina-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[features]
+test-support = ["dep:tempfile"]
+
+[dependencies]
+tempfile = { version = "3.27.0", optional = true }
+chardetng = "1"
+encoding_rs = "0.8"
+gix = "0.90.0"
+imara-diff = "0.2"
+log = "0.4"
+memchr = "2"
+notify = "8"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tree-sitter = "0.27.2"
+tree-sitter-bash = "0.25.1"
+tree-sitter-c = "0.24.2"
+tree-sitter-cpp = "0.23.4"
+tree-sitter-css = "0.25.0"
+tree-sitter-go = "0.25.0"
+tree-sitter-highlight = "0.27.2"
+tree-sitter-html = "0.23.2"
+tree-sitter-javascript = "0.25.0"
+tree-sitter-json = "0.24.8"
+tree-sitter-md = { version = "0.5.4", default-features = false }
+tree-sitter-python = "0.25.0"
+tree-sitter-rust = "0.24.2"
+tree-sitter-toml-ng = "0.7.0"
+tree-sitter-typescript = "0.23.2"
+tree-sitter-yaml = "0.7.2"
+unicode-width = "0.2"
+
+# Proxy detection reads the OS settings store on each platform that has one.
+# Both versions are already in the lockfile through other crates, so this
+# only adds the direct dependency edge.
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.9"
+system-configuration = "0.6"
+
+# WinHTTP: the documented way to resolve the per-user Internet Options and
+# PAC scripts. `Win32_Foundation` supplies GlobalFree, which every buffer
+# WinHTTP hands out must be released with.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Networking_WinHttp"] }
+
+[dev-dependencies]
+insta = "1.49.0"
+tempfile = "3.27.0"

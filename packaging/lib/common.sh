@@ -7,7 +7,7 @@
 # just to learn the version.
 
 # Prints the [workspace.package] version of the repository rooted at $1.
-strata_version() {
+lamina_version() {
     sed -n '/^\[workspace\.package\]/,/^\[[^[]/p' "$1/Cargo.toml" |
         sed -n 's/^version *= *"\([^"]*\)".*/\1/p' |
         head -n 1
@@ -17,7 +17,7 @@ strata_version() {
 # at $1 and the target triple in $2 (which may be empty). CARGO_TARGET_DIR wins
 # because the Nix dev shell points every worktree at one shared target
 # directory, so `./target` is usually not where the binary is.
-strata_release_dir() {
+lamina_release_dir() {
     base=${CARGO_TARGET_DIR:-$1/target}
     if [ -n "${2:-}" ]; then
         printf '%s/%s/release\n' "$base" "$2"
@@ -27,7 +27,7 @@ strata_release_dir() {
 }
 
 # Prints the short architecture name used in artifact file names.
-strata_arch() {
+lamina_arch() {
     case ${1:-$(uname -m)} in
     *aarch64* | *arm64*) echo arm64 ;;
     *x86_64* | *amd64* | *x64*) echo x64 ;;

@@ -6,21 +6,21 @@ output lands in `dist/`, which is git-ignored.
 | Path | What it does |
 | --- | --- |
 | `lib/common.sh` | Version, target-directory and arch helpers the scripts share. |
-| `macos/bundle.sh` | Builds `dist/Strata.app` with `Info.plist`, the `.icns`, the licences and the notices, signed ad hoc or with a certificate identity. |
-| `macos/dmg.sh` | Wraps that app in `dist/Strata-<version>-macos-<arch>.dmg`. |
+| `macos/bundle.sh` | Builds `dist/Lamina.app` with `Info.plist`, the `.icns`, the licences and the notices, signed ad hoc or with a certificate identity. |
+| `macos/dmg.sh` | Wraps that app in `dist/Lamina-<version>-macos-<arch>.dmg`. |
 | `macos/SIGNING.md` | How to make the self-signed signing certificate and the secrets the release workflow imports. |
-| `linux/package.sh` | Builds `dist/strata-<version>-linux-<arch>.tar.gz`. |
-| `linux/strata.desktop` | Desktop entry for menus and file managers. |
+| `linux/package.sh` | Builds `dist/lamina-<version>-linux-<arch>.tar.gz`. |
+| `linux/lamina.desktop` | Desktop entry for menus and file managers. |
 | `linux/install.sh` | Installs the binary, icons and desktop entry into a prefix; works from an unpacked archive or a checkout. |
-| `windows/package.ps1` | Builds and zips `strata.exe`, the README, the licences and the notices; `-Installer` adds the setup executable. |
-| `windows/strata.iss` | Inno Setup script behind `-Installer`: installs the staged zip contents per user and registers an uninstaller. |
+| `windows/package.ps1` | Builds and zips `lamina.exe`, the README, the licences and the notices; `-Installer` adds the setup executable. |
+| `windows/lamina.iss` | Inno Setup script behind `-Installer`: installs the staged zip contents per user and registers an uninstaller. |
 | `release/update-manifest.sh` | Signs the release archives and writes `latest.json` for the app's updater. |
 | `third-party/generate.sh` | Writes the third-party notices that every artifact carries. |
 | `third-party/libghostty-vt.md` | The part of those notices that cargo-about cannot see: the Zig side of the terminal backend. |
 | `third-party/catppuccin.md` | MIT notice for the bundled Catppuccin colour palettes. |
 
 The app icon lives with the other resources, not here:
-`crates/strata-app/resources/icon/`. `generate.sh` there renders every platform
+`crates/lamina-app/resources/icon/`. `generate.sh` there renders every platform
 file from the SVGs with `resvg`, and all of its outputs are checked in, so no
 build step needs an image tool. How to regenerate them is the last section.
 
@@ -32,7 +32,7 @@ the app with `--no-default-features` to prove it still builds without the
 terminal feature and therefore without Zig. Clippy runs locally before each
 commit rather than in CI, so the workspace is compiled once per platform.
 
-Zig 0.17.1 is required by `crates/strata-term/build.rs`, which downloads
+Zig 0.17.1 is required by `crates/lamina-term/build.rs`, which downloads
 libghostty-vt 1.0.1 and its dependency tarballs (verifying their SHA-256 sums)
 and compiles the static library. The compiled archive and the tarballs are
 cached under `<target dir>/ghostty-vt-cache`, and CI caches that directory
@@ -46,12 +46,12 @@ several minutes of Zig work.
 2. `build` compiles with `--release --locked` on three runners, packages the
    result with the scripts below, and uploads each archive as a workflow
    artifact:
-   - `Strata-<version>-macos-arm64.dmg` on `macos-15`
+   - `Lamina-<version>-macos-arm64.dmg` on `macos-15`
      (`aarch64-apple-darwin`)
-   - `Strata-<version>-windows-x64.zip` and
-     `Strata-<version>-windows-x64-setup.exe` on `windows-latest`
+   - `Lamina-<version>-windows-x64.zip` and
+     `Lamina-<version>-windows-x64-setup.exe` on `windows-latest`
      (`x86_64-pc-windows-msvc`)
-   - `strata-<version>-linux-x86_64.tar.gz` on `ubuntu-22.04`
+   - `lamina-<version>-linux-x86_64.tar.gz` on `ubuntu-22.04`
      (`x86_64-unknown-linux-gnu`, the oldest hosted runner, so the archive
      needs no newer glibc than 2.35)
 3. `publish` (tags only) downloads the archives, signs them and writes
@@ -77,12 +77,12 @@ reads to decide whether a newer release exists:
 {
   "version": "0.1.7",
   "tag": "v0.1.7",
-  "notes_url": "https://github.com/satotek/strata/releases/tag/v0.1.7",
+  "notes_url": "https://github.com/satotek/lamina/releases/tag/v0.1.7",
   "assets": {
-    "macos-aarch64": {"name": "Strata-0.1.7-macos-arm64.dmg", "sha256": "<hex>", "minisig": "<full .minisig text>"},
-    "windows-x86_64": {"name": "Strata-0.1.7-windows-x64-setup.exe", "sha256": "<hex>", "minisig": "<full .minisig text>"},
-    "windows-x86_64-portable": {"name": "Strata-0.1.7-windows-x64.zip", "sha256": "<hex>", "minisig": "<full .minisig text>"},
-    "linux-x86_64": {"name": "strata-0.1.7-linux-x86_64.tar.gz", "sha256": "<hex>", "minisig": "<full .minisig text>"}
+    "macos-aarch64": {"name": "Lamina-0.1.7-macos-arm64.dmg", "sha256": "<hex>", "minisig": "<full .minisig text>"},
+    "windows-x86_64": {"name": "Lamina-0.1.7-windows-x64-setup.exe", "sha256": "<hex>", "minisig": "<full .minisig text>"},
+    "windows-x86_64-portable": {"name": "Lamina-0.1.7-windows-x64.zip", "sha256": "<hex>", "minisig": "<full .minisig text>"},
+    "linux-x86_64": {"name": "lamina-0.1.7-linux-x86_64.tar.gz", "sha256": "<hex>", "minisig": "<full .minisig text>"}
   }
 }
 ```
@@ -100,7 +100,7 @@ One key pair signs every release. It is separate from the platform code signing
 keys because the app checks it itself:
 
 ```sh
-minisign -G -W -p strata-update.pub -s strata-update.key
+minisign -G -W -p lamina-update.pub -s lamina-update.key
 ```
 
 `-W` leaves the secret key unencrypted, because the workflow has no terminal to
@@ -109,10 +109,10 @@ key is compiled into the app as the app's embedded update key, and the secret
 key is a repository secret:
 
 ```sh
-gh secret set STRATA_UPDATE_KEY < strata-update.key
+gh secret set LAMINA_UPDATE_KEY < lamina-update.key
 ```
 
-Keep `strata-update.key` out of the working tree and backed up somewhere only
+Keep `lamina-update.key` out of the working tree and backed up somewhere only
 release managers can reach. Without it a release cannot be signed, and anyone
 holding it can sign an update the app will install. Rotating the key means
 generating a pair, embedding the new public key, publishing a release with it
@@ -125,8 +125,8 @@ A run without the secret — a fork that never set it, for instance — logs a
 ### Verifying by hand
 
 ```sh
-minisign -V -p strata-update.pub -m Strata-0.1.7-macos-arm64.dmg
-minisign -V -p strata-update.pub -m latest.json
+minisign -V -p lamina-update.pub -m Lamina-0.1.7-macos-arm64.dmg
+minisign -V -p lamina-update.pub -m latest.json
 ```
 
 Installing `latest.json.minisig` next to `latest.json` is enough for minisign to
@@ -137,7 +137,7 @@ version the runner image happens to ship.
 To run the script against a directory of archives:
 
 ```sh
-packaging/release/update-manifest.sh --key ~/strata-update.key dist 0.1.7 v0.1.7
+packaging/release/update-manifest.sh --key ~/lamina-update.key dist 0.1.7 v0.1.7
 ```
 
 It needs `jq` and `minisign` on `PATH`.
@@ -148,17 +148,17 @@ It needs `jq` and `minisign` on `PATH`.
 direnv allow
 direnv exec . packaging/macos/bundle.sh
 direnv exec . packaging/macos/dmg.sh
-open dist/Strata.app
+open dist/Lamina.app
 ```
 
-`bundle.sh` runs `cargo build --release --locked -p strata-app`, copies the
-binary to `Contents/MacOS/strata` and `Strata.icns`, `LICENSE-MIT`,
+`bundle.sh` runs `cargo build --release --locked -p lamina-app`, copies the
+binary to `Contents/MacOS/lamina` and `Lamina.icns`, `LICENSE-MIT`,
 `LICENSE-APACHE` and `THIRD-PARTY-NOTICES.md` to `Contents/Resources/`, writes
 `Contents/Info.plist`, and signs the bundle ad hoc (`codesign -s -`). It needs
 `dist/THIRD-PARTY-NOTICES.md`, so run `third-party/generate.sh` first, or point
 `NOTICES` at another file.
 
-Pass `--sign "Strata Code Signing"` (or set `STRATA_SIGNING_IDENTITY`) to sign
+Pass `--sign "Lamina Code Signing"` (or set `LAMINA_SIGNING_IDENTITY`) to sign
 with the self-signed certificate instead, which keeps the app's identity the
 same across releases so updates keep Keychain and privacy grants.
 [`macos/SIGNING.md`](macos/SIGNING.md) covers the certificate and the secrets
@@ -166,7 +166,7 @@ the release workflow uses.
 
 The ad-hoc signature is enough for local use; Gatekeeper still treats the app as
 unsigned for anything downloaded, and there is no notarization. The version
-comes from the workspace `Cargo.toml`; the bundle id is `dev.strata.Strata`.
+comes from the workspace `Cargo.toml`; the bundle id is `dev.lamina.Lamina`.
 
 Pass `--target <triple>` to build for the other architecture, and `--no-build`
 to bundle a binary that already exists. Both scripts resolve the binary through
@@ -181,7 +181,7 @@ before `bundle.sh`.
 The bundle carries no dylibs: the release binary links only system frameworks,
 so the `.app` is the whole product. `LSMinimumSystemVersion` is 14.0.
 
-`CFBundleIconFile` names `Strata.icns`, which the icon `generate.sh` builds with
+`CFBundleIconFile` names `Lamina.icns`, which the icon `generate.sh` builds with
 `iconutil` from an `.iconset`. `iconutil` is macOS-only, so regenerating that
 one file has to happen on a Mac; the other sizes still regenerate anywhere.
 
@@ -194,21 +194,21 @@ PREFIX=$HOME/.local direnv exec . packaging/linux/install.sh
 ```
 
 `package.sh` builds the release binary and writes
-`dist/strata-<version>-linux-<arch>.tar.gz`. The archive unpacks into one
-directory holding `strata`, `strata.desktop`, `icons/<size>.png` (16–512),
+`dist/lamina-<version>-linux-<arch>.tar.gz`. The archive unpacks into one
+directory holding `lamina`, `lamina.desktop`, `icons/<size>.png` (16–512),
 `install.sh`, `LICENSE-MIT`, `LICENSE-APACHE` and `THIRD-PARTY-NOTICES.md`, so
 it installs on a machine with no toolchain:
 
 ```sh
-tar -xzf strata-0.1.0-linux-x86_64.tar.gz
-PREFIX=$HOME/.local strata-0.1.0-linux-x86_64/install.sh
+tar -xzf lamina-0.1.0-linux-x86_64.tar.gz
+PREFIX=$HOME/.local lamina-0.1.0-linux-x86_64/install.sh
 ```
 
 `install.sh` detects that layout. Run from a checkout instead, it builds the
 release binary first and installs from the repository. Either way it drops the
-binary in `bin/`, `strata.desktop` in `share/applications/`, the icons in
-`share/icons/hicolor/<size>x<size>/apps/strata.png` and the licences in
-`share/doc/strata/`. It is a convenience for a development machine or the
+binary in `bin/`, `lamina.desktop` in `share/applications/`, the icons in
+`share/icons/hicolor/<size>x<size>/apps/lamina.png` and the licences in
+`share/doc/lamina/`. It is a convenience for a development machine or the
 release archive, not a distribution package: a distro build needs its own
 dependency and library-path handling.
 
@@ -216,8 +216,8 @@ dependency and library-path handling.
 and `NOTICES=<path>` to point at a notices file other than
 `dist/THIRD-PARTY-NOTICES.md`.
 
-The desktop entry uses `Icon=strata` and `StartupWMClass=strata`, and the app
-sets `WindowOptions::app_id` to `strata` so X11/Wayland group the window with
+The desktop entry uses `Icon=lamina` and `StartupWMClass=lamina`, and the app
+sets `WindowOptions::app_id` to `lamina` so X11/Wayland group the window with
 the entry. Wayland takes the icon from the desktop file; X11 has no such
 lookup, so on Linux the app embeds `resources/icon/hicolor/128.png` with
 `include_bytes!` and hands the decoded pixels to `WindowOptions::icon`, which
@@ -232,31 +232,31 @@ powershell -ExecutionPolicy Bypass -File packaging\windows\package.ps1
 powershell -ExecutionPolicy Bypass -File packaging\windows\package.ps1 -Installer
 ```
 
-Builds with `cargo build --release --locked -p strata-app` and writes
-`dist\Strata-<version>-windows-x64.zip` containing `strata.exe`, `README.txt`,
+Builds with `cargo build --release --locked -p lamina-app` and writes
+`dist\Lamina-<version>-windows-x64.zip` containing `lamina.exe`, `README.txt`,
 both licences and `THIRD-PARTY-NOTICES.md`. `-Target <triple>` and `-NoBuild`
 mirror the shell scripts, and the script resolves the binary through
-`CARGO_TARGET_DIR`. `build.rs` embeds `resources/icon/strata.ico` in the
+`CARGO_TARGET_DIR`. `build.rs` embeds `resources/icon/lamina.ico` in the
 executable, which is what Explorer, the taskbar and every window show, so the
 zip needs no icon files. Build on Windows: GPUI compiles its shaders with
 `fxc.exe` from the Windows SDK, so there is no cross-build.
 
-`-Installer` additionally compiles `strata.iss` with Inno Setup into
-`dist\Strata-<version>-windows-x64-setup.exe`, from the very files it just
+`-Installer` additionally compiles `lamina.iss` with Inno Setup into
+`dist\Lamina-<version>-windows-x64-setup.exe`, from the very files it just
 staged for the zip, so the two artifacts cannot drift apart. It needs `iscc`
 (Inno Setup 6.3 or newer) on PATH or under `C:\Program Files (x86)\Inno
 Setup 6`; CI installs the pinned chocolatey package.
 
 The installer needs no administrator: it installs into
-`%LOCALAPPDATA%\Programs\Strata`, creates a Start-menu shortcut, an optional
+`%LOCALAPPDATA%\Programs\Lamina`, creates a Start-menu shortcut, an optional
 (unchecked) desktop shortcut, and an uninstaller registered under Apps &
-features, and upgrades a previous version in place, closing a running Strata
+features, and upgrades a previous version in place, closing a running Lamina
 via Restart Manager. The `AppId` GUID is fixed, so never change it. Next to
-`strata.exe` it writes an empty `installed-by-setup` marker, which is how the
+`lamina.exe` it writes an empty `installed-by-setup` marker, which is how the
 app recognizes an installed copy and may update it by running the installer
 again; the marker is removed on uninstall, and a silent run
 (`setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS`)
-relaunches Strata when it finishes. The portable zip is unaffected: it
+relaunches Lamina when it finishes. The portable zip is unaffected: it
 unpacks anywhere and carries no marker.
 
 ## Third-party notices
@@ -298,10 +298,10 @@ of the pinned release, so bumping libghostty-vt means updating that table too.
 ## Regenerating the icons
 
 ```sh
-crates/strata-app/resources/icon/generate.sh
+crates/lamina-app/resources/icon/generate.sh
 ```
 
-This writes `strata.ico` (Windows), `Strata.icns` (macOS) and
+This writes `lamina.ico` (Windows), `Lamina.icns` (macOS) and
 `hicolor/{16,32,48,64,128,256,512}.png` (Linux) from the SVGs in the same
 directory. The small sizes use the dedicated drawings rather than downscales;
 see that directory's `README.md`. Commit the regenerated files with the SVG

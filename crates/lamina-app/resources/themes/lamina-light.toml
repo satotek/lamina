@@ -1,0 +1,76 @@
+id = "lamina-light"
+name = "Lamina Light"
+appearance = "light"
+
+[colors]
+background = "#ffffff"
+chrome = "#f7f8fa"
+sidebar = "#f7f8fa"
+panel = "#fafbfc"
+field = "#eef0f3"
+border = "#e3e6eb"
+text = "#1b1d22"
+muted = "#5b616e"
+selected = "#e3e9fb"
+row_selected = "#e9eefc"
+accent = "#3d63dd"
+accent_soft = "#e3e9fb"
+accent_text = "#2a4bb8"
+on_accent = "#ffffff"
+add_background = "#e7f6ec"
+add_text = "#1d7a45"
+remove_background = "#fdecec"
+remove_text = "#b4352a"
+remote_background = "#eceef2"
+remote_text = "#3f4450"
+tag_background = "#fbf0dc"
+tag_text = "#8a5a12"
+diff_added_bg = "#e6f5eb"
+diff_removed_bg = "#fcebea"
+diff_added_word = "#d2efdd"
+diff_removed_word = "#fde1df"
+diff_hunk_header = "#f0f2f6"
+diff_gutter_fg = "#5f6674"
+diff_whitespace = "#7d8592"
+syntax_keyword = "#a03a75"
+syntax_string = "#18703d"
+syntax_comment = "#5b616e"
+syntax_function = "#2a4bb8"
+syntax_type = "#8a5a12"
+syntax_number = "#1f6f8b"
+syntax_tag = "#b4352a"
+avatar = ["#3d63dd", "#2fa58d", "#e0913a", "#c2508a", "#7a5cd6", "#2f9fd0"]
+
+[terminal]
+foreground = "#1b1d22"
+background = "#ffffff"
+cursor = "#3d63dd"
+selection = "#e3e9fbcc"
+black = "#1b1d22"
+red = "#b4352a"
+green = "#1d7a45"
+yellow = "#8a5a12"
+blue = "#2a4bb8"
+magenta = "#a03a75"
+cyan = "#1f6f8b"
+white = "#5b616e"
+bright_black = "#636a78"
+bright_red = "#c93b2f"
+bright_green = "#1a884d"
+bright_yellow = "#9b640e"
+bright_blue = "#3d63dd"
+bright_magenta = "#b24384"
+bright_cyan = "#197e9e"
+bright_white = "#3f4450"
+
+[graph]
+lanes = [
+    "#3d63dd",
+    "#2fa58d",
+    "#e0913a",
+    "#c2508a",
+    "#7a5cd6",
+    "#2f9fd0",
+    "#8a9a2e",
+    "#d0553f",
+]

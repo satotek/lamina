@@ -1,14 +1,14 @@
-# Strata
+# Lamina
 
 [English](README.md)
 
-Strata は、Rust と GPUI で構築された、macOS および Windows 向けの軽量で高速なネイティブ Git クライアントです（Linux はベストエフォートで対応しています）。リポジトリの読み取りは gitoxide（`gix`）で直接行い、書き込み操作はすべて `git` CLI を経由するため、フック、コミット署名、認証情報ヘルパー、Git LFS などがターミナル上の `git` と同じように動作します。UI は英語と日本語に対応しています。
+Lamina は、Rust と GPUI で構築された、macOS および Windows 向けの軽量で高速なネイティブ Git クライアントです（Linux はベストエフォートで対応しています）。リポジトリの読み取りは gitoxide（`gix`）で直接行い、書き込み操作はすべて `git` CLI を経由するため、フック、コミット署名、認証情報ヘルパー、Git LFS などがターミナル上の `git` と同じように動作します。UI は英語と日本語に対応しています。
 
 <!-- Screenshot placeholder: スクリーンショットが用意できたらここに追加します -->
 
 ## 開発状況
 
-Strata は個人開発のオープンソースプロジェクトとして公開しており、現在は初期段階（`0.x`）です。荒削りな部分や破壊的変更が残っている場合があります。
+Lamina は個人開発のオープンソースプロジェクトとして公開しており、現在は初期段階（`0.x`）です。荒削りな部分や破壊的変更が残っている場合があります。
 
 ## 主な機能
 
@@ -53,18 +53,18 @@ Strata は個人開発のオープンソースプロジェクトとして公開�
 ### ワークスペース・カスタマイズ・埋め込みターミナル
 - 複数タブ・複数ウィンドウ、セッション復元、最近開いたリポジトリピッカー、ライト／ダーク／システム連動テーマ（同梱テーマおよびユーザー作成の TOML パレットに対応）、UI フォント・コードフォントのカスタマイズ、日英 UI 切り替え（`システム` は OS の言語に追従）に対応しています。
 - コマンドパレット、`keymap.json` およびキーボード設定画面によるキーバインド変更、`commands.json` によるカスタムコマンド定義（`${repo}` / `${branch}` / `${commit}` / `${file}` / `${remote}` 変数展開付き）を行えます。
-- リポジトリタブごとに埋め込み PTY ターミナルパネル（`libghostty-vt` と `portable-pty` による `strata-term`、Cargo の `terminal` feature で有効化）を利用できます。
+- リポジトリタブごとに埋め込み PTY ターミナルパネル（`libghostty-vt` と `portable-pty` による `lamina-term`、Cargo の `terminal` feature で有効化）を利用できます。
 - 日本語およびレガシー文字コードに対応しています。UTF-8、UTF-16LE/BE（BOM 付き）、`.gitattributes` の `working-tree-encoding`、自動判定（`Shift_JIS`、`EUC-JP`、`ISO-2022-JP` など）を用いて表示用にデコードしつつ、差分計算・パッチ適用・書き込み時には元のバイト列をそのまま維持します。
 
 ## カスタマイズ
 
 ### カスタムテーマ
 
-Strata は設定ディレクトリ内の `themes/` フォルダ（`STRATA_CONFIG_DIR` を設定している場合は `$STRATA_CONFIG_DIR/themes/`）からユーザー定義の `*.toml` カラーテーマを読み込みます。
+Lamina は設定ディレクトリ内の `themes/` フォルダ（`LAMINA_CONFIG_DIR` を設定している場合は `$LAMINA_CONFIG_DIR/themes/`）からユーザー定義の `*.toml` カラーテーマを読み込みます。
 
-- **macOS:** `~/Library/Application Support/Strata/themes/`
-- **Windows:** `%APPDATA%\Strata\themes\`
-- **Linux:** `$XDG_CONFIG_HOME/strata/themes/`（未設定時は `~/.config/strata/themes/`）
+- **macOS:** `~/Library/Application Support/Lamina/themes/`
+- **Windows:** `%APPDATA%\Lamina\themes\`
+- **Linux:** `$XDG_CONFIG_HOME/lamina/themes/`（未設定時は `~/.config/lamina/themes/`）
 
 最初から正しい形式のファイルを作るには、**設定 → 外観** を開いて **「現在のテーマを書き出す」** をクリックします。すべてのトークンが揃った `<id>-custom.toml` がテーマフォルダに作成され、**「テーマフォルダを開く」** からすぐに開けます。選択中のユーザーテーマを編集して保存すると、開いているすべてのウィンドウに即時反映されます。
 
@@ -84,16 +84,16 @@ Strata は設定ディレクトリ内の `themes/` フォルダ（`STRATA_CONFIG
 - 任意: `gh`（GitHub CLI）、`git-lfs`、`ghq`
 
 ### macOS
-GitHub Releases から `.dmg`（Apple silicon 専用、macOS 14.0 以降）をダウンロードして開き、`Strata.app` を `/Applications` にドラッグします。Intel Mac には対応していません。
+GitHub Releases から `.dmg`（Apple silicon 専用、macOS 14.0 以降）をダウンロードして開き、`Lamina.app` を `/Applications` にドラッグします。Intel Mac には対応していません。
 
-配布ビルドはアドホック署名のみで**公証（notarization）を受けていません**。初回起動時は `Strata.app` を右クリックして**「開く」**を選ぶか、次のコマンドで quarantine 属性を解除してください。
+配布ビルドはアドホック署名のみで**公証（notarization）を受けていません**。初回起動時は `Lamina.app` を右クリックして**「開く」**を選ぶか、次のコマンドで quarantine 属性を解除してください。
 
 ```sh
-xattr -dr com.apple.quarantine /Applications/Strata.app
+xattr -dr com.apple.quarantine /Applications/Lamina.app
 ```
 
 ### Windows（x86_64）
-`.zip` アーカイブをダウンロードして展開し、`strata.exe` を実行します。
+`.zip` アーカイブをダウンロードして展開し、`lamina.exe` を実行します。
 
 配布ビルドは**署名されていません**。Windows SmartScreen の警告が表示された場合は、**「詳細情報」→「実行」**を選択してください。
 
@@ -109,16 +109,16 @@ xattr -dr com.apple.quarantine /Applications/Strata.app
 
 ```sh
 # macOS（Xcode および Metal Toolchain をインストール済みの場合）
-cargo run --release -p strata-app
+cargo run --release -p lamina-app
 
 # Windows（「Developer PowerShell for VS」から実行）
-cargo build --release -p strata-app
+cargo build --release -p lamina-app
 
 # Linux（Nix dev shell を利用する場合）
-direnv allow && direnv exec . cargo run --release -p strata-app
+direnv allow && direnv exec . cargo run --release -p lamina-app
 
 # 埋め込みターミナルなしでビルドする場合（Zig 不要）
-cargo build --release -p strata-app --no-default-features
+cargo build --release -p lamina-app --no-default-features
 ```
 
 各プラットフォームの詳細な手順、Linux の依存パッケージ一覧、Windows のセットアップ、Nix dev shell の仕様については [docs/building.md](docs/building.md) を参照してください。
