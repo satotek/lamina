@@ -158,7 +158,7 @@ binary to `Contents/MacOS/lamina` and `Lamina.icns`, `LICENSE-MIT`,
 `dist/THIRD-PARTY-NOTICES.md`, so run `third-party/generate.sh` first, or point
 `NOTICES` at another file.
 
-Pass `--sign "Lamina Code Signing"` (or set `LAMINA_SIGNING_IDENTITY`) to sign
+Pass `--sign "Strata Code Signing"` (or set `LAMINA_SIGNING_IDENTITY`) to sign
 with the self-signed certificate instead, which keeps the app's identity the
 same across releases so updates keep Keychain and privacy grants.
 [`macos/SIGNING.md`](macos/SIGNING.md) covers the certificate and the secrets

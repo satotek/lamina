@@ -95,7 +95,7 @@ jobs:
       HAS_SIGNING_P12: ${{ secrets.STRATA_SIGNING_P12 != '' }}
       # Self-signed, so signing needs no Apple Developer Program membership.
       # packaging/macos/SIGNING.md describes the certificate and the secrets.
-      SIGNING_IDENTITY: Lamina Code Signing
+      SIGNING_IDENTITY: Strata Code Signing
     strategy:
       fail-fast: false
       matrix:

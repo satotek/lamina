@@ -11,7 +11,7 @@
 #
 #     direnv exec . packaging/macos/bundle.sh
 #     packaging/macos/bundle.sh --target x86_64-apple-darwin
-#     packaging/macos/bundle.sh --sign "Lamina Code Signing"
+#     packaging/macos/bundle.sh --sign "Strata Code Signing"
 set -eu
 
 root=$(CDPATH='' cd -- "$(dirname "$0")/../.." && pwd)
@@ -26,7 +26,7 @@ publishes.
 
     direnv exec . packaging/macos/bundle.sh
     packaging/macos/bundle.sh --target x86_64-apple-darwin
-    packaging/macos/bundle.sh --sign "Lamina Code Signing"
+    packaging/macos/bundle.sh --sign "Strata Code Signing"
 
 Options:
     --target <triple>  build and bundle that target instead of the host

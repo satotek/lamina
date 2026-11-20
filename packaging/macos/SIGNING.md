@@ -13,12 +13,14 @@ and the first launch still needs the Finder's "Open" bypass.
 
 ## Create the certificate
 
-The identity is `Lamina Code Signing`, which is the common name of the
-certificate. Either route works; long validity is what matters, because a
+The identity is `Strata Code Signing`, which is the common name of the
+certificate. It keeps the app's former name on purpose: the certificate in the
+release secrets was made under it, and a new certificate would be a new
+identity to macOS. Either route works; long validity is what matters, because a
 replacement certificate is a new identity to macOS.
 
 Keychain Access: Certificate Assistant → Create a Certificate…, name
-`Lamina Code Signing`, identity type "Self Signed Root", certificate type "Code
+`Strata Code Signing`, identity type "Self Signed Root", certificate type "Code
 Signing", 3650 days, then export the certificate and its private key as a
 `.p12` with a password.
 
@@ -27,12 +29,12 @@ Or with `openssl`:
 ```sh
 openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
   -keyout LaminaSigning.key -out LaminaSigning.crt \
-  -subj "/CN=Lamina Code Signing" \
+  -subj "/CN=Strata Code Signing" \
   -addext "basicConstraints=critical,CA:false" \
   -addext "keyUsage=critical,digitalSignature" \
   -addext "extendedKeyUsage=critical,codeSigning"
 openssl pkcs12 -export -inkey LaminaSigning.key -in LaminaSigning.crt \
-  -out LaminaSigning.p12 -name "Lamina Code Signing"
+  -out LaminaSigning.p12 -name "Strata Code Signing"
 ```
 
 OpenSSL 3 and later default to a PKCS#12 encryption that macOS refuses with
@@ -48,7 +50,7 @@ Import the archive into a keychain that `codesign` searches, for example by
 opening the `.p12` in Keychain Access and allowing access to the key. Then:
 
 ```sh
-direnv exec . packaging/macos/bundle.sh --sign "Lamina Code Signing"
+direnv exec . packaging/macos/bundle.sh --sign "Strata Code Signing"
 codesign -dr - dist/Lamina.app
 ```
 
