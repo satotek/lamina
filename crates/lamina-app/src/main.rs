@@ -51,6 +51,7 @@ mod graph_canvas;
 mod i18n;
 mod image_diff;
 mod keymap;
+mod legacy;
 mod menus;
 mod merge_editor;
 mod metrics;
@@ -98,6 +99,9 @@ fn main() {
         std::process::exit(code);
     }
     env_logger::init();
+    // Before anything reads a settings file, so the first launch under the
+    // new name starts from the settings saved under the old one.
+    legacy::migrate_config_dir();
 
     // A launch from Finder, the Dock or a desktop file inherits the minimal
     // PATH the session started with, so Homebrew, Nix and ~/.local/bin tools

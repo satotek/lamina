@@ -49,12 +49,29 @@ pub fn load_password() -> Option<String> {
     };
     match entry.get_password() {
         Ok(password) => (!password.is_empty()).then_some(password),
-        Err(keyring::Error::NoEntry) => None,
+        Err(keyring::Error::NoEntry) => take_legacy_password(&entry),
         Err(error) => {
             log::warn!("failed to read proxy password from credential store: {error}");
             None
         }
     }
+}
+
+/// Moves a password saved under the former app name to the current entry.
+/// Called with the lock held, from the read that found no current entry.
+fn take_legacy_password(entry: &keyring::Entry) -> Option<String> {
+    let legacy = keyring::Entry::new(crate::legacy::KEYRING_SERVICE, KEYRING_ACCOUNT).ok()?;
+    let password = legacy.get_password().ok().filter(|p| !p.is_empty())?;
+    match entry.set_password(&password) {
+        Ok(()) => {
+            if let Err(error) = legacy.delete_credential() {
+                log::warn!("could not remove the former proxy password entry: {error}");
+            }
+        }
+        // Keep the old entry so the next read tries again.
+        Err(error) => log::warn!("could not move the proxy password: {error}"),
+    }
+    Some(password)
 }
 
 /// Saves or clears the manual proxy password in the OS credential store.

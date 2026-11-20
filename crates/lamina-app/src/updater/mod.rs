@@ -10,7 +10,7 @@ pub mod core;
 use std::fs::File;
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::Path;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
 use std::path::PathBuf;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 use std::process::Stdio;
@@ -674,6 +674,7 @@ fn install_macos_dmg(
     let parent = bundle_path
         .parent()
         .ok_or_else(|| "invalid bundle path: missing parent directory".to_owned())?;
+    let target = renamed_bundle_target(bundle_path);
     let pid = std::process::id();
     let staged_app = parent.join(format!(".Lamina.app.new.{pid}"));
     let backup_app = parent.join(format!(".Lamina.app.old.{pid}"));
@@ -713,7 +714,7 @@ fn install_macos_dmg(
         return Err(format!("failed to back up current bundle: {err}"));
     }
 
-    if let Err(err) = std::fs::rename(&staged_app, bundle_path) {
+    if let Err(err) = std::fs::rename(&staged_app, &target) {
         if let Err(rollback_err) = std::fs::rename(&backup_app, bundle_path) {
             log::error!("failed to restore backup bundle after rename error: {rollback_err}");
         }
@@ -737,7 +738,7 @@ fn install_macos_dmg(
         )
         .arg("lamina-relaunch")
         .arg(pid.to_string())
-        .arg(bundle_path)
+        .arg(&target)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -745,6 +746,20 @@ fn install_macos_dmg(
         .map_err(|err| format!("failed to spawn relaunch helper: {err}"))?;
 
     Ok(())
+}
+
+/// Where the updated bundle goes. A bundle still named after the former app
+/// name is replaced by one under the current name beside it, unless that name
+/// is already taken, in which case it is updated in place.
+#[cfg(any(target_os = "macos", test))]
+fn renamed_bundle_target(bundle_path: &Path) -> PathBuf {
+    if bundle_path.file_name().and_then(|name| name.to_str()) == Some("Strata.app") {
+        let renamed = bundle_path.with_file_name("Lamina.app");
+        if !renamed.exists() {
+            return renamed;
+        }
+    }
+    bundle_path.to_path_buf()
 }
 
 #[cfg(target_os = "macos")]
@@ -1000,6 +1015,26 @@ mod tests {
         let fake_bundle = dir.path().join("Lamina.app");
         assert!(is_bundle_parent_writable(&fake_bundle));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn a_bundle_under_the_former_name_is_replaced_under_the_new_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("Strata.app");
+        assert_eq!(renamed_bundle_target(&old), dir.path().join("Lamina.app"));
+
+        let current = dir.path().join("Lamina.app");
+        assert_eq!(renamed_bundle_target(&current), current);
+
+        let custom = dir.path().join("My Git.app");
+        assert_eq!(renamed_bundle_target(&custom), custom);
+
+        std::fs::create_dir(&current).unwrap();
+        assert_eq!(
+            renamed_bundle_target(&old),
+            old,
+            "never replace another bundle"
+        );
     }
 
     #[gpui::test]

@@ -526,10 +526,19 @@ impl Settings {
     /// An invalid file is logged and left in place so the user can fix it.
     pub fn load(path: &Path) -> Settings {
         match std::fs::read(path) {
-            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|error| {
-                log::warn!("ignoring {}: {error}", path.display());
-                Settings::default()
-            }),
+            Ok(bytes) => serde_json::from_slice::<Settings>(&bytes)
+                .map(|mut settings| {
+                    let appearance = &mut settings.appearance;
+                    appearance.light_theme =
+                        crate::legacy::theme_id(&appearance.light_theme).to_owned();
+                    appearance.dark_theme =
+                        crate::legacy::theme_id(&appearance.dark_theme).to_owned();
+                    settings
+                })
+                .unwrap_or_else(|error| {
+                    log::warn!("ignoring {}: {error}", path.display());
+                    Settings::default()
+                }),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Settings::default(),
             Err(error) => {
                 log::warn!("cannot read {}: {error}", path.display());

@@ -1313,7 +1313,8 @@ pub static ACTIONS: &[ActionSpec] = &[
 
 /// Looks up an action by its full name or its short one, ignoring case.
 pub fn resolve(name: &str) -> Option<&'static ActionSpec> {
-    let wanted = name.trim();
+    let wanted = crate::legacy::action_name(name.trim());
+    let wanted = wanted.as_ref();
     ACTIONS.iter().find(|spec| {
         spec.name.eq_ignore_ascii_case(wanted) || short_name(spec.name).eq_ignore_ascii_case(wanted)
     })

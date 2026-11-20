@@ -51,6 +51,14 @@ Name: "ja"; MessagesFile: "compiler:Languages\Japanese.isl"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
+[InstallDelete]
+; An upgrade from a release made under the former name, Strata, keeps its
+; install directory but would otherwise leave the old executable and its
+; shortcuts beside the new ones.
+Type: files; Name: "{app}\strata.exe"
+Type: files; Name: "{autoprograms}\Strata.lnk"
+Type: files; Name: "{autodesktop}\Strata.lnk"
+
 [Files]
 ; A wildcard over the staged zip contents: whatever package.ps1 stages is
 ; what both artifacts ship, so the file list lives in one place only.
