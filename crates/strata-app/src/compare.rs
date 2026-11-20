@@ -2096,11 +2096,19 @@ impl CompareView {
                     .ghost()
                     .size(ButtonSize::Small)
             };
-            button
-                .tooltip(label)
-                .on_click(cx.listener(|this, _, window, cx| {
-                    this.back_to_folder(window, cx);
-                }))
+            // The title bar under it is a window drag area; on Windows a
+            // press reaches the caption instead of the button unless a
+            // mouse-blocking layer sits in between, as the actions have.
+            div()
+                .flex_none()
+                .occlude()
+                .child(
+                    button
+                        .tooltip(label)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.back_to_folder(window, cx);
+                        })),
+                )
                 .into_any_element()
         });
 
