@@ -97,7 +97,7 @@ use workspace::Workspace;
 fn main() {
     // ssh starts this executable as its ProxyCommand. Like the askpass helper,
     // the tunnel needs no display, settings or window.
-    if let Some(code) = lamina_core::proxy::connector_main(std::env::args_os().skip(1)) {
+    if let Some(code) = lamina_core::proxy::ssh::connector_main(std::env::args_os().skip(1)) {
         std::process::exit(code);
     }
     // git starts this executable as its askpass program while it holds a

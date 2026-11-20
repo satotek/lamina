@@ -2416,7 +2416,7 @@ mod tests {
             }
         }
         // Every built-in palette entry has a registry row.
-        let expected_count = if cfg!(feature = "terminal") { 56 } else { 55 };
+        let expected_count = if cfg!(feature = "terminal") { 57 } else { 56 };
         assert_eq!(orders.len(), expected_count);
     }
 

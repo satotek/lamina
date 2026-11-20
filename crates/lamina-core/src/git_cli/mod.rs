@@ -896,7 +896,7 @@ impl Git {
     /// git learns the remote host only after it starts, so `LAMINA_NO_PROXY`
     /// is applied by the connector for the one host it is asked to reach.
     fn apply_ssh_proxy(&self, command: &mut Command) {
-        if crate::proxy::proxy_url().is_none() {
+        if crate::proxy::ssh::proxy_url().is_none() {
             return;
         }
         let own_ssh = ["GIT_SSH_COMMAND", "GIT_SSH"].iter().any(|key| {
@@ -908,7 +908,7 @@ impl Git {
         if own_ssh || self.core_ssh_command_set() {
             return;
         }
-        if let Some(value) = crate::proxy::git_ssh_command() {
+        if let Some(value) = crate::proxy::ssh::git_ssh_command() {
             command.env("GIT_SSH_COMMAND", value);
         }
     }

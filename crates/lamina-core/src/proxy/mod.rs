@@ -6,6 +6,7 @@
 //! them onto URL strings, `NO_PROXY` checks, and [`std::process::Command`]
 //! environment variables.
 
+pub mod ssh;
 pub mod system;
 
 use std::fmt::Write as _;

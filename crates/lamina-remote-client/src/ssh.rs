@@ -508,7 +508,7 @@ fn ssh_argv_with(
 /// which hosts bypass it. `ssh` on Windows has no `nc`, so the tunnel is this
 /// executable's hidden connector rather than an external program.
 fn proxy_for_host(program: &Path, host: &str, port: Option<u16>) -> Option<String> {
-    if !lamina_core::proxy::applies_to(host, port.unwrap_or(22)) {
+    if !lamina_core::proxy::ssh::applies_to(host, port.unwrap_or(22)) {
         return None;
     }
     // A ProxyCommand or ProxyJump in the user's own ssh config is a deliberate
@@ -518,7 +518,7 @@ fn proxy_for_host(program: &Path, host: &str, port: Option<u16>) -> Option<Strin
         return None;
     }
     let executable = std::env::current_exe().ok()?;
-    Some(lamina_core::proxy::proxy_command(&executable))
+    Some(lamina_core::proxy::ssh::proxy_command(&executable))
 }
 
 /// Reads `ssh -G` for the effective configuration. Anything unexpected is

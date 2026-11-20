@@ -3093,8 +3093,9 @@ mod tests {
         // Detaching is a checkout the helper can run. A remote tab must not
         // hide it the way it hides tags.
         assert_eq!(state.blocked(HistoryAction::CheckoutCommit), None);
+        let line = line_of(&[oid(1), oid(2)]);
         assert_eq!(
-            edit_blocked_on_line(&state, &[], None, EditAction::Reword).as_deref(),
+            edit_blocked_on_line(&state, view_at(&line, Some(0)), EditAction::Reword).as_deref(),
             Some(reason.as_str())
         );
         // The remote reason still wins over busy for a tag.

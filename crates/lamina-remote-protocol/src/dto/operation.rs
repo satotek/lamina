@@ -756,11 +756,10 @@ fn stash_index(index: u64) -> Result<usize, ProtocolError> {
 
 #[cfg(test)]
 mod tests {
+    use lamina_core::git_cli::AcrossMergesAction;
     use lamina_core::merge::ContentHash;
     use lamina_core::patch::LineSelection;
-    use lamina_core::session::{
-        AcrossMergesAction, ConflictSide, Operation, RemoteBranch, ResetMode,
-    };
+    use lamina_core::session::{ConflictSide, Operation, RemoteBranch, ResetMode};
     use lamina_core::{ReflogEntry, ReflogKind};
 
     use super::*;
