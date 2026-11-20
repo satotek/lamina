@@ -8,6 +8,8 @@ Lamina is a fast, lightweight native Git client for macOS and Windows (with Linu
 
 ## Status
 
+Lamina was called Strata until 0.1.10. An update from those releases keeps its settings, themes, keymap and proxy password.
+
 Lamina is in early (`0.x`) development as a personal open-source project—expect rough edges and breaking changes.
 
 ## Features
