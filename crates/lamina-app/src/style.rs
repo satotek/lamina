@@ -518,8 +518,8 @@ pub mod glyph {
 pub const BRAND_MARK: f32 = 18.0;
 /// Cap height of the wordmark beside the app mark.
 pub const BRAND_WORDMARK: f32 = 10.5;
-/// The wordmark's viewBox is 10400 x 1550; widths keep that aspect.
-const WORDMARK_ASPECT: f32 = 10400.0 / 1550.0;
+/// The wordmark's viewBox is 10197 x 1550; widths keep that aspect.
+const WORDMARK_ASPECT: f32 = 10197.0 / 1550.0;
 
 /// Width of the wordmark drawn at `height`.
 pub fn wordmark_width(height: f32) -> f32 {
