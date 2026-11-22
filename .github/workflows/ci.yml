@@ -159,7 +159,7 @@ jobs:
           git config --global user.email "ci@lamina.invalid"
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2.90.5
+        uses: taiki-e/install-action@v2.90.6
         with:
           tool: cargo-nextest@0.9.152
 
