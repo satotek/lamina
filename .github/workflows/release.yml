@@ -149,7 +149,7 @@ jobs:
       # The notices are generated here rather than checked in so they always
       # describe the lockfile that produced the binaries.
       - name: Install cargo-about
-        uses: taiki-e/install-action@v2.90.5
+        uses: taiki-e/install-action@v2.90.6
         with:
           tool: cargo-about
 
