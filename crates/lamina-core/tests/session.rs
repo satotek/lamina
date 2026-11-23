@@ -778,9 +778,13 @@ fn dropping_a_session_lets_a_running_write_finish() {
     let hooks = repo.path().join(".git/hooks");
     fs::create_dir_all(&hooks).expect("create hooks directory");
     let hook = hooks.join("pre-commit");
+    // Git runs hooks through sh on every platform. A Windows path's
+    // backslashes would be read as escapes there, so the marker lands
+    // somewhere else and the test waits for a hook that already ran.
+    let marker_for_sh = marker.display().to_string().replace('\\', "/");
     fs::write(
         &hook,
-        format!("#!/bin/sh\ntouch {}\nsleep 2\n", marker.display()),
+        format!("#!/bin/sh\ntouch '{marker_for_sh}'\nsleep 2\n"),
     )
     .expect("write the pre-commit hook");
     #[cfg(unix)]
