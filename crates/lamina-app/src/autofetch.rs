@@ -165,9 +165,6 @@ mod tests {
         );
 
         let session = view.update(&mut cx, |view, _| view.session.take());
-        if let Some(session) = session {
-            crate::repo_view::drop_session_in_background(session);
-        }
         cx.executor().advance_clock(Duration::from_secs(6));
         cx.run_until_parked();
 
@@ -175,6 +172,21 @@ mod tests {
             view.read_with(&cx, |view, _| !view.autofetch_running()),
             "the tick must return once the tab has no session"
         );
+
+        // The finished timer is still stored; it must not stop a session
+        // that comes back from getting a timer of its own.
+        view.update(&mut cx, |view, cx| {
+            view.session = session;
+            view.sync_autofetch(cx);
+        });
+        assert!(
+            view.read_with(&cx, |view, _| view.autofetch_running()),
+            "a session that comes back starts the timer again"
+        );
+        let session = view.update(&mut cx, |view, _| view.session.take());
+        if let Some(session) = session {
+            crate::repo_view::drop_session_in_background(session);
+        }
     }
 
     /// The command the scheduler submits. Kept next to the gate so a remote

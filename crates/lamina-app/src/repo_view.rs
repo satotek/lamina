@@ -947,7 +947,7 @@ impl RepoView {
         }
     }
 
-    fn sync_autofetch(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn sync_autofetch(&mut self, cx: &mut Context<Self>) {
         let should_run = self.active
             && self.autofetch_ready()
             && crate::settings::Settings::get(cx)
@@ -955,7 +955,9 @@ impl RepoView {
                 .auto_fetch_minutes
                 > 0;
         if should_run {
-            if self.autofetch.is_none()
+            // The loop also ends on its own, for a tab that lost its session;
+            // a finished task must not keep a later session from polling.
+            if self.autofetch.as_ref().is_none_or(|task| task.is_ready())
                 && let Some(window) = self.window_handle
             {
                 self.autofetch = Some(crate::autofetch::start(window, self.last_autofetch, cx));
