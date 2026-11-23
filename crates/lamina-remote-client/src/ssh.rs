@@ -380,6 +380,7 @@ pub(crate) fn spawn(
     remote_args: &[String],
     askpass: Option<&AskpassSession>,
 ) -> Result<Child> {
+    ensure_destination(host)?;
     let argv = ssh_argv(program, port, host, remote_args);
     let mut command = Command::new(&argv[0]);
     command.args(&argv[1..]);
@@ -511,6 +512,12 @@ fn proxy_for_host(program: &Path, host: &str, port: Option<u16>) -> Option<Strin
     if !lamina_core::proxy::ssh::applies_to(host, port.unwrap_or(22)) {
         return None;
     }
+    // `ssh -G` option-parses everything before the destination, so a host
+    // beginning with '-' cannot be inspected here. `spawn` refuses it right
+    // after, and no proxy is needed for a connection that never starts.
+    if host.starts_with('-') {
+        return None;
+    }
     // A ProxyCommand or ProxyJump in the user's own ssh config is a deliberate
     // route to that host (a bastion, a jump host); the app proxy must not
     // silently replace it.
@@ -586,6 +593,22 @@ fn is_shell_safe(value: &str) -> bool {
                     b'/' | b'.' | b'_' | b'-' | b'+' | b':' | b'@' | b'%' | b'='
                 )
         })
+}
+
+/// A destination `ssh` would parse as an option instead of a host.
+///
+/// Everything before the destination is option-parsed, so a host beginning
+/// with '-' is read as `ssh` flags (`-oProxyCommand=…`, `-F …`) and never
+/// reaches the network as an address. There is no quoting that helps: the
+/// destination is not a remote-shell word. Real hosts, addresses and
+/// `user@host` forms never begin with '-', so refusing is unambiguous.
+fn ensure_destination(host: &str) -> Result<()> {
+    if host.starts_with('-') {
+        return Err(Error::other(format!(
+            "the remote host may not begin with '-': {host}"
+        )));
+    }
+    Ok(())
 }
 
 fn hide_console(command: &mut Command) {
@@ -837,6 +860,17 @@ mod tests {
         assert!(config_forwards(
             "host example.test\nProxyCommand ssh -W %h:%p bastion\n"
         ));
+    }
+
+    #[test]
+    fn a_host_beginning_with_a_dash_is_refused_as_an_ssh_destination() {
+        // Everything before the destination is option-parsed by ssh, so such
+        // a host would be read as flags instead of an address.
+        assert!(ensure_destination("-oProxyCommand=touch /tmp/pwned").is_err());
+        assert!(ensure_destination("-F /etc/ssh/other_config").is_err());
+        assert!(ensure_destination("example.test").is_ok());
+        assert!(ensure_destination("[::1]").is_ok());
+        assert!(ensure_destination("git@example.test").is_ok());
     }
 
     #[test]

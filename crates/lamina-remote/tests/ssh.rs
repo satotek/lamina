@@ -55,8 +55,27 @@ struct Fake {
     lie: Lie,
     /// Exported on the "remote" side as `LAMINA_REMOTE_HELPER`.
     override_path: Option<PathBuf>,
+    /// Printed to stdout before every remote command, the way a login shell
+    /// or its startup files might.
+    banner: Option<&'static str>,
+    /// Rewrites the upload's `cat` into `false`, so the transfer fails after
+    /// creating the temp file.
+    fail_upload: bool,
+    /// Holds each install at its self-check and at its rename, so a test can
+    /// make two installs overlap exactly.
+    barrier: Option<Barrier>,
 }
 
+/// Release files the test touches to let a held command continue.
+#[derive(Clone)]
+struct Barrier {
+    /// Released once every install has run its first self-check.
+    checks: PathBuf,
+    /// Released once every upload has finished writing its temp file.
+    uploads: PathBuf,
+}
+
+#[derive(Clone)]
 struct LaidOut {
     ssh: PathBuf,
     log: PathBuf,
@@ -101,6 +120,53 @@ fn layout(scratch: &Scratch, fake: &Fake) -> LaidOut {
         ),
         None => String::new(),
     };
+    let banner_line = match fake.banner {
+        Some(text) => format!("printf '%s\\n' {}\n", sh_quote(text)),
+        None => String::new(),
+    };
+    // The self-check case arm doubles as the arrival point for installs that
+    // the test wants to hold back until every instance has decided to upload.
+    let check_barrier = match &fake.barrier {
+        Some(barrier) => format!(
+            "printf 'x-check\\n' >> \"$LOG\"\nwhile [ ! -e {} ]; do sleep 0.1; done\n",
+            sh_quote(&barrier.checks.display().to_string())
+        ),
+        None => String::new(),
+    };
+    // The upload script's `cat >` and `chmod 700` are rewritten textually:
+    // the script runs in a fresh inner `sh`, so only in-script changes are
+    // seen by it.
+    let (fail_sed, upload_barrier, upload_exports) = match &fake.barrier {
+        Some(barrier) => (
+            if fake.fail_upload {
+                "cmd=$(printf '%s\\n' \"$cmd\" | sed 's@cat >@false >@')\n".to_owned()
+            } else {
+                String::new()
+            },
+            // `$$` and quoting stay intact: only `chmod 700` is replaced, by
+            // the marker write and the wait that precede it.
+            "cmd=$(printf '%s\\n' \"$cmd\" | sed 's@chmod 700@printf x-cat >> $LAMINA_TEST_LOG; while [ ! -e $LAMINA_TEST_RELEASE ]; do sleep 0.1; done; chmod 700@')\n"
+                .to_owned(),
+            format!(
+                "export LAMINA_TEST_LOG=$LOG\nexport LAMINA_TEST_RELEASE={}\n",
+                sh_quote(&barrier.uploads.display().to_string())
+            ),
+        ),
+        None => (
+            if fake.fail_upload {
+                "cmd=$(printf '%s\\n' \"$cmd\" | sed 's@cat >@false >@')\n".to_owned()
+            } else {
+                String::new()
+            },
+            String::new(),
+            String::new(),
+        ),
+    };
+    let upload_case = if fail_sed.is_empty() && upload_barrier.is_empty() {
+        String::new()
+    } else {
+        format!("case \"$cmd\" in\n  *umask\\ 077*)\n{fail_sed}{upload_barrier}    ;;\nesac\n")
+    };
     let script = format!(
         r#"#!/bin/sh
 export HOME={home}
@@ -108,7 +174,7 @@ unset XDG_CACHE_HOME
 export PATH={bin}:$PATH
 {override_line}
 LOG={log}
-MARK={mark}
+{upload_exports}MARK={mark}
 {{
   printf 'SSH_ASKPASS=%s\n' "${{SSH_ASKPASS-}}"
   printf 'SSH_ASKPASS_REQUIRE=%s\n' "${{SSH_ASKPASS_REQUIRE-}}"
@@ -134,13 +200,13 @@ cmd=${{cmd# }}
 case "$cmd" in
   *--self-check*)
     {lie}
-    ;;
+{check_barrier}    ;;
 esac
-if [ -z "$cmd" ]; then
+{upload_case}if [ -z "$cmd" ]; then
   echo "fake ssh: no remote command" >&2
   exit 2
 fi
-exec sh -c "$cmd"
+{banner_line}exec sh -c "$cmd"
 "#,
         home = sh_quote(&home.display().to_string()),
         bin = sh_quote(&bin.display().to_string()),
@@ -194,15 +260,37 @@ fn options(laid: &LaidOut) -> SshOptions {
 }
 
 fn install(laid: &LaidOut, port: Option<u16>) -> Result<String, lamina_core::Error> {
+    install_on(laid, "ignored.example", port)
+}
+
+fn install_on(laid: &LaidOut, host: &str, port: Option<u16>) -> Result<String, lamina_core::Error> {
     let mut opts = options(laid);
     lamina_remote_client::install_helper(&InstallOptions {
         program: opts.program.clone(),
-        host: "ignored.example".into(),
+        host: host.into(),
         port,
         helper_dir: opts.helper_dir.take(),
         askpass_program: opts.askpass_program.clone(),
         askpass: opts.askpass.clone(),
     })
+}
+
+/// Waits until the ssh log has grown `count` lines containing `needle`.
+fn wait_for_lines(path: &Path, needle: &str, count: usize) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    loop {
+        if let Ok(text) = fs::read_to_string(path)
+            && text.matches(needle).count() >= count
+        {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for {count} {needle:?} lines in {}",
+            path.display()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
 }
 
 #[test]
@@ -215,6 +303,9 @@ fn ssh_transport_reads_a_repository_and_installs_mode_0700() {
             arch: "x86_64",
             lie: Lie::Never,
             override_path: None,
+            banner: None,
+            fail_upload: false,
+            barrier: None,
         },
     );
     host_helper(&laid.helpers);
@@ -297,6 +388,9 @@ fn a_build_id_mismatch_reinstalls_once() {
             arch: "x86_64",
             lie: Lie::Once,
             override_path: None,
+            banner: None,
+            fail_upload: false,
+            barrier: None,
         },
     );
     host_helper(&laid.helpers);
@@ -327,6 +421,9 @@ fn a_current_helper_is_not_uploaded_again() {
             arch: "x86_64",
             lie: Lie::Never,
             override_path: None,
+            banner: None,
+            fail_upload: false,
+            barrier: None,
         },
     );
     host_helper(&laid.helpers);
@@ -351,6 +448,9 @@ fn a_repeated_build_id_mismatch_is_reported() {
             arch: "x86_64",
             lie: Lie::Always,
             override_path: None,
+            banner: None,
+            fail_upload: false,
+            barrier: None,
         },
     );
     host_helper(&laid.helpers);
@@ -381,6 +481,9 @@ fn an_override_path_skips_the_upload() {
             arch: "x86_64",
             lie: Lie::Never,
             override_path: Some(override_path.clone()),
+            banner: None,
+            fail_upload: false,
+            barrier: None,
         },
     );
     let installed = install(&laid, None).expect("override");
@@ -404,6 +507,9 @@ fn an_override_mismatch_does_not_delete_the_file() {
             arch: "x86_64",
             lie: Lie::Always,
             override_path: Some(override_path.clone()),
+            banner: None,
+            fail_upload: false,
+            barrier: None,
         },
     );
     let error = install(&laid, None).expect_err("mismatch");
@@ -424,6 +530,9 @@ fn an_unwritable_cache_is_a_clear_error() {
             arch: "x86_64",
             lie: Lie::Never,
             override_path: None,
+            banner: None,
+            fail_upload: false,
+            barrier: None,
         },
     );
     host_helper(&laid.helpers);
@@ -447,6 +556,9 @@ fn a_missing_local_binary_names_the_file() {
             arch: "x86_64",
             lie: Lie::Never,
             override_path: None,
+            banner: None,
+            fail_upload: false,
+            barrier: None,
         },
     );
     let error = install(&laid, None).expect_err("missing binary");
@@ -468,6 +580,9 @@ fn an_unsupported_remote_is_refused() {
             arch: "arm64",
             lie: Lie::Never,
             override_path: None,
+            banner: None,
+            fail_upload: false,
+            barrier: None,
         },
     );
     let error = install(&laid, None).expect_err("darwin");
@@ -486,6 +601,9 @@ fn a_browse_helper_walks_folders_on_the_host() {
             arch: "x86_64",
             lie: Lie::Never,
             override_path: None,
+            banner: None,
+            fail_upload: false,
+            barrier: None,
         },
     );
     host_helper(&laid.helpers);
@@ -527,4 +645,31 @@ fn a_browse_helper_walks_folders_on_the_host() {
 
     let log = fs::read_to_string(&laid.log).expect("ssh log");
     assert!(log.contains("<--browse>"), "{log}");
+}
+
+#[test]
+fn a_host_beginning_with_a_dash_is_refused_before_ssh_runs() {
+    let scratch = Scratch::new();
+    let laid = layout(
+        &scratch,
+        &Fake {
+            os: "Linux",
+            arch: "x86_64",
+            lie: Lie::Never,
+            override_path: None,
+            banner: None,
+            fail_upload: false,
+            barrier: None,
+        },
+    );
+    host_helper(&laid.helpers);
+    let error = install_on(&laid, "-oProxyCommand=touch /tmp/pwned", None)
+        .expect_err("a dash host is not a destination");
+    let text = error.to_string();
+    assert!(text.contains("may not begin with '-'"), "{text}");
+    assert!(
+        !laid.log.exists(),
+        "ssh ran anyway and option-parsed the host: {}",
+        fs::read_to_string(&laid.log).unwrap_or_default()
+    );
 }
