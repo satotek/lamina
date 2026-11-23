@@ -2472,7 +2472,7 @@ pub(crate) fn branch_drop_target_with(
         let source = dragged.clone();
         let position = window.mouse_position();
         entity.update(cx, |view, cx| {
-            view.open_branch_drop_menu(source, target, position, cx);
+            view.open_branch_drop_menu(source, target, position, window, cx);
         });
     })
 }
@@ -4332,6 +4332,7 @@ impl RepoView {
         source: DraggedBranch,
         target: String,
         position: Point<Pixels>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.branches.dialog_open() {
@@ -4362,24 +4363,47 @@ impl RepoView {
                             // the read was in flight.
                             if !view.branches.dialog_open() {
                                 view.finish_branch_drop_menu(
-                                    source, target, position, head, ready, cx,
+                                    source, target, position, head, ready, None, cx,
                                 );
                             }
                         });
                     })
                     .detach();
                 }
-                None => self.finish_branch_drop_menu(source, target, position, head, None, cx),
+                None => self.finish_branch_drop_menu(
+                    source,
+                    target,
+                    position,
+                    head,
+                    None,
+                    Some(window),
+                    cx,
+                ),
             }
             return;
         }
         let fast_forward = (source.kind == RefKind::RemoteBranch)
             .then(|| self.fast_forward_ready(&source.name, &target))
             .flatten();
-        self.finish_branch_drop_menu(source, target, position, head, fast_forward, cx);
+        self.finish_branch_drop_menu(
+            source,
+            target,
+            position,
+            head,
+            fast_forward,
+            Some(window),
+            cx,
+        );
     }
 
     /// Installs the drop menu the entry list describes and focuses it.
+    ///
+    /// `window` is the drop event's own window on the synchronous path. Focus
+    /// has to go through it directly: gpui takes the window out of
+    /// `cx.windows()` while it dispatches the event, so a focus through the
+    /// stored handle would silently miss. Only the asynchronous remote answer,
+    /// which runs after dispatch, has no window and uses the handle.
+    #[allow(clippy::too_many_arguments)]
     fn finish_branch_drop_menu(
         &mut self,
         source: DraggedBranch,
@@ -4387,6 +4411,7 @@ impl RepoView {
         position: Point<Pixels>,
         head: Option<String>,
         fast_forward: Option<bool>,
+        window: Option<&mut Window>,
         cx: &mut Context<Self>,
     ) {
         let busy = self.is_busy();
@@ -4400,10 +4425,15 @@ impl RepoView {
             target,
             entries,
         });
-        if let Some(focus) = self.branches.dialog_focus.clone()
-            && let Some(handle) = self.window()
-        {
-            let _ = handle.update(cx, |_, window, cx| window.focus(&focus, cx));
+        if let Some(focus) = self.branches.dialog_focus.clone() {
+            match window {
+                Some(window) => window.focus(&focus, cx),
+                None => {
+                    if let Some(handle) = self.window() {
+                        let _ = handle.update(cx, |_, window, cx| window.focus(&focus, cx));
+                    }
+                }
+            }
         }
         cx.notify();
     }
@@ -7585,5 +7615,79 @@ mod tests {
                 );
             }
         });
+    }
+
+    /// A drop is handled inside the event that delivered it, and gpui takes the
+    /// window out of `cx.windows()` for the duration of that dispatch. The menu
+    /// therefore has to take focus through the event's own window; a focus
+    /// through the stored handle silently misses and the menu stays unfocused.
+    #[gpui::test]
+    fn a_local_branch_drop_menu_focuses_while_the_window_is_dispatching(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use crate::Launch;
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let config = temp.path().join("gitconfig");
+        std::fs::write(&config, "").expect("write gitconfig");
+        let dir = temp.path().join("repo");
+        std::fs::create_dir_all(&dir).expect("repo dir");
+        let init = std::process::Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&dir)
+            .env("GIT_CONFIG_GLOBAL", &config)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .expect("git init");
+        assert!(init.status.success());
+
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            gpui_component::init(cx);
+            cx.set_global(crate::settings::Settings::default());
+            crate::actions::bind(cx);
+        });
+
+        let repo_win = cx
+            .update(|cx| {
+                cx.open_window(Default::default(), |window, cx| {
+                    cx.new(|cx| RepoView::new(Launch::open_quiet(&dir, None), window, cx))
+                })
+            })
+            .expect("repo window");
+
+        repo_win
+            .update(cx, |view, window, cx| {
+                let menu_focus = view
+                    .branches
+                    .dialog_focus
+                    .clone()
+                    .expect("the view has a dialog focus handle");
+                window.blur(cx);
+                assert!(window.focused(cx).is_none(), "the test starts unfocused");
+
+                let source = DraggedBranch {
+                    kind: RefKind::LocalBranch,
+                    name: "topic".to_owned(),
+                };
+                view.open_branch_drop_menu(
+                    source,
+                    "main".to_owned(),
+                    point(px(12.0), px(12.0)),
+                    window,
+                    cx,
+                );
+
+                assert!(
+                    view.branches.drop_menu.is_some(),
+                    "a local branch dropped on another opens the menu"
+                );
+                assert_eq!(
+                    window.focused(cx),
+                    Some(menu_focus),
+                    "the menu takes focus through the window that dispatched the drop"
+                );
+            })
+            .expect("drop");
     }
 }
