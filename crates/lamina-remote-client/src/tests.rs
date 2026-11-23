@@ -16,7 +16,7 @@ use lamina_remote_protocol::{
     RepoStateDto, Request, Response, SnapshotDto, SpanDto, WorktreeStatusDto,
 };
 
-use crate::session::TransportAttach;
+use crate::session::{MAX_EARLY_EVENTS, TransportAttach};
 use crate::{CONNECTION_LOST, ClientConfig, RemoteSession, RemoteTarget};
 
 struct PipeRead {
@@ -484,6 +484,7 @@ fn missed_pings_report_a_lost_connection_and_keep_the_snapshot() {
             missed_pings: 3,
             first_chunk_timeout: Duration::from_secs(5),
             request_timeout: Duration::from_secs(10),
+            ..ClientConfig::default()
         },
     )
     .expect("connect");
@@ -563,6 +564,7 @@ fn an_answered_ping_records_the_round_trip_until_the_link_drops() {
             missed_pings: 3,
             first_chunk_timeout: Duration::from_secs(5),
             request_timeout: Duration::from_secs(10),
+            ..ClientConfig::default()
         },
     )
     .expect("connect");
@@ -919,6 +921,7 @@ fn dropping_a_session_with_a_stalled_write_does_not_hang() {
             missed_pings: 3,
             first_chunk_timeout: Duration::from_secs(5),
             request_timeout: Duration::from_secs(10),
+            ..ClientConfig::default()
         },
         TransportAttach {
             diagnostic: Arc::new(String::new),
@@ -1057,6 +1060,7 @@ fn a_request_whose_answer_never_comes_times_out() {
             missed_pings: 3,
             first_chunk_timeout: Duration::from_secs(5),
             request_timeout: Duration::from_millis(300),
+            ..ClientConfig::default()
         },
     )
     .expect("connect");
@@ -1075,5 +1079,140 @@ fn a_request_whose_answer_never_comes_times_out() {
         "the error should name the deadline: {error}"
     );
     let _ = exit_tx.send(());
+    peer.join().expect("peer");
+}
+
+#[test]
+fn a_handshake_that_never_answers_times_out() {
+    let (client_read, client_write, mut peer_read, _peer_write) = pipe();
+    let (hold_tx, hold_rx) = mpsc::channel::<()>();
+    let peer = thread::spawn(move || {
+        // Read the Hello and stay silent while `_peer_write` keeps the channel
+        // open, so the client sees a live helper that never answers.
+        let _ = read_msg(&mut peer_read);
+        let _ = hold_rx.recv();
+    });
+
+    let (tx, rx) = mpsc::channel();
+    let client = thread::spawn(move || {
+        let error = RemoteSession::connect_with(
+            client_read,
+            client_write,
+            RemoteTarget::new("scripted"),
+            |_| {},
+            ClientConfig {
+                request_timeout: Duration::from_millis(200),
+                ..ClientConfig::default()
+            },
+        )
+        .err()
+        .map(|error| error.to_string());
+        let _ = tx.send(error);
+    });
+    let error = rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("connect must not wait for a silent helper")
+        .expect("a handshake without an answer fails");
+    assert!(
+        error.contains("handshake"),
+        "the error should name the handshake: {error}"
+    );
+    client.join().expect("connect thread");
+    drop(hold_tx);
+    peer.join().expect("peer");
+}
+
+#[test]
+fn a_helper_that_floods_events_before_the_handshake_is_rejected() {
+    let (client_read, client_write, mut peer_read, mut peer_write) = pipe();
+    let peer = thread::spawn(move || {
+        let _ = read_msg(&mut peer_read);
+        for _ in 0..=MAX_EARLY_EVENTS {
+            write_msg(
+                &mut peer_write,
+                0,
+                &Message::Event(Event::SignaturesInvalidated),
+            );
+        }
+    });
+
+    let error = RemoteSession::connect_with(
+        client_read,
+        client_write,
+        RemoteTarget::new("scripted"),
+        |_| {},
+        ClientConfig {
+            request_timeout: Duration::from_secs(5),
+            ..ClientConfig::default()
+        },
+    )
+    .err()
+    .expect("an unbounded run of early events is refused");
+    assert!(
+        error.to_string().contains("before its handshake answer"),
+        "unexpected error: {error}"
+    );
+    peer.join().expect("peer");
+}
+
+#[test]
+fn a_snapshot_that_grows_past_the_commit_limit_fails_to_load() {
+    let (client_read, client_write, mut peer_read, mut peer_write) = pipe();
+    let (hold_tx, hold_rx) = mpsc::channel::<()>();
+    let peer = thread::spawn(move || {
+        hello(&mut peer_read, &mut peer_write);
+        accept_subscribe(&mut peer_read, &mut peer_write);
+        let (_, id) = oid_pair(1);
+        send_chunk(&mut peer_write, id, true);
+        // The configured limit is one commit; this second chunk would make two.
+        write_msg(
+            &mut peer_write,
+            0,
+            &Message::Event(Event::SnapshotAppend {
+                generation: 1,
+                commits: vec![commit_dto(ObjectId::from_bytes([2; 20]))],
+                rows: vec![row()],
+                complete: true,
+            }),
+        );
+        let _ = hold_rx.recv();
+    });
+
+    let (tx, rx) = mpsc::channel();
+    let session = RemoteSession::connect_with(
+        client_read,
+        client_write,
+        RemoteTarget::new("scripted"),
+        move |event| {
+            let _ = tx.send(event);
+        },
+        ClientConfig {
+            max_snapshot_commits: 1,
+            ..ClientConfig::default()
+        },
+    )
+    .expect("connect");
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut failed = None;
+    while failed.is_none() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(remaining) {
+            Ok(SessionEvent::LoadFailed { error }) => failed = Some(error),
+            Ok(_) => {}
+            Err(error) => panic!("the oversized append was not reported: {error}"),
+        }
+    }
+    let failed = failed.expect("load failed");
+    assert!(
+        failed.contains("commit limit"),
+        "the error should name the limit: {failed}"
+    );
+    assert_eq!(
+        session.snapshot().commits.len(),
+        1,
+        "the rejected chunk must not be kept"
+    );
+    drop(hold_tx);
     peer.join().expect("peer");
 }

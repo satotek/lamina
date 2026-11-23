@@ -57,6 +57,23 @@ const DEFAULT_FIRST_CHUNK: Duration = Duration::from_secs(30);
 /// is the ping watchdog's job, this only ends the wait.
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Upper bound on events buffered before the handshake answer.
+///
+/// The helper subscribes to snapshots only after `HelloAck`, so a well-behaved
+/// peer sends nothing early. A few frames could be in flight after a reconnect;
+/// dozens is already far beyond that, and the rest is either a bug or an
+/// attempt to make the handshake allocate without limit.
+pub(crate) const MAX_EARLY_EVENTS: usize = 64;
+
+/// Upper bound on commits one snapshot may accumulate.
+///
+/// A very large real history is a few million commits. Each commit keeps a
+/// `CommitInfo` plus its graph row, so tens of millions already costs
+/// gigabytes and the app would run out of memory before it could draw the
+/// list. Past this the helper is broken or hostile, and failing the load keeps
+/// one connection from taking the process down.
+const DEFAULT_MAX_SNAPSHOT_COMMITS: usize = 20_000_000;
+
 /// Where the helper is running. The repository path comes from the helper's
 /// handshake, because it is the one that resolved `~` and relative paths.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,8 +106,11 @@ pub struct ClientConfig {
     /// How long [`RemoteSession::connect`] waits for the first snapshot chunk.
     pub first_chunk_timeout: Duration,
     /// How long one request waits for its answer before the caller gets an
-    /// error instead of waiting forever.
+    /// error instead of waiting forever. The handshake uses it too: it is the
+    /// first request on the connection.
     pub request_timeout: Duration,
+    /// Upper bound on commits one snapshot may accumulate.
+    pub max_snapshot_commits: usize,
 }
 
 impl Default for ClientConfig {
@@ -100,6 +120,7 @@ impl Default for ClientConfig {
             missed_pings: DEFAULT_MISSED_PINGS,
             first_chunk_timeout: DEFAULT_FIRST_CHUNK,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            max_snapshot_commits: DEFAULT_MAX_SNAPSHOT_COMMITS,
         }
     }
 }
@@ -204,6 +225,7 @@ struct Inner {
     missed_limit: u32,
     first_chunk_timeout: Duration,
     request_timeout: Duration,
+    max_snapshot_commits: usize,
     diagnostic: Arc<dyn Fn() -> String + Send + Sync>,
     disconnect: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     park: Mutex<()>,
@@ -256,14 +278,14 @@ impl RemoteSession {
     }
 
     pub(crate) fn connect_attached(
-        mut reader: impl Read + Send + 'static,
+        reader: impl Read + Send + 'static,
         mut writer: impl Write + Send + 'static,
         target: RemoteTarget,
         on_event: impl Fn(SessionEvent) + Send + Sync + 'static,
         config: ClientConfig,
         mut attach: TransportAttach,
     ) -> Result<Self> {
-        let (ack, early) = match handshake(&mut reader, &mut writer) {
+        let (ack, early, reader) = match handshake(reader, &mut writer, config.request_timeout) {
             Ok(value) => value,
             Err(error) => {
                 // The reader thread does not exist yet, so shutdown cannot
@@ -308,6 +330,7 @@ impl RemoteSession {
             missed_limit: config.missed_pings.max(1),
             first_chunk_timeout: config.first_chunk_timeout,
             request_timeout: config.request_timeout,
+            max_snapshot_commits: config.max_snapshot_commits,
             diagnostic: attach.diagnostic,
             disconnect: Mutex::new(attach.disconnect),
             park: Mutex::new(()),
@@ -449,7 +472,11 @@ fn request_name(request: &Request) -> &'static str {
     }
 }
 
-fn handshake(reader: &mut impl Read, writer: &mut impl Write) -> Result<(HelloAck, Vec<Event>)> {
+fn handshake<R: Read + Send + 'static>(
+    reader: R,
+    writer: &mut impl Write,
+    timeout: Duration,
+) -> Result<(HelloAck, Vec<Event>, R)> {
     let stream = 1u16;
     proto::write_frame(
         writer,
@@ -462,12 +489,39 @@ fn handshake(reader: &mut impl Read, writer: &mut impl Write) -> Result<(HelloAc
     )
     .map_err(|error| Error::other(format!("remote write failed: {error}")))?;
 
+    // The stream is a pipe or a socket with no portable read timeout, so a
+    // helper that never answers would park `connect` forever. Read the answer
+    // on its own thread and give the caller the same deadline a request gets.
+    // The reader comes back with the answer, because the same stream carries
+    // every frame after it.
+    let (tx, rx) = mpsc::sync_channel(1);
+    thread::Builder::new()
+        .name("lamina-remote-handshake".to_owned())
+        .spawn(move || {
+            let mut reader = reader;
+            let result = read_hello(&mut reader).map(|(ack, early)| (ack, early, reader));
+            let _ = tx.send(result);
+        })
+        .map_err(|error| Error::other(format!("could not start the remote handshake: {error}")))?;
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(Error::other(format!(
+            "the remote helper did not answer the handshake within {timeout:?}"
+        ))),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(Error::other(
+            "the remote handshake stopped without an answer",
+        )),
+    }
+}
+
+fn read_hello<R: Read>(reader: &mut R) -> Result<(HelloAck, Vec<Event>)> {
+    let stream = 1u16;
     let mut early = Vec::new();
     loop {
         let frame = read_frame(reader)?;
         if frame.stream != stream {
             if let Message::Event(event) = frame.message {
-                early.push(event);
+                push_early(&mut early, event)?;
             }
             continue;
         }
@@ -493,7 +547,7 @@ fn handshake(reader: &mut impl Read, writer: &mut impl Write) -> Result<(HelloAc
                 )));
             }
             Message::Response(Response::Error(error)) => return Err(remote_error(error)),
-            Message::Event(event) => early.push(event),
+            Message::Event(event) => push_early(&mut early, event)?,
             Message::Response(_) => continue,
             Message::Request(_) => {
                 return Err(Error::other(
@@ -502,6 +556,16 @@ fn handshake(reader: &mut impl Read, writer: &mut impl Write) -> Result<(HelloAc
             }
         }
     }
+}
+
+fn push_early(early: &mut Vec<Event>, event: Event) -> Result<()> {
+    if early.len() >= MAX_EARLY_EVENTS {
+        return Err(Error::other(format!(
+            "the remote helper sent more than {MAX_EARLY_EVENTS} events before its handshake answer"
+        )));
+    }
+    early.push(event);
+    Ok(())
 }
 
 fn read_frame(reader: &mut impl Read) -> Result<proto::Frame> {
@@ -975,6 +1039,20 @@ impl Inner {
                         return;
                     }
                 };
+                // The helper decides how many chunks to send. Without a bound
+                // a broken or hostile one could keep this list growing until
+                // the app is killed for memory it will never get back.
+                let total = next.commits.len().saturating_add(infos.len());
+                if total > self.max_snapshot_commits {
+                    drop(guard);
+                    (self.events)(SessionEvent::LoadFailed {
+                        error: format!(
+                            "the remote snapshot exceeds the {} commit limit",
+                            self.max_snapshot_commits
+                        ),
+                    });
+                    return;
+                }
                 next.commits.extend(infos, graph);
                 next.commits.complete = complete;
                 next.commit_index = Arc::new(index);
