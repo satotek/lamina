@@ -483,6 +483,12 @@ fn answer_control(shared: &Arc<ServerShared>, chunk: usize, request: Request) ->
                 Ok(request) => request,
                 Err(error) => return Some(Response::Error(protocol_error(error))),
             };
+            // The worktree-reading sides are checked before the job is
+            // queued: without this a request could diff a file outside the
+            // checkout and read its contents back as the diff text.
+            if let Err(error) = require_worktree_diff_path(&request) {
+                return Some(Response::Error(error));
+            }
             // The mapping is installed under the lock the callback also takes,
             // so a diff that finishes immediately cannot report an unknown
             // ticket and vanish.
@@ -983,6 +989,21 @@ fn rejected_operation_path(operation: &lamina_core::session::Operation) -> Optio
             require_worktree_path(path).err().map(|error| error.message)
         }
         _ => None,
+    }
+}
+
+/// Why a diff request's path must not reach the session, or `None`.
+///
+/// The staged and commit sides are read from git's object store, which a path
+/// cannot escape. The unstaged and worktree-compare sides read the file from
+/// disk, so those paths face the same check as [`Request::FileInWorktree`].
+fn require_worktree_diff_path(request: &lamina_core::session::DiffRequest) -> Result<(), RemoteError> {
+    use lamina_core::session::DiffRequest;
+    match request {
+        DiffRequest::Unstaged { path } | DiffRequest::CompareWorktree { path, .. } => {
+            require_worktree_path(path)
+        }
+        _ => Ok(()),
     }
 }
 

@@ -211,3 +211,105 @@ fn cancelling_a_diff_does_not_block_the_next_one() {
     drop(session);
     server.join().expect("server thread");
 }
+
+/// A diff that reads the working tree must not read past the checkout: the
+/// diff text would carry the outside file's contents back over the wire.
+#[test]
+fn worktree_diff_paths_that_escape_are_refused() {
+    let repo = TestRepo::new();
+    repo.write("README.md", "alpha\n");
+    repo.commit("initial import");
+    // A file just outside the checkout; a helper that diffed it would send
+    // this text back as the added side of the diff.
+    let outside = repo
+        .path()
+        .parent()
+        .expect("tempdir parent")
+        .join("lamina-diff-outside.txt");
+    std::fs::write(&outside, b"file contents outside the checkout\n").expect("outside file");
+
+    let (session, events, server) = open(&repo);
+    let commit = head_oid(&session);
+    let outside_name = outside
+        .file_name()
+        .expect("file name")
+        .to_string_lossy()
+        .into_owned();
+    let cases = [
+        (
+            DiffRequest::Unstaged {
+                path: format!("../{outside_name}"),
+            },
+            "worktree",
+        ),
+        (
+            DiffRequest::CompareWorktree {
+                base: commit,
+                path: format!("../{outside_name}"),
+            },
+            "worktree",
+        ),
+        (
+            DiffRequest::Unstaged {
+                path: ".git/config".into(),
+            },
+            ".git",
+        ),
+        (
+            DiffRequest::CompareWorktree {
+                base: commit,
+                path: if cfg!(windows) {
+                    r"C:\Windows\win.ini".into()
+                } else {
+                    "/etc/hostname".into()
+                },
+            },
+            "worktree",
+        ),
+    ];
+    for (request, needle) in cases {
+        let ticket = session.request_diff(request);
+        let deadline = Instant::now() + TIMEOUT;
+        let error = loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match events.recv_timeout(remaining) {
+                Ok(SessionEvent::DiffFailed {
+                    ticket: failed,
+                    error,
+                }) if failed == ticket => break error,
+                Ok(SessionEvent::DiffReady { ticket: ready, .. }) if ready == ticket => {
+                    panic!("a diff outside the checkout was answered")
+                }
+                Ok(SessionEvent::LoadFailed { error }) => panic!("load failed: {error}"),
+                Ok(_) => {}
+                Err(error) => panic!("no answer for an escaping diff path: {error}"),
+            }
+        };
+        assert!(
+            error.contains(needle),
+            "expected {needle:?} in the rejection: {error}"
+        );
+    }
+
+    // A repository-relative path still diffs, so the check refuses only
+    // what leaves the worktree.
+    let ticket = session.request_diff(DiffRequest::Unstaged {
+        path: "README.md".into(),
+    });
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match events.recv_timeout(remaining) {
+            Ok(SessionEvent::DiffReady { ticket: ready, .. }) if ready == ticket => break,
+            Ok(SessionEvent::DiffFailed {
+                ticket: failed,
+                error,
+            }) if failed == ticket => panic!("a clean path was refused: {error}"),
+            Ok(SessionEvent::LoadFailed { error }) => panic!("load failed: {error}"),
+            Ok(_) => {}
+            Err(error) => panic!("a clean unstaged diff did not arrive: {error}"),
+        }
+    }
+    drop(session);
+    server.join().expect("server thread");
+}
