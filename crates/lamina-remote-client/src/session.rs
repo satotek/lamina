@@ -886,13 +886,6 @@ impl Inner {
             }
             self.wake.notify_all();
         }
-        // A deliberate close releases every caller itself. The reader thread
-        // may stay parked on a stream the peer never closes, so waiting for
-        // it to notice would leave a blocked `call` and every open ticket
-        // hanging on a session that no longer exists. The per-item failures
-        // travel without a connection-lost banner, which would read as the
-        // repository breaking when the app asked to close.
-        self.drain_streams("the remote session was closed");
         // The transport dies before any thread is joined. A write parked on a
         // full pipe only fails once the child is killed, so joining a worker
         // thread first would leave shutdown waiting on that stalled write,
@@ -913,9 +906,19 @@ impl Inner {
                 let _ = handle.join();
             }
         }
+        // Joined before the drain: this thread has to end on the flag set
+        // under `park`, not on the wakeup the drain sends for callers. That
+        // wakeup can land while the thread is between waits and be lost.
         if let Some(handle) = lock(&self.ping).take() {
             let _ = handle.join();
         }
+        // A deliberate close releases every caller itself. The reader thread
+        // may stay parked on a stream the peer never closes, so waiting for
+        // it to notice would leave a blocked `call` and every open ticket
+        // hanging on a session that no longer exists. The per-item failures
+        // travel without a connection-lost banner, which would read as the
+        // repository breaking when the app asked to close.
+        self.drain_streams("the remote session was closed");
         if let Some(handle) = lock(&self.reader).take() {
             let reader_id = *lock(&self.reader_id);
             if reader_id == Some(thread::current().id()) {

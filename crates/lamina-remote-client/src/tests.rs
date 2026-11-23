@@ -1170,29 +1170,26 @@ fn a_drop_wakes_the_ping_thread_without_waiting_out_its_interval() {
         accept_subscribe(&mut peer_read, &mut peer_write);
         let (_, id) = oid_pair(15);
         send_chunk(&mut peer_write, id, true);
-        let _ = peer_exit_rx.recv();
+        // Keep the connection open until the close itself says otherwise. An
+        // early EOF would fail the link, and that drain would wake the ping
+        // thread on its behalf and hide the wakeup under test.
+        let _ = peer_exit_rx.recv_timeout(Duration::from_secs(30));
     });
 
-    let stall = Arc::new(AtomicBool::new(false));
-    let release = Arc::new(AtomicBool::new(false));
-    let entered = Arc::new(AtomicUsize::new(0));
-    let writer = StalledWrite {
-        inner: client_write,
-        stall: Arc::clone(&stall),
-        release: Arc::clone(&release),
-        entered: Arc::clone(&entered),
-    };
-    // Only the parked write is released. The peer already left by then, so
-    // nothing else can wake the ping thread on its behalf.
-    let hook_release = Arc::clone(&release);
-    let interval = Duration::from_secs(1);
-    let (tx, rx) = mpsc::channel();
-    let session = RemoteSession::connect_attached(
+    // Long enough that a missed wakeup is unmistakable, and short enough that
+    // a run of this test stays cheap.
+    let interval = Duration::from_secs(5);
+    let session = RemoteSession::connect_with(
         client_read,
-        writer,
+        client_write,
         RemoteTarget::new("scripted"),
         move |event| {
-            let _ = tx.send(event);
+            // The close fails this query once it releases callers, which
+            // happens only after the ping thread was joined. Nothing earlier
+            // in the close reaches the callback.
+            if matches!(event, SessionEvent::QueryFailed { .. }) {
+                let _ = peer_exit_tx.send(());
+            }
         },
         ClientConfig {
             ping_interval: interval,
@@ -1201,39 +1198,14 @@ fn a_drop_wakes_the_ping_thread_without_waiting_out_its_interval() {
             request_timeout: Duration::from_secs(10),
             ..ClientConfig::default()
         },
-        TransportAttach {
-            diagnostic: Arc::new(String::new),
-            disconnect: Some(Box::new(move || hook_release.store(true, Ordering::SeqCst))),
-            retain: None,
-        },
     )
     .expect("connect");
+    // Held open so the close has a caller to release.
+    let _query = session.path_history("src/lib.rs".to_owned());
 
-    // The next ping parks inside `write`, so the ping thread is between waits
-    // when the session closes.
-    stall.store(true, Ordering::SeqCst);
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while entered.load(Ordering::SeqCst) == 0 {
-        assert!(
-            Instant::now() < deadline,
-            "the ping never reached the stalled write"
-        );
-        thread::sleep(Duration::from_millis(5));
-    }
-
-    // The peer goes away while the ping thread is parked, so the drain that
-    // EOF triggers is the wakeup it misses.
-    let _ = peer_exit_tx.send(());
-    peer.join().expect("peer");
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(SessionEvent::LoadFailed { .. }) => break,
-            Ok(_) => {}
-            Err(error) => panic!("the dropped link was not reported: {error}"),
-        }
-    }
-
+    // The ping thread is parked for the whole interval and nothing else will
+    // wake it. The close has to be seen as `closing` rather than delivered as
+    // a wakeup that could land while that thread is between waits.
     let started = Instant::now();
     drop(session);
     assert!(
@@ -1241,6 +1213,7 @@ fn a_drop_wakes_the_ping_thread_without_waiting_out_its_interval() {
         "the drop waited out the ping interval: {:?}",
         started.elapsed()
     );
+    peer.join().expect("peer");
 }
 
 #[test]
