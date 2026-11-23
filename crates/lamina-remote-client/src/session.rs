@@ -379,9 +379,9 @@ impl RemoteSession {
 
 impl Drop for RemoteSession {
     fn drop(&mut self) {
-        // `retain` (the ssh child) drops after this returns, so shutdown can
-        // still close stdin and read the resulting EOF before the process is
-        // killed.
+        // `retain` (the ssh child) drops after this returns: shutdown kills
+        // the process through the disconnect hook, and that hook needs the
+        // child to still exist.
         self.inner.shutdown();
     }
 }
@@ -575,15 +575,19 @@ impl Inner {
             let _ = waiter.send(Some("the remote session was closed".to_owned()));
         }
         self.wake.notify_all();
-        if let Some(handle) = lock(&self.ping).take() {
-            let _ = handle.join();
+        // The transport dies before any thread is joined. A write parked on a
+        // full pipe only fails once the child is killed, so joining a worker
+        // thread first would leave shutdown waiting on the writer mutex that
+        // stalled write holds, and ssh plus the helper would leak.
+        if let Some(disconnect) = lock(&self.disconnect).take() {
+            disconnect();
         }
         {
             let mut writer = lock(&self.writer);
             *writer = None;
         }
-        if let Some(disconnect) = lock(&self.disconnect).take() {
-            disconnect();
+        if let Some(handle) = lock(&self.ping).take() {
+            let _ = handle.join();
         }
         if let Some(handle) = lock(&self.reader).take() {
             let reader_id = *lock(&self.reader_id);

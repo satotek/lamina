@@ -3,7 +3,7 @@
 
 use std::io::{Read, Write};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -16,6 +16,7 @@ use lamina_remote_protocol::{
     RepoStateDto, Request, Response, SnapshotDto, SpanDto, WorktreeStatusDto,
 };
 
+use crate::session::TransportAttach;
 use crate::{CONNECTION_LOST, ClientConfig, RemoteSession, RemoteTarget};
 
 struct PipeRead {
@@ -853,4 +854,104 @@ fn query_ticket(event: &SessionEvent) -> Option<QueryTicket> {
         | SessionEvent::CommitSignaturesReady { ticket, .. } => *ticket,
         _ => return None,
     })
+}
+
+/// A write end that can be told to park inside `write`, the way a real pipe
+/// parks the caller when the peer stops draining it.
+struct StalledWrite {
+    inner: PipeWrite,
+    stall: Arc<AtomicBool>,
+    release: Arc<AtomicBool>,
+    /// How many writes are (or were) parked; the test waits for the first.
+    entered: Arc<AtomicUsize>,
+}
+
+impl Write for StalledWrite {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.stall.load(Ordering::SeqCst) {
+            self.entered.fetch_add(1, Ordering::SeqCst);
+            while !self.release.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_millis(5));
+            }
+        }
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+#[test]
+fn dropping_a_session_with_a_stalled_write_does_not_hang() {
+    let (client_read, client_write, mut peer_read, mut peer_write) = pipe();
+    let (peer_exit_tx, peer_exit_rx) = mpsc::channel::<()>();
+    let peer = thread::spawn(move || {
+        hello(&mut peer_read, &mut peer_write);
+        accept_subscribe(&mut peer_read, &mut peer_write);
+        let (_, id) = oid_pair(11);
+        send_chunk(&mut peer_write, id, true);
+        // Stay connected until the transport is killed; closing early would
+        // end the client's read and hide the stalled write.
+        let _ = peer_exit_rx.recv();
+    });
+
+    let stall = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(AtomicBool::new(false));
+    let entered = Arc::new(AtomicUsize::new(0));
+    let writer = StalledWrite {
+        inner: client_write,
+        stall: Arc::clone(&stall),
+        release: Arc::clone(&release),
+        entered: Arc::clone(&entered),
+    };
+    let hook_release = Arc::clone(&release);
+    let hook_exit = peer_exit_tx.clone();
+    let session = RemoteSession::connect_attached(
+        client_read,
+        writer,
+        RemoteTarget::new("scripted"),
+        |_| {},
+        ClientConfig {
+            ping_interval: Duration::from_millis(40),
+            missed_pings: 3,
+            first_chunk_timeout: Duration::from_secs(5),
+        },
+        TransportAttach {
+            diagnostic: Arc::new(String::new),
+            // Killing ssh is what ends a write parked on a full pipe; the
+            // fake only has to unblock the parked `write`.
+            disconnect: Some(Box::new(move || {
+                hook_release.store(true, Ordering::SeqCst);
+                let _ = hook_exit.send(());
+            })),
+            retain: None,
+        },
+    )
+    .expect("connect");
+
+    // The next ping parks inside `write`, holding the writer mutex.
+    stall.store(true, Ordering::SeqCst);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while entered.load(Ordering::SeqCst) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "no write reached the stall; the ping never fired"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    let (drop_tx, drop_rx) = mpsc::channel::<()>();
+    let dropper = thread::spawn(move || {
+        drop(session);
+        let _ = drop_tx.send(());
+    });
+    // Shutdown used to join the ping thread before killing the transport, so
+    // the parked write never returned and the drop never finished.
+    drop_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("dropping the session must not wait for a stalled write");
+    dropper.join().expect("drop thread");
+    drop(peer_exit_tx);
+    peer.join().expect("peer");
 }
