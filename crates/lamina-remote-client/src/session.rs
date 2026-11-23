@@ -51,6 +51,9 @@ pub const UNSUPPORTED: &str = "not supported over remote yet";
 pub const CONNECTION_LOST: &str = "connection to the remote repository was lost";
 
 /// How often an idle connection is probed, and how many unanswered probes drop it.
+/// What callers still waiting get when the app closes the session itself.
+const CLOSED_BY_REQUEST: &str = "the remote session was closed";
+
 const DEFAULT_PING_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_MISSED_PINGS: u32 = 3;
 const DEFAULT_FIRST_CHUNK: Duration = Duration::from_secs(30);
@@ -924,7 +927,7 @@ impl Inner {
         // hanging on a session that no longer exists. The per-item failures
         // travel without a connection-lost banner, which would read as the
         // repository breaking when the app asked to close.
-        self.drain_streams("the remote session was closed");
+        self.drain_streams(CLOSED_BY_REQUEST);
         if let Some(handle) = lock(&self.reader).take() {
             let reader_id = *lock(&self.reader_id);
             if reader_id == Some(thread::current().id()) {
@@ -962,7 +965,14 @@ impl Inner {
         // A late pong must not resurrect a sample from the link that just died.
         lock(&self.pings).clear();
         *lock(&self.rtt) = None;
-        self.drain_streams(&message);
+        // A close kills the transport before it drains, so a writer caught
+        // mid-frame can land here first. The callers asked for the close and
+        // must not be told the connection broke.
+        if self.closing.load(Ordering::SeqCst) {
+            self.drain_streams(CLOSED_BY_REQUEST);
+        } else {
+            self.drain_streams(&message);
+        }
         // A caller still waiting for room in the write queue must not sit out
         // its deadline on a link that is already gone.
         self.outbox.close();
