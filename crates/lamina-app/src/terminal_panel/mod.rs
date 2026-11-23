@@ -327,7 +327,7 @@ impl TerminalPanel {
     }
 
     /// Like [`Self::new_with_command`] without the layout wait, for tests.
-    #[cfg(test)]
+    #[cfg(all(test, not(windows)))]
     pub(crate) fn new_quiet_with_command(
         working_dir: PathBuf,
         command: TerminalCommand,
