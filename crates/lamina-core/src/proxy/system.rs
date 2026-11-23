@@ -539,7 +539,10 @@ mod macos {
     use system_configuration::dynamic_store::SCDynamicStoreBuilder;
 
     pub fn detect(url_scheme: Option<&str>) -> Option<ProxyConfig> {
-        let store = SCDynamicStoreBuilder::new("lamina-proxy-detect").build();
+        let Some(store) = SCDynamicStoreBuilder::new("lamina-proxy-detect").build() else {
+            log::debug!("could not open a dynamic store session");
+            return None;
+        };
         let proxies = match store.get_proxies() {
             Some(proxies) => proxies,
             None => {

@@ -3983,7 +3983,7 @@ dependencies = [
  "serde_json",
  "serde_urlencoded",
  "sync_wrapper",
- "system-configuration",
+ "system-configuration 0.6.1",
  "tokio",
  "tokio-rustls",
  "tokio-socks",
@@ -5149,7 +5149,7 @@ name = "lamina-core"
 version = "0.2.0"
 dependencies = [
  "chardetng",
- "core-foundation 0.9.4",
+ "core-foundation 0.10.1",
  "encoding_rs",
  "gix",
  "imara-diff",
@@ -5160,7 +5160,7 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
- "system-configuration",
+ "system-configuration 0.8.0",
  "tempfile",
  "thiserror 2.0.21",
  "tree-sitter",
@@ -8399,6 +8399,17 @@ checksum = "3c879d448e9d986b661742763247d3693ed13609438cf3d006f51f5368a5ba6b"
 dependencies = [
  "bitflags 2.13.2",
  "core-foundation 0.9.4",
+ "system-configuration-sys",
+]
+
+[[package]]
+name = "system-configuration"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "501336eb7ba9e417300a6a0fa985721065467aa83a6dcf0422a8e43e4c0328fa"
+dependencies = [
+ "bitflags 2.13.2",
+ "core-foundation 0.10.1",
  "system-configuration-sys",
 ]
 
