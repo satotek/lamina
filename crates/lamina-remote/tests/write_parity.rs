@@ -424,6 +424,37 @@ fn pointer_repo() -> TestRepo {
     repo
 }
 
+/// Only for a failure message: what git-lfs did to one side.
+fn lfs_details(repo: &TestRepo) -> String {
+    let output = |args: &[&str]| {
+        let out = repo.git_output(args);
+        format!(
+            "$ git {}\n{}{}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    };
+    [
+        output(&["config", "--local", "--get-regexp", "^(filter|lfs)\\."]),
+        output(&["diff", "--cached", "--stat", "--", "data.bin"]),
+        output(&["diff", "--stat", "--", "data.bin"]),
+        output(&["cat-file", "-p", ":data.bin"]),
+        format!(
+            "worktree data.bin: {:?}\n",
+            std::fs::read(repo.path().join("data.bin"))
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        ),
+    ]
+    .concat()
+}
+
+fn lfs_version(repo: &TestRepo) -> String {
+    String::from_utf8_lossy(&repo.git_output(&["lfs", "version"]).stdout)
+        .trim()
+        .to_owned()
+}
+
 fn run_outcome_local(
     session: &Session,
     events: &Receiver<SessionEvent>,
@@ -499,16 +530,24 @@ fn lfs_reads_and_writes_match_a_local_session() {
         },
     ];
     for operation in writes {
+        let label = format!("{operation:?}");
         let local_error = run_outcome_local(&local, &local_events, operation.clone());
         let remote_error = run_outcome_remote(&helper, operation);
         assert_eq!(
             local_error.is_none(),
             remote_error.is_none(),
-            "local {local_error:?} remote {remote_error:?}"
+            "after {label}: local {local_error:?} remote {remote_error:?}"
         );
+        let local_state = repository_state(&local_repo);
+        let remote_state = repository_state(&remote_repo);
         assert_eq!(
-            repository_state(&local_repo),
-            repository_state(&remote_repo)
+            local_state,
+            remote_state,
+            "after {label} (local {local_error:?}, remote {remote_error:?})\n\
+             git-lfs: {}\nlocal:\n{}\nremote:\n{}",
+            lfs_version(&local_repo),
+            lfs_details(&local_repo),
+            lfs_details(&remote_repo),
         );
     }
     helper.close();
