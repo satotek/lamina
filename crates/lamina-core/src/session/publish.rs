@@ -159,8 +159,8 @@ impl Shared {
         self.shutdown.store(true, Ordering::SeqCst);
         // The git child polls this flag. Only a host whose client is gone
         // with the session kills the write; closing a local tab stops new
-        // work but lets the command the user started finish, and `Drop`
-        // joins its worker in the background.
+        // work but lets the command the user started finish. `Drop` waits
+        // for that write, so the app drops sessions on a worker thread.
         if !self.cancel_on_shutdown {
             return;
         }
