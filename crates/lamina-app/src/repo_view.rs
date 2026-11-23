@@ -30,7 +30,7 @@ mod rebase_plan;
 mod reflog;
 mod remote_copy;
 #[cfg(all(test, unix))]
-mod remote_fixture;
+pub(crate) mod remote_fixture;
 mod remote_tab;
 mod selection_diff;
 mod sidebar;

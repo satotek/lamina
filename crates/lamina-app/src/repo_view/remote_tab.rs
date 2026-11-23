@@ -177,6 +177,9 @@ impl RepoView {
                 }
                 self.install_remote_session(session, cx);
             }
+            ConnectMsg::BrowserReady { browser, .. } => {
+                crate::remote_open::drop_browser_in_background(browser);
+            }
             ConnectMsg::Session(event) => {
                 let buffering = self.remote_tab.as_ref().is_some_and(|tab| tab.buffering);
                 if buffering {
@@ -199,28 +202,7 @@ impl RepoView {
         reply: mpsc::Sender<Option<String>>,
         cx: &mut Context<Self>,
     ) {
-        let Some(window) = self.window_handle else {
-            let _ = reply.send(None);
-            return;
-        };
-        // The modal owns one sender. This clone answers only when the modal
-        // could not be opened, so the blocked helper is not left waiting.
-        let fallback = reply.clone();
-        let opened = window.update(cx, |_, window, cx| {
-            crate::ui::askpass_prompt(
-                window,
-                cx,
-                t!("history.authentication").to_string(),
-                prompt,
-                secret,
-                move |answer, _, _| {
-                    let _ = reply.send(answer);
-                },
-            );
-        });
-        if opened.is_err() {
-            let _ = fallback.send(None);
-        }
+        crate::remote_open::show_askpass_prompt(self.window_handle, prompt, secret, reply, cx);
     }
 
     fn install_remote_session(
