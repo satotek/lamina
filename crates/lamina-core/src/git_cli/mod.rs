@@ -993,6 +993,14 @@ fn isolate_for_cancel(command: &mut Command) {
     let _ = command;
 }
 
+/// How long a cancelled git child gets to handle SIGTERM before its group is
+/// killed outright.
+///
+/// Git removes the lock files it holds (`index.lock`, `HEAD.lock`, ...) from
+/// its SIGTERM handler, so a plain SIGKILL leaves them behind and every later
+/// command fails until someone deletes them by hand.
+const CANCEL_GRACE: Duration = Duration::from_secs(2);
+
 /// Stop `child` and, with it, whatever git started.
 ///
 /// A hook, a credential helper or an askpass child inherits git's pipes.
@@ -1004,18 +1012,22 @@ fn isolate_for_cancel(command: &mut Command) {
 fn kill_child_group(child: &mut Child) {
     #[cfg(unix)]
     {
-        // SAFETY: `kill` is the POSIX function. Declared locally so this crate
-        // does not take a libc dependency for one call.
-        unsafe extern "C" {
-            fn kill(pid: i32, sig: i32) -> i32;
-        }
-        if let Ok(pid) = i32::try_from(child.id()) {
-            // SAFETY: `process_group(0)` made this pid the leader of a new
-            // group. A negative pid names that group, not this process.
-            unsafe {
-                kill(-pid, 9);
+        let Ok(pid) = i32::try_from(child.id()) else {
+            let _ = child.kill();
+            return;
+        };
+        // SIGTERM first: git's handler releases the lock files it holds.
+        signal_group(pid, SIGTERM);
+        let deadline = std::time::Instant::now() + CANCEL_GRACE;
+        while child.try_wait().ok().flatten().is_none() {
+            if std::time::Instant::now() >= deadline {
+                break;
             }
+            thread::sleep(Duration::from_millis(25));
         }
+        // Whatever ignored SIGTERM — or a child still holding git's pipes —
+        // must not outlive the cancel.
+        signal_group(pid, SIGKILL);
     }
     #[cfg(windows)]
     {
@@ -1028,6 +1040,26 @@ fn kill_child_group(child: &mut Child) {
             .status();
     }
     let _ = child.kill();
+}
+
+#[cfg(unix)]
+const SIGTERM: i32 = 15;
+#[cfg(unix)]
+const SIGKILL: i32 = 9;
+
+/// Signal the process group `pid` leads, not `pid` alone.
+#[cfg(unix)]
+fn signal_group(pid: i32, signal: i32) {
+    // SAFETY: `kill` is the POSIX function. Declared locally so this crate
+    // does not take a libc dependency for one call.
+    unsafe extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    // SAFETY: `process_group(0)` made this pid the leader of a new group. A
+    // negative pid names that group, not this process.
+    unsafe {
+        kill(-pid, signal);
+    }
 }
 
 /// A successful [`std::process::ExitStatus`]. The standard library has no
@@ -1345,6 +1377,64 @@ mod cancel_tests {
             began.elapsed()
         );
         let _ = tripped.join();
+    }
+
+    /// A killed index write must not leave `.git/index.lock` behind: git drops
+    /// the lock files it holds from its SIGTERM handler, which a group SIGKILL
+    /// skips. The stale lock then fails every later command until the user
+    /// deletes it by hand.
+    #[cfg(unix)]
+    #[test]
+    fn cancelling_an_index_write_leaves_no_lock_file() {
+        let test = crate::test_support::TestRepo::new();
+        test.write("base.txt", "one\n");
+        test.commit("base");
+        // The clean filter runs inside `git add` while git holds the index
+        // lock, so the cancel lands exactly on an index write.
+        test.git(&["config", "filter.slow.clean", "sleep 20; cat"]);
+        test.git(&["config", "filter.slow.smudge", "cat"]);
+        test.write(".gitattributes", "*.slow filter=slow\n");
+        test.write("big.slow", "slow contents\n");
+
+        let lock = test.path().join(".git/index.lock");
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let git = test.git_handle().with_cancel({
+            let cancelled = Arc::clone(&cancelled);
+            move || cancelled.load(Ordering::SeqCst)
+        });
+        let run = std::thread::spawn(move || git.run(&["add", "big.slow"], None));
+
+        // The lock is the gate: the test cancels only once git holds it.
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !lock.exists() {
+            if Instant::now() >= deadline {
+                panic!("git never took the index lock");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let began = Instant::now();
+        cancelled.store(true, Ordering::SeqCst);
+
+        let error = run
+            .join()
+            .expect("the command thread")
+            .expect_err("a cancelled command is an error");
+        assert!(
+            error
+                .to_string()
+                .contains(crate::error::OPERATION_CANCELLED),
+            "{error}"
+        );
+        assert!(
+            !lock.exists(),
+            "the cancelled index write left {} behind",
+            lock.display()
+        );
+        assert!(
+            began.elapsed() < Duration::from_secs(15),
+            "the cancel took {:?}; a child survived it",
+            began.elapsed()
+        );
     }
 }
 
