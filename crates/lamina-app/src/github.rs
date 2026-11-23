@@ -155,6 +155,11 @@ pub(crate) fn with_create_pr(
     branch: &str,
     cx: &App,
 ) -> Notification {
+    // The push ran on the host. Pointing the local `gh` at that working tree
+    // would open a path this machine does not have, so the note stays as it is.
+    if view.is_ssh() {
+        return note;
+    }
     if remote_for(view, cx).is_none() {
         return note;
     }
@@ -215,7 +220,7 @@ fn open_item(url: String) -> PopupMenuItem {
 }
 
 fn create_pr_item(entity: &Entity<RepoView>, branch: &str, cx: &App) -> PopupMenuItem {
-    let blocked = gh_blocked(cx);
+    let blocked = pr_form_blocked(entity.read(cx).is_ssh(), gh_blocked(cx));
     let label = match &blocked {
         Some(reason) => t!("github.create_pr_blocked", reason = reason).to_string(),
         None => t!("github.create_pr").to_string().to_owned(),
@@ -304,6 +309,18 @@ fn workdir(entity: &Entity<RepoView>, cx: &App) -> Option<PathBuf> {
         .map(|session| session.git_extras().workdir().to_path_buf())
 }
 
+/// Why the pull-request form cannot open from here.
+///
+/// A remote tab has no working tree on this machine for `gh` to run in, so
+/// the form stays off however healthy the local `gh` is.
+fn pr_form_blocked(ssh: bool, gh_error: Option<String>) -> Option<String> {
+    if ssh {
+        Some(crate::remote_open::unavailable_reason())
+    } else {
+        gh_error
+    }
+}
+
 fn create_pull_request(
     gh: PathBuf,
     workdir: PathBuf,
@@ -331,4 +348,26 @@ fn create_pull_request(
         });
     })
     .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_remote_tab_cannot_open_the_pull_request_form() {
+        rust_i18n::set_locale("en");
+        let remote = crate::remote_open::unavailable_reason();
+        assert_eq!(pr_form_blocked(true, None), Some(remote.clone()));
+        assert_eq!(
+            pr_form_blocked(true, Some("gh is not installed".to_owned())),
+            Some(remote),
+            "the remote reason wins over a missing gh"
+        );
+        assert_eq!(pr_form_blocked(false, None), None);
+        assert_eq!(
+            pr_form_blocked(false, Some("gh is not installed".to_owned())),
+            Some("gh is not installed".to_owned())
+        );
+    }
 }
