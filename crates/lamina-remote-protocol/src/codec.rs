@@ -202,6 +202,16 @@ mod tests {
         io::Cursor::new(bytes)
     }
 
+    /// Compresses without recording the decompressed size, as a streaming
+    /// encoder does. `zstd::bulk::compress` always records it, so frames
+    /// from it exercise a different path in the reader's decompressor.
+    fn stream_compress(data: &[u8]) -> Vec<u8> {
+        use std::io::Write;
+        let mut encoder = zstd::stream::write::Encoder::new(Vec::new(), 3).expect("encoder");
+        encoder.write_all(data).expect("write");
+        encoder.finish().expect("finish")
+    }
+
     #[test]
     fn a_small_message_round_trips_without_compression() {
         let mut bytes = Vec::new();
@@ -341,6 +351,93 @@ mod tests {
 
         let error = read_frame(&mut cursor(&bytes)).expect_err("must fail");
         assert!(matches!(error, ProtocolError::Decompress(_)), "{error:?}");
+    }
+
+    #[test]
+    fn a_bomb_without_a_recorded_size_is_capped_too() {
+        // A frame from a streaming compressor records no decompressed size,
+        // so the decoder cannot refuse it by looking at the header; it has to
+        // stop once the cap is actually reached. The capped branch is a
+        // different one from the recorded-size test above.
+        let compressed = stream_compress(&vec![0u8; MAX_FRAME_BYTES + 1]);
+        let rest = 4 + compressed.len();
+        let mut bytes = (rest as u32).to_be_bytes().to_vec();
+        bytes.extend_from_slice(&[FLAG_ZSTD, KIND_RESPONSE, 0, 0]);
+        bytes.extend_from_slice(&compressed);
+
+        let error = read_frame(&mut cursor(&bytes)).expect_err("must fail");
+        assert!(matches!(error, ProtocolError::Decompress(_)), "{error:?}");
+    }
+
+    #[test]
+    fn a_frame_without_a_recorded_size_still_round_trips() {
+        let message = Message::Response(Response::Error(RemoteError {
+            kind: ErrorKind::Git,
+            message: "bad revision".into(),
+            stderr: Some("fatal: bad revision".into()),
+            code: Some(128),
+        }));
+        let compressed = stream_compress(&encode_message(&message).expect("encode"));
+        let rest = 4 + compressed.len();
+        let mut bytes = (rest as u32).to_be_bytes().to_vec();
+        bytes.extend_from_slice(&[FLAG_ZSTD, KIND_RESPONSE, 0, 7]);
+        bytes.extend_from_slice(&compressed);
+
+        let frame = read_frame(&mut cursor(&bytes))
+            .expect("read")
+            .expect("frame");
+        assert_eq!(frame.stream, 7);
+        assert_eq!(frame.message, message);
+    }
+
+    #[test]
+    fn a_compressed_frame_with_an_empty_payload_is_refused() {
+        // The smallest frame a hostile peer can mark as compressed: no
+        // payload at all. It must be a clean error, whatever zstd thinks
+        // of an empty input.
+        let mut bytes = 4u32.to_be_bytes().to_vec();
+        bytes.extend_from_slice(&[FLAG_ZSTD, KIND_RESPONSE, 0, 0]);
+
+        let result = read_frame(&mut cursor(&bytes));
+        assert!(result.is_err(), "{result:?}");
+    }
+
+    #[test]
+    fn every_truncation_of_a_frame_is_a_clean_error() {
+        // A peer can die mid-frame at any byte. No prefix may decode as a
+        // frame, panic, or hang; only the exact full length is a frame.
+        let mut plain = Vec::new();
+        write_frame(&mut plain, 2, &Message::Request(Request::Ping { nonce: 5 })).expect("write");
+        let mut zstd_frame = Vec::new();
+        let payload = encode_message(&Message::Response(Response::BlobAt {
+            data: vec![b'a'; 16 * 1024],
+        }))
+        .expect("encode");
+        let compressed = zstd::bulk::compress(&payload, 3).expect("compress");
+        let rest = 4 + compressed.len();
+        zstd_frame.extend_from_slice(&(rest as u32).to_be_bytes());
+        zstd_frame.extend_from_slice(&[FLAG_ZSTD, KIND_RESPONSE, 0, 2]);
+        zstd_frame.extend_from_slice(&compressed);
+
+        for whole in [&plain, &zstd_frame] {
+            for cut in 0..whole.len() {
+                let result = read_frame(&mut cursor(&whole[..cut]));
+                if cut == 0 {
+                    // Zero bytes is the peer closing between frames: a
+                    // clean end of stream, not an error.
+                    assert_eq!(result.expect("read"), None);
+                } else {
+                    assert!(
+                        result.is_err(),
+                        "prefix of {cut} bytes must not be a frame: {result:?}"
+                    );
+                }
+            }
+            let frame = read_frame(&mut cursor(whole))
+                .expect("read")
+                .expect("frame");
+            assert_eq!(frame.stream, 2);
+        }
     }
 
     #[test]
