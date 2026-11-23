@@ -35,7 +35,7 @@ use gpui_component::{
 };
 use gpui_kit_assets::IconName;
 use lamina_core::repo::{SubmoduleInfo, SubmoduleStatus, WorktreeInfo};
-use lamina_core::session::{HistoryScope, Operation, OperationId, RemoteBranch};
+use lamina_core::session::{HistoryScope, Operation, OperationId, RemoteBranch, RepoLocation};
 use lamina_core::{HeadInfo, RefInfo, RefKind, RemoteInfo, UpstreamInfo};
 
 use crate::data::{SidebarData, Source};
@@ -2472,7 +2472,7 @@ pub(crate) fn branch_drop_target_with(
         let source = dragged.clone();
         let position = window.mouse_position();
         entity.update(cx, |view, cx| {
-            view.open_branch_drop_menu(source, target, position, window, cx);
+            view.open_branch_drop_menu(source, target, position, cx);
         });
     })
 }
@@ -4332,7 +4332,6 @@ impl RepoView {
         source: DraggedBranch,
         target: String,
         position: Point<Pixels>,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.branches.dialog_open() {
@@ -4345,9 +4344,51 @@ impl RepoView {
             Some(HeadInfo::Branch { short_name, .. }) => Some(short_name.clone()),
             _ => None,
         };
+        if source.kind == RefKind::RemoteBranch
+            && matches!(session.location(), RepoLocation::Ssh { .. })
+        {
+            // The ancestry read is one round trip; the menu opens when the
+            // answer lands instead of freezing the window on the wire.
+            match self.drop_tips(&source.name, &target) {
+                Some((target_tip, source_tip)) => {
+                    let reader = session.reader();
+                    cx.spawn(async move |this, cx| {
+                        let ready = cx
+                            .background_executor()
+                            .spawn(async move { reader.is_ancestor(target_tip, source_tip).ok() })
+                            .await;
+                        let _ = this.update(cx, |view, cx| {
+                            // Another drop or a dialog may have started while
+                            // the read was in flight.
+                            if !view.branches.dialog_open() {
+                                view.finish_branch_drop_menu(
+                                    source, target, position, head, ready, cx,
+                                );
+                            }
+                        });
+                    })
+                    .detach();
+                }
+                None => self.finish_branch_drop_menu(source, target, position, head, None, cx),
+            }
+            return;
+        }
         let fast_forward = (source.kind == RefKind::RemoteBranch)
             .then(|| self.fast_forward_ready(&source.name, &target))
             .flatten();
+        self.finish_branch_drop_menu(source, target, position, head, fast_forward, cx);
+    }
+
+    /// Installs the drop menu the entry list describes and focuses it.
+    fn finish_branch_drop_menu(
+        &mut self,
+        source: DraggedBranch,
+        target: String,
+        position: Point<Pixels>,
+        head: Option<String>,
+        fast_forward: Option<bool>,
+        cx: &mut Context<Self>,
+    ) {
         let busy = self.is_busy();
         let Some(entries) = drop_entries(&source, &target, head.as_deref(), busy, fast_forward)
         else {
@@ -4359,8 +4400,10 @@ impl RepoView {
             target,
             entries,
         });
-        if let Some(focus) = self.branches.dialog_focus.clone() {
-            window.focus(&focus, cx);
+        if let Some(focus) = self.branches.dialog_focus.clone()
+            && let Some(handle) = self.window()
+        {
+            let _ = handle.update(cx, |_, window, cx| window.focus(&focus, cx));
         }
         cx.notify();
     }
@@ -4440,6 +4483,18 @@ impl RepoView {
     /// cannot be read.
     fn fast_forward_ready(&self, source: &str, target: &str) -> Option<bool> {
         let session = self.session.as_ref()?;
+        let (target_tip, source_tip) = self.drop_tips(source, target)?;
+        session.reader().is_ancestor(target_tip, source_tip).ok()
+    }
+
+    /// The tips a drop's ancestry check compares, or `None` when either side
+    /// is missing from the snapshot.
+    fn drop_tips(
+        &self,
+        source: &str,
+        target: &str,
+    ) -> Option<(lamina_core::Oid, lamina_core::Oid)> {
+        let session = self.session.as_ref()?;
         let snapshot = session.snapshot();
         let tip = |kind: RefKind, name: &str| {
             snapshot
@@ -4448,9 +4503,10 @@ impl RepoView {
                 .find(|info| info.kind == kind && info.short_name == name)
                 .map(|info| info.target)
         };
-        let target_tip = tip(RefKind::LocalBranch, target)?;
-        let source_tip = tip(RefKind::RemoteBranch, source)?;
-        session.reader().is_ancestor(target_tip, source_tip).ok()
+        Some((
+            tip(RefKind::LocalBranch, target)?,
+            tip(RefKind::RemoteBranch, source)?,
+        ))
     }
 }
 

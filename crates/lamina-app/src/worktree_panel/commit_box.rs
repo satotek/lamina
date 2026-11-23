@@ -5,6 +5,7 @@ use gpui::prelude::*;
 use gpui::{AnyElement, Context, Entity, FontWeight, IntoElement, ParentElement, Styled, div, px};
 use gpui_component::input::Textarea;
 use lamina_core::HeadInfo;
+use lamina_core::Oid;
 use lamina_core::session::{RepoSnapshot, RepositorySession};
 
 use super::{Colors, PendingKind, WorktreePanel};
@@ -216,17 +217,23 @@ fn summary_hint(message: &str, limit: u32) -> Option<String> {
 /// HEAD's full message, used to prefill the amend box.
 ///
 /// A single object read through gix, so it stays on the UI thread instead of
-/// adding a session round trip for every amend toggle.
+/// adding a session round trip for every amend toggle. A remote tab reads it
+/// in the background instead; see [`RepoView::toggle_amend`].
 pub(super) fn previous_message(session: &dyn RepositorySession) -> Option<String> {
-    let head = match session.snapshot().head.as_ref()? {
+    let head = amend_head(session)?;
+    session.reader().commit_message(head).ok()
+}
+
+/// The commit whose message an amend would start from.
+pub(super) fn amend_head(session: &dyn RepositorySession) -> Option<Oid> {
+    match session.snapshot().head.as_ref()? {
         HeadInfo::Branch {
             target: Some(target),
             ..
-        } => *target,
-        HeadInfo::Detached { target } => *target,
-        HeadInfo::Branch { target: None, .. } => return None,
-    };
-    session.reader().commit_message(head).ok()
+        } => Some(*target),
+        HeadInfo::Detached { target } => Some(*target),
+        HeadInfo::Branch { target: None, .. } => None,
+    }
 }
 
 #[cfg(test)]

@@ -29,12 +29,12 @@ use lamina_core::lfs::{LfsInfo, LfsLock};
 use lamina_core::patch::LineSelection;
 use lamina_core::repo::InProgressDetails;
 use lamina_core::session::{
-    ConflictSide, DiffRequest, DiffTicket, DiffView, Operation, OperationId, RepoSnapshot,
-    RepositorySession,
+    ConflictSide, DiffRequest, DiffTicket, DiffView, Operation, OperationId, RepoLocation,
+    RepoSnapshot, RepositorySession,
 };
 use lamina_core::{ChangeKind, FileChange, RepoState, WorktreeStatus};
 
-use commit_box::{commit_enabled, previous_message, trim_message};
+use commit_box::{amend_head, commit_enabled, previous_message, trim_message};
 use hunks::{panel_rows_expanded, picked_in_range, picked_selection};
 
 use crate::activity::ActivityKind;
@@ -529,7 +529,12 @@ impl WorktreePanel {
 
     /// Offers git's prepared message once per merge, the way `git commit`
     /// opens the editor with it.
-    fn sync_merge_message(&mut self, session: &dyn RepositorySession, state: RepoState) {
+    fn sync_merge_message(
+        &mut self,
+        session: &dyn RepositorySession,
+        state: RepoState,
+        cx: &mut Context<RepoView>,
+    ) {
         if state != RepoState::Merging {
             self.merge_prefilled = false;
             self.withdraw_merge_message = self.offered_merge_message.take();
@@ -539,11 +544,38 @@ impl WorktreePanel {
             return;
         }
         self.merge_prefilled = true;
-        // One small file read; cheaper than a round trip through a worker.
-        if let Ok(Some(message)) = session.reader().merge_message() {
-            self.offered_merge_message = Some(message.clone());
-            self.prefill = Some(message);
+        // A local read is one small file, cheaper than a round trip through a
+        // worker. A remote one is a round trip the window must not wait for:
+        // the message lands on a later render instead.
+        if !matches!(session.location(), RepoLocation::Ssh { .. }) {
+            if let Ok(Some(message)) = session.reader().merge_message() {
+                self.offered_merge_message = Some(message.clone());
+                self.prefill = Some(message);
+            }
+            return;
         }
+        let reader = session.reader();
+        cx.spawn(async move |this, cx| {
+            let message = cx
+                .background_executor()
+                .spawn(async move { reader.merge_message().ok().flatten() })
+                .await;
+            let Some(message) = message else {
+                return;
+            };
+            let _ = this.update(cx, |view, cx| {
+                let merging = view
+                    .session
+                    .as_ref()
+                    .is_some_and(|session| session.snapshot().state == RepoState::Merging);
+                if merge_message_lands(merging, view.worktree.offered_merge_message.is_some()) {
+                    view.worktree.offered_merge_message = Some(message.clone());
+                    view.worktree.prefill = Some(message);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// Makes `path` the only selected row and resets the diff, so the next
@@ -813,6 +845,13 @@ impl WorktreePanel {
     }
 }
 
+/// Whether a merge message read in the background still has a merge to land
+/// in: the merge may have been aborted, or another offer may have arrived,
+/// while the read was in flight.
+fn merge_message_lands(merging: bool, already_offered: bool) -> bool {
+    merging && !already_offered
+}
+
 // ---------------------------------------------------------------------------
 // RepoView glue: everything that needs the session lives here, so `repo_view`
 // only adds the fields and forwards events.
@@ -849,7 +888,7 @@ impl RepoView {
             self.worktree.conflicts.observe(&snapshot);
             self.worktree.reconcile(&snapshot);
             self.worktree
-                .sync_merge_message(session.as_ref(), snapshot.state);
+                .sync_merge_message(session.as_ref(), snapshot.state, cx);
         }
         self.worktree.ensure_input(window, cx);
         self.request_worktree_diff(cx);
@@ -915,7 +954,7 @@ impl RepoView {
             return;
         }
         self.worktree
-            .sync_merge_message(session.as_ref(), snapshot.state);
+            .sync_merge_message(session.as_ref(), snapshot.state, cx);
         self.worktree.conflicts.observe(&snapshot);
         let moved = self.worktree.reconcile(&snapshot);
         let needs_view = match self.worktree.selected.as_ref() {
@@ -1548,8 +1587,67 @@ impl RepoView {
     }
 
     pub(crate) fn toggle_amend(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let previous = self.session.as_deref().and_then(previous_message);
         let amend = !self.worktree.amend;
+        let Some(session) = self.session.as_deref() else {
+            self.worktree.set_amend(amend, None, window, cx);
+            return;
+        };
+        // Turning amend off restores the draft; reading HEAD's message for it
+        // would be a round trip whose answer is thrown away.
+        if !amend {
+            self.worktree.set_amend(amend, None, window, cx);
+            return;
+        }
+        // A local read is one object through gix. A remote one is a round
+        // trip the window must not wait for: the box toggles immediately and
+        // the message lands on a later render.
+        if matches!(session.location(), RepoLocation::Ssh { .. }) {
+            if let Some(head) = amend_head(session) {
+                let reader = session.reader();
+                cx.spawn(async move |this, cx| {
+                    let message = cx
+                        .background_executor()
+                        .spawn(async move { reader.commit_message(head).ok() })
+                        .await;
+                    let Some(message) = message else {
+                        return;
+                    };
+                    let _ = this.update(cx, |view, cx| {
+                        // The toggle may have been undone, or a commit may
+                        // have finished, while the read was in flight.
+                        if !view.worktree.amend {
+                            return;
+                        }
+                        // Text typed meanwhile wins; otherwise the message
+                        // replaces the draft the way the local toggle does.
+                        let untouched = view
+                            .worktree
+                            .message_input
+                            .as_ref()
+                            .is_none_or(|input| input.read(cx).value() == view.worktree.draft);
+                        if !untouched {
+                            return;
+                        }
+                        if let Some(input) = view.worktree.message_input.clone() {
+                            if let Some(handle) = view.window() {
+                                let _ = handle.update(cx, |_, window, cx| {
+                                    input.update(cx, |state, cx| {
+                                        state.set_value(message, window, cx)
+                                    });
+                                });
+                            }
+                        } else {
+                            view.worktree.prefill = Some(message);
+                            cx.notify();
+                        }
+                    });
+                })
+                .detach();
+            }
+            self.worktree.set_amend(amend, None, window, cx);
+            return;
+        }
+        let previous = previous_message(session);
         self.worktree.set_amend(amend, previous, window, cx);
     }
 
@@ -2000,6 +2098,19 @@ mod tests {
 
     fn names(paths: &[&str]) -> Vec<String> {
         paths.iter().map(|path| (*path).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_background_merge_message_only_lands_in_a_live_merge() {
+        assert!(merge_message_lands(true, false));
+        assert!(
+            !merge_message_lands(false, false),
+            "a merge aborted while the read was in flight must not prefill the box"
+        );
+        assert!(
+            !merge_message_lands(true, true),
+            "a second offer must not overwrite the first"
+        );
     }
 
     fn selected(side: Side, path: &str) -> Selected {

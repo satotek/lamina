@@ -895,6 +895,12 @@ impl RepoView {
         &self.title
     }
 
+    /// The window this view lives in, for completions that wake up without
+    /// the `Window` their action started with.
+    pub(crate) fn window(&self) -> Option<gpui::AnyWindowHandle> {
+        self.window_handle
+    }
+
     pub(crate) fn is_active(&self) -> bool {
         self.active
     }

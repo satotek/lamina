@@ -219,7 +219,10 @@ impl RepoView {
             ),
             RepoLocation::Local(_) => (self.name.clone().unwrap_or_default(), None),
         };
-        let head = session.reader().head().ok();
+        // The connect worker waits for the first snapshot chunk before it
+        // reports the session, so the head is already published here. A
+        // reader call would be a synchronous round trip on the UI thread.
+        let head = session.snapshot().head.clone();
         self.name = Some(name.clone());
         self.title = crate::data::window_title(&name, head.as_ref());
         info!("remote: session ready for {name}");
@@ -1050,6 +1053,13 @@ mod tests {
                 Some(reason.as_str())
             );
             assert!(view.commit_count() > 0);
+            // The title names HEAD's branch, which the connect worker's
+            // snapshot already carried: no extra reader round trip is needed.
+            let title = view.window_title();
+            assert!(
+                title.contains("main"),
+                "the title should name HEAD's branch, got {title}"
+            );
         });
 
         let pid = std::fs::read_to_string(&laid.pid)
