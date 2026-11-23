@@ -1194,11 +1194,17 @@ impl RepoView {
 
     #[cfg(feature = "terminal")]
     pub(crate) fn terminal_working_dir(&self) -> Option<PathBuf> {
+        let command = self.remote_terminal_command().ok().flatten();
+        self.terminal_dir(command.is_some())
+    }
+
+    /// The local directory the terminal's process starts in. A remote tab runs
+    /// `ssh` here, so it only needs any local directory; the remote command is
+    /// what enters the repository on the host.
+    #[cfg(feature = "terminal")]
+    fn terminal_dir(&self, has_remote_command: bool) -> Option<PathBuf> {
         if self.is_ssh() {
-            // The `ssh` process runs on this machine, so the panel needs a
-            // local directory; the remote command is what enters the
-            // repository. No command means no connection to run it against.
-            return self.remote_terminal_command().map(|_| std::env::temp_dir());
+            return has_remote_command.then(std::env::temp_dir);
         }
         self.work_dir().or_else(|| {
             self.session
@@ -1234,14 +1240,23 @@ impl RepoView {
             self.terminal.take();
         }
         if self.terminal.is_none() {
-            let Some(dir) = self.terminal_working_dir() else {
+            let command = match self.remote_terminal_command() {
+                Ok(command) => command,
+                Err(error) => {
+                    // The terminal cannot even be dialled; the status bar is
+                    // where a command that never started reports why.
+                    self.status_error = Some(error);
+                    self.notify_if_active(cx);
+                    return;
+                }
+            };
+            let Some(dir) = self.terminal_dir(command.is_some()) else {
                 if self.is_ssh() {
                     self.status_note = Some(t!("title_bar.not_connected").to_string());
                     self.notify_if_active(cx);
                 }
                 return;
             };
-            let command = self.remote_terminal_command();
             let parent_focus = self.focus.clone();
             let weak = self.entity.clone();
             let on_close: crate::terminal_panel::CloseHandler =

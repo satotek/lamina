@@ -428,21 +428,26 @@ pub(crate) fn ssh_argv(
 /// reaches the host exactly the way the tab behind it does. It differs in
 /// asking for a tty and in the remote command, which arrives ready to run
 /// instead of as separate arguments to quote.
+///
+/// The destination is checked the way [`spawn`] checks it: a host beginning
+/// with '-' would be option-parsed before `--` is ever read, so no argv is
+/// built for it.
 pub fn terminal_argv(
     program: &Path,
     port: Option<u16>,
     host: &str,
     repo_path: &str,
-) -> Vec<std::ffi::OsString> {
+) -> Result<Vec<std::ffi::OsString>> {
+    ensure_destination(host)?;
     let proxy = proxy_for_host(program, host, port);
-    ssh_argv_with(
+    Ok(ssh_argv_with(
         program,
         port,
         host,
         Tty::Interactive,
         &[login_command(repo_path).into()],
         proxy.as_deref(),
-    )
+    ))
 }
 
 /// The remote command a terminal runs: enter the repository and replace that
@@ -763,6 +768,7 @@ mod tests {
             &["/opt/lamina-remote".into(), "--stdio".into()],
         );
         let terminal = terminal_argv(program, Some(2222), "git@example.test", "/srv/repo");
+        let terminal = terminal.expect("a real host builds a terminal command");
         assert_eq!(
             connection_args(&session),
             connection_args(&terminal),
@@ -814,6 +820,7 @@ mod tests {
     #[test]
     fn the_terminal_remote_command_is_one_argument() {
         let argv = terminal_argv(Path::new("ssh"), None, "host", "/srv/my repo");
+        let argv = argv.expect("a real host builds a terminal command");
         let text: Vec<String> = argv
             .iter()
             .map(|part| part.to_string_lossy().into_owned())
@@ -880,6 +887,23 @@ mod tests {
         assert!(ensure_destination("example.test").is_ok());
         assert!(ensure_destination("[::1]").is_ok());
         assert!(ensure_destination("git@example.test").is_ok());
+    }
+
+    #[test]
+    fn a_terminal_refuses_a_destination_ssh_would_parse_as_options() {
+        // The terminal once built its argv directly, which put such a host
+        // before `--` and let ssh run the injected command locally.
+        let error = terminal_argv(
+            Path::new("ssh"),
+            None,
+            "-oProxyCommand=touch /tmp/lamina-terminal-pwned",
+            "/srv/repo",
+        )
+        .expect_err("a host that parses as ssh options is not a destination");
+        assert!(
+            error.to_string().contains("may not begin with '-'"),
+            "{error}"
+        );
     }
 
     #[test]

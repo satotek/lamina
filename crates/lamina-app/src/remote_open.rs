@@ -204,16 +204,21 @@ pub(crate) fn ssh_program(ssh: Option<&SshOverride>) -> PathBuf {
 /// The program and arguments the embedded terminal runs for a remote tab: the
 /// session's own `ssh` invocation, with a tty and a remote command that enters
 /// the repository and becomes the host's login shell.
+///
+/// The only argv `ssh` refuses to build is one whose destination starts with
+/// '-', and the refusal is reported in the interface's language because it
+/// reaches the status bar.
 #[cfg(feature = "terminal")]
 pub(crate) fn terminal_command(
     spec: &RemoteSpec,
     ssh: Option<&SshOverride>,
-) -> (String, Vec<String>) {
+) -> Result<(String, Vec<String>), String> {
     let program = ssh_program(ssh);
-    let argv = lamina_remote_client::terminal_argv(&program, spec.port, &spec.host, &spec.path);
+    let argv = lamina_remote_client::terminal_argv(&program, spec.port, &spec.host, &spec.path)
+        .map_err(|_| t!("remote_repo.err.host_flag", host = spec.host.as_str()).to_string())?;
     let mut parts = argv.iter().map(|part| part.to_string_lossy().into_owned());
     let program = parts.next().unwrap_or_default();
-    (program, parts.collect())
+    Ok((program, parts.collect()))
 }
 
 pub(crate) fn is_stored_remote(path: &Path) -> bool {
@@ -1537,7 +1542,7 @@ mod tests {
             program: PathBuf::from("/opt/fake-ssh"),
             helper_dir: PathBuf::from("/tmp/helpers"),
         };
-        let (program, args) = terminal_command(&target, Some(&ssh));
+        let (program, args) = terminal_command(&target, Some(&ssh)).expect("terminal command");
         assert_eq!(
             program, "/opt/fake-ssh",
             "a test override has to reach the terminal as well"
@@ -1550,8 +1555,29 @@ mod tests {
             Some("cd '/srv/my repo' && exec \"$SHELL\" -l")
         );
 
-        assert_eq!(terminal_command(&target, None).0, "ssh");
+        assert_eq!(
+            terminal_command(&target, None).expect("terminal command").0,
+            "ssh"
+        );
         assert_eq!(ssh_program(None), PathBuf::from("ssh"));
+    }
+
+    #[cfg(feature = "terminal")]
+    #[test]
+    fn a_terminal_command_refuses_a_host_that_ssh_would_read_as_options() {
+        // A destination beginning with '-' is parsed as flags before `--`, so
+        // no command may be built for it; the refusal is shown in the status
+        // bar, which is why it has to be in the interface's language.
+        let target = spec(
+            "-oProxyCommand=touch /tmp/lamina-terminal-pwned",
+            None,
+            "/srv/repo",
+        );
+        let error = terminal_command(&target, None).expect_err("a flag-shaped host has no command");
+        assert!(
+            error.contains("may not begin with '-'"),
+            "the refusal names what is wrong with the host: {error}"
+        );
     }
 
     #[cfg(feature = "terminal")]

@@ -418,18 +418,25 @@ impl RepoView {
 
     /// The command the embedded terminal runs for this tab's host, with the
     /// same `ssh` program and options the session dials with.
+    ///
+    /// `Ok(None)` means there is nothing to run it against yet; an error is the
+    /// refusal that must be shown instead of starting a terminal.
     #[cfg(feature = "terminal")]
-    pub(super) fn remote_terminal_command(&self) -> Option<crate::terminal_panel::TerminalCommand> {
-        let tab = self.remote_tab.as_ref()?;
+    pub(super) fn remote_terminal_command(
+        &self,
+    ) -> Result<Option<crate::terminal_panel::TerminalCommand>, String> {
+        let Some(tab) = self.remote_tab.as_ref() else {
+            return Ok(None);
+        };
         if !self.remote_connected() {
-            return None;
+            return Ok(None);
         }
-        let (program, args) = crate::remote_open::terminal_command(&tab.spec, tab.ssh.as_ref());
-        Some(crate::terminal_panel::TerminalCommand {
+        let (program, args) = crate::remote_open::terminal_command(&tab.spec, tab.ssh.as_ref())?;
+        Ok(Some(crate::terminal_panel::TerminalCommand {
             program,
             args,
             title: crate::remote_open::terminal_tab_title(&tab.spec),
-        })
+        }))
     }
 
     /// Records the remote-repository reason and reports that the caller should
