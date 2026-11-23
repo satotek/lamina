@@ -543,6 +543,85 @@ fn a_diff_accepted_before_the_helper_leaves_fails_instead_of_waiting() {
 }
 
 #[test]
+fn a_late_answer_does_not_reach_the_next_request_with_the_same_id() {
+    let (client_read, client_write, mut peer_read, mut peer_write) = pipe();
+    let (abandoned_tx, abandoned_rx) = mpsc::channel::<u16>();
+    let peer = thread::spawn(move || {
+        hello(&mut peer_read, &mut peer_write);
+        accept_subscribe(&mut peer_read, &mut peer_write);
+        let (_, id) = oid_pair(16);
+        send_chunk(&mut peer_write, id, true);
+
+        // The first read is never answered, so its caller gives up on it.
+        let (abandoned, request) =
+            next_request(&mut peer_read, &mut peer_write).expect("first head");
+        assert!(matches!(request, Request::Head), "{request:?}");
+        abandoned_tx.send(abandoned).expect("report the id");
+
+        let (stream, request) = next_request(&mut peer_read, &mut peer_write).expect("second head");
+        assert!(matches!(request, Request::Head), "{request:?}");
+        assert_ne!(
+            stream, abandoned,
+            "the id of a request nobody answered was handed out again"
+        );
+        // The abandoned answer finally leaves the helper. The new request's
+        // answer follows it.
+        write_msg(
+            &mut peer_write,
+            abandoned,
+            &Message::Response(Response::CommitMessage {
+                message: "late\n".into(),
+            }),
+        );
+        write_msg(
+            &mut peer_write,
+            stream,
+            &Message::Response(Response::Head {
+                head: Some(HeadDto::Branch {
+                    short_name: "main".into(),
+                    target: Some(id),
+                }),
+            }),
+        );
+    });
+
+    let session = RemoteSession::connect_with(
+        client_read,
+        client_write,
+        RemoteTarget::new("scripted"),
+        |_| {},
+        ClientConfig {
+            ping_interval: Duration::from_millis(100),
+            missed_pings: 3,
+            first_chunk_timeout: Duration::from_secs(5),
+            request_timeout: Duration::from_millis(200),
+            ..ClientConfig::default()
+        },
+    )
+    .expect("connect");
+
+    session
+        .reader()
+        .head()
+        .expect_err("an unanswered read times out");
+    let abandoned = abandoned_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the peer reports the abandoned id");
+    // Sixty thousand requests would be needed for the real wrap.
+    session.rewind_streams_to(abandoned);
+
+    match session
+        .reader()
+        .head()
+        .expect("the second read is answered")
+    {
+        lamina_core::HeadInfo::Branch { short_name, .. } => assert_eq!(short_name, "main"),
+        other => panic!("the late answer reached the new caller: {other:?}"),
+    }
+    peer.join().expect("peer");
+}
+
+#[test]
 fn missed_pings_report_a_lost_connection_and_keep_the_snapshot() {
     let (client_read, client_write, mut peer_read, mut peer_write) = pipe();
     // The write end has to stay open. Dropping it is an EOF, and the client

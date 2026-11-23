@@ -206,6 +206,12 @@ struct Inner {
     /// Query requests do not wait. The stream id is how an `Error` response
     /// finds the ticket to fail.
     query_streams: Mutex<HashMap<u16, QueryTicket>>,
+    /// Ids whose caller gave up, with the instant they may be handed out
+    /// again. The id space only wraps after tens of thousands of requests, but
+    /// nothing stops a late answer from then reaching a newer caller, so a
+    /// given-up id stays out of circulation until its answer arrives or one
+    /// more request deadline passes.
+    quarantined: Mutex<HashMap<u16, Instant>>,
     next_stream: AtomicU16,
     snapshot: RwLock<Arc<RepoSnapshot>>,
     /// Generation the current commit list belongs to. Only a reset starts a
@@ -322,6 +328,7 @@ impl RemoteSession {
             operation_waiters: Mutex::new(HashMap::new()),
             queries: Mutex::new(HashSet::new()),
             query_streams: Mutex::new(HashMap::new()),
+            quarantined: Mutex::new(HashMap::new()),
             next_stream: AtomicU16::new(2),
             snapshot: RwLock::new(Arc::new(empty_snapshot())),
             list_generation: AtomicU64::new(0),
@@ -426,6 +433,15 @@ impl RemoteSession {
         let _ = self
             .inner
             .send_detached(Request::CancelOperation { id: id.0 });
+    }
+}
+
+#[cfg(test)]
+impl RemoteSession {
+    /// Puts the next stream id back where it was, so a test can reach the
+    /// reuse a session only meets once the u16 space wraps.
+    pub(crate) fn rewind_streams_to(&self, id: u16) {
+        self.inner.next_stream.store(id, Ordering::SeqCst);
     }
 }
 
@@ -764,6 +780,7 @@ impl Inner {
         let inflight = std::mem::take(&mut *lock(&self.inflight));
         let queries = std::mem::take(&mut *lock(&self.queries));
         let _query_streams = std::mem::take(&mut *lock(&self.query_streams));
+        lock(&self.quarantined).clear();
         {
             let _park = lock(&self.park);
             self.wake.notify_all();
@@ -811,6 +828,9 @@ impl Inner {
             if id == 0 {
                 continue;
             }
+            if self.is_quarantined(id) {
+                continue;
+            }
             // Separate statements so the two maps are never locked together.
             let pending = lock(&self.pending).contains_key(&id);
             let diff = lock(&self.diff_streams).contains_key(&id);
@@ -821,6 +841,16 @@ impl Inner {
             }
         }
         Err(Error::other("too many remote requests are in flight"))
+    }
+
+    /// True while `id` is held back after the caller that used it gave up.
+    fn is_quarantined(&self, id: u16) -> bool {
+        let mut quarantine = lock(&self.quarantined);
+        if quarantine.is_empty() {
+            return false;
+        }
+        quarantine.retain(|_, until| *until > Instant::now());
+        quarantine.contains_key(&id)
     }
 
     fn write_message(&self, stream: u16, message: &Message) -> Result<()> {
@@ -864,8 +894,10 @@ impl Inner {
                 // Pongs keep the link "alive", so without this deadline a
                 // request whose answer was lost would wait forever. Freeing
                 // the entry drops a late answer instead of waking a caller
-                // that already gave up.
+                // that already gave up, and the id stays out of circulation so
+                // a newer caller cannot receive that answer under the same id.
                 lock(&self.pending).remove(&stream);
+                lock(&self.quarantined).insert(stream, Instant::now() + self.request_timeout);
                 break Err(Error::other(format!(
                     "the remote helper did not answer a {name} within {:?}",
                     self.request_timeout
@@ -973,6 +1005,11 @@ impl Inner {
             Message::Response(response) => {
                 if let Response::Pong { nonce } = &response {
                     self.note_pong(*nonce);
+                    return;
+                }
+                // The answer to a request whose caller already gave up. Its id
+                // is held back for exactly this frame; let it go no further.
+                if lock(&self.quarantined).remove(&frame.stream).is_some() {
                     return;
                 }
                 if let Some(tx) = lock(&self.pending).remove(&frame.stream) {
