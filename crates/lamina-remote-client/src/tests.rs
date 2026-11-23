@@ -1052,6 +1052,39 @@ impl Write for StalledWrite {
     }
 }
 
+/// A write end that accepts a slice per call after a pause, the way a slow
+/// uplink moves a large frame without ever stalling.
+struct SlowWrite {
+    inner: PipeWrite,
+    chunk: usize,
+    step: Duration,
+}
+
+impl Write for SlowWrite {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let take = buf.len().min(self.chunk);
+        thread::sleep(self.step);
+        self.inner.write(&buf[..take])
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// Bytes zstd cannot shrink, so a patch frame really is as large as it claims.
+fn noise(len: usize) -> Vec<u8> {
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    (0..len)
+        .map(|_| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 24) as u8
+        })
+        .collect()
+}
+
 #[test]
 fn dropping_a_session_with_a_stalled_write_does_not_hang() {
     let (client_read, client_write, mut peer_read, mut peer_write) = pipe();
@@ -1286,6 +1319,166 @@ fn a_large_patch_is_queued_instead_of_waiting_on_the_transport() {
     runner.join().expect("runner");
     drop(peer_exit_tx);
     peer.join().expect("peer");
+}
+
+#[test]
+fn a_slow_write_that_keeps_moving_does_not_lose_the_link() {
+    let (client_read, client_write, mut peer_read, mut peer_write) = pipe();
+    let (hold_tx, hold_rx) = mpsc::channel::<()>();
+    let peer = thread::spawn(move || {
+        hello(&mut peer_read, &mut peer_write);
+        accept_subscribe(&mut peer_read, &mut peer_write);
+        let (_, id) = oid_pair(18);
+        send_chunk(&mut peer_write, id, true);
+        // The patch frame arrives long after it was queued, and only then is
+        // the operation acknowledged.
+        let (stream, request) = next_request(&mut peer_read, &mut peer_write).expect("apply");
+        let Request::Run { id, .. } = request else {
+            panic!("expected the patch, got {request:?}");
+        };
+        write_msg(&mut peer_write, stream, &Message::Response(Response::Ok));
+        write_msg(
+            &mut peer_write,
+            0,
+            &Message::Event(Event::OperationFinished { id, error: None }),
+        );
+        let _ = hold_rx.recv();
+    });
+
+    // One slice per call with a pause: the frame outlives the ping deadline,
+    // but every call still moves bytes.
+    let writer = SlowWrite {
+        inner: client_write,
+        chunk: 4 << 10,
+        step: Duration::from_millis(6),
+    };
+    let interval = Duration::from_millis(100);
+    let missed = 3;
+    let (tx, rx) = mpsc::channel();
+    let session = RemoteSession::connect_with(
+        client_read,
+        writer,
+        RemoteTarget::new("scripted"),
+        move |event| {
+            let _ = tx.send(event);
+        },
+        ClientConfig {
+            ping_interval: interval,
+            missed_pings: missed,
+            first_chunk_timeout: Duration::from_secs(5),
+            request_timeout: Duration::from_secs(10),
+            ..ClientConfig::default()
+        },
+    )
+    .expect("connect");
+
+    let started = Instant::now();
+    let id = session.run(Operation::ApplyPatch {
+        patch: noise(256 << 10),
+    });
+    let deadline = started + Duration::from_secs(10);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(remaining) {
+            Ok(SessionEvent::OperationFinished {
+                id: finished,
+                error,
+            }) if finished == id => {
+                assert_eq!(error, None, "the patch should have been applied");
+                break;
+            }
+            Ok(SessionEvent::LoadFailed { error }) => {
+                panic!("a write that keeps moving was called a lost link: {error}");
+            }
+            Ok(_) => {}
+            Err(error) => panic!("the patch never finished: {error}"),
+        }
+    }
+    assert!(
+        started.elapsed() >= interval * missed,
+        "the frame did not outlive the ping deadline: {:?}",
+        started.elapsed()
+    );
+
+    drop(hold_tx);
+    peer.join().expect("peer");
+    drop(session);
+}
+
+#[test]
+fn a_write_that_accepts_nothing_still_fails_the_link() {
+    let (client_read, client_write, mut peer_read, mut peer_write) = pipe();
+    let (hold_tx, hold_rx) = mpsc::channel::<()>();
+    let peer = thread::spawn(move || {
+        hello(&mut peer_read, &mut peer_write);
+        accept_subscribe(&mut peer_read, &mut peer_write);
+        let (_, id) = oid_pair(19);
+        send_chunk(&mut peer_write, id, true);
+        // Stay connected and silent after the chunk, so only the watchdog can
+        // report the link.
+        let _ = hold_rx.recv();
+    });
+
+    let stall = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(AtomicBool::new(false));
+    let entered = Arc::new(AtomicUsize::new(0));
+    let writer = StalledWrite {
+        inner: client_write,
+        stall: Arc::clone(&stall),
+        release: Arc::clone(&release),
+        entered: Arc::clone(&entered),
+    };
+    let hook_release = Arc::clone(&release);
+    let (tx, rx) = mpsc::channel();
+    let session = RemoteSession::connect_attached(
+        client_read,
+        writer,
+        RemoteTarget::new("scripted"),
+        move |event| {
+            let _ = tx.send(event);
+        },
+        ClientConfig {
+            ping_interval: Duration::from_millis(40),
+            missed_pings: 3,
+            first_chunk_timeout: Duration::from_secs(5),
+            request_timeout: Duration::from_secs(10),
+            ..ClientConfig::default()
+        },
+        TransportAttach {
+            diagnostic: Arc::new(String::new),
+            disconnect: Some(Box::new(move || hook_release.store(true, Ordering::SeqCst))),
+            retain: None,
+        },
+    )
+    .expect("connect");
+
+    // The first frame after the handshake is a ping, and the transport takes
+    // it without accepting a byte.
+    stall.store(true, Ordering::SeqCst);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while entered.load(Ordering::SeqCst) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "no write reached the stall; the ping never fired"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(SessionEvent::LoadFailed { error }) => {
+                assert!(error.contains(CONNECTION_LOST), "{error}");
+                break;
+            }
+            Ok(_) => {}
+            Err(error) => panic!("a write that accepts nothing was not reported: {error}"),
+        }
+    }
+
+    drop(hold_tx);
+    peer.join().expect("peer");
+    drop(session);
 }
 
 #[test]

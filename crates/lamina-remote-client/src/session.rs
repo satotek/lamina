@@ -351,6 +351,12 @@ struct Inner {
     closing: AtomicBool,
     lost_text: Mutex<Option<String>>,
     last_rx: Mutex<Instant>,
+    /// Last time the transport accepted a byte of an outbound frame.
+    ///
+    /// The reader sees a frame only once all of it has arrived, so a patch
+    /// still going out leaves `last_rx` old while the helper is plainly
+    /// receiving it. Send progress is the other proof of a live link.
+    last_tx: Mutex<Instant>,
     missed: AtomicU32,
     /// Identifies one idle probe. Loss still counts unanswered probes with
     /// `missed`: a busy connection resets that count without retiring a probe
@@ -466,6 +472,7 @@ impl RemoteSession {
             closing: AtomicBool::new(false),
             lost_text: Mutex::new(None),
             last_rx: Mutex::new(Instant::now()),
+            last_tx: Mutex::new(Instant::now()),
             missed: AtomicU32::new(0),
             next_ping: AtomicU64::new(0),
             pings: Mutex::new(HashMap::new()),
@@ -775,16 +782,48 @@ fn reader_loop(inner: Arc<Inner>, mut reader: impl Read) {
 /// the connection failing, so it goes through [`Inner::fail`] the way a read
 /// error does; a deliberate close stops the loop without writing what is still
 /// queued.
-fn writer_loop(inner: Arc<Inner>, mut writer: impl Write) {
+fn writer_loop(inner: Arc<Inner>, writer: impl Write) {
     *lock(&inner.writer_id) = Some(thread::current().id());
+    let mut writer = ProgressWriter {
+        inner: writer,
+        last_tx: &inner.last_tx,
+    };
     while let Some(outgoing) = inner.outbox.pop() {
         if inner.closing.load(Ordering::SeqCst) {
             break;
         }
+        // Encoding a large patch happens before the first byte reaches the
+        // transport, so the frame's start counts as movement too.
+        *lock(&inner.last_tx) = Instant::now();
         if let Err(error) = proto::write_frame(&mut writer, outgoing.stream, &outgoing.message) {
             inner.fail(format!("{CONNECTION_LOST}: {error}"));
             break;
         }
+    }
+}
+
+/// A transport that records each slice it accepts.
+///
+/// One frame is written with several `write_all` calls, so a slow uplink that
+/// still moves a slice per call keeps the ping watchdog satisfied. Only a call
+/// that accepts nothing leaves the timestamp behind, which is what a write
+/// that is actually stuck does.
+struct ProgressWriter<'a, W: Write> {
+    inner: W,
+    last_tx: &'a Mutex<Instant>,
+}
+
+impl<W: Write> Write for ProgressWriter<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        if written > 0 {
+            *lock(self.last_tx) = Instant::now();
+        }
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
     }
 }
 
@@ -809,14 +848,13 @@ fn ping_loop(inner: Arc<Inner>) {
         // `park` is also taken by snapshot wakeups. Drop it before touching
         // `last_rx`, which the reader writes immediately before taking `park`.
         drop(guard);
-        let idle = lock(&inner.last_rx).elapsed() >= interval;
-        if !idle {
+        if !inner.link_idle(interval) {
             inner.missed.store(0, Ordering::SeqCst);
             guard = lock(&inner.park);
             continue;
         }
         let missed = inner.missed.fetch_add(1, Ordering::SeqCst) + 1;
-        if missed >= inner.missed_limit && lock(&inner.last_rx).elapsed() >= interval {
+        if missed >= inner.missed_limit && inner.link_idle(interval) {
             inner.fail(inner.failure_text(None));
             break;
         }
@@ -990,6 +1028,18 @@ impl Inner {
         } else {
             Ok(())
         }
+    }
+
+    /// True when neither direction has moved for `interval`.
+    ///
+    /// A slow uplink can spend longer than that inside one `write_frame`, and
+    /// the pong for a ping queued behind that frame cannot arrive in time. Send
+    /// progress proves the helper is still reading, so only movement in neither
+    /// direction counts as a missed probe. Progress, not a writer that merely
+    /// started a frame, keeps it alive: a write that accepts nothing still
+    /// fails within the normal missed-ping deadline.
+    fn link_idle(&self, interval: Duration) -> bool {
+        lock(&self.last_rx).elapsed() >= interval && lock(&self.last_tx).elapsed() >= interval
     }
 
     fn alloc_stream(&self) -> Result<u16> {
