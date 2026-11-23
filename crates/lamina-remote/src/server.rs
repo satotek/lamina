@@ -37,6 +37,11 @@ const SNAPSHOT_CHUNK: usize = 1024;
 /// while the first was still queued.
 const SNAPSHOT_QUEUE: usize = 1;
 
+/// How many control frames from workers and session callbacks may wait for the
+/// writer. The request loop itself never waits (see [`Outbox::push_high`]), so
+/// this only bounds the producers that can be told to slow down.
+const CONTROL_QUEUE: usize = 8;
+
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// Identifies the helper build in `--self-check` and in error reports.
@@ -129,8 +134,32 @@ impl Outbox {
         }
     }
 
+    /// A control frame from the request loop: a response, a pong or a protocol
+    /// error. It never waits, so the loop can answer a ping even while every
+    /// worker is parked on [`Self::push_high_bounded`]. The loop adds at most
+    /// one frame per request it read, so this backlog follows what the peer
+    /// asked for rather than how fast the writer drains.
     fn push_high(&self, frame: Vec<u8>) -> bool {
         let mut state = lock(&self.state);
+        if state.closed {
+            return false;
+        }
+        state.high.push_back(frame);
+        self.cond.notify_one();
+        true
+    }
+
+    /// A control frame from a worker or a session callback. Blocks while
+    /// `CONTROL_QUEUE` frames are already waiting, so a burst of read replies
+    /// or events parks its producers instead of buffering without bound.
+    fn push_high_bounded(&self, frame: Vec<u8>) -> bool {
+        let mut state = lock(&self.state);
+        while state.high.len() >= CONTROL_QUEUE && !state.closed {
+            state = self
+                .cond
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
         if state.closed {
             return false;
         }
@@ -163,6 +192,8 @@ impl Outbox {
         let mut state = lock(&self.state);
         loop {
             if let Some(frame) = state.high.pop_front() {
+                // A worker might be parked on the control bound.
+                self.cond.notify_all();
                 return Some(frame);
             }
             if let Some(frame) = state.low.pop_front() {
@@ -370,7 +401,7 @@ fn dispatch(shared: &Arc<ServerShared>, stream: u16, chunk: usize, request: Requ
         // its own timeout. Answer on this thread instead.
         if !spawn_worker(shared, move || {
             let response = answer_read(&reader, &extras, request);
-            push_high(&task, stream, &Message::Response(response));
+            push_high_bounded(&task, stream, &Message::Response(response));
         }) {
             push_high(
                 shared,
@@ -459,7 +490,9 @@ fn spawn_worker(shared: &Arc<ServerShared>, work: impl FnOnce() + Send + 'static
         .spawn(work)
     {
         Ok(handle) => {
-            lock(&shared.workers).push(handle);
+            let mut workers = lock(&shared.workers);
+            reap_finished(&mut workers);
+            workers.push(handle);
             true
         }
         Err(error) => {
@@ -467,6 +500,27 @@ fn spawn_worker(shared: &Arc<ServerShared>, work: impl FnOnce() + Send + 'static
             false
         }
     }
+}
+
+/// Joins the workers that already returned, dropping their handles.
+///
+/// One read is one thread, and a connection lives as long as the app keeps the
+/// repository open, so holding every handle until shutdown would grow this
+/// list with the number of requests served.
+fn reap_finished(workers: &mut Vec<JoinHandle<()>>) {
+    if !workers.iter().any(|worker| worker.is_finished()) {
+        return;
+    }
+    let mut live = Vec::with_capacity(workers.len());
+    for worker in workers.drain(..) {
+        if worker.is_finished() {
+            // `is_finished` means the join returns without waiting.
+            let _ = worker.join();
+        } else {
+            live.push(worker);
+        }
+    }
+    *workers = live;
 }
 
 fn answer_control(shared: &Arc<ServerShared>, chunk: usize, request: Request) -> Option<Response> {
@@ -1223,7 +1277,7 @@ fn on_session_event(shared: &Arc<ServerShared>, chunk: usize, event: SessionEven
             if last {
                 forget_diff(shared, ticket);
             }
-            push_high(
+            push_high_bounded(
                 shared,
                 0,
                 &Message::Event(Event::DiffReady {
@@ -1235,7 +1289,7 @@ fn on_session_event(shared: &Arc<ServerShared>, chunk: usize, event: SessionEven
         SessionEvent::DiffFailed { ticket, error } => {
             let client = forget_diff(shared, ticket);
             if let Some(client) = client {
-                push_high(
+                push_high_bounded(
                     shared,
                     0,
                     &Message::Event(Event::DiffFailed {
@@ -1246,17 +1300,17 @@ fn on_session_event(shared: &Arc<ServerShared>, chunk: usize, event: SessionEven
             }
         }
         SessionEvent::LoadFailed { error } => {
-            push_high(shared, 0, &Message::Event(Event::LoadFailed { error }));
+            push_high_bounded(shared, 0, &Message::Event(Event::LoadFailed { error }));
         }
         SessionEvent::OperationStarted { id } => {
-            push_high(
+            push_high_bounded(
                 shared,
                 0,
                 &Message::Event(Event::OperationStarted { id: id.0 }),
             );
         }
         SessionEvent::OperationProgress { id, text, percent } => {
-            push_high(
+            push_high_bounded(
                 shared,
                 0,
                 &Message::Event(Event::OperationProgress {
@@ -1267,7 +1321,7 @@ fn on_session_event(shared: &Arc<ServerShared>, chunk: usize, event: SessionEven
             );
         }
         SessionEvent::OperationFinished { id, error } => {
-            push_high(
+            push_high_bounded(
                 shared,
                 0,
                 &Message::Event(Event::OperationFinished { id: id.0, error }),
@@ -1276,7 +1330,7 @@ fn on_session_event(shared: &Arc<ServerShared>, chunk: usize, event: SessionEven
         SessionEvent::AskpassPrompt { id, prompt, secret } => {
             // The prompt text is not the answer. The answer only travels back
             // as `AnswerAskpass`, and this callback must not log either.
-            push_high(
+            push_high_bounded(
                 shared,
                 0,
                 &Message::Event(Event::AskpassPrompt {
@@ -1289,7 +1343,7 @@ fn on_session_event(shared: &Arc<ServerShared>, chunk: usize, event: SessionEven
         SessionEvent::SignaturesInvalidated => {
             // Unticketed: a reload clears the helper's cache, and the client
             // has to drop badges it already drew.
-            push_high(shared, 0, &Message::Event(Event::SignaturesInvalidated));
+            push_high_bounded(shared, 0, &Message::Event(Event::SignaturesInvalidated));
         }
         // The command log and the commit-graph offer stay on the helper. A
         // remote tab has no local checkout to write the graph into.
@@ -1358,7 +1412,7 @@ fn forward_query(
     let Some(client) = client else {
         return;
     };
-    push_high(
+    push_high_bounded(
         shared,
         0,
         &Message::Event(Event::Query {
@@ -1507,14 +1561,32 @@ fn push_snapshot(
 }
 
 fn push_high(shared: &Arc<ServerShared>, stream: u16, message: &Message) -> bool {
-    enqueue(shared, stream, message, true)
+    enqueue(shared, stream, message, Level::Control)
+}
+
+/// A control frame from a worker or a session callback.
+///
+/// Those producers can be told to wait; the request loop cannot, because it
+/// also carries the pings that keep a busy connection alive.
+fn push_high_bounded(shared: &Arc<ServerShared>, stream: u16, message: &Message) -> bool {
+    enqueue(shared, stream, message, Level::Worker)
 }
 
 fn push_low(shared: &Arc<ServerShared>, stream: u16, message: &Message) -> bool {
-    enqueue(shared, stream, message, false)
+    enqueue(shared, stream, message, Level::Snapshot)
 }
 
-fn enqueue(shared: &Arc<ServerShared>, stream: u16, message: &Message, high: bool) -> bool {
+/// Which queue a frame belongs to, and therefore whether it may wait.
+enum Level {
+    /// The request loop's own answer: never waits.
+    Control,
+    /// A worker's or session callback's answer: waits on the control bound.
+    Worker,
+    /// A snapshot frame: waits for the writer to take the previous one.
+    Snapshot,
+}
+
+fn enqueue(shared: &Arc<ServerShared>, stream: u16, message: &Message, level: Level) -> bool {
     let mut frame = Vec::new();
     if let Err(error) = proto::write_frame(&mut frame, stream, message) {
         eprintln!(
@@ -1523,10 +1595,10 @@ fn enqueue(shared: &Arc<ServerShared>, stream: u16, message: &Message, high: boo
         );
         return false;
     }
-    if high {
-        shared.outbox.push_high(frame)
-    } else {
-        shared.outbox.push_low(frame)
+    match level {
+        Level::Control => shared.outbox.push_high(frame),
+        Level::Worker => shared.outbox.push_high_bounded(frame),
+        Level::Snapshot => shared.outbox.push_low(frame),
     }
 }
 
@@ -1857,6 +1929,75 @@ mod tests {
             .expect("freeing the slot unblocks the walk");
         assert_eq!(outbox.pop().as_deref(), Some(&b"next"[..]));
         worker.join().expect("queue thread");
+    }
+
+    #[test]
+    fn a_full_control_queue_parks_a_worker_but_not_the_request_loop() {
+        let outbox = Arc::new(Outbox::new());
+        for index in 0..CONTROL_QUEUE {
+            assert!(outbox.push_high_bounded(format!("response-{index}").into_bytes()));
+        }
+        let blocked = Arc::clone(&outbox);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            assert!(blocked.push_high_bounded(b"late".to_vec()));
+            let _ = done_tx.send(());
+        });
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err(),
+            "a worker must wait for a free slot"
+        );
+        // What the request loop does when it answers a ping while every
+        // worker is parked. It must not wait on the workers' bound.
+        assert!(outbox.push_high(b"pong".to_vec()));
+        let mut frames = Vec::new();
+        while frames.len() <= CONTROL_QUEUE {
+            frames.push(outbox.pop().expect("a queued frame"));
+        }
+        assert_eq!(
+            frames[CONTROL_QUEUE],
+            b"pong".to_vec(),
+            "the ping answer keeps its place at the back of the queue"
+        );
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("draining the queue releases the parked worker");
+        assert_eq!(outbox.pop().as_deref(), Some(&b"late"[..]));
+        worker.join().expect("worker thread");
+    }
+
+    #[test]
+    fn returned_workers_do_not_accumulate_until_shutdown() {
+        let shared = test_shared();
+        for _ in 0..32 {
+            assert!(spawn_worker(&shared, || {}));
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while lock(&shared.workers)
+            .iter()
+            .any(|worker| !worker.is_finished())
+        {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the test workers did not finish"
+            );
+            thread::yield_now();
+        }
+        // The next spawn reaps the handles of the workers that already
+        // returned. Without that, one read per request keeps a handle for as
+        // long as the connection lives.
+        assert!(spawn_worker(&shared, || {}));
+        assert_eq!(
+            lock(&shared.workers).len(),
+            1,
+            "returned workers must not accumulate"
+        );
+        let workers = std::mem::take(&mut *lock(&shared.workers));
+        for worker in workers {
+            let _ = worker.join();
+        }
     }
 
     #[test]
