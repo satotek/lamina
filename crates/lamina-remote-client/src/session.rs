@@ -912,7 +912,17 @@ impl Inner {
                     });
                     return;
                 }
-                next.commits.extend(infos, rows_from_dto(&rows));
+                let graph = match rows_from_dto(&rows) {
+                    Ok(graph) => graph,
+                    Err(error) => {
+                        drop(guard);
+                        (self.events)(SessionEvent::LoadFailed {
+                            error: error.to_string(),
+                        });
+                        return;
+                    }
+                };
+                next.commits.extend(infos, graph);
                 next.commits.complete = complete;
                 next.commit_index = Arc::new(index);
                 *guard = Arc::new(next);
