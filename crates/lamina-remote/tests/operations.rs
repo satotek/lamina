@@ -6,6 +6,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use lamina_core::HeadInfo;
+use lamina_core::compare::RepoCompareSide;
 use lamina_core::error::OPERATION_CANCELLED;
 use lamina_core::lfs::LfsPointer;
 use lamina_core::merge::{ConflictStyle, ContentHash};
@@ -466,6 +467,53 @@ fn conflict_reads_match_a_local_repository() {
     drop(reader);
     drop(remote);
     server.join().expect("server thread");
+}
+
+#[cfg(unix)]
+#[test]
+fn worktree_reads_refuse_a_symlink_that_leaves_the_repository() {
+    use std::os::unix::fs::symlink;
+
+    let repo = TestRepo::new();
+    identity(&repo);
+    repo.write("README.md", "inside\n");
+    repo.commit("base");
+    let outside = repo
+        .path()
+        .parent()
+        .expect("worktree parent")
+        .join("lamina-read-symlink-secret.txt");
+    std::fs::write(&outside, b"secret\n").expect("outside file");
+    symlink(&outside, repo.path().join("leaks.txt")).expect("symlink");
+    // A link that stays inside keeps working, as it does in a local session.
+    symlink("README.md", repo.path().join("inside-link.txt")).expect("inside symlink");
+
+    let (remote, _events, server) = serve(&repo);
+    let reader = remote.reader();
+    assert_eq!(
+        reader
+            .file_in_worktree("inside-link.txt")
+            .expect("an in-checkout link is readable"),
+        Some(b"inside\n".to_vec())
+    );
+    let error = reader
+        .file_in_worktree("leaks.txt")
+        .expect_err("a link out of the checkout must not be read");
+    assert!(
+        error.to_string().contains("outside the worktree"),
+        "unexpected error: {error}"
+    );
+    let error = reader
+        .compare_side_blob(RepoCompareSide::Worktree, "leaks.txt")
+        .expect_err("a link out of the checkout has no worktree blob");
+    assert!(
+        error.to_string().contains("outside the worktree"),
+        "unexpected error: {error}"
+    );
+    drop(reader);
+    drop(remote);
+    server.join().expect("server thread");
+    let _ = std::fs::remove_file(outside);
 }
 
 #[test]

@@ -365,8 +365,7 @@ fn a_malformed_frame_fails_serve_and_shuts_the_helper_down() {
     let repo = fixture();
     let (client_read, mut client_write, server_read, server_write) = duplex();
     let root = repo.path().to_path_buf();
-    let server =
-        std::thread::spawn(move || lamina_remote::serve(server_read, server_write, root));
+    let server = std::thread::spawn(move || lamina_remote::serve(server_read, server_write, root));
 
     lamina_remote_protocol::write_frame(
         &mut client_write,
@@ -389,10 +388,7 @@ fn a_malformed_frame_fails_serve_and_shuts_the_helper_down() {
 
     let outcome = server.join().expect("server thread");
     let error = outcome.expect_err("serve must report the malformed frame");
-    assert!(
-        error.to_string().contains("unknown frame kind"),
-        "{error}"
-    );
+    assert!(error.to_string().contains("unknown frame kind"), "{error}");
 
     // The writer thread held the server side of this channel. Its exit is
     // what disconnects the client; a helper that only returned would leave

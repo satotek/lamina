@@ -534,7 +534,7 @@ fn answer_control(shared: &Arc<ServerShared>, chunk: usize, request: Request) ->
             // The worktree-reading sides are checked before the job is
             // queued: without this a request could diff a file outside the
             // checkout and read its contents back as the diff text.
-            if let Err(error) = require_worktree_diff_path(&request) {
+            if let Err(error) = require_worktree_diff_path(session.reader().workdir(), &request) {
                 return Some(Response::Error(error));
             }
             // The mapping is installed under the lock the callback also takes,
@@ -542,9 +542,13 @@ fn answer_control(shared: &Arc<ServerShared>, chunk: usize, request: Request) ->
             // ticket and vanish.
             let mut routes = lock(&shared.diff_routes);
             let local = session.request_diff_with(request, options.into());
-            routes
-                .local_to_client
-                .insert(local, RoutedDiff { client: ticket, plain_sent: false });
+            routes.local_to_client.insert(
+                local,
+                RoutedDiff {
+                    client: ticket,
+                    plain_sent: false,
+                },
+            );
             routes.client_to_local.insert(ticket, local);
             Response::Ok
         }
@@ -746,7 +750,7 @@ fn answer_read(
             Err(error) => Response::Error(remote_error(error)),
         },
         Request::FileInWorktree { path } => {
-            if let Err(error) = require_worktree_path(&path) {
+            if let Err(error) = require_worktree_read_path(reader.workdir(), &path) {
                 return Response::Error(error);
             }
             match reader.file_in_worktree(&path) {
@@ -859,7 +863,7 @@ fn answer_read(
             // the index only looks the path up inside git, which cannot leave
             // the repository.
             if side.is_worktree()
-                && let Err(error) = require_worktree_path(&path)
+                && let Err(error) = require_worktree_read_path(reader.workdir(), &path)
             {
                 return Response::Error(error);
             }
@@ -1047,11 +1051,14 @@ fn rejected_operation_path(operation: &lamina_core::session::Operation) -> Optio
 /// The staged and commit sides are read from git's object store, which a path
 /// cannot escape. The unstaged and worktree-compare sides read the file from
 /// disk, so those paths face the same check as [`Request::FileInWorktree`].
-fn require_worktree_diff_path(request: &lamina_core::session::DiffRequest) -> Result<(), RemoteError> {
+fn require_worktree_diff_path(
+    workdir: Option<&Path>,
+    request: &lamina_core::session::DiffRequest,
+) -> Result<(), RemoteError> {
     use lamina_core::session::DiffRequest;
     match request {
         DiffRequest::Unstaged { path } | DiffRequest::CompareWorktree { path, .. } => {
-            require_worktree_path(path)
+            require_worktree_read_path(workdir, path)
         }
         _ => Ok(()),
     }
@@ -1112,8 +1119,8 @@ fn require_explicit_absolute_path(path: &Path) -> Result<(), RemoteError> {
 ///
 /// The bytes of a resolved file are written with `std::fs`, which does not
 /// apply git's pathspec rules. A symlink that points outside is not visible
-/// here; the write resolves it and refuses when the destination leaves the
-/// worktree.
+/// here; writes resolve it and refuse when the destination leaves the worktree,
+/// and reads go through [`require_worktree_read_path`].
 fn require_worktree_path(path: &str) -> Result<(), RemoteError> {
     if path.chars().any(|character| character.is_control()) {
         return Err(RemoteError::other("path contains a control character"));
@@ -1145,6 +1152,40 @@ fn require_worktree_path(path: &str) -> Result<(), RemoteError> {
                 )));
             }
         }
+    }
+    Ok(())
+}
+
+/// [`require_worktree_path`] plus a confinement check on what the path
+/// resolves to.
+///
+/// A local session follows a symlink, so an in-checkout link still shows its
+/// target here. A link whose target lies outside the checkout is refused
+/// instead: the helper answers whoever can run `ssh` on the account, and
+/// following that link would turn a file view into a read of any file the
+/// account can open. Returning the link text instead would disagree with the
+/// local bytes for an in-checkout link, so both sides keep the target content
+/// and only the escaping case is refused.
+///
+/// A missing file or a dangling link canonicalizes to an error; the read that
+/// follows reports it in the form that request already uses.
+fn require_worktree_read_path(workdir: Option<&Path>, path: &str) -> Result<(), RemoteError> {
+    require_worktree_path(path)?;
+    let Some(workdir) = workdir else {
+        return Ok(());
+    };
+    // The checkout may itself sit behind a link (`/tmp` on macOS), so both
+    // sides of the comparison come from `canonicalize`.
+    let Ok(root) = workdir.canonicalize() else {
+        return Ok(());
+    };
+    let Ok(resolved) = root.join(path).canonicalize() else {
+        return Ok(());
+    };
+    if !resolved.starts_with(&root) {
+        return Err(RemoteError::other(format!(
+            "path resolves outside the worktree: {path}"
+        )));
     }
     Ok(())
 }
@@ -1651,9 +1692,13 @@ mod tests {
 
     fn install_diff_route(shared: &Arc<ServerShared>, local: DiffTicket, client: u64) {
         let mut routes = lock(&shared.diff_routes);
-        routes
-            .local_to_client
-            .insert(local, RoutedDiff { client, plain_sent: false });
+        routes.local_to_client.insert(
+            local,
+            RoutedDiff {
+                client,
+                plain_sent: false,
+            },
+        );
         routes.client_to_local.insert(client, local);
     }
 
