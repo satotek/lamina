@@ -1048,6 +1048,88 @@ fn dropping_a_session_with_a_stalled_write_does_not_hang() {
 }
 
 #[test]
+fn a_drop_wakes_the_ping_thread_without_waiting_out_its_interval() {
+    let (client_read, client_write, mut peer_read, mut peer_write) = pipe();
+    let (peer_exit_tx, peer_exit_rx) = mpsc::channel::<()>();
+    let peer = thread::spawn(move || {
+        hello(&mut peer_read, &mut peer_write);
+        accept_subscribe(&mut peer_read, &mut peer_write);
+        let (_, id) = oid_pair(15);
+        send_chunk(&mut peer_write, id, true);
+        let _ = peer_exit_rx.recv();
+    });
+
+    let stall = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(AtomicBool::new(false));
+    let entered = Arc::new(AtomicUsize::new(0));
+    let writer = StalledWrite {
+        inner: client_write,
+        stall: Arc::clone(&stall),
+        release: Arc::clone(&release),
+        entered: Arc::clone(&entered),
+    };
+    // Only the parked write is released. The peer already left by then, so
+    // nothing else can wake the ping thread on its behalf.
+    let hook_release = Arc::clone(&release);
+    let interval = Duration::from_secs(1);
+    let (tx, rx) = mpsc::channel();
+    let session = RemoteSession::connect_attached(
+        client_read,
+        writer,
+        RemoteTarget::new("scripted"),
+        move |event| {
+            let _ = tx.send(event);
+        },
+        ClientConfig {
+            ping_interval: interval,
+            missed_pings: 3,
+            first_chunk_timeout: Duration::from_secs(5),
+            request_timeout: Duration::from_secs(10),
+            ..ClientConfig::default()
+        },
+        TransportAttach {
+            diagnostic: Arc::new(String::new),
+            disconnect: Some(Box::new(move || hook_release.store(true, Ordering::SeqCst))),
+            retain: None,
+        },
+    )
+    .expect("connect");
+
+    // The next ping parks inside `write`, so the ping thread is between waits
+    // when the session closes.
+    stall.store(true, Ordering::SeqCst);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while entered.load(Ordering::SeqCst) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the ping never reached the stalled write"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    // The peer goes away while the ping thread is parked, so the drain that
+    // EOF triggers is the wakeup it misses.
+    let _ = peer_exit_tx.send(());
+    peer.join().expect("peer");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+            Ok(SessionEvent::LoadFailed { .. }) => break,
+            Ok(_) => {}
+            Err(error) => panic!("the dropped link was not reported: {error}"),
+        }
+    }
+
+    let started = Instant::now();
+    drop(session);
+    assert!(
+        started.elapsed() < interval / 2,
+        "the drop waited out the ping interval: {:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
 fn a_close_releases_a_request_that_never_got_an_answer() {
     let (client_read, client_write, mut peer_read, mut peer_write) = pipe();
     let (saw_request_tx, saw_request_rx) = mpsc::channel::<()>();

@@ -618,6 +618,12 @@ fn ping_loop(inner: Arc<Inner>) {
     let interval = inner.ping_interval;
     let mut guard = lock(&inner.park);
     loop {
+        // Checked under `park` before every wait. `shutdown` sets the flag
+        // under the same lock, so a wakeup it sends cannot land before this
+        // wait and leave the join sitting out a whole interval.
+        if inner.closing.load(Ordering::SeqCst) || inner.lost.load(Ordering::SeqCst) {
+            break;
+        }
         let (next, _) = inner
             .wake
             .wait_timeout(guard, interval)
@@ -657,8 +663,16 @@ fn ping_loop(inner: Arc<Inner>) {
 
 impl Inner {
     fn shutdown(&self) {
-        if self.closing.swap(true, Ordering::SeqCst) {
-            return;
+        {
+            // Set under `park`, the lock the ping thread rechecks under before
+            // each wait. Setting it outside could let the wakeup go out before
+            // that thread waits, leaving the join below to sit out a whole
+            // ping interval.
+            let _park = lock(&self.park);
+            if self.closing.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            self.wake.notify_all();
         }
         // A deliberate close releases every caller itself. The reader thread
         // may stay parked on a stream the peer never closes, so waiting for
