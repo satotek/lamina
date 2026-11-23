@@ -18,8 +18,8 @@ use futures::channel::mpsc::{self as futures_mpsc, UnboundedSender};
 use futures::channel::oneshot;
 use gpui::{
     AnyElement, AnyWindowHandle, App, AppContext as _, Context, Entity, Focusable as _, FontWeight,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, div, px,
+    IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Task, WeakEntity, Window, div, px,
 };
 use gpui_component::dialog::DialogFooter;
 use gpui_component::input::{Input, InputEvent, InputState};
@@ -1087,53 +1087,16 @@ impl RemoteDialog {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if let Some(listing) = &panel.listing {
-            let mut header = div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .px_3()
-                .py_2()
-                .bg(design.panel)
-                .border_b_1()
-                .border_color(design.border)
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .font_family(design.mono.clone())
-                        .text_size(px(design.tiny()))
-                        .text_color(design.text)
-                        .child(listing.path.clone()),
-                );
+            let mut frame = ui::panel(design).header(ui::path_label(listing.path.clone(), design));
             if listing.repository {
-                header = header.child(ui::status_badge(
-                    t!("remote_repo.browse.repository").to_string(),
-                    ui::BadgeTone::Accent,
-                    design,
-                ));
+                frame = frame.header(repository_badge(design));
             }
             if panel.loading {
-                header = header.child(ui::spinner("remote-browse-loading", design, 12.0));
+                frame = frame.header(ui::spinner("remote-browse-loading", design, 12.0));
             }
-            header = header.child(
-                ui::icon_button("remote-browse-close", IconName::X)
-                    .ghost()
-                    .size(ui::ButtonSize::Tiny)
-                    .tooltip(t!("common.close").to_string())
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.close_browser(cx);
-                    })),
-            );
+            frame = frame.header(close_picker_button("remote-browse-close", cx));
 
-            let mut list = div()
-                .id("remote-browse-list")
-                .flex()
-                .flex_col()
-                .gap(design.px(2.0))
-                .py_1()
-                .max_h(design.px(BROWSE_LIST_MAX_HEIGHT))
-                .overflow_y_scroll();
+            let mut list = ui::scrolling_list("remote-browse-list", BROWSE_LIST_MAX_HEIGHT, design);
 
             if let Some(parent) = &listing.parent {
                 let parent = parent.clone();
@@ -1196,30 +1159,16 @@ impl RemoteDialog {
                                     .child(entry.name.clone()),
                             );
                     if entry.repository {
-                        row = row.child(ui::status_badge(
-                            t!("remote_repo.browse.repository").to_string(),
-                            ui::BadgeTone::Accent,
-                            design,
-                        ));
+                        row = row.child(repository_badge(design));
                     }
                     list = list.child(row);
                 }
             }
 
-            let mut box_view = div()
-                .flex()
-                .flex_col()
-                .w_full()
-                .rounded(design.px(6.0))
-                .border_1()
-                .border_color(design.border)
-                .bg(design.background)
-                .overflow_hidden()
-                .child(header)
-                .child(list);
+            frame = frame.child(list);
 
             if listing.truncated {
-                box_view = box_view.child(
+                frame = frame.child(
                     ui::banner(
                         ui::BannerKind::Info,
                         t!("remote_repo.browse.truncated").to_string(),
@@ -1230,84 +1179,89 @@ impl RemoteDialog {
             }
 
             if let Some(error) = &panel.error {
-                box_view = box_view
-                    .child(ui::banner(ui::BannerKind::Danger, error.clone(), design).wrap());
+                frame = frame.child(danger_banner(error, design));
             }
 
-            box_view = box_view.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_end()
-                    .gap_2()
-                    .px_3()
-                    .py_2()
-                    .bg(design.panel)
-                    .border_t_1()
-                    .border_color(design.border)
-                    .child(
-                        ui::button(
-                            "remote-browse-use",
-                            t!("remote_repo.browse.use_folder").to_string(),
-                        )
-                        .kind(if listing.repository {
-                            ui::ButtonKind::Primary
-                        } else {
-                            ui::ButtonKind::Normal
-                        })
-                        .size(ui::ButtonSize::Small)
-                        .disabled(panel.loading)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.use_current_folder(window, cx);
-                        })),
-                    ),
+            frame = frame.footer(
+                ui::button(
+                    "remote-browse-use",
+                    t!("remote_repo.browse.use_folder").to_string(),
+                )
+                .kind(if listing.repository {
+                    ui::ButtonKind::Primary
+                } else {
+                    ui::ButtonKind::Normal
+                })
+                .size(ui::ButtonSize::Small)
+                .disabled(panel.loading)
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.use_current_folder(window, cx);
+                })),
             );
-            return box_view.into_any_element();
+            return frame.into_any_element();
         }
 
         if let Some(phase) = panel.connect_phase {
-            return div()
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap_2()
-                .w_full()
-                .px_3()
-                .py_3()
-                .rounded(design.px(6.0))
-                .border_1()
-                .border_color(design.border)
-                .bg(design.background)
+            return ui::panel(design)
                 .child(
                     div()
                         .flex()
                         .items_center()
+                        .justify_between()
                         .gap_2()
-                        .text_size(px(design.small()))
-                        .text_color(design.muted)
-                        .child(ui::spinner("remote-browse-connect", design, 14.0))
-                        .child(browse_phase_label(phase)),
-                )
-                .child(
-                    ui::icon_button("remote-browse-cancel", IconName::X)
-                        .ghost()
-                        .size(ui::ButtonSize::Tiny)
-                        .tooltip(t!("common.close").to_string())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.close_browser(cx);
-                        })),
+                        .w_full()
+                        .px_3()
+                        .py_3()
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap_2()
+                                .text_size(px(design.small()))
+                                .text_color(design.muted)
+                                .child(ui::spinner("remote-browse-connect", design, 14.0))
+                                .child(browse_phase_label(phase)),
+                        )
+                        .child(close_picker_button("remote-browse-cancel", cx)),
                 )
                 .into_any_element();
         }
 
         if let Some(error) = &panel.error {
-            return ui::banner(ui::BannerKind::Danger, error.clone(), design)
-                .wrap()
-                .into_any_element();
+            return danger_banner(error, design);
         }
 
         div().into_any_element()
     }
+}
+
+/// The dismiss control in a picker header or progress row. Both close the
+/// picker, so they share one handler and differ only in their element id.
+fn close_picker_button(id: &'static str, cx: &mut Context<RemoteDialog>) -> impl IntoElement {
+    ui::icon_button(id, IconName::X)
+        .ghost()
+        .size(ui::ButtonSize::Tiny)
+        .tooltip(t!("common.close").to_string())
+        .on_click(cx.listener(|this, _, _, cx| {
+            this.close_browser(cx);
+        }))
+}
+
+/// The chip that marks a folder as a Git repository, in a header or a row.
+fn repository_badge(design: &Design) -> AnyElement {
+    ui::status_badge(
+        t!("remote_repo.browse.repository").to_string(),
+        ui::BadgeTone::Accent,
+        design,
+    )
+}
+
+/// A failure the user has to read, wrapped rather than truncated: a long
+/// `ssh` message is the whole point of the banner.
+fn danger_banner(message: &str, design: &Design) -> AnyElement {
+    ui::banner(ui::BannerKind::Danger, message.to_owned(), design)
+        .wrap()
+        .into_any_element()
 }
 
 impl Drop for RemoteDialog {
