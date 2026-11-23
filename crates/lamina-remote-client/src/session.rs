@@ -1,11 +1,16 @@
-//! Concurrent [`RemoteSession`]: one reader, many in-flight calls.
+//! Concurrent [`RemoteSession`]: one reader, one writer, many in-flight calls.
 //!
 //! The reader thread is the only thing that reads the stream. It pairs each
 //! response with the caller that sent that stream id and turns events into
 //! [`SessionEvent`]s. Callers wait on their own channel, so a diff that has not
 //! finished does not stop a `commit_message` or a `CancelDiff` write.
+//!
+//! Writes are queued for a writer thread instead of happening on the caller's
+//! thread: encoding and writing a patch or an LFS object can take long, and the
+//! caller is often the UI thread. Pings go through the same queue, so a stalled
+//! transport is the ping watchdog's problem and never a caller's.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, Ordering};
@@ -56,6 +61,22 @@ const DEFAULT_FIRST_CHUNK: Duration = Duration::from_secs(30);
 /// a blob, a patch or an LFS object crawling over a slow uplink; a dead link
 /// is the ping watchdog's job, this only ends the wait.
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// How many frames may wait for the wire.
+///
+/// Encoding and writing happen on the writer thread, so this bounds payloads
+/// (a patch, an LFS object, a credential answer) that can be megabytes each.
+/// The app keeps at most a couple of writes in flight, so a deeper queue can
+/// only mean the transport stopped draining it.
+const WRITE_QUEUE: usize = 32;
+
+/// How long a caller may wait for room in [`WRITE_QUEUE`] before the link is
+/// treated as lost.
+///
+/// A ping uses the same bound: it must never park forever behind a queue
+/// nobody drains, and reaching this bound already means the transport is not
+/// moving.
+const WRITE_ENQUEUE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Upper bound on events buffered before the handshake answer.
 ///
@@ -168,6 +189,103 @@ struct QueryRejected {
     reported: bool,
 }
 
+/// One frame waiting for the writer thread.
+///
+/// The message is queued unencoded: zstd on a multi-megabyte patch belongs on
+/// the writer thread, not on the caller's.
+struct Outgoing {
+    stream: u16,
+    message: Message,
+}
+
+/// Why a frame could not be queued.
+enum PushError {
+    /// The queue stayed full for the caller's whole deadline.
+    Full,
+    /// The session closed or the transport failed.
+    Closed,
+}
+
+/// The bounded hand-off between callers and the writer thread.
+///
+/// A caller enqueues and returns; only the writer thread encodes a frame or
+/// waits on the pipe. A full queue holds a caller for at most the deadline it
+/// passes, so a transport nobody drains cannot park the UI thread forever.
+struct OutQueue {
+    state: Mutex<OutState>,
+    ready: Condvar,
+}
+
+struct OutState {
+    frames: VecDeque<Outgoing>,
+    closed: bool,
+}
+
+impl OutQueue {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(OutState {
+                frames: VecDeque::new(),
+                closed: false,
+            }),
+            ready: Condvar::new(),
+        }
+    }
+
+    fn push(&self, outgoing: Outgoing, timeout: Duration) -> Result<(), PushError> {
+        let deadline = Instant::now() + timeout;
+        let mut state = lock(&self.state);
+        while state.frames.len() >= WRITE_QUEUE {
+            if state.closed {
+                return Err(PushError::Closed);
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(PushError::Full);
+            }
+            let (next, _) = self
+                .ready
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(PoisonError::into_inner);
+            state = next;
+        }
+        if state.closed {
+            return Err(PushError::Closed);
+        }
+        state.frames.push_back(outgoing);
+        self.ready.notify_one();
+        Ok(())
+    }
+
+    /// The next frame, or `None` once the queue is closed.
+    fn pop(&self) -> Option<Outgoing> {
+        let mut state = lock(&self.state);
+        loop {
+            if state.closed {
+                return None;
+            }
+            if let Some(frame) = state.frames.pop_front() {
+                // Releases a caller waiting for room.
+                self.ready.notify_one();
+                return Some(frame);
+            }
+            state = self
+                .ready
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+
+    /// Stops the writer and releases a caller waiting for room. Frames still
+    /// queued are dropped here rather than kept alive until the session is.
+    fn close(&self) {
+        let mut state = lock(&self.state);
+        state.closed = true;
+        state.frames.clear();
+        self.ready.notify_all();
+    }
+}
+
 /// How far one accepted diff has got.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DiffProgress {
@@ -180,7 +298,8 @@ enum DiffProgress {
 }
 
 struct Inner {
-    writer: Mutex<Option<Box<dyn Write + Send>>>,
+    /// Frames waiting for the writer thread, which owns the transport.
+    outbox: OutQueue,
     pending: Mutex<HashMap<u16, Sender<Response>>>,
     /// Diff requests do not wait. The stream id is how an `Error` response
     /// finds the ticket to fail.
@@ -253,6 +372,8 @@ struct Inner {
     wake: Condvar,
     reader: Mutex<Option<JoinHandle<()>>>,
     reader_id: Mutex<Option<ThreadId>>,
+    writer: Mutex<Option<JoinHandle<()>>>,
+    writer_id: Mutex<Option<ThreadId>>,
     ping: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -319,7 +440,7 @@ impl RemoteSession {
             }
         };
         let inner = Arc::new(Inner {
-            writer: Mutex::new(Some(Box::new(writer))),
+            outbox: OutQueue::new(),
             pending: Mutex::new(HashMap::new()),
             diff_streams: Mutex::new(HashMap::new()),
             diff_open: Mutex::new(HashMap::new()),
@@ -360,6 +481,8 @@ impl RemoteSession {
             wake: Condvar::new(),
             reader: Mutex::new(None),
             reader_id: Mutex::new(None),
+            writer: Mutex::new(None),
+            writer_id: Mutex::new(None),
             ping: Mutex::new(None),
         });
         // Anything the helper sent before HelloAck is part of the same stream.
@@ -382,6 +505,21 @@ impl RemoteSession {
             .spawn(move || reader_loop(reader_inner, reader))
             .map_err(|error| Error::other(format!("could not start the remote reader: {error}")))?;
         *lock(&inner.reader) = Some(reader_handle);
+
+        let writer_inner = Arc::clone(&inner);
+        let writer_handle = match thread::Builder::new()
+            .name("lamina-remote-write".to_owned())
+            .spawn(move || writer_loop(writer_inner, writer))
+        {
+            Ok(handle) => handle,
+            Err(error) => {
+                inner.shutdown();
+                return Err(Error::other(format!(
+                    "could not start the remote writer: {error}"
+                )));
+            }
+        };
+        *lock(&inner.writer) = Some(writer_handle);
 
         let ping_inner = Arc::clone(&inner);
         let ping_handle = match thread::Builder::new()
@@ -630,6 +768,26 @@ fn reader_loop(inner: Arc<Inner>, mut reader: impl Read) {
     }
 }
 
+/// Owns the transport and writes queued frames in order.
+///
+/// Encoding a multi-megabyte payload and waiting on a full pipe both belong
+/// here rather than on whichever thread made the request. A write failure is
+/// the connection failing, so it goes through [`Inner::fail`] the way a read
+/// error does; a deliberate close stops the loop without writing what is still
+/// queued.
+fn writer_loop(inner: Arc<Inner>, mut writer: impl Write) {
+    *lock(&inner.writer_id) = Some(thread::current().id());
+    while let Some(outgoing) = inner.outbox.pop() {
+        if inner.closing.load(Ordering::SeqCst) {
+            break;
+        }
+        if let Err(error) = proto::write_frame(&mut writer, outgoing.stream, &outgoing.message) {
+            inner.fail(format!("{CONNECTION_LOST}: {error}"));
+            break;
+        }
+    }
+}
+
 fn ping_loop(inner: Arc<Inner>) {
     let interval = inner.ping_interval;
     let mut guard = lock(&inner.park);
@@ -667,7 +825,7 @@ fn ping_loop(inner: Arc<Inner>) {
         let nonce = inner.next_ping.fetch_add(1, Ordering::SeqCst);
         lock(&inner.pings).insert(nonce, Instant::now());
         if inner
-            .write_message(0, &Message::Request(Request::Ping { nonce }))
+            .write_message(0, Message::Request(Request::Ping { nonce }))
             .is_err()
         {
             lock(&inner.pings).remove(&nonce);
@@ -699,14 +857,23 @@ impl Inner {
         self.drain_streams("the remote session was closed");
         // The transport dies before any thread is joined. A write parked on a
         // full pipe only fails once the child is killed, so joining a worker
-        // thread first would leave shutdown waiting on the writer mutex that
-        // stalled write holds, and ssh plus the helper would leak.
+        // thread first would leave shutdown waiting on that stalled write,
+        // and ssh plus the helper would leak.
         if let Some(disconnect) = lock(&self.disconnect).take() {
             disconnect();
         }
-        {
-            let mut writer = lock(&self.writer);
-            *writer = None;
+        // Closing the queue stops the writer after the frame it is on, drops
+        // what is still queued, and releases a caller waiting for room.
+        self.outbox.close();
+        if let Some(handle) = lock(&self.writer).take() {
+            let writer_id = *lock(&self.writer_id);
+            if writer_id == Some(thread::current().id()) {
+                // The transport failed while the event callback dropped the
+                // session. Joining here would wait for this same thread.
+                drop(handle);
+            } else {
+                let _ = handle.join();
+            }
         }
         if let Some(handle) = lock(&self.ping).take() {
             let _ = handle.join();
@@ -749,6 +916,9 @@ impl Inner {
         lock(&self.pings).clear();
         *lock(&self.rtt) = None;
         self.drain_streams(&message);
+        // A caller still waiting for room in the write queue must not sit out
+        // its deadline on a link that is already gone.
+        self.outbox.close();
         // A drop already set `closing`: the app closed the session on purpose,
         // and a LoadFailed for that would look like the repository broke.
         if self.closing.load(Ordering::SeqCst) {
@@ -853,23 +1023,30 @@ impl Inner {
         quarantine.contains_key(&id)
     }
 
-    fn write_message(&self, stream: u16, message: &Message) -> Result<()> {
-        let mut guard = lock(&self.writer);
+    /// Queues one frame for the writer thread.
+    ///
+    /// The caller only waits for room in the queue: encoding and writing a
+    /// patch or an LFS object is the writer thread's work, and a caller on the
+    /// UI thread must not pay for it. A queue that stays full means nobody is
+    /// draining the transport, so waiting longer would only hide a dead link.
+    fn write_message(&self, stream: u16, message: Message) -> Result<()> {
         if self.lost.load(Ordering::SeqCst) || self.closing.load(Ordering::SeqCst) {
             return Err(self.lost_error());
         }
-        let Some(writer) = guard.as_mut() else {
-            return Err(self.lost_error());
-        };
-        // `writer` is `&mut Box<dyn Write>`, which is sized. `as_mut()` would
-        // yield `&mut dyn Write` and `write_frame`'s generic could not name it.
-        let result = proto::write_frame(writer, stream, message);
-        drop(guard);
-        result.map_err(|error| {
-            let message = format!("{CONNECTION_LOST}: {error}");
-            self.fail(message);
-            self.lost_error()
-        })
+        match self
+            .outbox
+            .push(Outgoing { stream, message }, WRITE_ENQUEUE_TIMEOUT)
+        {
+            Ok(()) => Ok(()),
+            Err(PushError::Full) => {
+                self.fail(format!(
+                    "{CONNECTION_LOST}: the remote writer stopped draining its queue"
+                ));
+                Err(self.lost_error())
+            }
+            // The transport already failed, and reported why.
+            Err(PushError::Closed) => Err(self.lost_error()),
+        }
     }
 
     fn call(&self, request: Request) -> Result<Response> {
@@ -883,7 +1060,7 @@ impl Inner {
             lock(&self.pending).remove(&stream);
             return Err(self.lost_error());
         }
-        if let Err(error) = self.write_message(stream, &Message::Request(request)) {
+        if let Err(error) = self.write_message(stream, Message::Request(request)) {
             lock(&self.pending).remove(&stream);
             return Err(error);
         }
@@ -949,7 +1126,7 @@ impl Inner {
         lock(&self.inflight).insert(id);
         if let Err(error) = self.write_message(
             stream,
-            &Message::Request(Request::Run {
+            Message::Request(Request::Run {
                 id: id.0,
                 operation,
             }),
@@ -979,7 +1156,7 @@ impl Inner {
     fn send_detached(&self, request: Request) -> Result<u16> {
         self.ensure_open()?;
         let stream = self.alloc_stream()?;
-        self.write_message(stream, &Message::Request(request))?;
+        self.write_message(stream, Message::Request(request))?;
         Ok(stream)
     }
 
@@ -1300,7 +1477,7 @@ impl Inner {
             lock(&self.queries).insert(ticket);
             if let Err(error) = self.write_message(
                 stream,
-                &Message::Request(Request::Query {
+                Message::Request(Request::Query {
                     ticket: ticket.0,
                     query,
                 }),
@@ -1382,7 +1559,7 @@ impl Inner {
             lock(&self.diff_streams).insert(stream, ticket);
             if let Err(error) = self.write_message(
                 stream,
-                &Message::Request(Request::Diff {
+                Message::Request(Request::Diff {
                     ticket: ticket.0,
                     request: DiffRequestDto::from(&request),
                     options: DiffOptionsDto::from(&options),

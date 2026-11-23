@@ -9,7 +9,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use lamina_core::Oid;
-use lamina_core::session::{DiffRequest, DiffTicket, QueryTicket, RepositorySession, SessionEvent};
+use lamina_core::session::{
+    DiffRequest, DiffTicket, Operation, QueryTicket, RepositorySession, SessionEvent,
+};
 use lamina_remote_protocol::{
     self as proto, CommitDto, CommitStatDto, DiffRequestDto, DiffViewDto, Event, FileDiffDto,
     GraphRowDto, HeadDto, HighlightKindDto, HighlightSpanDto, Message, ObjectId, QueryEvent,
@@ -1100,7 +1102,7 @@ fn dropping_a_session_with_a_stalled_write_does_not_hang() {
     )
     .expect("connect");
 
-    // The next ping parks inside `write`, holding the writer mutex.
+    // The next ping parks the writer thread inside `write`.
     stall.store(true, Ordering::SeqCst);
     let deadline = Instant::now() + Duration::from_secs(5);
     while entered.load(Ordering::SeqCst) == 0 {
@@ -1206,6 +1208,84 @@ fn a_drop_wakes_the_ping_thread_without_waiting_out_its_interval() {
         "the drop waited out the ping interval: {:?}",
         started.elapsed()
     );
+}
+
+#[test]
+fn a_large_patch_is_queued_instead_of_waiting_on_the_transport() {
+    let (client_read, client_write, mut peer_read, mut peer_write) = pipe();
+    let (peer_exit_tx, peer_exit_rx) = mpsc::channel::<()>();
+    let peer = thread::spawn(move || {
+        hello(&mut peer_read, &mut peer_write);
+        accept_subscribe(&mut peer_read, &mut peer_write);
+        let (_, id) = oid_pair(17);
+        send_chunk(&mut peer_write, id, true);
+        let _ = peer_exit_rx.recv();
+    });
+
+    let stall = Arc::new(AtomicBool::new(false));
+    let release = Arc::new(AtomicBool::new(false));
+    let entered = Arc::new(AtomicUsize::new(0));
+    let writer = StalledWrite {
+        inner: client_write,
+        stall: Arc::clone(&stall),
+        release: Arc::clone(&release),
+        entered: Arc::clone(&entered),
+    };
+    let hook_release = Arc::clone(&release);
+    let hook_exit = peer_exit_tx.clone();
+    let session = RemoteSession::connect_attached(
+        client_read,
+        writer,
+        RemoteTarget::new("scripted"),
+        |_| {},
+        ClientConfig {
+            ping_interval: Duration::from_millis(40),
+            missed_pings: 3,
+            first_chunk_timeout: Duration::from_secs(5),
+            request_timeout: Duration::from_secs(10),
+            ..ClientConfig::default()
+        },
+        TransportAttach {
+            diagnostic: Arc::new(String::new),
+            disconnect: Some(Box::new(move || {
+                hook_release.store(true, Ordering::SeqCst);
+                let _ = hook_exit.send(());
+            })),
+            retain: None,
+        },
+    )
+    .expect("connect");
+
+    // A ping parks inside `write`: a pipe whose reader stopped draining it.
+    // A patch written directly would park behind it.
+    stall.store(true, Ordering::SeqCst);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while entered.load(Ordering::SeqCst) == 0 {
+        assert!(
+            Instant::now() < deadline,
+            "the ping never reached the stalled write"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    let (sent_tx, sent_rx) = mpsc::channel();
+    let (hold_tx, hold_rx) = mpsc::channel::<()>();
+    let runner = thread::spawn(move || {
+        let id = session.run(Operation::ApplyPatch {
+            patch: vec![b'x'; 4 << 20],
+        });
+        let _ = sent_tx.send(id);
+        // The session is dropped only after the measurement, so the release
+        // below is what unblocks the transport.
+        let _ = hold_rx.recv();
+    });
+    sent_rx
+        .recv_timeout(Duration::from_secs(1))
+        .expect("the caller waited on the transport instead of queueing the patch");
+    let _ = hold_tx.send(());
+    runner.join().expect("runner");
+    drop(peer_exit_tx);
+    peer.join().expect("peer");
 }
 
 #[test]
