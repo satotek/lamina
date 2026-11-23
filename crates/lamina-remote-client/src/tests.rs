@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use lamina_core::Oid;
 use lamina_core::session::{
-    DiffRequest, DiffTicket, Operation, QueryTicket, RepositorySession, SessionEvent,
+    DiffRequest, DiffTicket, Operation, OperationId, QueryTicket, RepositorySession, SessionEvent,
 };
 use lamina_remote_protocol::{
     self as proto, CommitDto, CommitStatDto, DiffRequestDto, DiffViewDto, Event, FileDiffDto,
@@ -593,10 +593,13 @@ fn a_late_answer_does_not_reach_the_next_request_with_the_same_id() {
         RemoteTarget::new("scripted"),
         |_| {},
         ClientConfig {
-            ping_interval: Duration::from_millis(100),
+            // The quarantine lasts one request deadline. A loaded machine can
+            // take a while between the timeout and the next `head`, so the two
+            // must not be close enough for the id to leave quarantine early.
+            ping_interval: Duration::from_secs(30),
             missed_pings: 3,
             first_chunk_timeout: Duration::from_secs(5),
-            request_timeout: Duration::from_millis(200),
+            request_timeout: Duration::from_secs(1),
             ..ClientConfig::default()
         },
     )
@@ -1245,7 +1248,9 @@ fn a_large_patch_is_queued_instead_of_waiting_on_the_transport() {
         RemoteTarget::new("scripted"),
         |_| {},
         ClientConfig {
-            ping_interval: Duration::from_millis(40),
+            // Only the queue is under test. A long ping interval keeps the
+            // watchdog from failing the link while the transport is parked.
+            ping_interval: Duration::from_secs(30),
             missed_pings: 3,
             first_chunk_timeout: Duration::from_secs(5),
             request_timeout: Duration::from_secs(10),
@@ -1262,14 +1267,16 @@ fn a_large_patch_is_queued_instead_of_waiting_on_the_transport() {
     )
     .expect("connect");
 
-    // A ping parks inside `write`: a pipe whose reader stopped draining it.
-    // A patch written directly would park behind it.
+    // A cancel parks inside `write`: a pipe whose reader stopped draining it.
+    // A patch written directly would park behind it. The watchdog is kept out
+    // of the way so only the queue can decide this test.
     stall.store(true, Ordering::SeqCst);
+    session.cancel_operation(OperationId(0));
     let deadline = Instant::now() + Duration::from_secs(5);
     while entered.load(Ordering::SeqCst) == 0 {
         assert!(
             Instant::now() < deadline,
-            "the ping never reached the stalled write"
+            "the cancel never reached the stalled write"
         );
         thread::sleep(Duration::from_millis(5));
     }
