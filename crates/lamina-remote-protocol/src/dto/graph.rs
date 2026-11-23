@@ -4,7 +4,6 @@
 use serde::{Deserialize, Serialize};
 
 use crate::codec::ProtocolError;
-use crate::dto::repo::oid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HalfDto {
@@ -136,25 +135,6 @@ pub fn rows_from_dto(rows: &[GraphRowDto]) -> Result<lamina_core::graph::GraphRo
         graph.push_row(row.node_lane, row.node_color, row.width, &passes, &edges);
     }
     Ok(graph)
-}
-
-/// A commit list sent in one frame, paired with its rows.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CommitChunkDto {
-    pub generation: u64,
-    pub commits: Vec<crate::dto::repo::CommitDto>,
-    pub rows: Vec<GraphRowDto>,
-    pub complete: bool,
-}
-
-/// Validates that a chunk keeps commits and rows aligned.
-pub fn chunk_ids(chunk: &CommitChunkDto) -> Result<Vec<lamina_core::Oid>, ProtocolError> {
-    if chunk.commits.len() != chunk.rows.len() {
-        return Err(ProtocolError::Malformed(
-            "snapshot chunk has a different number of commits and rows",
-        ));
-    }
-    chunk.commits.iter().map(|commit| oid(commit.id)).collect()
 }
 
 #[cfg(test)]

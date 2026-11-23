@@ -176,18 +176,13 @@ fn decode_payload<T: serde::de::DeserializeOwned>(payload: &[u8]) -> Result<T, P
 
 /// Encodes one message payload. The variant discriminator lives in the frame's
 /// kind byte, so the payload holds only the inner request, response or event.
-pub fn encode_message(message: &Message) -> Result<Vec<u8>, ProtocolError> {
+fn encode_message(message: &Message) -> Result<Vec<u8>, ProtocolError> {
     let encoded = match message {
         Message::Request(request) => postcard::to_allocvec(request),
         Message::Response(response) => postcard::to_allocvec(response),
         Message::Event(event) => postcard::to_allocvec(event),
     };
     encoded.map_err(|error| ProtocolError::Encode(error.to_string()))
-}
-
-/// Decodes a payload that [`encode_message`] produced.
-pub fn decode_message_bytes(kind: u8, payload: &[u8]) -> Result<Message, ProtocolError> {
-    decode_message(kind, payload)
 }
 
 /// Compile-time check that [`Message`] stays serializable by the helpers above.

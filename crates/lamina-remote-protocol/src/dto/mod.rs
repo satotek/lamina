@@ -24,9 +24,7 @@ pub use diff::{
     HighlightKindDto, HighlightSpanDto, HunkDto, ImageDiffDto, ImageFormatDto, ImageKindDto,
     ImageSideDto, LfsDiffSideDto, LfsDiffSummaryDto, LineKindDto, SpanDto,
 };
-pub use graph::{
-    CommitChunkDto, GraphRowDto, HalfDto, PassThroughDto, SegmentDto, chunk_ids, rows_from_dto,
-};
+pub use graph::{GraphRowDto, HalfDto, PassThroughDto, SegmentDto, rows_from_dto};
 pub use lfs::{LfsInfoDto, LfsLockDto};
 pub use operation::{
     ConflictSideDto, OperationDto, RemoteBranchDto, ResetModeDto, UnsupportedOperation,
@@ -286,12 +284,6 @@ mod tests {
                 half: HalfDto::Top,
                 color: 2,
             }],
-        });
-        roundtrip(&CommitChunkDto {
-            generation: 1,
-            commits: Vec::new(),
-            rows: Vec::new(),
-            complete: true,
         });
     }
 
