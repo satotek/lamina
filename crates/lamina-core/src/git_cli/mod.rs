@@ -245,7 +245,10 @@ impl Git {
     fn run_output(&self, args: &[String], stdin: Option<&[u8]>, internal: bool) -> Result<Output> {
         if let Some(cancel) = &self.cancel {
             let cancel = Arc::clone(cancel);
-            return match self.run_output_cancellable(args, stdin, &|| cancel())? {
+            // The flag must travel with the call: a session handle always
+            // takes this path, and its probes would otherwise surface in the
+            // command log as if the user ran them.
+            return match self.run_output_cancellable(args, stdin, internal, &|| cancel())? {
                 Some(output) => Ok(output),
                 None => Err(Error::other(crate::error::OPERATION_CANCELLED)),
             };
@@ -290,6 +293,7 @@ impl Git {
         &self,
         args: &[S],
         stdin: Option<&[u8]>,
+        internal: bool,
         cancelled: &(impl Fn() -> bool + Send + Sync),
     ) -> Result<Option<Output>> {
         if cancelled() {
@@ -300,7 +304,7 @@ impl Git {
         let (mut command, _askpass) = match self.prepared(&args) {
             Ok(prepared) => prepared,
             Err(error) => {
-                self.log_spawn_failure(&args, started_at, &error, false);
+                self.log_spawn_failure(&args, started_at, &error, internal);
                 return Err(error);
             }
         };
@@ -312,7 +316,7 @@ impl Git {
             Ok(child) => child,
             Err(error) => {
                 let error = Error::from(error);
-                self.log_spawn_failure(&args, started_at, &error, false);
+                self.log_spawn_failure(&args, started_at, &error, internal);
                 return Err(error);
             }
         };
@@ -411,7 +415,7 @@ impl Git {
             stdout: stdout_bytes,
             stderr: stderr_bytes,
         };
-        self.log_output(&args, started_at, &output, false);
+        self.log_output(&args, started_at, &output, internal);
 
         if state.killed.load(Ordering::SeqCst) || cancelled() {
             return Ok(None);
@@ -1173,6 +1177,27 @@ mod tests {
         assert!(!log[0].internal, "a command the user ran stays visible");
         assert!(log[1].internal, "a probe must not reach the status line");
         assert_eq!(log[1].args, ["lfs", "version"]);
+    }
+
+    #[test]
+    fn capability_probes_stay_internal_on_the_cancellable_path() {
+        let test = TestRepo::new();
+        // A session handle always has a canceller, so its probes all take the
+        // cancellable path; the internal flag must survive that detour.
+        let git = test.git_handle().with_cancel(|| false);
+        git.run(&["status"], None).expect("status");
+        let _ = git.run_internal(&["lfs", "version"], None);
+
+        let log = git.log();
+        assert_eq!(log.len(), 2);
+        assert!(
+            !log[0].internal,
+            "a command the user ran stays visible even while cancellable"
+        );
+        assert!(
+            log[1].internal,
+            "a probe on the cancellable path must not reach the status line"
+        );
     }
 
     #[test]

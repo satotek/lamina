@@ -85,7 +85,8 @@ impl Git {
 
         let format_arg = format!("--format={LOG_FORMAT}");
         let args = ["log", "--no-walk=unsorted", "--stdin", "-z", &format_arg];
-        let Some(output) = self.run_output_cancellable(&args, Some(stdin.as_bytes()), cancelled)?
+        let Some(output) =
+            self.run_output_cancellable(&args, Some(stdin.as_bytes()), false, cancelled)?
         else {
             return Ok(None);
         };
