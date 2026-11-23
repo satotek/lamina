@@ -234,7 +234,7 @@ impl RepoView {
         self.name = Some(name.clone());
         self.title = crate::data::window_title(&name, head.as_ref());
         info!("remote: session ready for {name}");
-        let old = self.session.replace(session);
+        let old = self.adopt_session(session);
         if let Some(tab) = &mut self.remote_tab {
             tab.phase = ConnectPhase::LoadingHistory;
             tab.buffering = false;

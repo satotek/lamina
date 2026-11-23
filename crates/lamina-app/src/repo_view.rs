@@ -389,6 +389,10 @@ pub(crate) fn history_diff_options(cx: &App) -> DiffOptions {
 
 pub struct RepoView {
     pub(crate) session: Option<Box<dyn RepositorySession>>,
+    /// Bumped whenever `session` is replaced. A prompt names an operation id,
+    /// and a fresh session restarts those at 1, so an answer has to prove it
+    /// belongs to the session on screen before it reaches it.
+    session_epoch: u64,
     fake: Option<Rc<FakeRepo>>,
     error: Option<(String, String)>,
     name: Option<String>,
@@ -688,6 +692,7 @@ impl RepoView {
 
         let mut view = Self {
             session: None,
+            session_epoch: 0,
             fake: None,
             error: None,
             name: None,
@@ -851,6 +856,7 @@ impl RepoView {
                 }));
                 view.repository_key = commit_graph::repository_key(&session.location());
                 view.session = Some(session);
+                view.session_epoch = view.session_epoch.wrapping_add(1);
                 if let Some(key) = view.repository_key.clone() {
                     view.hidden_refs = crate::settings::Settings::get(cx).history.hidden_refs(&key);
                 }
@@ -1716,6 +1722,10 @@ impl RepoView {
             session.answer_askpass(id, None);
             return;
         };
+        // The modal outlives this update. If the view reconnects while it is
+        // open, its answer belongs to the session that asked, not to the one
+        // that replaced it, whose operation ids start over.
+        let epoch = self.session_epoch;
         let entity = self.entity.clone();
         let opened = window.update(cx, |_, window, cx| {
             crate::ui::askpass_prompt(
@@ -1726,17 +1736,37 @@ impl RepoView {
                 secret,
                 move |answer, _window, cx| {
                     if let Some(entity) = entity.upgrade() {
-                        entity.update(cx, |view, _cx| {
-                            if let Some(session) = view.session.as_ref() {
-                                session.answer_askpass(id, answer);
-                            }
-                        });
+                        entity.update(cx, |view, _cx| view.answer_prompt(epoch, id, answer));
                     }
                 },
             );
         });
         if opened.is_err() {
             session.answer_askpass(id, None);
+        }
+    }
+
+    /// Makes `session` the view's own and retires whatever the old one left.
+    fn adopt_session(
+        &mut self,
+        session: Box<dyn RepositorySession>,
+    ) -> Option<Box<dyn RepositorySession>> {
+        self.session_epoch = self.session_epoch.wrapping_add(1);
+        self.session.replace(session)
+    }
+
+    /// Answers a credential prompt opened while the view held `epoch`.
+    ///
+    /// A prompt names the operation that asked. The helper restarts those ids
+    /// on a new connection, so an answer to a prompt from a replaced session
+    /// can name a different operation on the one that replaced it; that answer
+    /// is dropped instead.
+    fn answer_prompt(&mut self, epoch: u64, id: OperationId, answer: Option<String>) {
+        if epoch != self.session_epoch {
+            return;
+        }
+        if let Some(session) = self.session.as_ref() {
+            session.answer_askpass(id, answer);
         }
     }
 
@@ -3484,6 +3514,172 @@ mod tests {
         assert!(
             released.upgrade().is_none(),
             "the closed window must release the repository view"
+        );
+    }
+
+    type Answers = Arc<std::sync::Mutex<Vec<(OperationId, Option<String>)>>>;
+
+    /// A session that records the credential answers it receives; every other
+    /// call is outside what these tests exercise.
+    struct RecordingSession {
+        answers: Answers,
+    }
+
+    impl RecordingSession {
+        fn new() -> (Self, Answers) {
+            let answers = Arc::new(std::sync::Mutex::new(Vec::new()));
+            (
+                Self {
+                    answers: Arc::clone(&answers),
+                },
+                answers,
+            )
+        }
+    }
+
+    impl RepositorySession for RecordingSession {
+        fn location(&self) -> RepoLocation {
+            unimplemented!("the answer path never asks for the location")
+        }
+        fn reader(&self) -> Arc<dyn RepoReader> {
+            unimplemented!("the answer path never reads the repository")
+        }
+        fn git_extras(&self) -> Arc<dyn lamina_core::session::GitExtras> {
+            unimplemented!("the answer path never runs git")
+        }
+        fn snapshot(&self) -> Arc<lamina_core::session::RepoSnapshot> {
+            unimplemented!("the answer path never reads the snapshot")
+        }
+        fn run(&self, _op: Operation) -> OperationId {
+            unimplemented!("the answer path starts no operation")
+        }
+        fn cancel_operation(&self, _id: OperationId) {
+            unimplemented!("the answer path cancels nothing")
+        }
+        fn answer_askpass(&self, id: OperationId, answer: Option<String>) -> bool {
+            self.answers.lock().unwrap().push((id, answer));
+            true
+        }
+        fn request_diff(&self, _request: DiffRequest) -> DiffTicket {
+            unimplemented!("the answer path asks for no diff")
+        }
+        fn request_diff_with(&self, _request: DiffRequest, _options: DiffOptions) -> DiffTicket {
+            unimplemented!("the answer path asks for no diff")
+        }
+        fn cancel_diff(&self, _ticket: DiffTicket) {
+            unimplemented!("the answer path cancels no diff")
+        }
+        fn search_commits(&self, _query: lamina_core::session::CommitQuery) -> QueryTicket {
+            unimplemented!("the answer path starts no query")
+        }
+        fn path_history(&self, _path: String) -> QueryTicket {
+            unimplemented!("the answer path starts no query")
+        }
+        fn path_history_streaming(&self, _path: String) -> QueryTicket {
+            unimplemented!("the answer path starts no query")
+        }
+        fn request_commit_stat(&self, _commit: Oid) -> QueryTicket {
+            unimplemented!("the answer path starts no query")
+        }
+        fn request_compare(
+            &self,
+            _a: Oid,
+            _b: Oid,
+            _mode: lamina_core::session::CompareMode,
+        ) -> QueryTicket {
+            unimplemented!("the answer path starts no query")
+        }
+        fn request_compare_from(&self, _base: Option<Oid>, _head: Oid) -> QueryTicket {
+            unimplemented!("the answer path starts no query")
+        }
+        fn request_compare_with_worktree(&self, _base: Oid) -> QueryTicket {
+            unimplemented!("the answer path starts no query")
+        }
+        fn request_submodules_and_worktrees(&self) -> QueryTicket {
+            unimplemented!("the answer path starts no query")
+        }
+        fn request_reflog(&self, _limit: usize) -> QueryTicket {
+            unimplemented!("the answer path starts no query")
+        }
+        fn request_in_progress_details(&self) -> QueryTicket {
+            unimplemented!("the answer path starts no query")
+        }
+        fn request_blame(&self, _commit: Oid, _path: String) -> QueryTicket {
+            unimplemented!("the answer path starts no query")
+        }
+        fn content_search_streaming(
+            &self,
+            _query: lamina_core::session::ContentSearchQuery,
+        ) -> QueryTicket {
+            unimplemented!("the answer path starts no query")
+        }
+        fn request_commit_signatures(&self, _commits: Vec<Oid>) -> QueryTicket {
+            unimplemented!("the answer path starts no query")
+        }
+        fn cancel_query(&self, _ticket: QueryTicket) {
+            unimplemented!("the answer path cancels no query")
+        }
+        fn reload(&self) {
+            unimplemented!("the answer path reloads nothing")
+        }
+        fn set_history_scope(&self, _scope: lamina_core::session::HistoryScope) {
+            unimplemented!("the answer path changes no scope")
+        }
+        fn history_scope(&self) -> lamina_core::session::HistoryScope {
+            unimplemented!("the answer path asks for no scope")
+        }
+        fn set_hidden_refs(&self, _refs: Vec<String>) {
+            unimplemented!("the answer path hides no refs")
+        }
+        fn hidden_refs(&self) -> Vec<String> {
+            unimplemented!("the answer path asks for no refs")
+        }
+    }
+
+    /// A reconnect replaces the session while a credential modal is open. The
+    /// helper restarts its operation ids, so the modal's answer must not reach
+    /// the new session, where id 1 may be a different operation.
+    #[gpui::test]
+    fn a_prompt_from_a_replaced_session_never_reaches_the_new_one(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            gpui_component::init(cx);
+            cx.set_global(crate::settings::Settings::default());
+        });
+        let window = cx.add_window(|window, cx| {
+            RepoView::new(
+                Launch::Error {
+                    path: "not-a-repository".to_owned(),
+                    error: "not a repository".to_owned(),
+                },
+                window,
+                cx,
+            )
+        });
+        let view = window.root(cx).expect("the window's root view");
+
+        let (first, _first_answers) = RecordingSession::new();
+        let (second, second_answers) = RecordingSession::new();
+        cx.update(|cx| {
+            view.update(cx, |view, _| {
+                view.adopt_session(Box::new(first));
+                let opened_at = view.session_epoch;
+                view.adopt_session(Box::new(second));
+
+                view.answer_prompt(opened_at, OperationId(1), Some("password".into()));
+                assert!(
+                    second_answers.lock().unwrap().is_empty(),
+                    "the replaced session's password must not answer the new one"
+                );
+
+                // A prompt the new session opened still works.
+                view.answer_prompt(view.session_epoch, OperationId(1), Some("fresh".into()));
+            });
+        });
+        assert_eq!(
+            second_answers.lock().unwrap().as_slice(),
+            &[(OperationId(1), Some("fresh".to_owned()))],
+            "the answer must reach the session it was asked by"
         );
     }
 
