@@ -695,3 +695,91 @@ fn a_login_shell_banner_does_not_confuse_the_probe() {
     let installed = install(&laid, None).expect("install past the banner");
     assert!(Path::new(&installed).is_file(), "{installed}");
 }
+
+#[test]
+fn two_app_instances_installing_at_once_both_finish() {
+    let scratch = Scratch::new();
+    let checks = scratch.root.join("release-checks");
+    let uploads = scratch.root.join("release-uploads");
+    let laid = layout(
+        &scratch,
+        &Fake {
+            os: "Linux",
+            arch: "x86_64",
+            lie: Lie::Never,
+            override_path: None,
+            banner: None,
+            fail_upload: false,
+            barrier: Some(Barrier {
+                checks: checks.clone(),
+                uploads: uploads.clone(),
+            }),
+        },
+    );
+    host_helper(&laid.helpers);
+
+    // Two threads are two app instances: each runs its own ssh against the
+    // same cache directory on the host.
+    let first = {
+        let laid = laid.clone();
+        std::thread::spawn(move || install(&laid, None))
+    };
+    let second = {
+        let laid = laid.clone();
+        std::thread::spawn(move || install(&laid, None))
+    };
+
+    // Both instances must have decided to upload (both first self-checks ran
+    // on the still-missing file) before either one installs anything.
+    wait_for_lines(&laid.log, "x-check", 2);
+    fs::write(&checks, b"").expect("release the self-checks");
+    // Both temp files must be fully written before either install renames,
+    // which is where a shared temp name used to lose one of the two.
+    wait_for_lines(&laid.log, "x-cat", 2);
+    fs::write(&uploads, b"").expect("release the renames");
+
+    for (name, handle) in [("first", first), ("second", second)] {
+        handle
+            .join()
+            .unwrap_or_else(|_| panic!("the {name} install thread panicked"))
+            .unwrap_or_else(|error| panic!("the {name} install failed: {error}"));
+    }
+}
+
+#[test]
+fn a_failed_upload_leaves_no_temp_file_behind() {
+    let scratch = Scratch::new();
+    let laid = layout(
+        &scratch,
+        &Fake {
+            os: "Linux",
+            arch: "x86_64",
+            lie: Lie::Never,
+            override_path: None,
+            banner: None,
+            fail_upload: true,
+            barrier: None,
+        },
+    );
+    host_helper(&laid.helpers);
+    let error = install(&laid, None).expect_err("the upload fails");
+    let text = error.to_string();
+    assert!(
+        text.contains("could not install the remote helper"),
+        "{text}"
+    );
+    let version_dir = laid
+        .home
+        .join(".cache/lamina/remote")
+        .join(env!("CARGO_PKG_VERSION"));
+    let leftovers: Vec<String> = fs::read_dir(&version_dir)
+        .expect("the version directory exists")
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".tmp"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "a failed transfer must clean up its temp file: {leftovers:?}"
+    );
+}

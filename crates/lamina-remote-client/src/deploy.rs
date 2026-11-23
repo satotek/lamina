@@ -47,8 +47,11 @@ const PROBE_SCRIPT: &str = "printf \"lamina-os:%s\\nlamina-arch:%s\\nlamina-help
 
 /// `umask` covers every directory `mkdir -p` creates. The file mode is set
 /// explicitly because `cat` follows the umask only until something else
-/// changes it, and the rename must not leave a world-readable binary behind.
-const UPLOAD_SCRIPT: &str = "set -e; umask 077; mkdir -p -- \"$LAMINA_HELPER_DIR\"; tmp=\"$LAMINA_HELPER_PATH.tmp\"; cat > \"$tmp\"; chmod 700 \"$tmp\"; mv -f \"$tmp\" \"$LAMINA_HELPER_PATH\"";
+/// changes it. The temp file carries the shell's pid so two app instances
+/// installing at once never write to the same file, and `mv` within the
+/// directory is the atomic step that installs the result. The trap removes
+/// this attempt's temp file even when `cat` fails partway.
+const UPLOAD_SCRIPT: &str = "set -e; umask 077; mkdir -p -- \"$LAMINA_HELPER_DIR\"; tmp=\"$LAMINA_HELPER_PATH.$$.tmp\"; trap 'rm -f \"$tmp\"' 0; cat > \"$tmp\"; chmod 700 \"$tmp\"; mv -f \"$tmp\" \"$LAMINA_HELPER_PATH\"";
 
 /// Where to find `ssh`, the host, and the local helper directory.
 #[derive(Clone)]
