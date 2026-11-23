@@ -5116,7 +5116,7 @@ dependencies = [
 
 [[package]]
 name = "lamina-app"
-version = "0.1.10"
+version = "0.2.0"
 dependencies = [
  "env_logger",
  "futures",
@@ -5146,7 +5146,7 @@ dependencies = [
 
 [[package]]
 name = "lamina-core"
-version = "0.1.10"
+version = "0.2.0"
 dependencies = [
  "chardetng",
  "core-foundation 0.9.4",
@@ -5185,7 +5185,7 @@ dependencies = [
 
 [[package]]
 name = "lamina-remote"
-version = "0.1.10"
+version = "0.2.0"
 dependencies = [
  "lamina-core",
  "lamina-remote-client",
@@ -5194,7 +5194,7 @@ dependencies = [
 
 [[package]]
 name = "lamina-remote-client"
-version = "0.1.10"
+version = "0.2.0"
 dependencies = [
  "lamina-core",
  "lamina-remote-protocol",
@@ -5202,7 +5202,7 @@ dependencies = [
 
 [[package]]
 name = "lamina-remote-protocol"
-version = "0.1.10"
+version = "0.2.0"
 dependencies = [
  "lamina-core",
  "postcard",
@@ -5213,7 +5213,7 @@ dependencies = [
 
 [[package]]
 name = "lamina-term"
-version = "0.1.10"
+version = "0.2.0"
 dependencies = [
  "flate2",
  "futures",
