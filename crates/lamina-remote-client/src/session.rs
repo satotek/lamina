@@ -168,12 +168,27 @@ struct QueryRejected {
     reported: bool,
 }
 
+/// How far one accepted diff has got.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DiffProgress {
+    /// Nothing reached the app yet, so its pane is still loading and a lost
+    /// connection has to fail it.
+    Waiting,
+    /// A view arrived. A second, highlighted one can follow; failing the
+    /// ticket now would replace a file the user is reading with an error.
+    Shown,
+}
+
 struct Inner {
     writer: Mutex<Option<Box<dyn Write + Send>>>,
     pending: Mutex<HashMap<u16, Sender<Response>>>,
     /// Diff requests do not wait. The stream id is how an `Error` response
     /// finds the ticket to fail.
     diff_streams: Mutex<HashMap<u16, DiffTicket>>,
+    /// Tickets the helper accepted but has not finished. `diff_streams` loses
+    /// its entry when the `Ok` arrives, so it cannot say which diffs still owe
+    /// the app an outcome.
+    diff_open: Mutex<HashMap<DiffTicket, DiffProgress>>,
     /// `Run` does not wait. An `Error` response fails the operation; `Ok`
     /// means later events carry the outcome.
     operation_streams: Mutex<HashMap<u16, OperationId>>,
@@ -301,6 +316,7 @@ impl RemoteSession {
             writer: Mutex::new(Some(Box::new(writer))),
             pending: Mutex::new(HashMap::new()),
             diff_streams: Mutex::new(HashMap::new()),
+            diff_open: Mutex::new(HashMap::new()),
             operation_streams: Mutex::new(HashMap::new()),
             inflight: Mutex::new(HashSet::new()),
             operation_waiters: Mutex::new(HashMap::new()),
@@ -729,6 +745,7 @@ impl Inner {
             let _ = waiter.send(Some(reason.to_owned()));
         }
         let diffs = std::mem::take(&mut *lock(&self.diff_streams));
+        let open_diffs = std::mem::take(&mut *lock(&self.diff_open));
         let _operations = std::mem::take(&mut *lock(&self.operation_streams));
         let inflight = std::mem::take(&mut *lock(&self.inflight));
         let queries = std::mem::take(&mut *lock(&self.queries));
@@ -737,7 +754,16 @@ impl Inner {
             let _park = lock(&self.park);
             self.wake.notify_all();
         }
-        for ticket in diffs.into_values() {
+        // `diff_streams` only holds the ids an `Error` could still arrive on.
+        // The list of diffs that owe the app an outcome is `diff_open`.
+        drop(diffs);
+        // A ticket that already delivered a view is not loading any more; the
+        // app shows the file it has. The rest never reached the pane and would
+        // wait forever.
+        for (ticket, progress) in open_diffs {
+            if progress == DiffProgress::Shown {
+                continue;
+            }
             (self.events)(SessionEvent::DiffFailed {
                 ticket,
                 error: reason.to_owned(),
@@ -944,6 +970,7 @@ impl Inner {
                 if let Some(ticket) = lock(&self.diff_streams).remove(&frame.stream)
                     && let Response::Error(error) = response
                 {
+                    lock(&self.diff_open).remove(&ticket);
                     (self.events)(SessionEvent::DiffFailed {
                         ticket,
                         error: error.message,
@@ -1094,20 +1121,30 @@ impl Inner {
                     error: error.to_string(),
                 }),
             },
-            Event::DiffReady { ticket, view } => match DiffView::try_from(*view) {
-                Ok(view) => (self.events)(SessionEvent::DiffReady {
-                    ticket: DiffTicket(ticket),
-                    view: Arc::new(view),
-                }),
-                Err(error) => (self.events)(SessionEvent::DiffFailed {
-                    ticket: DiffTicket(ticket),
-                    error: error.to_string(),
-                }),
-            },
-            Event::DiffFailed { ticket, error } => (self.events)(SessionEvent::DiffFailed {
-                ticket: DiffTicket(ticket),
-                error,
-            }),
+            Event::DiffReady { ticket, view } => {
+                let ticket = DiffTicket(ticket);
+                match DiffView::try_from(*view) {
+                    Ok(view) => {
+                        self.note_diff_view(ticket, &view);
+                        (self.events)(SessionEvent::DiffReady {
+                            ticket,
+                            view: Arc::new(view),
+                        });
+                    }
+                    Err(error) => {
+                        lock(&self.diff_open).remove(&ticket);
+                        (self.events)(SessionEvent::DiffFailed {
+                            ticket,
+                            error: error.to_string(),
+                        });
+                    }
+                }
+            }
+            Event::DiffFailed { ticket, error } => {
+                let ticket = DiffTicket(ticket);
+                lock(&self.diff_open).remove(&ticket);
+                (self.events)(SessionEvent::DiffFailed { ticket, error });
+            }
             Event::LoadFailed { error } => (self.events)(SessionEvent::LoadFailed { error }),
             Event::OperationStarted { id } => {
                 (self.events)(SessionEvent::OperationStarted {
@@ -1159,6 +1196,33 @@ impl Inner {
             Event::SignaturesInvalidated => {
                 (self.events)(SessionEvent::SignaturesInvalidated);
             }
+        }
+    }
+
+    /// Records how far one accepted diff has got.
+    ///
+    /// The helper sends a plain view and, when the file has a grammar and is
+    /// small enough, a highlighted one behind it. The ticket is released after
+    /// that second view; for a binary file or a path with no grammar the plain
+    /// view is already the last one, which is the same lookup the helper makes
+    /// before it sends a second. A file too large to highlight is the one case
+    /// this cannot see, so its ticket waits for a cancel or the session's end.
+    fn note_diff_view(&self, ticket: DiffTicket, view: &DiffView) {
+        let last = view.diff.binary
+            || lamina_core::highlight::language_for_path(diff_path(&view.request)).is_none();
+        let mut open = lock(&self.diff_open);
+        match open.get_mut(&ticket) {
+            // Only one extra view can follow the plain one, and it is the last.
+            Some(DiffProgress::Shown) => {
+                open.remove(&ticket);
+            }
+            Some(progress @ DiffProgress::Waiting) => {
+                *progress = DiffProgress::Shown;
+                if last {
+                    open.remove(&ticket);
+                }
+            }
+            None => {}
         }
     }
 
@@ -1261,6 +1325,9 @@ impl Inner {
         let send = (|| -> Result<()> {
             self.ensure_open()?;
             let stream = self.alloc_stream()?;
+            // Registered before the request is written, so a connection that
+            // drops between the write and the first event still fails it.
+            lock(&self.diff_open).insert(ticket, DiffProgress::Waiting);
             lock(&self.diff_streams).insert(stream, ticket);
             if let Err(error) = self.write_message(
                 stream,
@@ -1271,6 +1338,7 @@ impl Inner {
                 }),
             ) {
                 lock(&self.diff_streams).remove(&stream);
+                lock(&self.diff_open).remove(&ticket);
                 return Err(error);
             }
             Ok(())
@@ -1374,6 +1442,9 @@ impl RepositorySession for RemoteSession {
     }
 
     fn cancel_diff(&self, ticket: DiffTicket) {
+        // Nobody waits for this ticket any more, so a lost connection must not
+        // report it as failed afterwards.
+        lock(&self.inner.diff_open).remove(&ticket);
         // Not `call`: an in-flight read must not delay the cancel frame.
         let _ = self
             .inner
@@ -1964,6 +2035,18 @@ impl lamina_core::git_cli::GitConfigAccess for RemoteConfig {
             Ok(Some(message)) => Err(Error::other(message)),
             Err(_) => Err(inner.lost_error()),
         }
+    }
+}
+
+/// The path a diff request names. It decides whether a highlighted view can
+/// follow the plain one, the same lookup the helper makes before sending it.
+fn diff_path(request: &DiffRequest) -> &str {
+    match request {
+        DiffRequest::Commit { path, .. }
+        | DiffRequest::Staged { path }
+        | DiffRequest::Unstaged { path }
+        | DiffRequest::Compare { path, .. }
+        | DiffRequest::CompareWorktree { path, .. } => path,
     }
 }
 

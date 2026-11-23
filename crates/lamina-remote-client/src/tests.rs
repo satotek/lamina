@@ -458,6 +458,91 @@ fn both_diff_views_are_delivered() {
 }
 
 #[test]
+fn a_diff_accepted_before_the_helper_leaves_fails_instead_of_waiting() {
+    let (client_read, client_write, mut peer_read, mut peer_write) = pipe();
+    let peer = thread::spawn(move || {
+        hello(&mut peer_read, &mut peer_write);
+        accept_subscribe(&mut peer_read, &mut peer_write);
+        let (_, id) = oid_pair(14);
+        send_chunk(&mut peer_write, id, true);
+
+        // The first diff runs to its last view. The second is only accepted,
+        // then the helper goes away the way an `ssh` child does when the link
+        // drops.
+        let (finished_stream, request) =
+            next_request(&mut peer_read, &mut peer_write).expect("finished diff");
+        let Request::Diff { ticket, .. } = request else {
+            panic!("expected a diff, got {request:?}");
+        };
+        write_msg(
+            &mut peer_write,
+            finished_stream,
+            &Message::Response(Response::Ok),
+        );
+        for highlighted in [false, true] {
+            write_msg(
+                &mut peer_write,
+                0,
+                &Message::Event(Event::DiffReady {
+                    ticket,
+                    view: Box::new(diff_view(highlighted)),
+                }),
+            );
+        }
+        let (open_stream, request) =
+            next_request(&mut peer_read, &mut peer_write).expect("open diff");
+        assert!(matches!(request, Request::Diff { .. }), "{request:?}");
+        write_msg(
+            &mut peer_write,
+            open_stream,
+            &Message::Response(Response::Ok),
+        );
+    });
+
+    let (tx, rx) = mpsc::channel();
+    let session = RemoteSession::connect(
+        client_read,
+        client_write,
+        RemoteTarget::new("scripted"),
+        move |event| {
+            let _ = tx.send(event);
+        },
+    )
+    .expect("connect");
+    let (oid, _) = oid_pair(14);
+    let finished = session.request_diff(DiffRequest::Commit {
+        commit: oid,
+        path: "src/lib.rs".into(),
+    });
+    let open = session.request_diff(DiffRequest::Unstaged {
+        path: "src/lib.rs".into(),
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut views = 0;
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(remaining) {
+            Ok(SessionEvent::DiffReady { ticket, .. }) if ticket == finished => views += 1,
+            Ok(SessionEvent::DiffFailed { ticket, error }) if ticket == open => {
+                assert!(
+                    error.contains(CONNECTION_LOST),
+                    "the dropped link should be named: {error}"
+                );
+                break;
+            }
+            Ok(SessionEvent::DiffFailed { ticket, error }) if ticket == finished => {
+                panic!("a diff that delivered both views failed: {error}");
+            }
+            Ok(_) => {}
+            Err(error) => panic!("the accepted diff never failed: {error}"),
+        }
+    }
+    assert_eq!(views, 2, "the finished diff keeps both of its views");
+    peer.join().expect("peer");
+}
+
+#[test]
 fn missed_pings_report_a_lost_connection_and_keep_the_snapshot() {
     let (client_read, client_write, mut peer_read, mut peer_write) = pipe();
     // The write end has to stay open. Dropping it is an EOF, and the client
