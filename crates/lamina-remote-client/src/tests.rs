@@ -2,9 +2,9 @@
 //! of an in-memory pipe, so these tests cover the client without `ssh`.
 
 use std::io::{Read, Write};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -1713,5 +1713,59 @@ fn a_snapshot_that_grows_past_the_commit_limit_fails_to_load() {
         "the rejected chunk must not be kept"
     );
     drop(hold_tx);
+    peer.join().expect("peer");
+}
+
+/// The watchdog reports a lost link from the ping thread. A callback that
+/// closes the tab drops the session right there, and shutdown used to join
+/// that same thread, which panics instead of returning.
+#[test]
+fn a_callback_may_drop_the_session_when_the_watchdog_gives_up() {
+    let (client_read, client_write, mut peer_read, mut peer_write) = pipe();
+    let peer = thread::spawn(move || {
+        hello(&mut peer_read, &mut peer_write);
+        accept_subscribe(&mut peer_read, &mut peer_write);
+        let (_, id) = oid_pair(12);
+        send_chunk(&mut peer_write, id, true);
+        // Read every ping and answer none, until the transport goes away.
+        while matches!(proto::read_frame(&mut peer_read), Ok(Some(_))) {}
+        drop(peer_write);
+    });
+
+    let slot: Arc<Mutex<Option<RemoteSession>>> = Arc::new(Mutex::new(None));
+    let (dropped_tx, dropped_rx) = mpsc::channel::<()>();
+    let dropped_tx = Mutex::new(dropped_tx);
+    let callback_slot = Arc::clone(&slot);
+    let session = RemoteSession::connect_attached(
+        client_read,
+        client_write,
+        RemoteTarget::new("scripted"),
+        move |event| {
+            if matches!(event, SessionEvent::LoadFailed { .. }) {
+                let session = callback_slot.lock().expect("slot").take();
+                drop(session);
+                let _ = dropped_tx.lock().expect("sender").send(());
+            }
+        },
+        ClientConfig {
+            ping_interval: Duration::from_millis(40),
+            missed_pings: 3,
+            first_chunk_timeout: Duration::from_secs(5),
+            request_timeout: Duration::from_secs(10),
+            ..ClientConfig::default()
+        },
+        TransportAttach {
+            diagnostic: Arc::new(String::new),
+            disconnect: None,
+            retain: None,
+        },
+    )
+    .expect("connect");
+    *slot.lock().expect("slot") = Some(session);
+
+    dropped_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("dropping the session from the watchdog's callback must return");
+    assert!(slot.lock().expect("slot").is_none());
     peer.join().expect("peer");
 }

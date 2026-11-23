@@ -910,7 +910,13 @@ impl Inner {
         // under `park`, not on the wakeup the drain sends for callers. That
         // wakeup can land while the thread is between waits and be lost.
         if let Some(handle) = lock(&self.ping).take() {
-            let _ = handle.join();
+            if handle.thread().id() == thread::current().id() {
+                // The watchdog declared the link lost and the event callback
+                // dropped the session on this same thread.
+                drop(handle);
+            } else {
+                let _ = handle.join();
+            }
         }
         // A deliberate close releases every caller itself. The reader thread
         // may stay parked on a stream the peer never closes, so waiting for
