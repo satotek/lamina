@@ -17,9 +17,9 @@ use futures::StreamExt as _;
 use futures::channel::mpsc::{self as futures_mpsc, UnboundedSender};
 use futures::channel::oneshot;
 use gpui::{
-    AnyElement, AnyWindowHandle, App, AppContext as _, Context, Entity, Focusable as _, FontWeight,
-    IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Task, WeakEntity, Window, div, px,
+    AnyElement, AnyWindowHandle, App, AppContext as _, Context, Div, Entity, Focusable as _,
+    FontWeight, IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Task, WeakEntity, Window, div, px,
 };
 use gpui_component::dialog::DialogFooter;
 use gpui_component::input::{Input, InputEvent, InputState};
@@ -318,13 +318,9 @@ pub(crate) fn spawn_connect(
     ssh: Option<SshOverride>,
     sender: UnboundedSender<ConnectMsg>,
 ) {
-    let worker = sender.clone();
-    let built = std::thread::Builder::new()
-        .name("lamina-remote-connect".to_owned())
-        .spawn(move || connect_worker(spec, ssh, worker));
-    if let Err(error) = built {
-        let _ = sender.unbounded_send(WorkerEvent::Failed(error.to_string()).into());
-    }
+    spawn_worker("lamina-remote-connect", sender, move |worker| {
+        connect_worker(spec, ssh, worker)
+    });
 }
 
 /// Installs the helper, opens a [`RemoteBrowser`], and lists the starting
@@ -336,10 +332,25 @@ pub(crate) fn spawn_browse_open(
     ssh: Option<SshOverride>,
     sender: UnboundedSender<BrowseMsg>,
 ) {
+    spawn_worker("lamina-remote-browse-open", sender, move |worker| {
+        browse_open_worker(target, ssh, worker)
+    });
+}
+
+/// Runs `work` on a thread named `name`. When the thread cannot start, the
+/// failure goes down the same channel a worker failure would, so the UI shows
+/// it through the normal path.
+fn spawn_worker<M>(
+    name: &str,
+    sender: UnboundedSender<M>,
+    work: impl FnOnce(UnboundedSender<M>) + Send + 'static,
+) where
+    M: From<WorkerEvent> + Send + 'static,
+{
     let worker = sender.clone();
     let built = std::thread::Builder::new()
-        .name("lamina-remote-browse-open".to_owned())
-        .spawn(move || browse_open_worker(target, ssh, worker));
+        .name(name.to_owned())
+        .spawn(move || work(worker));
     if let Err(error) = built {
         let _ = sender.unbounded_send(WorkerEvent::Failed(error.to_string()).into());
     }
@@ -1282,77 +1293,60 @@ impl Render for RemoteDialog {
             .flex_col()
             .gap_3()
             .w_full()
-            .child(labeled_field(
+            .child(labeled(
                 t!("remote_repo.host").to_string(),
-                &self.host,
+                Input::new(&self.host).w_full().bg(design.field),
                 &design,
             ))
-            .child(
-                div()
-                    .text_size(px(design.tiny()))
-                    .text_color(design.muted)
-                    .child(t!("remote_repo.host_hint").to_string()),
-            )
-            .child(
+            .child(caption(t!("remote_repo.host_hint").to_string(), &design))
+            .child(labeled(
+                t!("remote_repo.path").to_string(),
                 div()
                     .flex()
-                    .flex_col()
-                    .gap_1()
-                    .w_full()
+                    .items_center()
+                    .gap_2()
+                    .child(Input::new(&self.path).flex_1().bg(design.field))
                     .child(
-                        div()
-                            .text_size(px(design.tiny()))
-                            .text_color(design.muted)
-                            .child(t!("remote_repo.path").to_string()),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_2()
-                            .child(Input::new(&self.path).flex_1().bg(design.field))
-                            .child(
-                                ui::button(
-                                    "remote-repo-browse",
-                                    t!("remote_repo.browse").to_string(),
-                                )
-                                .kind(ui::ButtonKind::Normal)
-                                .size(ui::ButtonSize::Medium)
-                                .disabled(!can_browse)
-                                .loading(is_connecting)
-                                .on_click(cx.listener(
-                                    |this, _, _, cx| {
-                                        this.start_browse(cx);
-                                    },
-                                )),
-                            ),
+                        ui::button("remote-repo-browse", t!("remote_repo.browse").to_string())
+                            .kind(ui::ButtonKind::Normal)
+                            .size(ui::ButtonSize::Medium)
+                            .disabled(!can_browse)
+                            .loading(is_connecting)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.start_browse(cx);
+                            })),
                     ),
-            );
+                &design,
+            ));
 
         if let Some(panel) = &self.browse {
             form = form.child(self.render_browser_panel(panel, &design, cx));
         }
 
         if let Some(error) = &self.error {
-            form = form.child(ui::banner(ui::BannerKind::Danger, error.clone(), &design).wrap());
+            form = form.child(danger_banner(error, &design));
         }
         form
     }
 }
 
-fn labeled_field(label: String, input: &Entity<InputState>, design: &Design) -> gpui::AnyElement {
+/// A small muted line: a field label or the hint under a field.
+fn caption(text: String, design: &Design) -> Div {
+    div()
+        .text_size(px(design.tiny()))
+        .text_color(design.muted)
+        .child(text)
+}
+
+/// A caption above a control, filling the form's width.
+fn labeled(label: String, control: impl IntoElement, design: &Design) -> AnyElement {
     div()
         .flex()
         .flex_col()
         .gap_1()
         .w_full()
-        .child(
-            div()
-                .text_size(px(design.tiny()))
-                .text_color(design.muted)
-                .child(label),
-        )
-        .child(Input::new(input).w_full().bg(design.field))
+        .child(caption(label, design))
+        .child(control)
         .into_any_element()
 }
 
