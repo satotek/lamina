@@ -28,7 +28,9 @@ use lamina_core::git_cli::{
     AcrossMergesAction, MoveDirection, RebaseAction, RebaseStep, drop_commit, move_commit,
     reword_commit, squash_commit_into_parent,
 };
-use lamina_core::session::{Operation, RepoReader, RepoSnapshot, RepositorySession, ResetMode};
+use lamina_core::session::{
+    Operation, RepoLocation, RepoReader, RepoSnapshot, RepositorySession, ResetMode,
+};
 use lamina_core::{ChangeKind, Error, HeadInfo, Oid, RefKind, RepoState, Result, WorktreeStatus};
 
 use super::RepoView;
@@ -374,6 +376,29 @@ fn snapshot_parents(snapshot: &RepoSnapshot, id: Oid) -> Option<Vec<Oid>> {
     Some(commit.parents.clone())
 }
 
+/// Whether a session answers from the wire instead of this machine.
+///
+/// A remote read is an SSH round trip, so it must not run on the UI thread;
+/// the menu rules below only read what the snapshot already carries for one.
+fn is_remote(session: &dyn RepositorySession) -> bool {
+    matches!(session.location(), RepoLocation::Ssh { .. })
+}
+
+/// The parents of `id` for a UI-thread ancestry walk.
+///
+/// The loaded snapshot comes first, and only a local session may fall back to
+/// the repository: reading a commit from there is cheap through gix on this
+/// machine, but on an ssh tab it would hold the frame the menu opens in until
+/// the host answers.
+fn parents_in(
+    snapshot: &RepoSnapshot,
+    remote: bool,
+    id: Oid,
+    read: impl FnOnce() -> Option<Vec<Oid>>,
+) -> Option<Vec<Oid>> {
+    snapshot_parents(snapshot, id).or_else(|| (!remote).then(read).flatten())
+}
+
 /// Every commit HEAD can reach, capped like the remote check: a menu only needs
 /// to know whether any selected commit is already on the branch.
 fn head_reachable_set(session: &dyn RepositorySession) -> HashSet<Oid> {
@@ -382,6 +407,7 @@ fn head_reachable_set(session: &dyn RepositorySession) -> HashSet<Oid> {
         return HashSet::new();
     };
     let repo = session.reader();
+    let remote = is_remote(session);
     let mut reachable = HashSet::new();
     let mut stack = vec![head];
     while let Some(id) = stack.pop() {
@@ -391,7 +417,7 @@ fn head_reachable_set(session: &dyn RepositorySession) -> HashSet<Oid> {
         if reachable.len() > REMOTE_WALK_LIMIT {
             break;
         }
-        let parents = snapshot_parents(&snapshot, id).or_else(|| repo.parents(id).ok());
+        let parents = parents_in(&snapshot, remote, id, || repo.parents(id).ok());
         if let Some(parents) = parents {
             stack.extend(parents);
         }
@@ -419,6 +445,9 @@ pub(crate) struct EditContext {
     remotes: Vec<(String, Oid)>,
     snapshot: Arc<RepoSnapshot>,
     repo: Arc<dyn RepoReader>,
+    /// The session answers from the wire, so this context may only read what
+    /// the snapshot carries.
+    remote: bool,
 }
 
 impl EditContext {
@@ -426,10 +455,11 @@ impl EditContext {
         let snapshot = session.snapshot();
         let head = head_target(snapshot.head.as_ref())?;
         let repo = session.reader();
-        let (line, distance) =
-            walk_first_parents(head, commit, |id| snapshot_parents(&snapshot, id))
-                .or_else(|| walk_first_parents(head, commit, |id| repo.parents(id).ok()))
-                .unwrap_or_default();
+        let remote = is_remote(session);
+        let (line, distance) = walk_first_parents(head, commit, |id| {
+            parents_in(&snapshot, remote, id, || repo.parents(id).ok())
+        })
+        .unwrap_or_default();
         let remotes = snapshot
             .refs
             .iter()
@@ -445,6 +475,7 @@ impl EditContext {
             remotes,
             snapshot,
             repo,
+            remote,
         };
         // The walk only follows first parents, so a commit behind a merge needs
         // the full ancestry check to tell it apart from one on another branch.
@@ -471,8 +502,7 @@ impl EditContext {
     /// parent are merges, and whether the parent is already back on HEAD's
     /// line, where the merged branch forked.
     fn side_view(&self, commit: Oid) -> Option<SideView> {
-        let parents_of =
-            |id: Oid| snapshot_parents(&self.snapshot, id).or_else(|| self.repo.parents(id).ok());
+        let parents_of = |id: Oid| self.parents_of(id);
         let parents = parents_of(commit)?;
         let parent = parents.first().copied();
         Some(SideView {
@@ -494,6 +524,13 @@ impl EditContext {
         Some((onto, range_commits(&self.line, onto_index)))
     }
 
+    /// Parents for the merge checks, from the snapshot or a local repository.
+    fn parents_of(&self, id: Oid) -> Option<Vec<Oid>> {
+        parents_in(&self.snapshot, self.remote, id, || {
+            self.repo.parents(id).ok()
+        })
+    }
+
     /// The first line of `commit`'s message, from the loaded rows when the
     /// walk has them and from the repository otherwise.
     fn summary(&self, commit: Oid) -> String {
@@ -501,6 +538,9 @@ impl EditContext {
             && let Some((info, _)) = self.snapshot.commits.get(index)
         {
             return info.summary.clone();
+        }
+        if self.remote {
+            return short_oid(commit);
         }
         self.repo
             .commit_message(commit)
@@ -578,8 +618,7 @@ impl EditContext {
             if seen.len() > REMOTE_WALK_LIMIT {
                 return false;
             }
-            let parents =
-                snapshot_parents(&self.snapshot, id).or_else(|| self.repo.parents(id).ok());
+            let parents = self.parents_of(id);
             if let Some(parents) = parents {
                 stack.extend(parents);
             }
@@ -2975,6 +3014,43 @@ mod tests {
             short_name: short_name.into(),
             target: Some(target),
         }
+    }
+
+    fn empty_snapshot() -> RepoSnapshot {
+        RepoSnapshot {
+            generation: 0,
+            head: None,
+            refs: Arc::new(Vec::new()),
+            refs_by_commit: Arc::new(std::collections::HashMap::new()),
+            commits: lamina_core::session::CommitList::default(),
+            commit_index: Arc::new(std::collections::HashMap::new()),
+            status: Arc::new(WorktreeStatus::default()),
+            stashes: Arc::new(Vec::new()),
+            upstreams: Arc::new(std::collections::HashMap::new()),
+            remotes: Vec::new(),
+            state: RepoState::Normal,
+            conflicts: Arc::new(Vec::new()),
+            busy: None,
+        }
+    }
+
+    #[test]
+    fn an_ssh_ancestry_walk_never_reads_the_wire() {
+        let snapshot = empty_snapshot();
+        // A remote reader is a round trip that would hold the frame the menu
+        // opens in, so a commit the snapshot does not carry stays unknown.
+        assert_eq!(
+            parents_in(&snapshot, true, oid(3), || panic!(
+                "an ssh tab must not read parents from the host"
+            )),
+            None
+        );
+        // A local tab still reads the object through gix for one the loaded
+        // snapshot left out.
+        assert_eq!(
+            parents_in(&snapshot, false, oid(3), || Some(vec![oid(4)])),
+            Some(vec![oid(4)])
+        );
     }
 
     #[test]
