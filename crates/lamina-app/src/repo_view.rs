@@ -926,6 +926,13 @@ impl RepoView {
         self.last_autofetch = at;
     }
 
+    /// Whether the background timer still has work ahead of it. A tab with no
+    /// session must let the loop end instead of waking it forever.
+    #[cfg(test)]
+    pub(crate) fn autofetch_running(&self) -> bool {
+        self.autofetch.as_ref().is_some_and(|task| !task.is_ready())
+    }
+
     pub(crate) fn notify_if_active(&self, cx: &mut Context<Self>) {
         if self.active {
             cx.notify();

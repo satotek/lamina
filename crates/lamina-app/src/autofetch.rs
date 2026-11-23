@@ -34,21 +34,25 @@ pub(crate) fn start(
         loop {
             cx.background_executor().timer(TICK).await;
 
-            let Ok((active, connected, busy, minutes)) = this.read_with(cx, |view, cx| {
-                (
-                    view.is_active(),
-                    view.autofetch_ready(),
-                    view.has_operation_in_progress(),
-                    Settings::get(cx).behaviour.auto_fetch_minutes,
-                )
-            }) else {
+            let Ok((active, has_session, connected, busy, minutes)) =
+                this.read_with(cx, |view, cx| {
+                    (
+                        view.is_active(),
+                        view.session.is_some(),
+                        view.autofetch_ready(),
+                        view.has_operation_in_progress(),
+                        Settings::get(cx).behaviour.auto_fetch_minutes,
+                    )
+                })
+            else {
                 // The window or view is gone, and with it the repository.
                 return;
             };
-            // Stop polling when inactive, `--fake`, or disabled. A lost
-            // connection stays in the loop: the next tick tries again once
-            // the helper is back, instead of waiting for the tab to reopen.
-            if !active || minutes == 0 {
+            // Stop polling when inactive, `--fake`, disabled, or for a tab
+            // that no longer has a session: a reopened tab starts its own
+            // timer. A lost connection keeps its session, so it stays in the
+            // loop and the next tick tries again once the helper is back.
+            if !active || !has_session || minutes == 0 {
                 return;
             }
             if !should_autofetch(connected, busy, minutes) || !due(minutes, last.elapsed()) {
@@ -130,6 +134,47 @@ mod tests {
         assert!(!should_autofetch(true, true, 15));
         assert!(!should_autofetch(false, true, 15));
         assert!(!should_autofetch(true, false, 0));
+    }
+
+    /// A tab that lost its session has nothing to fetch through, so the timer
+    /// must end instead of waking every few seconds for the rest of the app's
+    /// life. A reconnect starts a new timer for the new session.
+    #[gpui::test]
+    fn a_tab_without_a_session_stops_the_timer(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            gpui_component::init(cx);
+            let mut settings = Settings::default();
+            settings.behaviour.auto_fetch_minutes = 15;
+            cx.set_global(settings);
+        });
+        let repo = lamina_core::test_support::TestRepo::new();
+        let window = cx.add_window(|window, cx| {
+            RepoView::new(
+                crate::repo_view::Launch::open_quiet(repo.path(), None),
+                window,
+                cx,
+            )
+        });
+        let view = window.root(cx).expect("the window's root view");
+        let mut cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        assert!(
+            view.read_with(&cx, |view, _| view.autofetch_running()),
+            "an open session starts the timer"
+        );
+
+        let session = view.update(&mut cx, |view, _| view.session.take());
+        if let Some(session) = session {
+            crate::repo_view::drop_session_in_background(session);
+        }
+        cx.executor().advance_clock(Duration::from_secs(6));
+        cx.run_until_parked();
+
+        assert!(
+            view.read_with(&cx, |view, _| !view.autofetch_running()),
+            "the tick must return once the tab has no session"
+        );
     }
 
     /// The command the scheduler submits. Kept next to the gate so a remote
