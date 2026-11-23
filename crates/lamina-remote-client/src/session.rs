@@ -161,6 +161,10 @@ struct Inner {
     query_streams: Mutex<HashMap<u16, QueryTicket>>,
     next_stream: AtomicU16,
     snapshot: RwLock<Arc<RepoSnapshot>>,
+    /// Generation the current commit list belongs to. Only a reset starts a
+    /// list; a meta frame bumps `RepoSnapshot::generation` without replacing
+    /// commits, and must not invalidate the chunks still behind it.
+    list_generation: AtomicU64,
     /// Bumped under `park` so a waiter cannot miss the wakeup for a chunk.
     snapshot_note: AtomicU64,
     events: Box<dyn Fn(SessionEvent) + Send + Sync>,
@@ -270,6 +274,7 @@ impl RemoteSession {
             query_streams: Mutex::new(HashMap::new()),
             next_stream: AtomicU16::new(2),
             snapshot: RwLock::new(Arc::new(empty_snapshot())),
+            list_generation: AtomicU64::new(0),
             snapshot_note: AtomicU64::new(0),
             events: Box::new(on_event),
             next_ticket: AtomicU64::new(0),
@@ -867,6 +872,7 @@ impl Inner {
             Event::SnapshotReset { snapshot } => match RepoSnapshot::try_from(snapshot) {
                 Ok(snapshot) => {
                     let generation = snapshot.generation;
+                    self.list_generation.store(generation, Ordering::SeqCst);
                     *write(&self.snapshot) = Arc::new(snapshot);
                     self.note_snapshot();
                     (self.events)(SessionEvent::SnapshotUpdated { generation });
@@ -882,8 +888,10 @@ impl Inner {
                 complete,
             } => {
                 let mut guard = write(&self.snapshot);
-                if guard.generation != generation {
+                if self.list_generation.load(Ordering::SeqCst) != generation {
                     // A reset for a newer snapshot already replaced this list.
+                    // A meta frame does not count: it keeps the commit list
+                    // and only bumps `RepoSnapshot::generation`.
                     return;
                 }
                 let mut next = RepoSnapshot::clone(&guard);
@@ -925,10 +933,16 @@ impl Inner {
                 next.commits.extend(infos, graph);
                 next.commits.complete = complete;
                 next.commit_index = Arc::new(index);
+                // The snapshot's generation, not the chunk's: a meta frame in
+                // between bumped the former, and the event must name the
+                // snapshot the caller can now read.
+                let updated = next.generation;
                 *guard = Arc::new(next);
                 drop(guard);
                 self.note_snapshot();
-                (self.events)(SessionEvent::SnapshotUpdated { generation });
+                (self.events)(SessionEvent::SnapshotUpdated {
+                    generation: updated,
+                });
             }
             Event::SnapshotMeta { snapshot } => match RepoSnapshot::try_from(snapshot) {
                 Ok(incoming) => {

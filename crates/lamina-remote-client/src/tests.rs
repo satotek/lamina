@@ -750,6 +750,89 @@ fn a_dropped_helper_expires_an_outstanding_query() {
     peer.join().expect("peer");
 }
 
+#[test]
+fn a_meta_frame_between_chunks_does_not_swallow_the_rest_of_the_history() {
+    let (client_read, client_write, mut peer_read, mut peer_write) = pipe();
+    let (hold_tx, hold_rx) = mpsc::channel::<()>();
+    let peer = thread::spawn(move || {
+        hello(&mut peer_read, &mut peer_write);
+        accept_subscribe(&mut peer_read, &mut peer_write);
+        let (_, first) = oid_pair(10);
+        let (_, second) = oid_pair(11);
+        // The helper streams generation 1. A status-only change then queues
+        // a small meta frame, which the helper sends ahead of the snapshot
+        // chunks still waiting in its low-priority queue.
+        write_msg(
+            &mut peer_write,
+            0,
+            &Message::Event(Event::SnapshotReset {
+                snapshot: snapshot_dto(),
+            }),
+        );
+        write_msg(
+            &mut peer_write,
+            0,
+            &Message::Event(Event::SnapshotAppend {
+                generation: 1,
+                commits: vec![commit_dto(first)],
+                rows: vec![row()],
+                complete: false,
+            }),
+        );
+        let mut bumped = snapshot_dto();
+        bumped.generation = 2;
+        write_msg(
+            &mut peer_write,
+            0,
+            &Message::Event(Event::SnapshotMeta { snapshot: bumped }),
+        );
+        write_msg(
+            &mut peer_write,
+            0,
+            &Message::Event(Event::SnapshotAppend {
+                generation: 1,
+                commits: vec![commit_dto(second)],
+                rows: vec![row()],
+                complete: true,
+            }),
+        );
+        // Dropping the write end is an EOF, which would race the client's
+        // own first-chunk wait.
+        let _ = hold_rx.recv();
+    });
+
+    let session = RemoteSession::connect(
+        client_read,
+        client_write,
+        RemoteTarget::new("scripted"),
+        |_| {},
+    )
+    .expect("connect");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let snapshot = session.snapshot();
+        if snapshot.commits.complete {
+            assert_eq!(
+                snapshot.commits.len(),
+                2,
+                "the chunk behind the meta frame was dropped"
+            );
+            assert_eq!(
+                snapshot.generation, 2,
+                "the meta frame still bumps the snapshot's own generation"
+            );
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the history never completed behind the meta frame"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    drop(hold_tx);
+    peer.join().expect("peer");
+}
+
 fn query_ticket(event: &SessionEvent) -> Option<QueryTicket> {
     Some(match event {
         SessionEvent::QueryReady { ticket, .. }
