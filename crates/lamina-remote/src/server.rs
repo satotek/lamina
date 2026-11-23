@@ -1563,11 +1563,41 @@ fn protocol_error(error: proto::ProtocolError) -> RemoteError {
 
 /// The repository root the helper was pointed at, for the `--stdio` entry
 /// point that parses its own arguments.
+///
+/// The client quotes the path for the remote shell, so a `~` the user typed in
+/// the app reaches this helper unexpanded. Expand it here, from the same home
+/// directory the user's shell reads, so `~/repo` opens the repository they
+/// meant instead of failing on a literal `~` folder.
 pub fn parse_root(value: Option<&str>) -> Result<PathBuf, BoxError> {
     match value {
-        Some(value) => Ok(PathBuf::from(value)),
+        Some(value) => Ok(expand_root(value)),
         None => Ok(std::env::current_dir()?),
     }
+}
+
+fn expand_root(value: &str) -> PathBuf {
+    expand_root_in(value, home_dir().as_deref())
+}
+
+/// Split from [`expand_root`] so the expansion is testable without changing
+/// the process environment.
+fn expand_root_in(value: &str, home: Option<&Path>) -> PathBuf {
+    if let Some(home) = home {
+        if value == "~" {
+            return home.to_path_buf();
+        }
+        if let Some(rest) = value.strip_prefix("~/") {
+            return home.join(rest);
+        }
+    }
+    PathBuf::from(value)
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .filter(|home| !home.is_empty())
+        .map(PathBuf::from)
 }
 
 #[cfg(test)]
@@ -1822,5 +1852,35 @@ mod tests {
             .expect("freeing the slot unblocks the walk");
         assert_eq!(outbox.pop().as_deref(), Some(&b"next"[..]));
         worker.join().expect("queue thread");
+    }
+
+    #[test]
+    fn a_tilde_root_expands_from_home() {
+        let home = Path::new("/home/dev");
+        assert_eq!(expand_root_in("~", Some(home)), home);
+        assert_eq!(expand_root_in("~/repo", Some(home)), home.join("repo"));
+        assert_eq!(
+            expand_root_in("/srv/repo", Some(home)),
+            PathBuf::from("/srv/repo"),
+            "only a leading ~ is expanded"
+        );
+        assert_eq!(
+            expand_root_in("~other/repo", Some(home)),
+            PathBuf::from("~other/repo"),
+            "another user's home is not ours to resolve"
+        );
+        assert_eq!(
+            expand_root_in("~/repo", None),
+            PathBuf::from("~/repo"),
+            "no home directory leaves the path as typed"
+        );
+    }
+
+    #[test]
+    fn parse_root_expands_a_tilde_path() {
+        let Some(home) = home_dir() else {
+            return;
+        };
+        assert_eq!(parse_root(Some("~/repo")).expect("root"), home.join("repo"));
     }
 }
