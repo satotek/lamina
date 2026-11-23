@@ -3,8 +3,9 @@
 //! [`RemoteSession`] implements [`RepositorySession`] over any byte stream, so
 //! the UI can render a repository served by `lamina-remote` the same way it
 //! renders a local one. Reads, diffs and the snapshot stream share one
-//! connection: a reader thread demultiplexes frames by stream id, and writes
-//! take their own lock, so a slow diff cannot block a read or a cancellation.
+//! connection: a reader thread demultiplexes frames by stream id, and a writer
+//! thread sends queued frames, so a slow diff cannot block a read or a
+//! cancellation and a large write does not stall the caller.
 //!
 //! The event callback is the same shape [`Session::open`](lamina_core::session::Session::open)
 //! uses. It runs on the reader thread. It may call [`RemoteSession::snapshot`];
