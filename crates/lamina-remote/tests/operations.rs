@@ -6,7 +6,9 @@ use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use lamina_core::HeadInfo;
+#[cfg(unix)]
 use lamina_core::compare::RepoCompareSide;
+#[cfg(unix)]
 use lamina_core::error::OPERATION_CANCELLED;
 use lamina_core::lfs::LfsPointer;
 use lamina_core::merge::{ConflictStyle, ContentHash};

@@ -20,7 +20,9 @@ use lamina_core::session::{
 };
 use lamina_core::test_support::TestRepo;
 use lamina_core::{CommitStat, Oid};
-use lamina_remote_client::{CONNECTION_LOST, RemoteSession, RemoteTarget};
+#[cfg(unix)]
+use lamina_remote_client::CONNECTION_LOST;
+use lamina_remote_client::{RemoteSession, RemoteTarget};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
