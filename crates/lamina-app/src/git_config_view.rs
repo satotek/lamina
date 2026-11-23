@@ -330,15 +330,21 @@ impl GitConfigView {
     }
 
     fn set_repository(&mut self, source: ConfigSource, cx: &mut Context<Self>) {
-        let same = if source.remote {
-            Arc::ptr_eq(&self.source.access, &source.access)
-        } else {
-            self.source.label() == source.label()
-        };
-        if same && (self.config.is_some() || self.loading) {
+        let same_target = self.source.remote == source.remote
+            && if source.remote {
+                Arc::ptr_eq(&self.source.access, &source.access)
+            } else {
+                self.source.label() == source.label()
+            };
+        // Reopening a repository keeps its path but starts a new session, and
+        // with it a new command log. The access always follows the latest
+        // publish so a save is recorded in the live log, while only a
+        // different read target makes the loaded values stale.
+        let reload = !same_target || (self.config.is_none() && !self.loading);
+        self.source = source;
+        if !reload {
             return;
         }
-        self.source = source;
         self.config = None;
         self.error = None;
         self.expanded.clear();
@@ -1940,6 +1946,8 @@ impl Render for ConfigEditor {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::*;
     use lamina_core::repo::{ConfigOrigin, well_known_key};
 
@@ -2111,5 +2119,81 @@ mod tests {
             .find(|choice| choice.target.layer == ConfigLayer::System)
             .expect("system is offered");
         assert!(system.disabled);
+    }
+
+    /// A source that reads an empty configuration. The test only checks which
+    /// session the window ends up reading and writing through.
+    struct FakeAccess {
+        loads: Arc<AtomicUsize>,
+    }
+
+    impl GitConfigAccess for FakeAccess {
+        fn load_config(&self) -> lamina_core::Result<GitConfig> {
+            self.loads.fetch_add(1, Ordering::SeqCst);
+            Ok(config(Vec::new()))
+        }
+
+        fn preview_config(&self, _: &ConfigWrite) -> lamina_core::Result<ConfigPreview> {
+            Err(lamina_core::Error::other("the test never previews"))
+        }
+
+        fn apply_config(&self, _: &ConfigPreview) -> lamina_core::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn fake_access(loads: &Arc<AtomicUsize>) -> Arc<dyn GitConfigAccess> {
+        Arc::new(FakeAccess {
+            loads: Arc::clone(loads),
+        })
+    }
+
+    fn local_source(path: &str, access: Arc<dyn GitConfigAccess>) -> ConfigSource {
+        ConfigSource {
+            label: path.to_owned(),
+            remote: false,
+            access,
+        }
+    }
+
+    /// A reopened repository keeps its path but starts a new session, so the
+    /// window must take the new access even though its loaded values are still
+    /// valid. Keeping the old one sent every save to a closed session's log.
+    #[gpui::test]
+    fn reopening_the_same_path_takes_the_new_session(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            gpui_component::init(cx);
+            cx.set_global(Settings::default());
+        });
+        let loads = Arc::new(AtomicUsize::new(0));
+        let closed = fake_access(&loads);
+        let live = fake_access(&loads);
+        let window = cx.add_window(|window, cx| {
+            GitConfigView::new(local_source("/repo", Arc::clone(&closed)), window, cx)
+        });
+        let view = window.root(cx).expect("the config view");
+        let mut visual_cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual_cx.run_until_parked();
+        assert!(
+            view.read_with(&visual_cx, |view, _| view.config.is_some()),
+            "the first load did not land"
+        );
+
+        view.update(&mut visual_cx, |view, cx| {
+            view.set_repository(local_source("/repo", Arc::clone(&live)), cx);
+        });
+        assert!(
+            view.read_with(&visual_cx, |view, _| Arc::ptr_eq(
+                &view.source.access,
+                &live
+            )),
+            "the window kept the closed session's command log"
+        );
+        assert_eq!(
+            loads.load(Ordering::SeqCst),
+            1,
+            "the same path does not need to be read again"
+        );
     }
 }
