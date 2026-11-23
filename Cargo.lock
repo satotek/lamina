@@ -5149,7 +5149,7 @@ name = "lamina-core"
 version = "0.2.0"
 dependencies = [
  "chardetng",
- "core-foundation 0.9.4",
+ "core-foundation 0.10.1",
  "encoding_rs",
  "gix",
  "imara-diff",

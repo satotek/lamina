@@ -44,7 +44,7 @@ unicode-width = "0.2"
 # Both versions are already in the lockfile through other crates, so this
 # only adds the direct dependency edge.
 [target.'cfg(target_os = "macos")'.dependencies]
-core-foundation = "0.9"
+core-foundation = "0.10"
 system-configuration = "0.6"
 
 # WinHTTP: the documented way to resolve the per-user Internet Options and
