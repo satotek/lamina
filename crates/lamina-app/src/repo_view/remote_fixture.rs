@@ -110,25 +110,30 @@ fn write_exec(path: &Path, text: &str) {
     std::fs::set_permissions(path, perms).unwrap();
 }
 
-/// The workspace build places `lamina-remote` next to this test binary's
-/// `deps` directory. A package test can start before that binary is linked.
+/// The workspace build places `lamina-remote` in the profile directory, an
+/// ancestor of this test binary. How deep the test binary sits depends on
+/// cargo's build-dir layout (`deps/` or `build/<package>/<hash>/out/`), so
+/// every ancestor is tried. A package test can start before that binary is
+/// linked.
 pub(crate) fn wait_for_helper() -> PathBuf {
     let exe = std::env::current_exe().expect("current exe");
-    let mut dir = exe.parent().expect("binary directory").to_path_buf();
-    if dir.file_name().is_some_and(|name| name == "deps") {
-        dir.pop();
-    }
-    let helper = dir.join("lamina-remote");
+    let candidates: Vec<PathBuf> = exe
+        .ancestors()
+        .skip(1)
+        .take(6)
+        .map(|dir| dir.join("lamina-remote"))
+        .collect();
     let deadline = Instant::now() + Duration::from_secs(180);
-    while !helper.is_file() {
+    loop {
+        if let Some(helper) = candidates.iter().find(|path| path.is_file()) {
+            return helper.clone();
+        }
         assert!(
             Instant::now() <= deadline,
-            "lamina-remote was not built at {}",
-            helper.display()
+            "lamina-remote was not built next to any of {candidates:?}"
         );
         std::thread::sleep(Duration::from_millis(200));
     }
-    helper
 }
 
 pub(crate) fn install_host_helper(source: &Path, dir: &Path) {
