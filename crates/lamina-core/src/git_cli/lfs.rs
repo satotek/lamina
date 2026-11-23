@@ -6,8 +6,19 @@
 //! instead of showing a failed command for every LFS file.
 
 use crate::Result;
+use crate::error::Error;
 use crate::git_cli::Git;
 use crate::lfs::{LfsLock, parse_locks_json};
+
+/// What `git lfs install` writes for the filter. Kept here so a git-lfs too
+/// old for `--skip-repo` still gets the filter that makes a tracked file
+/// store a pointer instead of its bytes.
+const LFS_FILTER_CONFIG: [(&str, &str); 4] = [
+    ("filter.lfs.clean", "git-lfs clean -- %f"),
+    ("filter.lfs.smudge", "git-lfs smudge -- %f"),
+    ("filter.lfs.process", "git-lfs filter-process"),
+    ("filter.lfs.required", "true"),
+];
 
 impl Git {
     /// Whether `git lfs` is installed and runnable.
@@ -43,18 +54,43 @@ impl Git {
 
     /// `git lfs track <pattern>`: adds `filter=lfs` to `.gitattributes`.
     ///
-    /// Returns true when the filter was missing and `git lfs install --local`
-    /// ran first. Without that install, tracking only edits `.gitattributes`
-    /// and the next commit stores the raw bytes, because `filter.lfs.clean`
-    /// never converted them.
+    /// Returns true when the filter was missing and this call configured it.
+    /// Without that filter, tracking only edits `.gitattributes` and the next
+    /// commit stores the raw bytes, because `filter.lfs.clean` never converted
+    /// them.
     pub fn lfs_track(&self, pattern: &str) -> Result<bool> {
         let installed = !self.lfs_filter_configured()?;
         if installed {
-            self.run(&["lfs", "install", "--local"], None)?;
+            self.configure_lfs_filter()?;
         }
         self.run(&["lfs", "track", "--", pattern], None)
             .map(|_| ())?;
         Ok(installed)
+    }
+
+    /// Writes the filter through `git lfs install`, but never its hooks.
+    ///
+    /// A plain `install` also adds a pre-push hook nobody asked for, and exits
+    /// non-zero when one already exists — after it wrote the filter — which
+    /// used to abandon the track and leave `.gitattributes` untouched.
+    /// `--skip-repo` configures only the filter; the direct config writes cover
+    /// a git-lfs too old for that flag.
+    fn configure_lfs_filter(&self) -> Result<()> {
+        let installed = self
+            .run(&["lfs", "install", "--local", "--skip-repo"], None)
+            .is_ok()
+            && self.lfs_filter_configured()?;
+        if installed {
+            return Ok(());
+        }
+        for (key, value) in LFS_FILTER_CONFIG {
+            self.run(&["config", key, value], None)?;
+        }
+        if self.lfs_filter_configured()? {
+            Ok(())
+        } else {
+            Err(Error::other("git did not configure the LFS filter"))
+        }
     }
 
     /// Whether both sides of the LFS clean filter are configured.
@@ -83,6 +119,9 @@ mod tests {
     use crate::lfs::POINTER_HEADER;
     use crate::test_support::TestRepo;
 
+    /// Skips instead of failing when `git-lfs` is not installed, so a CI image
+    /// without it still passes; the reason is printed for anyone debugging a
+    /// skipped run.
     fn git_lfs_available(test: &TestRepo) -> bool {
         test.git_output(&["lfs", "version"]).status.success()
     }
@@ -123,9 +162,42 @@ mod tests {
         );
     }
 
-    /// Skips instead of failing when `git-lfs` is not installed, so a CI image
-    /// without it still passes; the reason is printed for anyone debugging a
-    /// skipped run.
+    #[test]
+    fn track_leaves_an_existing_pre_push_hook_alone() {
+        let test = TestRepo::new();
+        if !git_lfs_available(&test) {
+            eprintln!("skipping LFS hook test: git-lfs is not installed");
+            return;
+        }
+        // `git lfs install` exits 2 when this hook is already there, after it
+        // wrote the filter, and the track used to be dropped with it.
+        let hooks = test.path().join(".git/hooks");
+        std::fs::create_dir_all(&hooks).expect("create hooks directory");
+        let hook = hooks.join("pre-push");
+        let script = "#!/bin/sh\nexit 0\n";
+        std::fs::write(&hook, script).expect("write pre-push hook");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755))
+                .expect("chmod the hook");
+        }
+
+        let git = test.git_handle();
+        assert!(
+            git.lfs_track("*.bin").expect("track with an existing hook"),
+            "tracking had to configure the missing filter"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&hook).expect("read the hook"),
+            script,
+            "tracking must not replace the pre-push hook"
+        );
+        let attributes =
+            std::fs::read_to_string(test.path().join(".gitattributes")).expect("read attributes");
+        assert!(attributes.contains("*.bin filter=lfs"), "{attributes}");
+    }
+
     #[test]
     fn track_commit_and_read_the_pointer_from_history() {
         let test = TestRepo::new();
