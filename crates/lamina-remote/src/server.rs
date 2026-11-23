@@ -255,7 +255,12 @@ fn serve_chunked(
     shared.watching.store(watching, Ordering::SeqCst);
     *lock(&shared.session) = Some(Arc::new(session));
 
-    while let Some(frame) = proto::read_frame(&mut reader)? {
+    let outcome = loop {
+        let frame = match proto::read_frame(&mut reader) {
+            Ok(Some(frame)) => frame,
+            Ok(None) => break Ok(()),
+            Err(error) => break Err(error.into()),
+        };
         let stream = frame.stream;
         match frame.message {
             Message::Request(request) => dispatch(&shared, stream, chunk_size, request),
@@ -271,10 +276,13 @@ fn serve_chunked(
                 );
             }
         }
-    }
+    };
 
-    // Closing the outbox unblocks a snapshot publish before the session join
-    // waits for the loader thread that is inside that publish.
+    // Both a clean EOF and a frame that failed to decode end here. Closing
+    // the outbox first unblocks a snapshot publish before the session join
+    // waits for the loader thread that is inside that publish; skipping this
+    // on the error path would leave the writer parked on the queue forever,
+    // the session's workers running and the queued responses unwritten.
     shared.outbox.close();
     let session = lock(&shared.session).take();
     drop(session);
@@ -284,7 +292,7 @@ fn serve_chunked(
     }
     drop(shared);
     let _ = writer_thread.join();
-    Ok(())
+    outcome
 }
 
 fn write_frames(outbox: Arc<Outbox>, mut writer: impl Write) {

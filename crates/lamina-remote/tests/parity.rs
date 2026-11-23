@@ -20,6 +20,7 @@ use lamina_core::session::{
 };
 use lamina_core::test_support::TestRepo;
 use lamina_remote_client::{RemoteSession, RemoteTarget};
+use lamina_remote_protocol::{Message, Request};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -354,6 +355,62 @@ fn closing_stdin_exits_the_helper_cleanly() {
     drop(child.stdin.take());
     let status = child.wait().expect("wait for helper");
     assert!(status.success(), "helper exited with {status}");
+}
+
+/// A frame that fails to decode must fail `serve`, and the whole helper has
+/// to come down with it. Leaving the writer thread parked on the outbox would
+/// keep the session and its workers alive and the stream open forever.
+#[test]
+fn a_malformed_frame_fails_serve_and_shuts_the_helper_down() {
+    let repo = fixture();
+    let (client_read, mut client_write, server_read, server_write) = duplex();
+    let root = repo.path().to_path_buf();
+    let server =
+        std::thread::spawn(move || lamina_remote::serve(server_read, server_write, root));
+
+    lamina_remote_protocol::write_frame(
+        &mut client_write,
+        1,
+        &Message::Request(Request::Hello {
+            protocol: lamina_remote_protocol::PROTOCOL_VERSION,
+            app_version: String::new(),
+            build: String::new(),
+        }),
+    )
+    .expect("write hello");
+
+    // Kind 42 is not a frame kind this protocol defines, so the helper's
+    // next read fails before any payload is decoded.
+    let mut malformed = Vec::new();
+    malformed.extend_from_slice(&6u32.to_be_bytes());
+    malformed.extend_from_slice(&[0, 42, 0, 0]);
+    malformed.extend_from_slice(&[0xff, 0xff]);
+    client_write.write_all(&malformed).expect("write garbage");
+
+    let outcome = server.join().expect("server thread");
+    let error = outcome.expect_err("serve must report the malformed frame");
+    assert!(
+        error.to_string().contains("unknown frame kind"),
+        "{error}"
+    );
+
+    // The writer thread held the server side of this channel. Its exit is
+    // what disconnects the client; a helper that only returned would leave
+    // it parked and this receive would never end.
+    let deadline = Instant::now() + TIMEOUT;
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "the helper kept the stream open after a malformed frame"
+        );
+        match client_read.rx.recv_timeout(Duration::from_millis(200)) {
+            // Frames queued before the failure are still delivered on the
+            // way down; only the disconnect proves the writer exited.
+            Ok(_) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+        }
+    }
 }
 
 #[test]
