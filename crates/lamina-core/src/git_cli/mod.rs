@@ -999,6 +999,7 @@ fn isolate_for_cancel(command: &mut Command) {
 /// Git removes the lock files it holds (`index.lock`, `HEAD.lock`, ...) from
 /// its SIGTERM handler, so a plain SIGKILL leaves them behind and every later
 /// command fails until someone deletes them by hand.
+#[cfg(unix)]
 const CANCEL_GRACE: Duration = Duration::from_secs(2);
 
 /// Stop `child` and, with it, whatever git started.
