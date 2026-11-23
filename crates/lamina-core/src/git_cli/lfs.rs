@@ -76,12 +76,13 @@ impl Git {
     /// `--skip-repo` configures only the filter; the direct config writes cover
     /// a git-lfs too old for that flag.
     fn configure_lfs_filter(&self) -> Result<()> {
-        let installed = self
-            .run(&["lfs", "install", "--local", "--skip-repo"], None)
-            .is_ok()
-            && self.lfs_filter_configured()?;
-        if installed {
-            return Ok(());
+        match self.run(&["lfs", "install", "--local", "--skip-repo"], None) {
+            Ok(_) if self.lfs_filter_configured()? => return Ok(()),
+            // Without git-lfs the fallback would leave a required filter whose
+            // command does not exist, and every later checkout or status of a
+            // tracked path would fail.
+            Err(error) if !self.lfs_available() => return Err(error),
+            _ => {}
         }
         for (key, value) in LFS_FILTER_CONFIG {
             self.run(&["config", key, value], None)?;
