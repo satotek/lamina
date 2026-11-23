@@ -9,6 +9,10 @@
 //! buffering the whole repository. Responses, pings, diffs and query events
 //! skip that queue: a read has to stay answerable while history is still
 //! streaming, and a cancel has to reach a query that is still running.
+//! Snapshot metas are the exception: they keep their turn behind queued
+//! history frames, because the client stitches a snapshot together in wire
+//! order and a meta that jumped ahead of its own generation's appends would
+//! strand them.
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
@@ -32,13 +36,6 @@ const SNAPSHOT_CHUNK: usize = 1024;
 /// to keep the writer busy; a second would only delay a response that arrived
 /// while the first was still queued.
 const SNAPSHOT_QUEUE: usize = 1;
-
-/// A watch update this size or smaller skips the snapshot queue.
-///
-/// A ping has to stay answerable while history streams. One modest status
-/// frame does not hold it up; a status large enough to matter waits with the
-/// snapshot frames instead of growing the control queue.
-const SMALL_EVENT: usize = 64 * 1024;
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -179,6 +176,41 @@ impl Outbox {
         let mut state = lock(&self.state);
         state.closed = true;
         self.cond.notify_all();
+    }
+
+    /// A snapshot meta keeps its turn: while history frames are still queued
+    /// it waits behind them like any other snapshot frame.
+    ///
+    /// The client applies appends only for the generation it last reset to,
+    /// so a meta that jumped the queue would strand either the older
+    /// generation's appends or the newer status, depending on arrival order.
+    /// With nothing queued there is no turn to keep, and the meta is
+    /// answerable like any other control frame. That shortcut is sound only
+    /// because every low push happens while `snapshot_publish` is held, which
+    /// a meta push holds too, so no history frame can sneak in between the
+    /// emptiness check and the enqueue.
+    fn push_meta(&self, frame: Vec<u8>) -> bool {
+        let mut state = lock(&self.state);
+        if state.low.is_empty() {
+            if state.closed {
+                return false;
+            }
+            state.high.push_back(frame);
+            self.cond.notify_one();
+            return true;
+        }
+        while state.low.len() >= SNAPSHOT_QUEUE && !state.closed {
+            state = self
+                .cond
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        if state.closed {
+            return false;
+        }
+        state.low.push_back(frame);
+        self.cond.notify_one();
+        true
     }
 }
 
@@ -1315,6 +1347,10 @@ fn publish_current(shared: &Arc<ServerShared>, chunk: usize) {
 }
 
 /// A worktree or config update. History stays where the client already has it.
+///
+/// The frame keeps its turn among the snapshot frames (see
+/// [`Outbox::push_meta`]); pings and responses are what stay answerable while
+/// history streams.
 fn push_meta(shared: &Arc<ServerShared>, snapshot: &lamina_core::session::RepoSnapshot) -> bool {
     let message = Message::Event(Event::SnapshotMeta {
         snapshot: SnapshotDto::from(snapshot),
@@ -1324,13 +1360,7 @@ fn push_meta(shared: &Arc<ServerShared>, snapshot: &lamina_core::session::RepoSn
         eprintln!("lamina-remote: failed to encode event: {error}");
         return false;
     }
-    // Large statuses wait on the snapshot queue so they cannot pile up ahead
-    // of a ping. Small ones do not need that backpressure.
-    if frame.len() <= SMALL_EVENT {
-        shared.outbox.push_high(frame)
-    } else {
-        shared.outbox.push_low(frame)
-    }
+    shared.outbox.push_meta(frame)
 }
 
 /// Publishes a snapshot as one reset followed by commit chunks.
@@ -1470,6 +1500,47 @@ pub fn parse_root(value: Option<&str>) -> Result<PathBuf, BoxError> {
 mod tests {
     use super::*;
 
+    fn test_shared() -> Arc<ServerShared> {
+        Arc::new(ServerShared {
+            session: Mutex::new(None),
+            outbox: Arc::new(Outbox::new()),
+            diff_routes: Mutex::new(DiffRoutes::default()),
+            query_routes: Mutex::new(QueryRoutes::default()),
+            snapshot_publish: Mutex::new(()),
+            subscribed: AtomicBool::new(false),
+            watching: AtomicBool::new(false),
+            last_history: Mutex::new(None),
+            workers: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// The smallest snapshot `SnapshotDto::from` accepts.
+    fn empty_snapshot() -> lamina_core::session::RepoSnapshot {
+        use lamina_core::session::{CommitList, RepoSnapshot};
+        RepoSnapshot {
+            generation: 0,
+            head: None,
+            refs: Arc::new(Vec::new()),
+            refs_by_commit: Arc::new(HashMap::new()),
+            commits: CommitList::default(),
+            commit_index: Arc::new(HashMap::new()),
+            status: Arc::new(lamina_core::WorktreeStatus::default()),
+            stashes: Arc::new(Vec::new()),
+            upstreams: Arc::new(HashMap::new()),
+            remotes: Vec::new(),
+            state: lamina_core::RepoState::Normal,
+            conflicts: Arc::new(Vec::new()),
+            busy: None,
+        }
+    }
+
+    fn decode(frame: &[u8]) -> Message {
+        proto::read_frame(&mut std::io::Cursor::new(frame))
+            .expect("decode frame")
+            .expect("a frame")
+            .message
+    }
+
     #[test]
     fn a_queued_response_overtakes_a_snapshot_frame() {
         let outbox = Outbox::new();
@@ -1477,6 +1548,50 @@ mod tests {
         assert!(outbox.push_high(b"response".to_vec()));
         assert_eq!(outbox.pop().as_deref(), Some(&b"response"[..]));
         assert_eq!(outbox.pop().as_deref(), Some(&b"snapshot"[..]));
+    }
+
+    #[test]
+    fn a_snapshot_meta_waits_behind_queued_history_frames() {
+        let shared = test_shared();
+        // A history publish is mid-stream: the only low slot is taken, the
+        // way it is while a walk streams behind a slow writer.
+        assert!(shared.outbox.push_low(b"history".to_vec()));
+        let blocked = Arc::clone(&shared);
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let waiter = thread::spawn(move || {
+            assert!(push_meta(&blocked, &empty_snapshot()));
+            let _ = done_tx.send(());
+        });
+        // A meta that jumped the queue here would be pushed immediately;
+        // staying parked behind the history frame is the ordering the client
+        // relies on to stitch snapshots in wire order.
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_millis(200))
+                .is_err(),
+            "the meta must not overtake the queued history frame"
+        );
+        assert_eq!(shared.outbox.pop().as_deref(), Some(&b"history"[..]));
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("freeing the slot lets the meta through");
+        let frame = shared.outbox.pop().expect("the meta frame");
+        assert!(matches!(
+            decode(&frame),
+            Message::Event(Event::SnapshotMeta { .. })
+        ));
+        waiter.join().expect("meta thread");
+    }
+
+    #[test]
+    fn a_snapshot_meta_without_queued_history_is_answerable() {
+        let shared = test_shared();
+        assert!(push_meta(&shared, &empty_snapshot()));
+        let frame = shared.outbox.pop().expect("meta");
+        assert!(matches!(
+            decode(&frame),
+            Message::Event(Event::SnapshotMeta { .. })
+        ));
     }
 
     #[test]
