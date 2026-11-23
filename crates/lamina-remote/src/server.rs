@@ -83,8 +83,16 @@ struct ServerShared {
 
 #[derive(Default)]
 struct DiffRoutes {
-    local_to_client: HashMap<DiffTicket, u64>,
+    local_to_client: HashMap<DiffTicket, RoutedDiff>,
     client_to_local: HashMap<u64, DiffTicket>,
+}
+
+/// A live diff request, from the client's ticket to the helper's.
+struct RoutedDiff {
+    client: u64,
+    /// True once the plain view was forwarded; the next view is the last
+    /// one, highlighted or not.
+    plain_sent: bool,
 }
 
 #[derive(Default)]
@@ -534,7 +542,9 @@ fn answer_control(shared: &Arc<ServerShared>, chunk: usize, request: Request) ->
             // ticket and vanish.
             let mut routes = lock(&shared.diff_routes);
             let local = session.request_diff_with(request, options.into());
-            routes.local_to_client.insert(local, ticket);
+            routes
+                .local_to_client
+                .insert(local, RoutedDiff { client: ticket, plain_sent: false });
             routes.client_to_local.insert(ticket, local);
             Response::Ok
         }
@@ -1143,18 +1153,28 @@ fn on_session_event(shared: &Arc<ServerShared>, chunk: usize, event: SessionEven
     match event {
         SessionEvent::SnapshotUpdated { .. } => publish_current(shared, chunk),
         SessionEvent::DiffReady { ticket, view } => {
-            // Both the plain view and the later highlighted view are forwarded.
-            // The route stays until the highlighted one, a failure, or a cancel,
-            // because the local session emits the second only when it can.
-            let client = lock(&shared.diff_routes)
-                .local_to_client
-                .get(&ticket)
-                .copied();
-            let Some(client) = client else {
-                return;
+            // The plain view is forwarded first, then the highlighted one
+            // when the file has a grammar and is small enough to highlight.
+            // The route has to survive between the two, but not past the
+            // last view, or a later cancel of the same client ticket reaches
+            // a session that no longer knows it.
+            let (client, last) = {
+                let mut routes = lock(&shared.diff_routes);
+                let Some(route) = routes.local_to_client.get_mut(&ticket) else {
+                    return;
+                };
+                // No bundled grammar means the session sends no second view;
+                // the same public lookup the diff worker applies decides
+                // that here. Files too large to highlight are the one case
+                // this cannot see, and their route waits for a cancel.
+                let last = route.plain_sent
+                    || view.diff.binary
+                    || lamina_core::highlight::language_for_path(diff_path(&view.request))
+                        .is_none();
+                route.plain_sent = true;
+                (route.client, last)
             };
-            let highlighted = !view.old_highlights.is_empty() || !view.new_highlights.is_empty();
-            if highlighted || view.diff.binary {
+            if last {
                 forget_diff(shared, ticket);
             }
             push_high(
@@ -1311,9 +1331,22 @@ fn forget_query(shared: &ServerShared, ticket: QueryTicket) -> Option<u64> {
 
 fn forget_diff(shared: &ServerShared, ticket: DiffTicket) -> Option<u64> {
     let mut routes = lock(&shared.diff_routes);
-    let client = routes.local_to_client.remove(&ticket)?;
+    let client = routes.local_to_client.remove(&ticket)?.client;
     routes.client_to_local.remove(&client);
     Some(client)
+}
+
+/// The path every diff variant names a file by, whichever side it is read
+/// from.
+fn diff_path(request: &lamina_core::session::DiffRequest) -> &str {
+    use lamina_core::session::DiffRequest;
+    match request {
+        DiffRequest::Commit { path, .. }
+        | DiffRequest::Staged { path }
+        | DiffRequest::Unstaged { path }
+        | DiffRequest::Compare { path, .. }
+        | DiffRequest::CompareWorktree { path, .. } => path,
+    }
 }
 
 fn publish_current(shared: &Arc<ServerShared>, chunk: usize) {
@@ -1592,6 +1625,99 @@ mod tests {
             decode(&frame),
             Message::Event(Event::SnapshotMeta { .. })
         ));
+    }
+
+    /// The smallest view a `DiffReady` event can carry.
+    fn diff_view(path: &str) -> lamina_core::session::DiffView {
+        lamina_core::session::DiffView {
+            request: lamina_core::session::DiffRequest::Unstaged {
+                path: path.to_owned(),
+            },
+            diff: lamina_core::diff::FileDiff {
+                hunks: Vec::new(),
+                binary: false,
+            },
+            old_highlights: Arc::new(Vec::new()),
+            new_highlights: Arc::new(Vec::new()),
+            lfs: None,
+            old_text: Arc::from(""),
+            new_text: Arc::from(""),
+            old_encoding: lamina_core::encoding::TextEncoding::UTF_8,
+            new_encoding: lamina_core::encoding::TextEncoding::UTF_8,
+            gaps: Arc::from(Vec::new()),
+            image: None,
+        }
+    }
+
+    fn install_diff_route(shared: &Arc<ServerShared>, local: DiffTicket, client: u64) {
+        let mut routes = lock(&shared.diff_routes);
+        routes
+            .local_to_client
+            .insert(local, RoutedDiff { client, plain_sent: false });
+        routes.client_to_local.insert(client, local);
+    }
+
+    #[test]
+    fn a_diff_route_ends_with_the_only_view_of_a_grammarless_file() {
+        let shared = test_shared();
+        install_diff_route(&shared, DiffTicket(11), 3);
+
+        // `.txt` has no bundled grammar, so the session sends only the plain
+        // view; a route kept for a highlighted second view would never end.
+        on_session_event(
+            &shared,
+            1,
+            SessionEvent::DiffReady {
+                ticket: DiffTicket(11),
+                view: Arc::new(diff_view("notes.txt")),
+            },
+        );
+
+        let routes = lock(&shared.diff_routes);
+        assert!(
+            routes.local_to_client.is_empty() && routes.client_to_local.is_empty(),
+            "the route must not outlive the diff"
+        );
+    }
+
+    #[test]
+    fn a_diff_route_lasts_until_the_second_view_arrives() {
+        let shared = test_shared();
+        install_diff_route(&shared, DiffTicket(12), 4);
+
+        // A Rust file gets a second, highlighted view, so the plain one keeps
+        // the route alive.
+        on_session_event(
+            &shared,
+            1,
+            SessionEvent::DiffReady {
+                ticket: DiffTicket(12),
+                view: Arc::new(diff_view("src/lib.rs")),
+            },
+        );
+        assert!(
+            lock(&shared.diff_routes)
+                .local_to_client
+                .contains_key(&DiffTicket(12)),
+            "the route must survive the plain view"
+        );
+
+        // The second view is the last one even when the highlighter produced
+        // no spans, which is what the old highlights-based check missed.
+        on_session_event(
+            &shared,
+            1,
+            SessionEvent::DiffReady {
+                ticket: DiffTicket(12),
+                view: Arc::new(diff_view("src/lib.rs")),
+            },
+        );
+        assert!(
+            !lock(&shared.diff_routes)
+                .local_to_client
+                .contains_key(&DiffTicket(12)),
+            "the route must end with the second view"
+        );
     }
 
     #[test]
