@@ -102,6 +102,11 @@ pub(crate) fn list_dir(home: &Path, path: Option<&str>) -> Result<DirListingDto,
     let mut entries = Vec::new();
     let mut truncated = false;
     for entry in read.flatten() {
+        // A work tree's `.git` has the bare layout and would be offered as a
+        // repository of its own; the folder that holds it is the one to open.
+        if entry.file_name() == ".git" {
+            continue;
+        }
         let child = entry.path();
         // `metadata` follows symlinks, so a link to a folder is listed like
         // the folder it points at. A dangling link fails and is skipped.
@@ -202,6 +207,7 @@ mod tests {
 
         let repo = list_dir(&home, Some("~/src/repo/..//repo")).expect("dot-dot");
         assert!(repo.repository);
+        assert!(repo.entries.is_empty(), "{:?}", repo.entries);
         assert_eq!(repo.path, home.join("src/repo").display().to_string());
         assert_eq!(repo.parent, Some(home.join("src").display().to_string()));
     }
