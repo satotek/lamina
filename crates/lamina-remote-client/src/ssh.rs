@@ -289,10 +289,19 @@ pub(crate) fn spawn_session(
 
     let captured = Arc::new(Mutex::new(Vec::<u8>::new()));
     let capture = Arc::clone(&captured);
-    let stderr_thread = thread::Builder::new()
+    let stderr_thread = match thread::Builder::new()
         .name("lamina-remote-ssh-err".to_owned())
         .spawn(move || capture_stderr(stderr, &capture))
-        .map_err(|error| Error::other(format!("could not read ssh stderr: {error}")))?;
+    {
+        Ok(handle) => handle,
+        Err(error) => {
+            // Nothing would drain the pipes without the reader, so the child
+            // has to be reaped here or it outlives the failed connect.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(Error::other(format!("could not read ssh stderr: {error}")));
+        }
+    };
 
     let process = Arc::new(SshChild {
         child: Mutex::new(Some(child)),

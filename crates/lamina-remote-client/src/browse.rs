@@ -112,10 +112,19 @@ impl RemoteBrowser {
         };
         let stderr_buf = Arc::new(Mutex::new(Vec::new()));
         let capture = Arc::clone(&stderr_buf);
-        let stderr_thread = thread::Builder::new()
+        let stderr_thread = match thread::Builder::new()
             .name("lamina-browse-ssh-err".to_owned())
             .spawn(move || ssh::capture_stderr(stderr, &capture))
-            .map_err(|error| Error::other(format!("could not read ssh stderr: {error}")))?;
+        {
+            Ok(handle) => handle,
+            Err(error) => {
+                // Nothing would drain the pipes without the reader, so the
+                // child has to be reaped here or it outlives the failed open.
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(Error::other(format!("could not read ssh stderr: {error}")));
+            }
+        };
 
         let mut browser = Self {
             host: target.host.clone(),
@@ -195,10 +204,9 @@ impl RemoteBrowser {
         }
     }
 
-    /// An error for a dead connection, carrying what `ssh` printed, since that
-    /// is usually the real reason (host key, permission denied, no route).
-    fn lost(&self, what: &str) -> Error {
-        // Waiting lets the stderr reader reach EOF, so the text is complete.
+    /// Kills the ssh child and joins the stderr reader. Idempotent: `lost`
+    /// disarms both, and `Drop` runs again afterwards.
+    fn kill_ssh(&self) {
         if let Some(mut child) = lock(&self.child).take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -206,6 +214,13 @@ impl RemoteBrowser {
         if let Some(handle) = lock(&self.stderr).take() {
             let _ = handle.join();
         }
+    }
+
+    /// An error for a dead connection, carrying what `ssh` printed, since that
+    /// is usually the real reason (host key, permission denied, no route).
+    fn lost(&self, what: &str) -> Error {
+        // Waiting lets the stderr reader reach EOF, so the text is complete.
+        self.kill_ssh();
         let stderr = String::from_utf8_lossy(&lock(&self.stderr_buf))
             .trim()
             .to_owned();
@@ -219,13 +234,7 @@ impl RemoteBrowser {
 
 impl Drop for RemoteBrowser {
     fn drop(&mut self) {
-        if let Some(mut child) = lock(&self.child).take() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
-        if let Some(handle) = lock(&self.stderr).take() {
-            let _ = handle.join();
-        }
+        self.kill_ssh();
     }
 }
 
