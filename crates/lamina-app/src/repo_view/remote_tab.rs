@@ -19,7 +19,7 @@ use log::{info, warn};
 
 use super::RepoView;
 use crate::remote_open::{
-    ConnectMsg, ConnectPhase, RemoteLaunch, spawn_connect, ssh_uri, tab_title, unavailable_reason,
+    ConnectMsg, ConnectPhase, RemoteLaunch, spawn_connect, tab_title, unavailable_reason,
 };
 use crate::style::Design;
 use crate::ui;
@@ -44,6 +44,16 @@ pub(super) struct RemoteTab {
     /// Latest idle round trip copied off the session. `None` until a probe is
     /// answered, and while the tab is lost or reconnecting.
     rtt: Option<Duration>,
+}
+
+/// What a connected remote tab tells the workspace to record.
+///
+/// The identity is the `ssh://` URI the dialog produced, not the root the
+/// handshake resolved: the helper expands `~` on the host, and a reopen
+/// compares the user's own spelling — the resolved form would open a second
+/// tab for the same repository.
+fn stored_identity(tab: Option<&RemoteTab>) -> Option<std::path::PathBuf> {
+    tab.map(|tab| tab.spec.stored_path())
 }
 
 impl RepoView {
@@ -213,9 +223,9 @@ impl RepoView {
         // The handshake reports an SSH location. A local path here would be a
         // helper bug; the tab keeps the name the dialog already showed.
         let (name, stored) = match session.location() {
-            RepoLocation::Ssh { host, port, path } => (
+            RepoLocation::Ssh { host, path, .. } => (
                 tab_title(&host, &path),
-                Some(std::path::PathBuf::from(ssh_uri(&host, port, &path))),
+                stored_identity(self.remote_tab.as_ref()),
             ),
             RepoLocation::Local(_) => (self.name.clone().unwrap_or_default(), None),
         };
@@ -755,6 +765,44 @@ mod tests {
     use super::super::remote_fixture::{install_host_helper, layout_fake_ssh, wait_for_helper};
     use super::{connection_rtt_status, focus_refresh_applies, remote_refresh_due};
     use crate::remote_open::{RemoteLaunch, RemoteSpec};
+
+    fn placeholder_tab(spec: RemoteSpec) -> super::RemoteTab {
+        super::RemoteTab {
+            spec,
+            ssh: None,
+            phase: super::ConnectPhase::Connecting,
+            placeholder: true,
+            lost: false,
+            reconnecting: false,
+            buffering: false,
+            pending: Vec::new(),
+            error: None,
+            rtt: None,
+        }
+    }
+
+    #[test]
+    fn a_connected_tab_keeps_the_identity_the_dialog_produced() {
+        // The helper resolves `~` on the host; the recorded identity must stay
+        // the user's spelling, or reopening the same dialog entry would add a
+        // second tab instead of activating this one.
+        let spec = RemoteSpec {
+            host: "git@example.com".into(),
+            port: None,
+            path: "~/repo".into(),
+        };
+        let tab = placeholder_tab(spec.clone());
+        assert_eq!(
+            super::stored_identity(Some(&tab)),
+            Some(spec.stored_path()),
+            "the identity must be what place_remote compares against"
+        );
+        assert!(
+            crate::remote_open::parse_stored(&spec.stored_path()).is_some(),
+            "the identity must restore as the same remote repository"
+        );
+        assert_eq!(super::stored_identity(None), None);
+    }
 
     #[test]
     fn connection_rtt_labels_a_slow_link_above_300_ms() {
