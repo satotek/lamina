@@ -955,3 +955,63 @@ fn dropping_a_session_with_a_stalled_write_does_not_hang() {
     drop(peer_exit_tx);
     peer.join().expect("peer");
 }
+
+#[test]
+fn a_close_releases_a_request_that_never_got_an_answer() {
+    let (client_read, client_write, mut peer_read, mut peer_write) = pipe();
+    let (saw_request_tx, saw_request_rx) = mpsc::channel::<()>();
+    let (close_tx, close_rx) = mpsc::channel::<()>();
+    let peer = thread::spawn(move || {
+        hello(&mut peer_read, &mut peer_write);
+        accept_subscribe(&mut peer_read, &mut peer_write);
+        let (_, id) = oid_pair(12);
+        send_chunk(&mut peer_write, id, true);
+        // Take the request and never answer it. The connection stays up until
+        // the end, so an EOF cannot release the caller for the drain.
+        next_request(&mut peer_read, &mut peer_write).expect("head request");
+        let _ = saw_request_tx.send(());
+        let _ = close_rx.recv();
+    });
+
+    let session = RemoteSession::connect(
+        client_read,
+        client_write,
+        RemoteTarget::new("scripted"),
+        |_| {},
+    )
+    .expect("connect");
+    let reader = session.reader();
+    let (answered_tx, answered_rx) = mpsc::channel();
+    let calling = thread::spawn(move || {
+        let _ = answered_tx.send(reader.head());
+    });
+    saw_request_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the request was sent");
+
+    let (dropped_tx, dropped_rx) = mpsc::channel::<()>();
+    let closer = thread::spawn(move || {
+        drop(session);
+        let _ = dropped_tx.send(());
+    });
+    // The close itself has to wake the caller: nothing else will, while the
+    // peer is still connected and simply not answering.
+    let answered = answered_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("closing the session must release the blocked caller");
+    let error = answered.expect_err("an unanswered request fails on close");
+    assert!(
+        error.to_string().contains(CONNECTION_LOST),
+        "the caller learns the session is gone: {error}"
+    );
+
+    // Only now may the peer go away; the reader join in the close waits for
+    // the EOF that follows.
+    let _ = close_tx.send(());
+    dropped_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the close finishes once the peer leaves");
+    let _ = calling.join();
+    let _ = closer.join();
+    peer.join().expect("peer");
+}

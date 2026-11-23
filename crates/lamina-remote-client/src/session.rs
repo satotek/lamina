@@ -567,14 +567,13 @@ impl Inner {
         if self.closing.swap(true, Ordering::SeqCst) {
             return;
         }
-        // A caller blocked on a write has to return when the session goes
-        // away, or a background thread stays parked on a channel nobody will
-        // answer.
-        let waiters = std::mem::take(&mut *lock(&self.operation_waiters));
-        for (_, waiter) in waiters {
-            let _ = waiter.send(Some("the remote session was closed".to_owned()));
-        }
-        self.wake.notify_all();
+        // A deliberate close releases every caller itself. The reader thread
+        // may stay parked on a stream the peer never closes, so waiting for
+        // it to notice would leave a blocked `call` and every open ticket
+        // hanging on a session that no longer exists. The per-item failures
+        // travel without a connection-lost banner, which would read as the
+        // repository breaking when the app asked to close.
+        self.drain_streams("the remote session was closed");
         // The transport dies before any thread is joined. A write parked on a
         // full pipe only fails once the child is killed, so joining a worker
         // thread first would leave shutdown waiting on the writer mutex that
@@ -626,8 +625,32 @@ impl Inner {
         // A late pong must not resurrect a sample from the link that just died.
         lock(&self.pings).clear();
         *lock(&self.rtt) = None;
+        self.drain_streams(&message);
+        // A drop already set `closing`: the app closed the session on purpose,
+        // and a LoadFailed for that would look like the repository broke.
+        if self.closing.load(Ordering::SeqCst) {
+            return;
+        }
+        (self.events)(SessionEvent::LoadFailed {
+            error: message.clone(),
+        });
+    }
+
+    /// Releases every in-flight request, waiter and open ticket.
+    ///
+    /// A lost connection and a deliberate close both have to wake a caller
+    /// parked in `call`, answer an operation waiter, and finish the tickets
+    /// the UI follows; leaving any registered would park that caller on a
+    /// channel whose peer is already gone.
+    fn drain_streams(&self, reason: &str) {
+        // A dropped sender errors every blocked recv, which is how a caller
+        // parked in `call` learns the session will not answer.
         let pending = std::mem::take(&mut *lock(&self.pending));
         drop(pending);
+        let waiters = std::mem::take(&mut *lock(&self.operation_waiters));
+        for (_, waiter) in waiters {
+            let _ = waiter.send(Some(reason.to_owned()));
+        }
         let diffs = std::mem::take(&mut *lock(&self.diff_streams));
         let _operations = std::mem::take(&mut *lock(&self.operation_streams));
         let inflight = std::mem::take(&mut *lock(&self.inflight));
@@ -637,35 +660,22 @@ impl Inner {
             let _park = lock(&self.park);
             self.wake.notify_all();
         }
-        // A caller blocked on a write has no other way to learn the link died.
-        let waiters = std::mem::take(&mut *lock(&self.operation_waiters));
-        for (_, waiter) in waiters {
-            let _ = waiter.send(Some(message.clone()));
-        }
-        // A drop already set `closing`: the app closed the session on purpose,
-        // and a LoadFailed for that would look like the repository broke.
-        if self.closing.load(Ordering::SeqCst) {
-            return;
-        }
-        (self.events)(SessionEvent::LoadFailed {
-            error: message.clone(),
-        });
         for ticket in diffs.into_values() {
             (self.events)(SessionEvent::DiffFailed {
                 ticket,
-                error: message.clone(),
+                error: reason.to_owned(),
             });
         }
         for id in inflight {
             (self.events)(SessionEvent::OperationFinished {
                 id,
-                error: Some(message.clone()),
+                error: Some(reason.to_owned()),
             });
         }
         for ticket in queries {
             (self.events)(SessionEvent::QueryFailed {
                 ticket,
-                error: message.clone(),
+                error: reason.to_owned(),
             });
         }
     }
