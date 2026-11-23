@@ -4,8 +4,9 @@
 //! the host before connecting. Connecting and browsing run on worker threads:
 //! the worker may block in `ssh`, and the askpass callback may block until the
 //! modal answers. Neither of those threads touches GPUI. They push
-//! [`ConnectMsg`] values into an unbounded channel that one foreground task
-//! drains, the same way a local session delivers [`SessionEvent`]s.
+//! [`ConnectMsg`] or [`BrowseMsg`] values into an unbounded channel that one
+//! foreground task drains, the same way a local session delivers
+//! [`SessionEvent`]s.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -110,9 +111,12 @@ impl ConnectPhase {
     }
 }
 
-/// Messages a connect or browse worker sends. The askpass reply channel is
-/// answered by the modal; the worker blocks on it, the UI thread does not.
-pub(crate) enum ConnectMsg {
+/// What either worker reports before its result: a phase label, a password
+/// prompt, or the failure that ends the run. Both workers send these through
+/// their own channel, so the phase and askpass plumbing is written once and each
+/// message enum only adds its result. The askpass reply channel is answered by
+/// the modal; the worker blocks on it, the UI thread does not.
+pub(crate) enum WorkerEvent {
     Phase(ConnectPhase),
     Askpass {
         prompt: String,
@@ -120,15 +124,38 @@ pub(crate) enum ConnectMsg {
         reply: mpsc::Sender<Option<String>>,
     },
     Failed(String),
+}
+
+/// Messages a connect worker sends. The repository tab drains them.
+pub(crate) enum ConnectMsg {
+    Worker(WorkerEvent),
     Ready(Box<dyn RepositorySession>),
-    BrowserReady {
+    Session(SessionEvent),
+}
+
+/// Messages a folder-picker worker sends. Only the dialog drains them, so a
+/// repository tab never sees a browser.
+pub(crate) enum BrowseMsg {
+    Worker(WorkerEvent),
+    Ready {
         browser: Arc<RemoteBrowser>,
         listing: RemoteDirListing,
         /// Shown when the requested starting path failed and the worker fell
         /// back to the remote home directory.
         warning: Option<String>,
     },
-    Session(SessionEvent),
+}
+
+impl From<WorkerEvent> for ConnectMsg {
+    fn from(event: WorkerEvent) -> Self {
+        Self::Worker(event)
+    }
+}
+
+impl From<WorkerEvent> for BrowseMsg {
+    fn from(event: WorkerEvent) -> Self {
+        Self::Worker(event)
+    }
 }
 
 /// Why a write, or anything that needs a local checkout, cannot run.
@@ -296,24 +323,25 @@ pub(crate) fn spawn_connect(
         .name("lamina-remote-connect".to_owned())
         .spawn(move || connect_worker(spec, ssh, worker));
     if let Err(error) = built {
-        let _ = sender.unbounded_send(ConnectMsg::Failed(error.to_string()));
+        let _ = sender.unbounded_send(WorkerEvent::Failed(error.to_string()).into());
     }
 }
 
 /// Installs the helper, opens a [`RemoteBrowser`], and lists the starting
-/// folder (or remote home). Uses the same [`ConnectMsg`] channel as
-/// [`spawn_connect`] so askpass prompts and progress work identically.
+/// folder (or remote home). Its own channel keeps the browser result away from
+/// repository tabs; askpass prompts and progress still go through
+/// [`WorkerEvent`] exactly as they do for [`spawn_connect`].
 pub(crate) fn spawn_browse_open(
     target: BrowseTarget,
     ssh: Option<SshOverride>,
-    sender: UnboundedSender<ConnectMsg>,
+    sender: UnboundedSender<BrowseMsg>,
 ) {
     let worker = sender.clone();
     let built = std::thread::Builder::new()
         .name("lamina-remote-browse-open".to_owned())
         .spawn(move || browse_open_worker(target, ssh, worker));
     if let Err(error) = built {
-        let _ = sender.unbounded_send(ConnectMsg::Failed(error.to_string()));
+        let _ = sender.unbounded_send(WorkerEvent::Failed(error.to_string()).into());
     }
 }
 
@@ -368,13 +396,16 @@ struct PreparedHost {
 /// Shared host setup for repository sessions and folder browsing: resolves the
 /// helper directory, wires the askpass handler, installs the remote helper,
 /// and builds the [`RemoteTarget`] and [`SshOptions`].
-fn prepare_remote_host(
+fn prepare_remote_host<M>(
     host: &str,
     port: Option<u16>,
     ssh: Option<&SshOverride>,
-    sender: &UnboundedSender<ConnectMsg>,
-) -> Option<PreparedHost> {
-    let _ = sender.unbounded_send(ConnectMsg::Phase(ConnectPhase::Connecting));
+    sender: &UnboundedSender<M>,
+) -> Option<PreparedHost>
+where
+    M: From<WorkerEvent> + Send + 'static,
+{
+    let _ = sender.unbounded_send(WorkerEvent::Phase(ConnectPhase::Connecting).into());
     let program = ssh_program(ssh);
     let helper_dir = match ssh {
         Some(ssh) => ssh.helper_dir.clone(),
@@ -382,14 +413,14 @@ fn prepare_remote_host(
             Ok(dir) => dir,
             Err(error) => {
                 warn!("remote: cannot connect to {host}: {error}");
-                let _ = sender.unbounded_send(ConnectMsg::Failed(error));
+                let _ = sender.unbounded_send(WorkerEvent::Failed(error).into());
                 return None;
             }
         },
     };
     let askpass_program = std::env::current_exe().ok();
     let askpass = askpass_handler(sender.clone());
-    let _ = sender.unbounded_send(ConnectMsg::Phase(ConnectPhase::PreparingHelper));
+    let _ = sender.unbounded_send(WorkerEvent::Phase(ConnectPhase::PreparingHelper).into());
     let install = InstallOptions {
         program: program.clone(),
         host: host.to_owned(),
@@ -405,11 +436,11 @@ fn prepare_remote_host(
         }
         Err(error) => {
             warn!("remote: helper install failed for {host}: {error}");
-            let _ = sender.unbounded_send(ConnectMsg::Failed(error.to_string()));
+            let _ = sender.unbounded_send(WorkerEvent::Failed(error.to_string()).into());
             return None;
         }
     };
-    let _ = sender.unbounded_send(ConnectMsg::Phase(ConnectPhase::Opening));
+    let _ = sender.unbounded_send(WorkerEvent::Phase(ConnectPhase::Opening).into());
     let options = SshOptions {
         program,
         helper_dir: Some(helper_dir),
@@ -451,7 +482,7 @@ fn connect_worker(spec: RemoteSpec, ssh: Option<SshOverride>, sender: UnboundedS
         }
         Err(error) => {
             warn!("remote: connect failed for {}: {error}", spec.host);
-            let _ = sender.unbounded_send(ConnectMsg::Failed(error.to_string()));
+            let _ = sender.unbounded_send(WorkerEvent::Failed(error.to_string()).into());
         }
     }
 }
@@ -459,7 +490,7 @@ fn connect_worker(spec: RemoteSpec, ssh: Option<SshOverride>, sender: UnboundedS
 fn browse_open_worker(
     target: BrowseTarget,
     ssh: Option<SshOverride>,
-    sender: UnboundedSender<ConnectMsg>,
+    sender: UnboundedSender<BrowseMsg>,
 ) {
     info!("remote: opening folder browser on {}", target.host);
     let Some(prepared) = prepare_remote_host(&target.host, target.port, ssh.as_ref(), &sender)
@@ -470,7 +501,7 @@ fn browse_open_worker(
         Ok(browser) => Arc::new(browser),
         Err(error) => {
             warn!("remote: browse open failed for {}: {error}", target.host);
-            let _ = sender.unbounded_send(ConnectMsg::Failed(error.to_string()));
+            let _ = sender.unbounded_send(WorkerEvent::Failed(error.to_string()).into());
             return;
         }
     };
@@ -497,7 +528,7 @@ fn browse_open_worker(
                 "remote: browser ready on {} at {}",
                 target.host, listing.path
             );
-            let _ = sender.unbounded_send(ConnectMsg::BrowserReady {
+            let _ = sender.unbounded_send(BrowseMsg::Ready {
                 browser,
                 listing,
                 warning,
@@ -508,7 +539,7 @@ fn browse_open_worker(
                 "remote: initial folder listing failed for {}: {error}",
                 target.host
             );
-            let _ = sender.unbounded_send(ConnectMsg::Failed(error));
+            let _ = sender.unbounded_send(WorkerEvent::Failed(error).into());
         }
     }
 }
@@ -534,15 +565,21 @@ fn spawn_browse_list(
     receiver
 }
 
-fn askpass_handler(sender: UnboundedSender<ConnectMsg>) -> lamina_remote_client::AskpassHandler {
+fn askpass_handler<M>(sender: UnboundedSender<M>) -> lamina_remote_client::AskpassHandler
+where
+    M: From<WorkerEvent> + Send + 'static,
+{
     Arc::new(move |prompt: Prompt| {
         let (reply_tx, reply_rx) = mpsc::channel();
         if sender
-            .unbounded_send(ConnectMsg::Askpass {
-                prompt: prompt.text,
-                secret: prompt.secret,
-                reply: reply_tx,
-            })
+            .unbounded_send(
+                WorkerEvent::Askpass {
+                    prompt: prompt.text,
+                    secret: prompt.secret,
+                    reply: reply_tx,
+                }
+                .into(),
+            )
             .is_err()
         {
             return None;
@@ -856,9 +893,7 @@ impl RemoteDialog {
         let task = cx.spawn(async move |this, cx| {
             while let Some(message) = receiver.next().await {
                 if this
-                    .update(cx, |dialog, cx| {
-                        dialog.on_browse_connect_msg(token, message, cx)
-                    })
+                    .update(cx, |dialog, cx| dialog.on_browse_msg(token, message, cx))
                     .is_err()
                 {
                     break;
@@ -879,32 +914,32 @@ impl RemoteDialog {
         cx.notify();
     }
 
-    fn on_browse_connect_msg(&mut self, token: u64, message: ConnectMsg, cx: &mut Context<Self>) {
+    fn on_browse_msg(&mut self, token: u64, message: BrowseMsg, cx: &mut Context<Self>) {
         if !self.browse_gate.is_current(token) {
             match message {
-                ConnectMsg::BrowserReady { browser, .. } => drop_browser_in_background(browser),
-                ConnectMsg::Askpass { reply, .. } => {
+                BrowseMsg::Ready { browser, .. } => drop_browser_in_background(browser),
+                BrowseMsg::Worker(WorkerEvent::Askpass { reply, .. }) => {
                     let _ = reply.send(None);
                 }
-                _ => {}
+                BrowseMsg::Worker(_) => {}
             }
             return;
         }
         match message {
-            ConnectMsg::Phase(phase) => {
+            BrowseMsg::Worker(WorkerEvent::Phase(phase)) => {
                 if let Some(panel) = &mut self.browse {
                     panel.connect_phase = Some(phase);
                 }
                 cx.notify();
             }
-            ConnectMsg::Askpass {
+            BrowseMsg::Worker(WorkerEvent::Askpass {
                 prompt,
                 secret,
                 reply,
-            } => {
+            }) => {
                 show_askpass_prompt(Some(self.window), prompt, secret, reply, cx);
             }
-            ConnectMsg::Failed(error) => {
+            BrowseMsg::Worker(WorkerEvent::Failed(error)) => {
                 if let Some(panel) = &mut self.browse {
                     panel.connect_phase = None;
                     panel.loading = false;
@@ -913,7 +948,7 @@ impl RemoteDialog {
                 }
                 cx.notify();
             }
-            ConnectMsg::BrowserReady {
+            BrowseMsg::Ready {
                 browser,
                 listing,
                 warning,
@@ -930,7 +965,6 @@ impl RemoteDialog {
                 }
                 cx.notify();
             }
-            ConnectMsg::Ready(_) | ConnectMsg::Session(_) => {}
         }
     }
 

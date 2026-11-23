@@ -19,7 +19,8 @@ use log::{info, warn};
 
 use super::RepoView;
 use crate::remote_open::{
-    ConnectMsg, ConnectPhase, RemoteLaunch, spawn_connect, tab_title, unavailable_reason,
+    ConnectMsg, ConnectPhase, RemoteLaunch, WorkerEvent, spawn_connect, tab_title,
+    unavailable_reason,
 };
 use crate::style::Design;
 use crate::ui;
@@ -152,18 +153,18 @@ impl RepoView {
 
     fn on_connect_msg(&mut self, message: ConnectMsg, cx: &mut Context<Self>) {
         match message {
-            ConnectMsg::Phase(phase) => {
+            ConnectMsg::Worker(WorkerEvent::Phase(phase)) => {
                 if let Some(tab) = &mut self.remote_tab {
                     tab.phase = phase;
                 }
                 self.notify_if_active(cx);
             }
-            ConnectMsg::Askpass {
+            ConnectMsg::Worker(WorkerEvent::Askpass {
                 prompt,
                 secret,
                 reply,
-            } => self.prompt_remote_askpass(prompt, secret, reply, cx),
-            ConnectMsg::Failed(error) => {
+            }) => self.prompt_remote_askpass(prompt, secret, reply, cx),
+            ConnectMsg::Worker(WorkerEvent::Failed(error)) => {
                 if self.session.is_some() {
                     warn!("remote: connection lost: {error}");
                 } else {
@@ -186,9 +187,6 @@ impl RepoView {
                     return;
                 }
                 self.install_remote_session(session, cx);
-            }
-            ConnectMsg::BrowserReady { browser, .. } => {
-                crate::remote_open::drop_browser_in_background(browser);
             }
             ConnectMsg::Session(event) => {
                 let buffering = self.remote_tab.as_ref().is_some_and(|tab| tab.buffering);
