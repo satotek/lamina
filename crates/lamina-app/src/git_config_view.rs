@@ -265,6 +265,9 @@ pub(crate) struct GitConfigView {
     config: Option<GitConfig>,
     error: Option<String>,
     loading: bool,
+    /// Bumped by every load. A read that finishes after a newer one started
+    /// belongs to the previous repository and must not replace its values.
+    load_generation: u64,
     /// Off shows the curated keys only; on shows every key.
     all_keys: bool,
     query: String,
@@ -313,6 +316,7 @@ impl GitConfigView {
             config: None,
             error: None,
             loading: true,
+            load_generation: 0,
             all_keys: false,
             query: String::new(),
             input,
@@ -356,6 +360,8 @@ impl GitConfigView {
     fn load(&mut self, cx: &mut Context<Self>) {
         self.loading = true;
         self.error = None;
+        self.load_generation += 1;
+        let generation = self.load_generation;
         let access = Arc::clone(&self.source.access);
         cx.spawn(async move |this, cx| {
             let read = cx
@@ -363,6 +369,9 @@ impl GitConfigView {
                 .spawn(async move { access.load_config().map_err(|error| error.to_string()) })
                 .await;
             this.update(cx, |this, cx| {
+                if this.load_generation != generation {
+                    return;
+                }
                 this.loading = false;
                 match read {
                     Ok(config) => {
@@ -2154,6 +2163,63 @@ mod tests {
             remote: false,
             access,
         }
+    }
+
+    /// Reads one fixed config, so a test can tell which repository's values
+    /// the window ended up showing.
+    struct FixedAccess(GitConfig);
+
+    impl GitConfigAccess for FixedAccess {
+        fn load_config(&self) -> lamina_core::Result<GitConfig> {
+            Ok(self.0.clone())
+        }
+
+        fn preview_config(&self, _: &ConfigWrite) -> lamina_core::Result<ConfigPreview> {
+            Err(lamina_core::Error::other("the test never previews"))
+        }
+
+        fn apply_config(&self, _: &ConfigPreview) -> lamina_core::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn named_access(name: &str) -> Arc<dyn GitConfigAccess> {
+        Arc::new(FixedAccess(config(vec![entry(
+            "user.name",
+            name,
+            ConfigLayer::Local,
+        )])))
+    }
+
+    /// Switching repository while the first read is still in flight starts a
+    /// second read. Whichever finishes last used to win, so the window could
+    /// show the first repository's values under the second one's label and
+    /// save into the wrong file. Several scheduler seeds cover both orders.
+    #[gpui::test(iterations = 20)]
+    fn a_read_for_the_previous_repository_does_not_replace_the_current_one(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            gpui_component::init(cx);
+            cx.set_global(Settings::default());
+        });
+        let window = cx.add_window(|window, cx| {
+            let mut view = GitConfigView::new(local_source("/a", named_access("A")), window, cx);
+            view.set_repository(local_source("/b", named_access("B")), cx);
+            view
+        });
+        let view = window.root(cx).expect("the config view");
+        let visual_cx = gpui::VisualTestContext::from_window(window.into(), cx);
+        visual_cx.run_until_parked();
+        let shown = view.read_with(&visual_cx, |view, _| {
+            view.config
+                .as_ref()
+                .and_then(|config| config.entries.first())
+                .and_then(|entry| entry.values.first())
+                .map(|value| value.value.clone())
+        });
+        assert_eq!(shown.as_deref(), Some("B"));
     }
 
     /// A reopened repository keeps its path but starts a new session, so the
