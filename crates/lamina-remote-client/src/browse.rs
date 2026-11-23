@@ -4,9 +4,10 @@
 //! open while the user walks the tree, so each step is one round trip instead
 //! of a fresh SSH handshake. Calls block; the app makes them off the UI thread.
 
+use std::collections::HashMap;
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::process::Child;
-use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -80,13 +81,27 @@ enum ReadEvent {
     Closed(String),
 }
 
+/// Where the reader thread hands a frame to the request waiting for it.
+///
+/// The app runs a request per folder click on the same browser, so several
+/// are in flight at once. Each request owns its receiver; the reader owns the
+/// sender until it delivers the frame that names that stream.
+#[derive(Default)]
+struct Inbox {
+    waiters: HashMap<u16, Sender<ReadEvent>>,
+    /// Why the stream ended, once the reader stopped. A request that arrives
+    /// afterwards fails at once instead of waiting out a deadline on a
+    /// connection that will never answer.
+    closed: Option<String>,
+}
+
 /// A live connection to a folder-listing helper on one host.
 pub struct RemoteBrowser {
     host: String,
     home: String,
     pipe: Mutex<Pipe>,
-    /// Frames decoded by the reader thread, in wire order.
-    frames: Mutex<Receiver<ReadEvent>>,
+    /// One answer slot per request in flight, keyed by stream id.
+    inbox: Arc<Mutex<Inbox>>,
     /// Not joined by `Drop`: it can be parked inside a read that only the
     /// killed child's closed pipe would end.
     reader: Mutex<Option<JoinHandle<()>>>,
@@ -149,10 +164,11 @@ impl RemoteBrowser {
             }
         };
 
-        let (frame_tx, frames) = mpsc::channel();
+        let inbox = Arc::new(Mutex::new(Inbox::default()));
+        let reading = Arc::clone(&inbox);
         let reader_thread = match thread::Builder::new()
             .name("lamina-browse-read".to_owned())
-            .spawn(move || read_frames(stdout, frame_tx))
+            .spawn(move || read_frames(stdout, reading))
         {
             Ok(handle) => handle,
             Err(error) => {
@@ -172,7 +188,7 @@ impl RemoteBrowser {
                 writer: BufWriter::new(Box::new(stdin) as Box<dyn Write + Send>),
                 next_stream: 1,
             }),
-            frames: Mutex::new(frames),
+            inbox,
             reader: Mutex::new(Some(reader_thread)),
             child: Mutex::new(Some(child)),
             stderr: Mutex::new(Some(stderr_thread)),
@@ -217,55 +233,100 @@ impl RemoteBrowser {
         }
     }
 
-    /// One request and its response. The helper answers in order and sends
-    /// no events, so the next frame on this stream is the answer.
+    /// One request and its response.
+    ///
+    /// Each request waits on its own channel, and the reader thread hands a
+    /// frame only to the request whose stream it names. Requests from
+    /// different threads share the connection (the app opens one per folder
+    /// click), so one must never take an answer that belongs to another.
     ///
     /// The read happens on the reader thread and this waits on a channel, so a
     /// host that stops answering ends the wait at the deadline instead of
     /// holding the pipe forever.
     fn request(&self, request: Request) -> Result<Response> {
-        let stream = {
-            let mut pipe = lock(&self.pipe);
-            let stream = pipe.next_stream;
-            pipe.next_stream = pipe.next_stream.wrapping_add(1).max(1);
-            let sent = proto::write_frame(&mut pipe.writer, stream, &Message::Request(request))
-                .and_then(|()| pipe.writer.flush().map_err(Into::into));
-            if let Err(error) = sent {
-                drop(pipe);
-                return Err(self.lost(&format!("remote write failed: {error}")));
-            }
-            stream
-        };
+        let (answer_tx, answer) = mpsc::channel();
+        let stream = self.send(answer_tx, request)?;
         let deadline = Instant::now() + self.timeout;
-        loop {
-            let frame = match self.next_event(deadline)? {
-                ReadEvent::Frame(frame) => frame,
-                ReadEvent::Closed(what) => return Err(self.lost(&what)),
-            };
-            if frame.stream != stream {
-                continue;
-            }
-            return match frame.message {
+        match self.wait(stream, &answer, deadline)? {
+            ReadEvent::Frame(frame) => match frame.message {
                 Message::Response(Response::Error(error)) => Err(Error::other(error.message)),
                 Message::Response(response) => Ok(response),
-                Message::Request(_) | Message::Event(_) => continue,
-            };
+                Message::Request(_) | Message::Event(_) => Err(Error::other(format!(
+                    "unexpected message from the remote helper on stream {stream}"
+                ))),
+            },
+            ReadEvent::Closed(what) => Err(self.lost(&what)),
         }
     }
 
-    /// The next frame, or the deadline error. A stream whose reader thread has
-    /// already stopped is reported as the connection closing.
-    fn next_event(&self, deadline: Instant) -> Result<ReadEvent> {
+    /// Puts this request's answer slot in the inbox and writes the request.
+    ///
+    /// The slot goes in before the bytes leave, so an answer that arrives
+    /// while the write is still flushing has somewhere to land.
+    fn send(&self, answer: Sender<ReadEvent>, request: Request) -> Result<u16> {
+        let mut pipe = lock(&self.pipe);
+        let stream = pipe.next_stream;
+        pipe.next_stream = pipe.next_stream.wrapping_add(1).max(1);
+        {
+            let mut inbox = lock(&self.inbox);
+            if let Some(what) = inbox.closed.clone() {
+                drop(inbox);
+                drop(pipe);
+                return Err(self.lost(&what));
+            }
+            inbox.waiters.insert(stream, answer);
+        }
+        let sent = proto::write_frame(&mut pipe.writer, stream, &Message::Request(request))
+            .and_then(|()| pipe.writer.flush().map_err(Into::into));
+        if let Err(error) = sent {
+            // Nothing will answer a request that never left the pipe.
+            lock(&self.inbox).waiters.remove(&stream);
+            drop(pipe);
+            return Err(self.lost(&format!("remote write failed: {error}")));
+        }
+        Ok(stream)
+    }
+
+    /// Waits for this request's one answer, or its deadline.
+    ///
+    /// Nothing here holds a lock that another request needs: the receiver
+    /// belongs to this request, and the inbox is only touched to take the slot
+    /// back. A request whose slot was already taken by the reader gets the
+    /// answer it left in the channel.
+    fn wait(
+        &self,
+        stream: u16,
+        answer: &Receiver<ReadEvent>,
+        deadline: Instant,
+    ) -> Result<ReadEvent> {
         let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            return Err(self.not_answered());
+        if !remaining.is_zero() {
+            match answer.recv_timeout(remaining) {
+                Ok(event) => return Ok(event),
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err(self.lost("the connection closed"));
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+            }
         }
-        let frames = lock(&self.frames);
-        match frames.recv_timeout(remaining) {
-            Ok(event) => Ok(event),
-            Err(RecvTimeoutError::Timeout) => Err(self.not_answered()),
-            Err(RecvTimeoutError::Disconnected) => Err(self.lost("the connection closed")),
+        match self.reclaim(stream, answer) {
+            Some(event) => Ok(event),
+            None => Err(self.not_answered()),
         }
+    }
+
+    /// Takes this request's slot back at the deadline, and reports an answer
+    /// the reader had already taken it for.
+    ///
+    /// A slot still in the inbox cannot receive again, so a late answer is
+    /// dropped there instead of leaking. When the reader had already taken it,
+    /// it hands the frame over while holding the inbox, so the frame is in the
+    /// channel by the time this finds the slot gone.
+    fn reclaim(&self, stream: u16, answer: &Receiver<ReadEvent>) -> Option<ReadEvent> {
+        if lock(&self.inbox).waiters.remove(&stream).is_some() {
+            return None;
+        }
+        answer.try_recv().ok()
     }
 
     fn not_answered(&self) -> Error {
@@ -323,10 +384,11 @@ impl RemoteBrowser {
         writer: impl Write + Send + 'static,
         timeout: Duration,
     ) -> Self {
-        let (tx, frames) = mpsc::channel();
+        let inbox = Arc::new(Mutex::new(Inbox::default()));
+        let reading = Arc::clone(&inbox);
         let reader = thread::Builder::new()
             .name("lamina-browse-read-test".to_owned())
-            .spawn(move || read_frames(reader, tx))
+            .spawn(move || read_frames(reader, reading))
             .expect("reader thread");
         Self {
             host: host.to_owned(),
@@ -335,7 +397,7 @@ impl RemoteBrowser {
                 writer: BufWriter::new(Box::new(writer) as Box<dyn Write + Send>),
                 next_stream: 1,
             }),
-            frames: Mutex::new(frames),
+            inbox,
             reader: Mutex::new(Some(reader)),
             child: Mutex::new(None),
             stderr: Mutex::new(None),
@@ -362,12 +424,13 @@ fn unexpected(response: &Response) -> Error {
     Error::other(format!("unexpected answer from the remote helper: {name}"))
 }
 
-/// Decodes frames for the lifetime of the stream.
+/// Decodes frames for the lifetime of the stream and hands each one to the
+/// request waiting on its stream id.
 ///
 /// The thread exists so a request can wait on a channel with a deadline: a
 /// pipe has no portable read timeout, and a host that stops answering would
 /// otherwise park the caller inside `read` for as long as it likes.
-fn read_frames(reader: impl Read, tx: mpsc::Sender<ReadEvent>) {
+fn read_frames(reader: impl Read, inbox: Arc<Mutex<Inbox>>) {
     let mut reader = BufReader::new(reader);
     loop {
         let event = match proto::read_frame(&mut reader) {
@@ -375,10 +438,30 @@ fn read_frames(reader: impl Read, tx: mpsc::Sender<ReadEvent>) {
             Ok(None) => ReadEvent::Closed("the connection closed".to_owned()),
             Err(error) => ReadEvent::Closed(format!("remote read failed: {error}")),
         };
-        let closed = matches!(event, ReadEvent::Closed(_));
-        // A dropped receiver means the browser is gone, so nothing reads on.
-        if tx.send(event).is_err() || closed {
-            return;
+        match event {
+            ReadEvent::Frame(frame) => {
+                let mut inbox = lock(&inbox);
+                // A stream without a slot belongs to a request that gave up
+                // at its deadline, so a late answer is dropped here rather
+                // than handed to whichever request waits next.
+                if let Some(waiter) = inbox.waiters.remove(&frame.stream) {
+                    // Sending while the inbox is locked keeps the slot and
+                    // the answer in step for `reclaim`.
+                    let _ = waiter.send(ReadEvent::Frame(frame));
+                }
+            }
+            ReadEvent::Closed(what) => {
+                let mut inbox = lock(&inbox);
+                inbox.closed = Some(what.clone());
+                let waiters = std::mem::take(&mut inbox.waiters);
+                drop(inbox);
+                // Every request in flight would otherwise wait out its whole
+                // deadline on a stream that can no longer answer.
+                for waiter in waiters.into_values() {
+                    let _ = waiter.send(ReadEvent::Closed(what.clone()));
+                }
+                return;
+            }
         }
     }
 }
@@ -400,6 +483,137 @@ mod tests {
             let _ = self.0.recv();
             Ok(0)
         }
+    }
+
+    /// The writer side of a fake helper: what the browser writes reaches the
+    /// peer thread as chunks.
+    struct ChannelWriter(mpsc::Sender<Vec<u8>>);
+
+    impl Write for ChannelWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            // A closed peer surfaces the way a broken pipe would.
+            self.0
+                .send(buf.to_vec())
+                .map_err(|_| std::io::Error::from(std::io::ErrorKind::BrokenPipe))?;
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The reading side of a fake helper: chunks arrive from the other end of
+    /// the connection, and the end of the channel is end of stream.
+    struct ChannelReader {
+        chunks: mpsc::Receiver<Vec<u8>>,
+        chunk: Vec<u8>,
+        used: usize,
+    }
+
+    impl ChannelReader {
+        fn new(chunks: mpsc::Receiver<Vec<u8>>) -> Self {
+            Self {
+                chunks,
+                chunk: Vec::new(),
+                used: 0,
+            }
+        }
+    }
+
+    impl Read for ChannelReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            while self.used == self.chunk.len() {
+                match self.chunks.recv() {
+                    Ok(chunk) => {
+                        self.chunk = chunk;
+                        self.used = 0;
+                    }
+                    Err(_) => return Ok(0),
+                }
+            }
+            let len = buf.len().min(self.chunk.len() - self.used);
+            buf[..len].copy_from_slice(&self.chunk[self.used..self.used + len]);
+            self.used += len;
+            Ok(len)
+        }
+    }
+
+    /// An answer that names the listing it carries.
+    fn answer(listing: &str) -> Message {
+        Message::Response(Response::DirListing {
+            listing: DirListingDto {
+                path: listing.to_owned(),
+                parent: None,
+                repository: false,
+                entries: Vec::new(),
+                truncated: false,
+            },
+        })
+    }
+
+    fn write_answer(writer: &mut impl Write, stream: u16, listing: &str) {
+        proto::write_frame(writer, stream, &answer(listing))
+            .and_then(|()| writer.flush().map_err(Into::into))
+            .expect("the peer must write its answers");
+    }
+
+    /// Two requests in flight on one browser must each receive the answer for
+    /// their own stream.
+    ///
+    /// The peer answers the second request first, which is the case a shared
+    /// answer queue loses: the request already waiting takes that frame,
+    /// drops it as not its own, and the second request never hears back. In
+    /// the app every folder click runs a request on the same browser, so the
+    /// lost answer ended the ssh connection for every later navigation.
+    #[test]
+    fn an_answer_reaches_the_request_that_asked_for_it() {
+        let (to_peer, peer_in) = mpsc::channel();
+        let (peer_out, from_peer) = mpsc::channel();
+        let browser = RemoteBrowser::with_streams(
+            "peer.example",
+            ChannelReader::new(from_peer),
+            ChannelWriter(to_peer),
+            Duration::from_secs(5),
+        );
+        let peer = thread::spawn(move || {
+            let mut requests = BufReader::new(ChannelReader::new(peer_in));
+            let first = proto::read_frame(&mut requests)
+                .expect("request bytes")
+                .expect("a first request");
+            let second = proto::read_frame(&mut requests)
+                .expect("request bytes")
+                .expect("a second request");
+            let mut answers = ChannelWriter(peer_out);
+            // Both requests are in, so the first is parked on its answer.
+            write_answer(&mut answers, second.stream, "/second");
+            write_answer(&mut answers, first.stream, "/first");
+            let third = proto::read_frame(&mut requests)
+                .expect("request bytes")
+                .expect("a third request");
+            write_answer(&mut answers, third.stream, "/third");
+        });
+
+        let (first, second) = thread::scope(|scope| {
+            let first = scope.spawn(|| browser.list(None));
+            // Starting the second request after the first is parked is what
+            // puts them both in flight at once.
+            thread::sleep(Duration::from_millis(20));
+            let second = scope.spawn(|| browser.list(Some("/second")));
+            (
+                first.join().expect("first request thread"),
+                second.join().expect("second request thread"),
+            )
+        });
+        let third = browser.list(Some("/third"));
+        peer.join().expect("peer thread");
+
+        assert_eq!(first.expect("the first answer").path, "/first");
+        assert_eq!(second.expect("the second answer").path, "/second");
+        assert_eq!(
+            third.expect("a connection that stayed alive").path,
+            "/third"
+        );
     }
 
     /// The browser plus the sender that later releases its reader thread.
