@@ -673,3 +673,25 @@ fn a_host_beginning_with_a_dash_is_refused_before_ssh_runs() {
         fs::read_to_string(&laid.log).unwrap_or_default()
     );
 }
+
+#[test]
+fn a_login_shell_banner_does_not_confuse_the_probe() {
+    let scratch = Scratch::new();
+    let laid = layout(
+        &scratch,
+        &Fake {
+            os: "Linux",
+            arch: "x86_64",
+            lie: Lie::Never,
+            override_path: None,
+            banner: Some("Welcome to the shell of the day"),
+            fail_upload: false,
+            barrier: None,
+        },
+    );
+    host_helper(&laid.helpers);
+    // A positional probe would read the banner as the os and shift every
+    // later value, turning `x86_64` into the helper override path.
+    let installed = install(&laid, None).expect("install past the banner");
+    assert!(Path::new(&installed).is_file(), "{installed}");
+}

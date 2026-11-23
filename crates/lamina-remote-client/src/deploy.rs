@@ -38,9 +38,12 @@ pub const HELPER_DIR_ENV: &str = "LAMINA_REMOTE_HELPER_DIR";
 pub const HELPER_OVERRIDE_ENV: &str = "LAMINA_REMOTE_HELPER";
 
 /// `uname` and the cache directory, plus the override path when the remote
-/// user set one. Double quotes only, so the ssh command can wrap it in single
+/// user set one. Each value is tagged with a marker because the login shell,
+/// its startup files or a motd can print banners to the same stream before
+/// the command runs; position-based lines would pick those up instead.
+/// Double quotes only, so the ssh command can wrap the script in single
 /// quotes without embedding any.
-const PROBE_SCRIPT: &str = "printf \"%s\\n\" \"$(uname -s)\" \"$(uname -m)\" \"${LAMINA_REMOTE_HELPER-}\" \"${XDG_CACHE_HOME:-$HOME/.cache}\"";
+const PROBE_SCRIPT: &str = "printf \"lamina-os:%s\\nlamina-arch:%s\\nlamina-helper:%s\\nlamina-cache:%s\\n\" \"$(uname -s)\" \"$(uname -m)\" \"${LAMINA_REMOTE_HELPER-}\" \"${XDG_CACHE_HOME:-$HOME/.cache}\"";
 
 /// `umask` covers every directory `mkdir -p` creates. The file mode is set
 /// explicitly because `cat` follows the umask only until something else
@@ -154,6 +157,7 @@ pub(crate) fn install_with(
     Ok(remote_path)
 }
 
+#[derive(Debug)]
 struct Probe {
     os: String,
     arch: String,
@@ -169,26 +173,41 @@ fn probe(options: &InstallOptions, askpass: Option<&AskpassSession>) -> Result<P
         None,
     )?;
     ensure_success("could not inspect the remote host", &output)?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    let mut lines = text.lines();
-    let os = lines.next().unwrap_or("").trim().to_owned();
-    let arch = lines.next().unwrap_or("").trim().to_owned();
-    let override_path = lines.next().unwrap_or("").trim().to_owned();
-    let cache = lines.next().unwrap_or("").trim().to_owned();
-    if os.is_empty() || arch.is_empty() {
+    parse_probe(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Reads the marked lines and ignores everything else the login shell may
+/// have printed to the same stream.
+fn parse_probe(text: &str) -> Result<Probe> {
+    let mut os = None;
+    let mut arch = None;
+    let mut helper_override = None;
+    let mut cache = None;
+    for line in text.lines() {
+        // Last occurrence wins: the script prints after any banner, so its
+        // lines are the ones that count.
+        if let Some(value) = line.strip_prefix("lamina-os:") {
+            os = Some(value.trim().to_owned());
+        } else if let Some(value) = line.strip_prefix("lamina-arch:") {
+            arch = Some(value.trim().to_owned());
+        } else if let Some(value) = line.strip_prefix("lamina-helper:") {
+            helper_override = Some(value.trim().to_owned());
+        } else if let Some(value) = line.strip_prefix("lamina-cache:") {
+            cache = Some(value.trim().to_owned());
+        }
+    }
+    let os = os.filter(|os| !os.is_empty());
+    let arch = arch.filter(|arch| !arch.is_empty());
+    let (Some(os), Some(arch)) = (os, arch) else {
         return Err(Error::other(format!(
             "could not inspect the remote host: unexpected probe output: {text}"
         )));
-    }
+    };
     Ok(Probe {
         os,
         arch,
-        helper_override: if override_path.is_empty() {
-            None
-        } else {
-            Some(override_path)
-        },
-        cache,
+        helper_override: helper_override.filter(|path| !path.is_empty()),
+        cache: cache.unwrap_or_default(),
     })
 }
 
@@ -380,5 +399,62 @@ mod tests {
         assert!(text.contains("Darwin"), "{text}");
         assert!(text.contains("not available"), "{text}");
         assert!(text.contains("x86_64-unknown-linux-musl"), "{text}");
+    }
+
+    #[test]
+    fn the_probe_reads_marked_lines_wherever_the_shell_prints_them() {
+        let probe = parse_probe(
+            "Welcome to the shell of the day\n\
+             motd: please be nice\n\
+             lamina-os:Linux\n\
+             lamina-arch:x86_64\n\
+             lamina-helper:\n\
+             lamina-cache:/home/ada/.cache\n",
+        )
+        .expect("probe");
+        assert_eq!(probe.os, "Linux");
+        assert_eq!(probe.arch, "x86_64");
+        assert_eq!(probe.helper_override, None);
+        assert_eq!(probe.cache, "/home/ada/.cache");
+    }
+
+    #[test]
+    fn banner_lines_shifted_the_old_probe_and_must_not_be_values() {
+        // A banner used to land in the values: the first line became the os
+        // and everything after it shifted, turning `x86_64` into the helper
+        // override path.
+        let shifted = parse_probe(
+            "Welcome to the shell of the day\n\
+             lamina-os:Linux\n\
+             lamina-arch:x86_64\n",
+        )
+        .expect("probe");
+        assert_eq!(shifted.os, "Linux", "the banner is not the os");
+        assert_eq!(shifted.helper_override, None);
+        assert_eq!(shifted.cache, "");
+
+        let probe = parse_probe(
+            "Welcome\nlamina-os:Linux\nlamina-arch:x86_64\n\
+             lamina-helper:/opt/custom-helper\nlamina-cache:/tmp/cache\n",
+        )
+        .expect("probe");
+        assert_eq!(probe.helper_override, Some("/opt/custom-helper".to_owned()));
+        assert_eq!(probe.cache, "/tmp/cache");
+    }
+
+    #[test]
+    fn a_probe_without_marked_lines_is_rejected() {
+        let error = parse_probe("Linux\nx86_64\n").expect_err("no markers");
+        assert!(
+            error
+                .to_string()
+                .contains("unexpected probe output: Linux\nx86_64"),
+            "{error}"
+        );
+        let error = parse_probe("lamina-os:\nlamina-arch:\n").expect_err("empty values");
+        assert!(
+            error.to_string().contains("unexpected probe output"),
+            "{error}"
+        );
     }
 }
