@@ -993,7 +993,14 @@ fn isolate_for_cancel(command: &mut Command) {
     let _ = command;
 }
 
-/// Stop `child` and, on Unix, the group [`isolate_for_cancel`] created.
+/// Stop `child` and, with it, whatever git started.
+///
+/// A hook, a credential helper or an askpass child inherits git's pipes.
+/// Killing only the git pid leaves that child running, and the reader stays
+/// blocked until it exits on its own. Unix gets the whole process group
+/// [`isolate_for_cancel`] created; Windows has no process groups, so
+/// `taskkill /T` walks git's descendant tree instead, before the direct
+/// kill removes the root that tree is listed under.
 fn kill_child_group(child: &mut Child) {
     #[cfg(unix)]
     {
@@ -1009,6 +1016,16 @@ fn kill_child_group(child: &mut Child) {
                 kill(-pid, 9);
             }
         }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let _ = Command::new("taskkill")
+            .args(["/T", "/F", "/PID"])
+            .arg(child.id().to_string())
+            // CREATE_NO_WINDOW: no console window flashes next to every kill.
+            .creation_flags(0x0800_0000)
+            .status();
     }
     let _ = child.kill();
 }
@@ -1225,6 +1242,109 @@ mod tests {
         );
         assert_eq!(parse_version("git version 3\n"), Some((3, 0, 0)));
         assert_eq!(parse_version("nonsense"), None);
+    }
+}
+
+/// Cancelling has to stop git's own children too, not just the git process:
+/// a hook, a credential helper or an askpass child inherits git's pipes, and
+/// the reader only unblocks when the last handle holder is gone.
+#[cfg(test)]
+mod cancel_tests {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::{Duration, Instant};
+
+    use super::Git;
+
+    /// A stand-in for git that starts a grandchild holding its pipes, marks
+    /// that the grandchild exists, and then waits to be killed.
+    fn tree_git(directory: &std::path::Path) -> std::path::PathBuf {
+        let path = directory.join(if cfg!(windows) {
+            "tree-git.cmd"
+        } else {
+            "tree-git"
+        });
+        #[cfg(unix)]
+        let script = "#!/bin/sh\n\
+                      sleep 120 &\n\
+                      : > \"$LAMINA_TREE_MARKER\"\n\
+                      exec sleep 120\n";
+        #[cfg(windows)]
+        let script = "@echo off\r\n\
+                      type NUL > \"%LAMINA_TREE_MARKER%\"\r\n\
+                      powershell -NoProfile -Command Start-Sleep -Seconds 120\r\n";
+        std::fs::write(&path, script).expect("write the fake git");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+            permissions.set_mode(0o755);
+            std::fs::set_permissions(&path, permissions).unwrap();
+        }
+        path
+    }
+
+    #[test]
+    fn cancelling_kills_git_and_the_children_it_started() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let binary = tree_git(temp.path());
+        let marker = temp.path().join("started");
+
+        // The gate lets the test wait for the grandchild before cancelling,
+        // so a cancel that merely raced the spawn cannot pass the test.
+        let started = Arc::new((Mutex::new(false), Condvar::new()));
+        let tripped = {
+            let started = Arc::clone(&started);
+            let marker = marker.clone();
+            std::thread::spawn(move || {
+                for _ in 0..1_000 {
+                    if marker.exists() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                let (lock, signal) = &*started;
+                *lock.lock().unwrap() = true;
+                signal.notify_all();
+            })
+        };
+
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let git = Git::new(temp.path().to_path_buf())
+            .with_git_binary(&binary)
+            .with_env("LAMINA_TREE_MARKER", marker.to_string_lossy().into_owned())
+            .with_cancel({
+                let cancelled = Arc::clone(&cancelled);
+                move || cancelled.load(Ordering::SeqCst)
+            });
+
+        let began = Instant::now();
+        let run = std::thread::spawn(move || git.run(&["status"], None));
+        {
+            let (lock, signal) = &*started;
+            let mut gate = lock.lock().unwrap();
+            while !*gate {
+                gate = signal.wait(gate).unwrap();
+            }
+        }
+        cancelled.store(true, Ordering::SeqCst);
+
+        let result = run.join().expect("the command thread");
+        let error = result.expect_err("a cancelled command is an error");
+        assert!(
+            error
+                .to_string()
+                .contains(crate::error::OPERATION_CANCELLED),
+            "{error}"
+        );
+        // The grandchild holds git's output pipes for two minutes; the call
+        // only returns promptly if the whole tree was stopped with git.
+        assert!(
+            began.elapsed() < Duration::from_secs(20),
+            "the cancel took {:?}; a child survived it",
+            began.elapsed()
+        );
+        let _ = tripped.join();
     }
 }
 
