@@ -135,7 +135,7 @@ impl RepoWatcher {
             // is the only place that may take its time.
             let _ = tx.send(Wake::Event(event));
         })
-        .map_err(|err| Error::Watch(format!("failed to create filesystem watcher: {err}")))?;
+        .map_err(|err| Error::other(format!("failed to create filesystem watcher: {err}")))?;
 
         // A recursive watch of the worktree already covers a git dir inside it.
         // Watching both would only duplicate every git-dir event.
@@ -150,7 +150,7 @@ impl RepoWatcher {
             watcher
                 .watch(&root, RecursiveMode::Recursive)
                 .map_err(|err| {
-                    Error::Watch(format!("failed to watch `{}`: {err}", root.display()))
+                    Error::other(format!("failed to watch `{}`: {err}", root.display()))
                 })?;
         }
 
@@ -165,7 +165,7 @@ impl RepoWatcher {
         let worker = thread::Builder::new()
             .name("lamina-repo-watcher".into())
             .spawn(move || run(rx, watch, on_change))
-            .map_err(|err| Error::Watch(format!("failed to start watcher thread: {err}")))?;
+            .map_err(|err| Error::other(format!("failed to start watcher thread: {err}")))?;
 
         Ok(Self {
             watcher: Some(watcher),
@@ -624,6 +624,21 @@ fn directory_hint(kind: &EventKind) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The reason reaches the user (and the helper's stderr) once: a wrapper
+    /// that names the failure again would print it twice.
+    #[test]
+    fn a_watch_that_cannot_start_names_the_failure_once() {
+        let temp = tempfile::TempDir::new().expect("temporary directory");
+        let missing = temp.path().join("gone");
+        let error = match RepoWatcher::new(None, &missing, Duration::from_millis(50), |_| {}) {
+            Ok(_) => panic!("a missing directory cannot be watched"),
+            Err(error) => error,
+        };
+        let text = error.to_string();
+        assert!(text.contains("failed to watch"), "{text}");
+        assert!(!text.contains("filesystem watch failed"), "{text}");
+    }
 
     #[test]
     fn git_dir_index_and_head() {

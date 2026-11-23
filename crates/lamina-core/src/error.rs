@@ -24,11 +24,6 @@ pub enum Error {
     #[error("not a git repository: {0}")]
     NotARepository(PathBuf),
 
-    /// The filesystem watcher could not be installed. The repository itself
-    /// opened; a caller that can refresh explicitly may continue without one.
-    #[error("filesystem watch failed: {0}")]
-    Watch(String),
-
     #[error("{0}")]
     Other(String),
 }

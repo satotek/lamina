@@ -830,6 +830,12 @@ pub struct SessionOptions {
     /// Install a filesystem watcher. Off only after a watch failed to start:
     /// the repository still opens, and the caller refreshes explicitly.
     pub watch: bool,
+    /// Keep the repository open when the watcher cannot be installed, and
+    /// report it through [`Session::watch_error`]. The remote helper sets it:
+    /// the same reads still work and the handshake tells the app that outside
+    /// edits need a refresh, whereas a local tab reports the failure instead
+    /// of silently missing them.
+    pub watch_optional: bool,
     /// Kill a running git write when the session is dropped. A local tab
     /// leaves it at the default so closing a tab lets the command the user
     /// started finish; the remote helper sets it because its client is gone
@@ -843,6 +849,7 @@ impl Default for SessionOptions {
             git_executable: None,
             proxy: crate::proxy::ProxyPolicy::default(),
             watch: true,
+            watch_optional: false,
             cancel_on_shutdown: false,
         }
     }
@@ -856,6 +863,9 @@ pub struct Session {
     senders: Option<Senders>,
     /// Kept last-in, first-dropped: its callback holds channel senders.
     watcher: Option<RepoWatcher>,
+    /// Why no watcher was installed when the caller allowed the session to
+    /// open without one. A local tab gets the error instead and never sees it.
+    watch_error: Option<String>,
     threads: Vec<JoinHandle<()>>,
 }
 
@@ -939,8 +949,9 @@ impl Session {
         // A host that cannot watch (inotify instance limit, no backend) still
         // gets a session when the caller opted out, instead of refusing the
         // repository.
+        let mut watch_error = None;
         let watcher = if options.watch {
-            Some(RepoWatcher::new(
+            let installed = RepoWatcher::new(
                 shared.repo.workdir(),
                 shared.repo.git_dir(),
                 WATCH_DEBOUNCE,
@@ -951,7 +962,15 @@ impl Session {
                     let signature_cache = Arc::clone(&signature_cache);
                     move |changes| on_watch(&shared, &load, &status, &signature_cache, &changes)
                 },
-            )?)
+            );
+            match installed {
+                Ok(watcher) => Some(watcher),
+                Err(error) if options.watch_optional => {
+                    watch_error = Some(error.to_string());
+                    None
+                }
+                Err(error) => return Err(error),
+            }
         } else {
             None
         };
@@ -1025,6 +1044,7 @@ impl Session {
                 query_state,
             }),
             watcher,
+            watch_error,
             threads,
         };
         session.reload();
@@ -1042,6 +1062,13 @@ impl Session {
     /// to [`reload`](Self::reload) to see edits made elsewhere.
     pub fn watches_filesystem(&self) -> bool {
         self.watcher.is_some()
+    }
+
+    /// Why the watcher could not be installed, when the caller allowed the
+    /// session to open without one. `None` when a watcher exists or none was
+    /// requested.
+    pub fn watch_error(&self) -> Option<&str> {
+        self.watch_error.as_deref()
     }
 
     /// Queues a mutation. The session refreshes affected state afterwards.

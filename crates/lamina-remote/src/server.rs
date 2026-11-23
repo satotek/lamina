@@ -270,6 +270,9 @@ fn serve_chunked(
             &root,
             lamina_core::session::SessionOptions {
                 watch,
+                // A host that cannot watch still serves reads; the handshake
+                // tells the app that outside edits need a refresh.
+                watch_optional: true,
                 // The client leaves with the connection, so a write still
                 // running here has nobody to report to; stop it with the
                 // session instead of holding the process open for it.
@@ -284,18 +287,16 @@ fn serve_chunked(
     // watch. A failed install takes the same path: polling would be a second
     // refresh policy, so the repository stays open and the app is told that
     // outside edits need a refresh.
-    let (session, watching) = if std::env::var_os("LAMINA_REMOTE_NO_WATCH").is_none() {
-        match open(true) {
-            Ok(session) => (session, true),
-            Err(lamina_core::Error::Watch(reason)) => {
-                eprintln!("lamina-remote: {reason}; changes outside the app need a refresh");
-                (open(false)?, false)
-            }
-            Err(error) => return Err(error.into()),
+    let session = if std::env::var_os("LAMINA_REMOTE_NO_WATCH").is_none() {
+        let session = open(true)?;
+        if let Some(reason) = session.watch_error() {
+            eprintln!("lamina-remote: {reason}; changes outside the app need a refresh");
         }
+        session
     } else {
-        (open(false)?, false)
+        open(false)?
     };
+    let watching = session.watches_filesystem();
     shared.watching.store(watching, Ordering::SeqCst);
     *lock(&shared.session) = Some(Arc::new(session));
 
