@@ -483,6 +483,7 @@ fn missed_pings_report_a_lost_connection_and_keep_the_snapshot() {
             ping_interval: Duration::from_millis(40),
             missed_pings: 3,
             first_chunk_timeout: Duration::from_secs(5),
+            request_timeout: Duration::from_secs(10),
         },
     )
     .expect("connect");
@@ -561,6 +562,7 @@ fn an_answered_ping_records_the_round_trip_until_the_link_drops() {
             ping_interval: Duration::from_millis(40),
             missed_pings: 3,
             first_chunk_timeout: Duration::from_secs(5),
+            request_timeout: Duration::from_secs(10),
         },
     )
     .expect("connect");
@@ -916,6 +918,7 @@ fn dropping_a_session_with_a_stalled_write_does_not_hang() {
             ping_interval: Duration::from_millis(40),
             missed_pings: 3,
             first_chunk_timeout: Duration::from_secs(5),
+            request_timeout: Duration::from_secs(10),
         },
         TransportAttach {
             diagnostic: Arc::new(String::new),
@@ -1013,5 +1016,64 @@ fn a_close_releases_a_request_that_never_got_an_answer() {
         .expect("the close finishes once the peer leaves");
     let _ = calling.join();
     let _ = closer.join();
+    peer.join().expect("peer");
+}
+
+#[test]
+fn a_request_whose_answer_never_comes_times_out() {
+    let (client_read, client_write, mut peer_read, mut peer_write) = pipe();
+    let (exit_tx, exit_rx) = mpsc::channel::<()>();
+    let peer = thread::spawn(move || {
+        hello(&mut peer_read, &mut peer_write);
+        accept_subscribe(&mut peer_read, &mut peer_write);
+        let (_, id) = oid_pair(13);
+        send_chunk(&mut peer_write, id, true);
+        // Swallow the read, answer every ping, and stay connected: the link
+        // keeps proving it is alive, so only the request deadline can end
+        // the caller's wait.
+        while exit_rx.try_recv().is_err() {
+            match read_msg(&mut peer_read) {
+                Some((_, Message::Request(Request::Ping { nonce }))) => {
+                    write_msg(
+                        &mut peer_write,
+                        0,
+                        &Message::Response(Response::Pong { nonce }),
+                    );
+                }
+                Some((_, Message::Request(Request::Head))) => {}
+                Some(_) => {}
+                None => return,
+            }
+        }
+    });
+
+    let session = RemoteSession::connect_with(
+        client_read,
+        client_write,
+        RemoteTarget::new("scripted"),
+        |_| {},
+        ClientConfig {
+            ping_interval: Duration::from_millis(100),
+            missed_pings: 3,
+            first_chunk_timeout: Duration::from_secs(5),
+            request_timeout: Duration::from_millis(300),
+        },
+    )
+    .expect("connect");
+
+    let started = Instant::now();
+    let error = session
+        .reader()
+        .head()
+        .expect_err("a request without an answer times out");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "the caller waited far past its deadline"
+    );
+    assert!(
+        error.to_string().contains("did not answer"),
+        "the error should name the deadline: {error}"
+    );
+    let _ = exit_tx.send(());
     peer.join().expect("peer");
 }

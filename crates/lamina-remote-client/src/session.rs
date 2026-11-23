@@ -49,6 +49,13 @@ pub const CONNECTION_LOST: &str = "connection to the remote repository was lost"
 const DEFAULT_PING_INTERVAL: Duration = Duration::from_secs(5);
 const DEFAULT_MISSED_PINGS: u32 = 3;
 const DEFAULT_FIRST_CHUNK: Duration = Duration::from_secs(30);
+/// How long one request may wait for its answer.
+///
+/// Answered pings prove the link is alive, not that a response is coming, so
+/// they cannot bound a request whose answer was lost. The value has to clear
+/// a blob, a patch or an LFS object crawling over a slow uplink; a dead link
+/// is the ping watchdog's job, this only ends the wait.
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Where the helper is running. The repository path comes from the helper's
 /// handshake, because it is the one that resolved `~` and relative paths.
@@ -81,6 +88,9 @@ pub struct ClientConfig {
     pub missed_pings: u32,
     /// How long [`RemoteSession::connect`] waits for the first snapshot chunk.
     pub first_chunk_timeout: Duration,
+    /// How long one request waits for its answer before the caller gets an
+    /// error instead of waiting forever.
+    pub request_timeout: Duration,
 }
 
 impl Default for ClientConfig {
@@ -89,6 +99,7 @@ impl Default for ClientConfig {
             ping_interval: DEFAULT_PING_INTERVAL,
             missed_pings: DEFAULT_MISSED_PINGS,
             first_chunk_timeout: DEFAULT_FIRST_CHUNK,
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
         }
     }
 }
@@ -192,6 +203,7 @@ struct Inner {
     ping_interval: Duration,
     missed_limit: u32,
     first_chunk_timeout: Duration,
+    request_timeout: Duration,
     diagnostic: Arc<dyn Fn() -> String + Send + Sync>,
     disconnect: Mutex<Option<Box<dyn FnOnce() + Send>>>,
     park: Mutex<()>,
@@ -295,6 +307,7 @@ impl RemoteSession {
             ping_interval: config.ping_interval,
             missed_limit: config.missed_pings.max(1),
             first_chunk_timeout: config.first_chunk_timeout,
+            request_timeout: config.request_timeout,
             diagnostic: attach.diagnostic,
             disconnect: Mutex::new(attach.disconnect),
             park: Mutex::new(()),
@@ -740,10 +753,28 @@ impl Inner {
             lock(&self.pending).remove(&stream);
             return Err(error);
         }
-        let response = match rx.recv() {
-            Ok(Response::Error(error)) => Err(remote_error(error)),
-            Ok(other) => Ok(other),
-            Err(_) => Err(self.lost_error()),
+        let deadline = started + self.request_timeout;
+        let response = loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                // Pongs keep the link "alive", so without this deadline a
+                // request whose answer was lost would wait forever. Freeing
+                // the entry drops a late answer instead of waking a caller
+                // that already gave up.
+                lock(&self.pending).remove(&stream);
+                break Err(Error::other(format!(
+                    "the remote helper did not answer a {name} within {:?}",
+                    self.request_timeout
+                )));
+            }
+            match rx.recv_timeout(remaining) {
+                Ok(Response::Error(error)) => break Err(remote_error(error)),
+                Ok(other) => break Ok(other),
+                Err(mpsc::RecvTimeoutError::Disconnected) => break Err(self.lost_error()),
+                // The deadline elapsed without an answer; the loop recomputes
+                // a zero remaining and ends the wait.
+                Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            }
         };
         // The name is a static label, never the request's payload: a request
         // can carry patch bytes, paths or a credential answer.
