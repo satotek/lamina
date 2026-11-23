@@ -14,7 +14,9 @@ use lamina_core::HeadInfo;
 use lamina_core::askpass::{Answer, Prompt};
 use lamina_core::session::RepositorySession;
 use lamina_core::test_support::TestRepo;
-use lamina_remote_client::{InstallOptions, RemoteSession, RemoteTarget, SshOptions};
+use lamina_remote_client::{
+    InstallOptions, RemoteBrowser, RemoteSession, RemoteTarget, SshOptions,
+};
 
 fn sh_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
@@ -472,4 +474,57 @@ fn an_unsupported_remote_is_refused() {
     let text = error.to_string();
     assert!(text.contains("not available"), "{text}");
     assert!(text.contains("Darwin"), "{text}");
+}
+
+#[test]
+fn a_browse_helper_walks_folders_on_the_host() {
+    let scratch = Scratch::new();
+    let laid = layout(
+        &scratch,
+        &Fake {
+            os: "Linux",
+            arch: "x86_64",
+            lie: Lie::Never,
+            override_path: None,
+        },
+    );
+    host_helper(&laid.helpers);
+    fs::create_dir_all(laid.home.join("src/app/.git")).unwrap();
+    fs::create_dir_all(laid.home.join("src/notes")).unwrap();
+    fs::write(laid.home.join("src/readme.txt"), "not a folder\n").unwrap();
+
+    let helper = install(&laid, None).expect("install helper");
+    let target = RemoteTarget::new("ignored.example");
+    let browser = RemoteBrowser::open(&target, helper, &options(&laid)).expect("open browser");
+    let home = fs::canonicalize(&laid.home).unwrap();
+    assert_eq!(browser.home(), laid.home.display().to_string());
+
+    let start = browser.list(None).expect("list home");
+    assert_eq!(start.path, home.display().to_string());
+    assert!(
+        start.entries.iter().any(|entry| entry.name == "src"),
+        "{start:?}"
+    );
+
+    let src = browser.list(Some("~/src")).expect("list src");
+    let names: Vec<_> = src
+        .entries
+        .iter()
+        .map(|entry| (entry.name.as_str(), entry.repository))
+        .collect();
+    assert_eq!(names, [("app", true), ("notes", false)]);
+    assert_eq!(src.parent, Some(home.display().to_string()));
+
+    let app = browser
+        .list(Some(&format!("{}/app", src.path)))
+        .expect("list app");
+    assert!(app.repository);
+
+    let missing = browser.list(Some("~/nope")).expect_err("missing folder");
+    assert!(missing.to_string().contains("nope"), "{missing}");
+    // The connection survives a failed listing.
+    browser.list(None).expect("list after an error");
+
+    let log = fs::read_to_string(&laid.log).expect("ssh log");
+    assert!(log.contains("<--browse>"), "{log}");
 }

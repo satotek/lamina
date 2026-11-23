@@ -32,6 +32,7 @@ fn main() -> ExitCode {
 fn run() -> Result<(), lamina_remote::BoxError> {
     let mut stdio = false;
     let mut self_check = false;
+    let mut browse = false;
     let mut root = None;
 
     let mut args = std::env::args().skip(1);
@@ -39,6 +40,7 @@ fn run() -> Result<(), lamina_remote::BoxError> {
         match arg.as_str() {
             "--stdio" => stdio = true,
             "--self-check" => self_check = true,
+            "--browse" => browse = true,
             "--root" => {
                 let Some(value) = args.next() else {
                     return Err("--root requires a path".into());
@@ -67,12 +69,18 @@ fn run() -> Result<(), lamina_remote::BoxError> {
         return Err("--stdio is required to serve a repository".into());
     }
 
+    if browse {
+        return lamina_remote::serve_browse(std::io::stdin().lock(), std::io::stdout().lock());
+    }
+
     let root = lamina_remote::parse_root(root.as_deref())?;
     lamina_remote::serve(std::io::stdin(), std::io::stdout(), root)
 }
 
 fn print_usage() {
-    eprintln!("usage: lamina-remote --stdio [--root <path>]\n       lamina-remote --self-check");
+    eprintln!(
+        "usage: lamina-remote --stdio [--root <path>]\n       lamina-remote --stdio --browse\n       lamina-remote --self-check"
+    );
 }
 
 /// True when argv is the repository server, not an askpass prompt.
@@ -82,6 +90,6 @@ fn print_usage() {
 fn server_arguments() -> bool {
     matches!(
         std::env::args().nth(1).as_deref(),
-        Some("--stdio" | "--self-check" | "--root" | "--help" | "-h")
+        Some("--stdio" | "--browse" | "--self-check" | "--root" | "--help" | "-h")
     )
 }

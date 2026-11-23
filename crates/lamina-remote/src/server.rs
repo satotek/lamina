@@ -446,6 +446,12 @@ fn answer_control(shared: &Arc<ServerShared>, chunk: usize, request: Request) ->
             }
         }
         Request::Ping { nonce } => Response::Pong { nonce },
+        // Folder listings belong to a helper started with `--browse`; a
+        // repository helper must not read outside the repository it serves.
+        Request::ListDir { .. } => Response::Error(RemoteError::new(
+            proto::ErrorKind::NotSupported,
+            "this helper serves a repository and does not list folders",
+        )),
         Request::SubscribeSnapshots => {
             shared.subscribed.store(true, Ordering::SeqCst);
             let task = Arc::clone(shared);

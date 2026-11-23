@@ -427,6 +427,7 @@ fn request_name(request: &Request) -> &'static str {
         Request::FormatPatch { .. } => "format patch",
         Request::GitConfig => "git config",
         Request::PreviewGitConfig { .. } => "preview git config",
+        Request::ListDir { .. } => "list folder",
     }
 }
 

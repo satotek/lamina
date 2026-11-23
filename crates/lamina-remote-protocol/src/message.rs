@@ -197,11 +197,28 @@ pub enum Request {
         key: String,
         change: crate::dto::ConfigChangeDto,
     },
+    /// Subdirectories of `path` on the host. `None` is the remote user's
+    /// home. A relative path, or one starting with `~`, is taken from home.
+    ///
+    /// Only a helper started with `--browse` answers this; a repository
+    /// helper rejects it.
+    ListDir {
+        path: Option<String>,
+    },
 }
 
 /// A direct answer to one [`Request`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Response {
+    /// The handshake answer of a helper started with `--browse`, which serves
+    /// folder listings instead of a repository.
+    BrowseAck {
+        /// The remote user's home directory.
+        home: String,
+    },
+    DirListing {
+        listing: crate::dto::DirListingDto,
+    },
     HelloAck {
         /// Repository root as the helper sees it. For a bare repository this is
         /// the git directory.

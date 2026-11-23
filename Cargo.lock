@@ -5191,6 +5191,7 @@ dependencies = [
  "lamina-core",
  "lamina-remote-client",
  "lamina-remote-protocol",
+ "tempfile",
 ]
 
 [[package]]

@@ -373,7 +373,7 @@ pub(crate) fn ssh_run(
     })
 }
 
-fn spawn(
+pub(crate) fn spawn(
     program: &Path,
     port: Option<u16>,
     host: &str,
@@ -601,7 +601,7 @@ fn hide_console(command: &mut Command) {
     }
 }
 
-fn capture_stderr(mut stderr: impl Read, buf: &Mutex<Vec<u8>>) {
+pub(crate) fn capture_stderr(mut stderr: impl Read, buf: &Mutex<Vec<u8>>) {
     let mut chunk = [0u8; 1024];
     loop {
         match stderr.read(&mut chunk) {

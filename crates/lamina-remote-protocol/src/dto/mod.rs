@@ -4,6 +4,7 @@
 //! are deliberately separate: deriving serde on the core types would freeze
 //! their public shape into the protocol.
 
+mod browse;
 mod config;
 mod diff;
 mod graph;
@@ -13,6 +14,7 @@ mod query;
 mod repo;
 mod three_way;
 
+pub use browse::{DirEntryDto, DirListingDto};
 pub use config::{
     ConfigChangeDto, ConfigEntryDto, ConfigFilePathsDto, ConfigIdentityDto, ConfigIncludeDto,
     ConfigLayerDto, ConfigOriginDto, ConfigValueDto, GitConfigDto, IncludeConditionKindDto,

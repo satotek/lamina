@@ -15,10 +15,12 @@
 //! [`CONNECTION_LOST`] (stderr from `ssh` appended when there is any). The last
 //! snapshot stays readable. Later requests fail immediately with that error.
 
+mod browse;
 mod deploy;
 mod session;
 mod ssh;
 
+pub use browse::{RemoteBrowser, RemoteDirEntry, RemoteDirListing};
 pub use deploy::{HELPER_DIR_ENV, HELPER_OVERRIDE_ENV, InstallOptions, install_helper, target_for};
 pub use lamina_remote_protocol::is_supported_operation;
 pub use session::{CONNECTION_LOST, ClientConfig, RemoteSession, RemoteTarget, UNSUPPORTED};

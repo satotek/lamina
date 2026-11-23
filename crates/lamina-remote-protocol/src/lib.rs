@@ -62,4 +62,10 @@ pub use message::{ErrorKind, Event, Message, RemoteError, Request, Response};
 /// remotes, an external merge tool and the history scope stay off the wire.
 /// Paths in these messages are checked on the helper before git sees them. An
 /// older helper fails the handshake, which is what makes the app replace it.
-pub const PROTOCOL_VERSION: u32 = 7;
+///
+/// Version 8 adds a helper mode that lists folders on the host
+/// ([`message::Request::ListDir`]), so the app can let the user pick a
+/// repository instead of typing its path. That helper answers the handshake
+/// with [`message::Response::BrowseAck`] and opens no repository. An older
+/// helper fails the handshake, which is what makes the app replace it.
+pub const PROTOCOL_VERSION: u32 = 8;
