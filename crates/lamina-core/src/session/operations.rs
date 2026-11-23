@@ -114,14 +114,14 @@ fn run_one(
     shared.publish(|snapshot| snapshot.busy = Some(job.id));
     shared.emit(SessionEvent::OperationStarted { id: job.id });
 
-    let result = if cancel_flag.load(Ordering::SeqCst) || shared.is_shutdown() {
+    let result = if cancel_flag.load(Ordering::SeqCst) || shared.shuts_down_writes() {
         Err(Error::other(OPERATION_CANCELLED))
     } else {
         execute(shared, job.id, &job.operation, &cancel_flag)
     };
     // A kill can surface as git's own "killed" message. The cancel is what
     // the user asked for, so that is the message that reaches them.
-    let result = if cancel_flag.load(Ordering::SeqCst) || shared.is_shutdown() {
+    let result = if cancel_flag.load(Ordering::SeqCst) || shared.shuts_down_writes() {
         Err(Error::other(OPERATION_CANCELLED))
     } else {
         result
@@ -257,7 +257,7 @@ fn execute(
     let git = git.with_cancel({
         let shared = Arc::clone(shared);
         let cancel_flag = Arc::clone(cancel_flag);
-        move || cancel_flag.load(Ordering::SeqCst) || shared.is_shutdown()
+        move || cancel_flag.load(Ordering::SeqCst) || shared.shuts_down_writes()
     });
     let git = &git;
     match operation {
@@ -482,7 +482,7 @@ fn execute(
         }
         Operation::WriteCommitGraph => {
             let mut progress = ProgressReporter::new(shared, id);
-            let cancelled = || cancel_flag.load(Ordering::SeqCst) || shared.is_shutdown();
+            let cancelled = || cancel_flag.load(Ordering::SeqCst) || shared.shuts_down_writes();
             let result = git.write_commit_graph_with_progress(&cancelled, |text, percent| {
                 progress.line(text, percent)
             });

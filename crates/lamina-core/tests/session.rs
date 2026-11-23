@@ -766,6 +766,66 @@ fn dropping_a_loading_session_stops_its_threads() {
 }
 
 #[test]
+fn dropping_a_session_lets_a_running_write_finish() {
+    let repo = TestRepo::new();
+    repo.write("a.txt", "one\n");
+    repo.commit_all("base");
+    let before = repo.git(&["rev-parse", "HEAD"]);
+
+    // The commit is still inside its hook when the session is dropped: a
+    // closed tab must not kill a command the user already started.
+    let marker = repo.path().join(".git/hook-started");
+    let hooks = repo.path().join(".git/hooks");
+    fs::create_dir_all(&hooks).expect("create hooks directory");
+    let hook = hooks.join("pre-commit");
+    fs::write(
+        &hook,
+        format!("#!/bin/sh\ntouch {}\nsleep 2\n", marker.display()),
+    )
+    .expect("write the pre-commit hook");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let mut perms = fs::metadata(&hook).expect("hook meta").permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&hook, perms).expect("chmod the hook");
+    }
+    repo.write("a.txt", "two\n");
+    repo.git(&["add", "a.txt"]);
+
+    let (tx, rx) = mpsc::channel();
+    let session = Session::open(repo.path(), move |event| {
+        let _ = tx.send(event);
+    })
+    .expect("open session");
+    let deadline = Instant::now() + TIMEOUT;
+    while !session.snapshot().commits.complete {
+        let now = Instant::now();
+        assert!(now < deadline, "the initial load did not finish");
+        let _ = rx.recv_timeout(deadline - now);
+    }
+
+    let _ = session.run(Operation::Commit {
+        message: "the drop must not cancel this".into(),
+        amend: false,
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !marker.exists() {
+        assert!(Instant::now() < deadline, "the pre-commit hook never ran");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // The drop joins the operation worker, so the commit has landed by the
+    // time it returns.
+    drop(session);
+    assert_ne!(
+        repo.git(&["rev-parse", "HEAD"]),
+        before,
+        "dropping the session cancelled the running commit"
+    );
+}
+
+#[test]
 fn dropping_a_session_during_the_initial_walk_is_prompt() {
     let repo = TestRepo::new();
     repo.fast_import(20_000);

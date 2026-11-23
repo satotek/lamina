@@ -270,6 +270,10 @@ fn serve_chunked(
             &root,
             lamina_core::session::SessionOptions {
                 watch,
+                // The client leaves with the connection, so a write still
+                // running here has nobody to report to; stop it with the
+                // session instead of holding the process open for it.
+                cancel_on_shutdown: true,
                 ..lamina_core::session::SessionOptions::default()
             },
             move |event| on_event(event),

@@ -84,6 +84,9 @@ pub(crate) struct Shared {
     cancelled_operations: Mutex<HashSet<OperationId>>,
     /// The operation the worker is inside, and the flag its git child polls.
     live_cancel: Mutex<Option<(OperationId, Arc<AtomicBool>)>>,
+    /// Whether dropping the session also stops the running git child. Set only
+    /// by a host whose client leaves with the session.
+    cancel_on_shutdown: bool,
     operation_active: AtomicBool,
     pending_refresh: Mutex<PendingRefresh>,
     /// One pending credential question per running operation. The waiter is
@@ -108,10 +111,17 @@ impl Shared {
             cancelled_diffs: Mutex::new(HashSet::new()),
             cancelled_operations: Mutex::new(HashSet::new()),
             live_cancel: Mutex::new(None),
+            cancel_on_shutdown: false,
             operation_active: AtomicBool::new(false),
             pending_refresh: Mutex::new(PendingRefresh::default()),
             prompts: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Install the shutdown policy before any worker starts.
+    pub(crate) fn cancel_on_shutdown(mut self, cancel: bool) -> Self {
+        self.cancel_on_shutdown = cancel;
+        self
     }
 
     pub(crate) fn snapshot(&self) -> Arc<RepoSnapshot> {
@@ -147,11 +157,21 @@ impl Shared {
 
     pub(crate) fn begin_shutdown(&self) {
         self.shutdown.store(true, Ordering::SeqCst);
-        // The git child polls this flag. Setting it here is what makes dropping
-        // the session kill a command that is still running.
+        // The git child polls this flag. Only a host whose client is gone
+        // with the session kills the write; closing a local tab stops new
+        // work but lets the command the user started finish, and `Drop`
+        // joins its worker in the background.
+        if !self.cancel_on_shutdown {
+            return;
+        }
         if let Some((_, flag)) = lock(&self.live_cancel).as_ref() {
             flag.store(true, Ordering::SeqCst);
         }
+    }
+
+    /// Whether shutdown must stop the git child, not just queue new work.
+    pub(crate) fn shuts_down_writes(&self) -> bool {
+        self.cancel_on_shutdown && self.is_shutdown()
     }
 
     /// Install the flag `execute` polls. A cancel that arrived while the job

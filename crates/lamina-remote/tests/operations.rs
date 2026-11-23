@@ -339,6 +339,58 @@ fn cancelling_a_commit_kills_the_git_child() {
     server.join().expect("server thread");
 }
 
+/// A closed connection leaves nobody to read the result, so the helper stops
+/// the running git child with the session instead of holding the process open
+/// for the rest of a hook.
+#[cfg(unix)]
+#[test]
+fn closing_the_connection_kills_a_running_write() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let repo = TestRepo::new();
+    identity(&repo);
+    repo.write("README.md", "one\n");
+    let first = repo.commit("initial");
+
+    let hooks = repo.path().join(".git/hooks");
+    std::fs::create_dir_all(&hooks).unwrap();
+    let marker = repo.path().join(".git/hook-started");
+    let script = format!(
+        "#!/bin/sh\ntouch {}\nsleep 30\n",
+        sh_quote(&marker.display().to_string())
+    );
+    let hook = hooks.join("pre-commit");
+    std::fs::write(&hook, script).unwrap();
+    std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
+    repo.git(&["config", "core.hooksPath", &hooks.display().to_string()]);
+
+    repo.write("README.md", "two\n");
+    repo.git(&["add", "README.md"]);
+    let (remote, _events, server) = serve(&repo);
+    remote.run(Operation::Commit {
+        message: "should not land".into(),
+        amend: false,
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !marker.exists() {
+        if Instant::now() >= deadline {
+            panic!("the pre-commit hook did not start");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    drop(remote);
+    let started = Instant::now();
+    server.join().expect("server thread");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "the helper waited {:?} for a write whose client was gone",
+        started.elapsed()
+    );
+    assert_eq!(repo.head(), first, "the abandoned commit must not land");
+}
+
 fn conflict_repo() -> TestRepo {
     let repo = TestRepo::new();
     identity(&repo);

@@ -830,6 +830,11 @@ pub struct SessionOptions {
     /// Install a filesystem watcher. Off only after a watch failed to start:
     /// the repository still opens, and the caller refreshes explicitly.
     pub watch: bool,
+    /// Kill a running git write when the session is dropped. A local tab
+    /// leaves it at the default so closing a tab lets the command the user
+    /// started finish; the remote helper sets it because its client is gone
+    /// with the session and nobody is left to read the result.
+    pub cancel_on_shutdown: bool,
 }
 
 impl Default for SessionOptions {
@@ -838,6 +843,7 @@ impl Default for SessionOptions {
             git_executable: None,
             proxy: crate::proxy::ProxyPolicy::default(),
             watch: true,
+            cancel_on_shutdown: false,
         }
     }
 }
@@ -923,7 +929,10 @@ impl Session {
 
         let reader: Arc<dyn RepoReader> = Arc::new(repo.clone());
         let git_extras: Arc<dyn GitExtras> = Arc::new(git.clone());
-        let shared = Arc::new(Shared::new(repo, git, events, empty_snapshot()));
+        let shared = Arc::new(
+            Shared::new(repo, git, events, empty_snapshot())
+                .cancel_on_shutdown(options.cancel_on_shutdown),
+        );
 
         // Start the watcher before the workers: a failure here must not leave
         // threads behind, and the callback only needs the channel senders.
