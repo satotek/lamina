@@ -81,9 +81,19 @@ impl Helper {
 
     /// Drain events until the stream has been quiet, so a later assertion is
     /// not charged for the snapshot the connection just finished.
+    ///
+    /// It waits for a full quiet period after the last event. Returning after
+    /// the first one let the initial load's later status publish land after
+    /// the test's own edit, which read as the helper reacting to it.
     fn settle(&self) {
-        let _ = self.events.recv_timeout(QUIET);
-        while self.events.try_recv().is_ok() {}
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            match self.events.recv_timeout(QUIET) {
+                Ok(_) => continue,
+                Err(_) => return,
+            }
+        }
+        panic!("the helper never went quiet");
     }
 
     fn has_path(&self, path: &str) -> bool {
