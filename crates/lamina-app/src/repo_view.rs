@@ -24,6 +24,7 @@ mod editor;
 mod follow_up;
 mod history_ops;
 mod in_progress;
+mod lfs;
 mod navigation;
 mod patch;
 mod rebase_dialog;
@@ -63,7 +64,6 @@ use gpui::{
 use gpui_component::input::InputState;
 use lamina_core::diff::GapAction;
 use lamina_core::git_cli::CommandRecord;
-use lamina_core::lfs::{LfsInfo, LfsLock};
 use lamina_core::repo::{SubmoduleInfo, WorktreeInfo};
 use lamina_core::session::{
     DiffOptions, DiffRequest, DiffTicket, DiffView, Operation, OperationId, QueryTicket,
@@ -89,6 +89,7 @@ use commit_selection::CommitSelection;
 use dev_harness::{DebugLaunchRunner, DevHarness, RevSlot};
 use follow_up::{FollowUp, FollowUps};
 use in_progress::{FinishedOperation, InProgress};
+use lfs::LfsState;
 
 /// How many rows a `PageUp`/`PageDown` moves.
 const PAGE: isize = 15;
@@ -493,27 +494,15 @@ pub struct RepoView {
     focus: FocusHandle,
 
     files: Option<Vec<FileChange>>,
-    /// LFS metadata for the changed files of the selected commit, keyed by
-    /// path. Read with the file list so a badge never blocks a frame.
-    files_lfs: Arc<HashMap<String, LfsInfo>>,
     /// Directories the details pane's tree view has collapsed, by path. Kept
     /// across commits so stepping through history keeps the same folders open.
     file_tree_collapsed: std::collections::HashSet<String>,
-    /// LFS metadata for the worktree rows, keyed by path.
-    pub(crate) worktree_lfs: Arc<HashMap<String, LfsInfo>>,
-    worktree_lfs_epoch: u64,
     files_epoch: u64,
     files_error: Option<String>,
     selected_file: Option<usize>,
-
-    /// Remote LFS locks, for the worktree context menu.
-    pub(crate) lfs_locks: Rc<HashMap<String, LfsLock>>,
-    pub(crate) lfs_locking_available: bool,
-    lfs_locks_loaded: bool,
-    /// The one-time warning shown when the repository uses LFS but git-lfs is
-    /// not installed.
-    lfs_notice: Option<String>,
-    lfs_notice_dismissed: bool,
+    /// LFS metadata for the commit file list, the worktree rows, the remote
+    /// locks and the install hint.
+    pub(crate) lfs: LfsState,
 
     /// Commit-wide added/removed counts; the details pane keeps the selected
     /// file's counts until they arrive.
@@ -725,18 +714,11 @@ impl RepoView {
             details_height: Rc::new(Cell::new(None)),
             focus,
             files: None,
-            files_lfs: Arc::new(HashMap::new()),
             file_tree_collapsed: std::collections::HashSet::new(),
-            worktree_lfs: Arc::new(HashMap::new()),
-            worktree_lfs_epoch: 0,
             files_epoch: 0,
             files_error: None,
             selected_file: None,
-            lfs_locks: Rc::new(HashMap::new()),
-            lfs_locking_available: false,
-            lfs_locks_loaded: false,
-            lfs_notice: None,
-            lfs_notice_dismissed: false,
+            lfs: LfsState::default(),
             stat: details::CommitStatSlot::default(),
             commit_message: details::CommitMessageSlot::default(),
             selection_diff: selection_diff::SelectionDiff::default(),
@@ -2115,7 +2097,7 @@ impl RepoView {
         self.revealed_commit = None;
         self.selected_file = None;
         self.files = None;
-        self.files_lfs = Arc::new(HashMap::new());
+        self.lfs.files = Arc::new(HashMap::new());
         self.files_error = None;
         self.diff_scroll = UniformListScrollHandle::default();
         self.tree.close();
@@ -2267,7 +2249,7 @@ impl RepoView {
         }
         self.selected_file = None;
         self.files = None;
-        self.files_lfs = Arc::new(HashMap::new());
+        self.lfs.files = Arc::new(HashMap::new());
         self.files_error = None;
         self.diff_scroll = UniformListScrollHandle::default();
         // The tree shows one commit's contents, so another selection leaves it.
@@ -2413,7 +2395,7 @@ impl RepoView {
                             .and_then(|path| files.iter().position(|file| file.path == path))
                             .unwrap_or(0);
                         this.files = Some(files);
-                        this.files_lfs = Arc::new(lfs);
+                        this.lfs.files = Arc::new(lfs);
                         this.files_error = None;
                         if empty {
                             this.notify_if_active(cx);
@@ -2451,8 +2433,8 @@ impl RepoView {
                 paths.push(change.path.clone());
             }
         }
-        self.worktree_lfs_epoch = self.worktree_lfs_epoch.wrapping_add(1);
-        let epoch = self.worktree_lfs_epoch;
+        self.lfs.worktree_epoch = self.lfs.worktree_epoch.wrapping_add(1);
+        let epoch = self.lfs.worktree_epoch;
         let repo = session.reader();
         cx.spawn(async move |this, cx| {
             let map = cx
@@ -2473,8 +2455,8 @@ impl RepoView {
                 })
                 .await;
             this.update(cx, |this, cx| {
-                if this.worktree_lfs_epoch == epoch {
-                    this.worktree_lfs = Arc::new(map);
+                if this.lfs.worktree_epoch == epoch {
+                    this.lfs.worktree = Arc::new(map);
                     this.notify_if_active(cx);
                 }
             })
@@ -2486,13 +2468,13 @@ impl RepoView {
     /// Asks the remote for its LFS locks once per view, which also decides
     /// whether the Lock and Unlock entries belong in the context menu.
     fn load_lfs_locks(&mut self, cx: &mut Context<Self>) {
-        if self.lfs_locks_loaded {
+        if self.lfs.locks_loaded {
             return;
         }
         let Some(session) = &self.session else {
             return;
         };
-        self.lfs_locks_loaded = true;
+        self.lfs.locks_loaded = true;
         let git = session.git_extras();
         cx.spawn(async move |this, cx| {
             let (available, locks) = cx
@@ -2504,8 +2486,8 @@ impl RepoView {
                 })
                 .await;
             this.update(cx, |this, cx| {
-                this.lfs_locking_available = available && locks.is_some();
-                this.lfs_locks = Rc::new(
+                this.lfs.locking_available = available && locks.is_some();
+                this.lfs.locks = Rc::new(
                     locks
                         .map(|locks| {
                             locks
@@ -2536,8 +2518,8 @@ impl RepoView {
                 .spawn(async move { !git.lfs_available() && repo.uses_lfs() })
                 .await;
             this.update(cx, |this, cx| {
-                if missing && !this.lfs_notice_dismissed && this.lfs_notice.is_none() {
-                    this.lfs_notice = Some(crate::ui::install_hint());
+                if missing && !this.lfs.notice_dismissed && this.lfs.notice.is_none() {
+                    this.lfs.notice = Some(crate::ui::install_hint());
                     this.notify_if_active(cx);
                 }
             })
