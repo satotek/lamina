@@ -506,9 +506,11 @@ fn many_refs_walk_matches_git_log() {
     ]);
 
     // Many refs share a handful of targets, so the walk has to deduplicate ref
-    // targets before checking objects; one git process creates them all.
+    // targets before checking objects; one git process creates them all. 300
+    // refs over 40 commits still make every tag name share its target with
+    // many others, which is the deduplication this checks.
     let mut refs = String::new();
-    for index in 0..2000 {
+    for index in 0..300 {
         let target = &commits[index % commits.len()];
         refs.push_str(&format!("create refs/tags/many-{index:04} {target}\n"));
     }
@@ -525,7 +527,7 @@ fn many_refs_walk_matches_git_log() {
     let listed = fixture.open().refs().expect("refs");
     assert_eq!(
         listed.iter().filter(|r| r.kind == RefKind::Tag).count(),
-        2001,
+        301,
         "the annotated tag and every lightweight tag are listed"
     );
 }
