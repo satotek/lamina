@@ -309,9 +309,8 @@ pub(crate) fn plan_worktree_connector<'a>(
     let head_index = ends
         .head_index
         .filter(|index| *index < len && row_at(*index).is_some());
-    // HEAD on the first row has nothing above it. The circle's own row already
-    // meets that node, and inserting a lane there would move a graph that
-    // already reads as connected.
+    // Nothing sits above a HEAD on the first row, so its lane stays put.
+    // A shift would slide the whole graph over for one short join.
     let head_private = head_index
         .is_some_and(|index| index > 0 && !lane_clear_until(&row_at, index, ends.head_lane));
 
@@ -443,14 +442,14 @@ impl UncommittedGraph {
 
     /// The working-tree dash on commit row `index`.
     ///
-    /// `None` on HEAD's own row when HEAD is the first commit: the circle's
-    /// row already draws the dash up to that boundary, and a second one would
-    /// lengthen a line that already reads as connected. Also `None` when HEAD
-    /// is not loaded.
+    /// Drawn from the top of the list through HEAD. HEAD's own row draws it
+    /// even when that row is first: the circle's dash stops at the bottom of
+    /// the uncommitted row, and without this join the top half of HEAD's row
+    /// is a gap. `None` below HEAD, and when HEAD is not loaded.
     pub fn worktree_edge_at(self, index: usize) -> Option<WorktreeEdge> {
         let lane = self.connector_lane?;
         let head_index = self.head_index?;
-        if head_index == 0 || index > head_index {
+        if index > head_index {
             return None;
         }
         Some(WorktreeEdge {
@@ -1652,7 +1651,7 @@ mod tests {
     }
 
     #[test]
-    fn head_on_the_first_row_keeps_its_lane_and_skips_the_commit_row() {
+    fn head_on_the_first_row_keeps_its_lane_and_joins_the_node() {
         let mut rows = GraphRows::new();
         push_row(&mut rows, 0, &[(0, 0)], &[]);
         // A later row reuses the lane. It is below HEAD, so it must not push
@@ -1674,10 +1673,15 @@ mod tests {
         assert_eq!(graph.connector_lane, Some(0));
         assert!(!graph.connector_muted);
         assert_eq!(graph.head_index, Some(0));
-        assert!(
-            graph.worktree_edge_at(0).is_none(),
-            "the circle's row already meets the node directly under it"
-        );
+        // The circle's dash ends at the bottom of its own row. HEAD's row
+        // has to finish the join, or the top half of that row is empty.
+        let edge = graph
+            .worktree_edge_at(0)
+            .expect("HEAD's row closes the gap under the circle");
+        assert!(edge.to_node);
+        assert_eq!(edge.lane, 0);
+        assert_eq!(edge.node_lane, 0);
+        assert!(graph.worktree_edge_at(1).is_none());
         assert_eq!(graph.lanes, 1);
     }
 
@@ -1834,7 +1838,11 @@ mod tests {
         assert_eq!(graph.connector_lane, Some(0));
         assert!(!graph.connector_muted);
         assert_eq!(graph.merge_lane, Some(1));
-        assert!(graph.worktree_edge_at(0).is_none());
+        let head = graph
+            .worktree_edge_at(0)
+            .expect("the first row joins the circle");
+        assert!(head.to_node);
+        assert_eq!(head.lane, 0);
         let edge = graph.merge_edge_at(1).expect("merge target");
         assert!(edge.to_node);
         assert_eq!(edge.lane, edge.node_lane);
