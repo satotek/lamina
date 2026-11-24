@@ -1247,6 +1247,13 @@ impl Inner {
     }
 
     fn dispatch(&self, frame: proto::Frame) {
+        // `fail` already ended every outstanding ticket and told the UI the
+        // connection is gone. A frame that left the helper before the loss
+        // (missed pings do not stop the link from delivering) must not
+        // resurrect one of them: each ticket gets exactly one terminal event.
+        if self.lost.load(Ordering::SeqCst) {
+            return;
+        }
         match frame.message {
             Message::Response(response) => {
                 if let Response::Pong { nonce } = &response {
