@@ -286,7 +286,7 @@ pub struct Workspace {
 impl Workspace {
     /// `None` opens the welcome screen; `Some` is whatever the command line or
     /// the restore settings resolved to.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn new(launch: Option<Launch>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         Self::new_with_debug(launch, DebugLaunch::default(), window, cx)
     }
