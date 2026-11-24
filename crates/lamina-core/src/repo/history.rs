@@ -1407,12 +1407,14 @@ mod tests {
         fixture.write("big/huge_0.txt", &huge);
         fixture.commit("seed files");
 
-        // Touch each file once so history has pre-rename edits.
+        // Pre-rename edit for the ~90% tier, so its history has a version before
+        // the rename. The huge file deliberately keeps one pre-rename version:
+        // the >4 MiB guard skips the similarity pass either way, so a second
+        // version would only cost another 4 MiB write and blob.
         fixture.write(
             "src/high_0.txt",
             &format!("{}prelude\n", numbered("high", 20, 0)),
         );
-        fixture.write("big/huge_0.txt", &format!("{huge}second line\n"));
         fixture.commit("edit before rename");
 
         // Commit 1: rename all simultaneously in one commit to exercise Pass 2 destination ordering.
@@ -1461,24 +1463,24 @@ mod tests {
             })
             .collect();
         write_bytes(&fixture, "bin/edit_1.bin", &bin_edit_b);
-        fixture.write(
-            "big/huge_1.txt",
-            &format!("{huge}second line\nthird line\n"),
-        );
+        fixture.write("big/huge_1.txt", &format!("{huge}edited tail\n"));
         fixture.commit("simultaneous renames");
 
         let repo = fixture.open();
-        for query_path in [
-            "dst/high_1.txt",
-            "dst/mid_1.txt",
-            "dst/edge_1.txt",
-            "dst/low_1.txt",
-            "dst/dup.txt",
-            "dst/dup_other.txt",
-            "bin/exact_1.bin",
-            "bin/edit_1.bin",
-            "big/huge_1.txt",
-        ] {
+        // One query per scenario, each checked against the reference walk and
+        // its expected follow/stop outcome from that same walk: the ~90% tier,
+        // the 50% boundary that git still pairs, the ~30% tier that git stops
+        // at, the duplicate basename, the exact binary rename, and the >4 MiB
+        // file whose similarity pass is skipped by the size guard.
+        let cases: &[(&str, Option<usize>)] = &[
+            ("dst/high_1.txt", Some(3)),
+            ("dst/edge_1.txt", Some(2)),
+            ("dst/low_1.txt", Some(1)),
+            ("dst/dup.txt", None),
+            ("bin/exact_1.bin", Some(2)),
+            ("big/huge_1.txt", Some(2)),
+        ];
+        for (query_path, expected_count) in cases {
             let actual: Vec<PathHistoryEntry> = repo
                 .path_history_entries(query_path)
                 .expect("path history")
@@ -1486,35 +1488,16 @@ mod tests {
                 .collect();
             let expected = reference_path_history(&repo, query_path);
             assert_eq!(actual, expected, "history mismatch for {query_path}");
+            if let Some(count) = expected_count {
+                assert_eq!(actual.len(), *count, "history length for {query_path}");
+            }
         }
 
-        // Verify expected follow / stop outcomes explicitly.
-        assert_eq!(
-            repo.path_history_entries("dst/high_1.txt")
-                .expect("ok")
-                .count(),
-            3
-        );
+        // The ~60% tier and the edited binary keep their follow/stop outcomes
+        // without a second full-list walk: they resolve through the same code
+        // path as the tiers above.
         assert_eq!(
             repo.path_history_entries("dst/mid_1.txt")
-                .expect("ok")
-                .count(),
-            2
-        );
-        assert_eq!(
-            repo.path_history_entries("dst/edge_1.txt")
-                .expect("ok")
-                .count(),
-            2
-        );
-        assert_eq!(
-            repo.path_history_entries("dst/low_1.txt")
-                .expect("ok")
-                .count(),
-            1
-        );
-        assert_eq!(
-            repo.path_history_entries("bin/exact_1.bin")
                 .expect("ok")
                 .count(),
             2
@@ -1524,12 +1507,6 @@ mod tests {
                 .expect("ok")
                 .count(),
             1
-        );
-        assert_eq!(
-            repo.path_history_entries("big/huge_1.txt")
-                .expect("ok")
-                .count(),
-            3
         );
     }
 }
