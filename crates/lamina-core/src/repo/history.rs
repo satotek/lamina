@@ -1294,13 +1294,14 @@ mod tests {
         fixture.write("sub/b.txt", &format!("{body}iota\nkappa\n"));
         fixture.commit("rename with edit");
 
-        // Main branch adds unrelated commits. The total stays above
-        // INLINE_WARMUP (256), so the commits past the warmup still go through
-        // the batching path; 150 here and 140 after the delete keep the
-        // fixture near 300 commits, half the previous 620, without dropping a
-        // scenario.
+        // Main branch adds unrelated commits. A walk only hands its batch to
+        // the worker pool when at least WORKER_CHUNK_SIZE (512) commits remain
+        // after INLINE_WARMUP (256), so every query here must walk past ~770
+        // commits for the reference comparison to cover the parallel path as
+        // well as the inline one. 450 here and 450 after the delete leave a
+        // margin; fast-import keeps them cheap to create.
         fixture.git(&["checkout", "-q", "main"]);
-        append_unrelated_commits(&fixture, "unrelated", "tick", 150);
+        append_unrelated_commits(&fixture, "unrelated", "tick", 450);
 
         // Merge feature into main.
         fixture.git(&[
@@ -1316,7 +1317,7 @@ mod tests {
         // then rename directory.
         fixture.git(&["rm", "--quiet", "sub/b.txt"]);
         fixture.commit("delete sub/b.txt");
-        append_unrelated_commits(&fixture, "post-delete", "post-delete", 140);
+        append_unrelated_commits(&fixture, "post-delete", "post-delete", 450);
         fixture.write("sub/b.txt", &format!("{body}readded\nlambda\nmu\n"));
         fixture.commit("re-add sub/b.txt");
         std::fs::create_dir_all(fixture.path().join("final")).expect("create final dir");
