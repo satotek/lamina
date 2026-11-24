@@ -1197,108 +1197,89 @@ mod tests {
         ref_tree(names.iter().map(|name| ((*name).to_owned(), ())).collect())
     }
 
-    fn leaf_labels<T>(nodes: &[RefNode<T>]) -> Vec<&str> {
+    /// The tree as each row reads: a folder prints its segment and path, a
+    /// leaf its full label and path.
+    fn shape<T>(nodes: &[RefNode<T>]) -> Vec<String> {
         nodes
             .iter()
             .map(|node| match node {
-                RefNode::Leaf { label, .. } => label.as_str(),
-                RefNode::Folder { segment, .. } => segment.as_str(),
+                RefNode::Leaf { label, path, .. } => format!("leaf:{label}@{path}"),
+                RefNode::Folder {
+                    path,
+                    segment,
+                    children,
+                } => format!("folder:{segment}@{path}[{}]", shape(children).join(",")),
             })
             .collect()
     }
 
     #[test]
-    fn refs_sharing_a_path_segment_nest_under_a_folder() {
-        let nodes = tree(&["t3/fast-blame", "t3/blame-view", "main"]);
+    fn refs_fold_along_their_shared_path_segments() {
+        // Each row names the scenario, the refs it folds, and the shape the
+        // tree must have: folders in brackets, leaves by their full label.
+        let cases: &[(&str, &[&str], &[&str])] = &[
+            (
+                "refs sharing a path segment nest under a folder",
+                &["t3/fast-blame", "t3/blame-view", "main"],
+                &[
+                    "leaf:main@main",
+                    "folder:t3@t3[leaf:blame-view@t3/blame-view,leaf:fast-blame@t3/fast-blame]",
+                ],
+            ),
+            (
+                "deeper segments nest inside each other",
+                &[
+                    "feature/auth/login",
+                    "feature/auth/logout",
+                    "feature/ui",
+                    "main",
+                ],
+                &[
+                    "folder:feature@feature[folder:auth@feature/auth[leaf:login@feature/auth/login,leaf:logout@feature/auth/logout],leaf:ui@feature/ui]",
+                    "leaf:main@main",
+                ],
+            ),
+            (
+                "a folder holding one branch shows the whole name in its row",
+                &["t3/blame-view"],
+                &["leaf:t3/blame-view@t3/blame-view"],
+            ),
+            (
+                "a chain of one-branch folders collapses to one row",
+                &["a/b/c"],
+                &["leaf:a/b/c@a/b/c"],
+            ),
+            (
+                "a folder appears once a sibling gives it something to group",
+                &["a/b/c", "a/b/d"],
+                &["folder:a@a[folder:b@a/b[leaf:c@a/b/c,leaf:d@a/b/d]]"],
+            ),
+            (
+                "folders and leaves keep natural order",
+                &[
+                    "topic-10",
+                    "topic-2",
+                    "feature-10/x",
+                    "feature-2/x",
+                    "zebra/x",
+                ],
+                &[
+                    "leaf:feature-2/x@feature-2/x",
+                    "leaf:feature-10/x@feature-10/x",
+                    "leaf:topic-2@topic-2",
+                    "leaf:topic-10@topic-10",
+                    "leaf:zebra/x@zebra/x",
+                ],
+            ),
+        ];
 
-        assert_eq!(leaf_labels(&nodes), ["main", "t3"]);
-        let RefNode::Folder {
-            path,
-            segment,
-            children,
-        } = &nodes[1]
-        else {
-            panic!("the t3 refs belong in a folder");
-        };
-        assert_eq!(segment, "t3");
-        assert_eq!(path, "t3");
-        assert_eq!(leaf_labels(children), ["blame-view", "fast-blame"]);
-    }
-
-    #[test]
-    fn deeper_segments_nest_inside_each_other() {
-        let nodes = tree(&[
-            "feature/auth/login",
-            "feature/auth/logout",
-            "feature/ui",
-            "main",
-        ]);
-
-        assert_eq!(leaf_labels(&nodes), ["feature", "main"]);
-        let RefNode::Folder { children, .. } = &nodes[0] else {
-            panic!("feature is a folder");
-        };
-        assert_eq!(leaf_labels(children), ["auth", "ui"]);
-        let RefNode::Folder { children: auth, .. } = &children[0] else {
-            panic!("auth is a folder under feature");
-        };
-        assert_eq!(leaf_labels(auth), ["login", "logout"]);
-    }
-
-    #[test]
-    fn a_folder_holding_one_branch_shows_the_whole_name_instead() {
-        assert_eq!(
-            tree(&["t3/blame-view"]),
-            vec![RefNode::Leaf {
-                label: "t3/blame-view".into(),
-                path: "t3/blame-view".into(),
-                value: (),
-            }],
-            "a one-branch folder would only hide the name"
-        );
-        assert_eq!(
-            tree(&["a/b/c"]),
-            vec![RefNode::Leaf {
-                label: "a/b/c".into(),
-                path: "a/b/c".into(),
-                value: (),
-            }],
-            "a chain of one-branch folders collapses to one row"
-        );
-        // The folder exists once a sibling gives it something to group.
-        let nodes = tree(&["a/b/c", "a/b/d"]);
-        let RefNode::Folder { children, .. } = &nodes[0] else {
-            panic!("a is a folder");
-        };
-        let RefNode::Folder {
-            children: inner, ..
-        } = &children[0]
-        else {
-            panic!("b is a folder under a");
-        };
-        assert_eq!(leaf_labels(inner), ["c", "d"]);
-    }
-
-    #[test]
-    fn folders_and_leaves_keep_natural_order() {
-        let nodes = tree(&[
-            "topic-10",
-            "topic-2",
-            "feature-10/x",
-            "feature-2/x",
-            "zebra/x",
-        ]);
-
-        assert_eq!(
-            leaf_labels(&nodes),
-            [
-                "feature-2/x",
-                "feature-10/x",
-                "topic-2",
-                "topic-10",
-                "zebra/x"
-            ]
-        );
+        for (case, names, expected) in cases {
+            assert_eq!(
+                shape(&tree(names)),
+                *expected,
+                "the ref tree changed for case: {case}"
+            );
+        }
     }
 
     #[test]
