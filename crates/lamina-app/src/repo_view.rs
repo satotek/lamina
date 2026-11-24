@@ -20,6 +20,7 @@ mod details;
 mod diff_pane;
 mod edit_dialog;
 mod editor;
+mod follow_up;
 mod history_ops;
 mod in_progress;
 mod navigation;
@@ -85,6 +86,7 @@ use crate::search::SearchState;
 use crate::worktree_panel::{MainMode, WorktreePanel};
 use commit_selection::CommitSelection;
 
+use follow_up::{FollowUp, FollowUps};
 use in_progress::{FinishedOperation, InProgress};
 
 /// How many rows a `PageUp`/`PageDown` moves.
@@ -454,12 +456,9 @@ pub struct RepoView {
     /// Full ref names the history graph leaves out. The refs themselves stay in
     /// the sidebar; only the commits reachable from them alone leave the walk.
     pub(crate) hidden_refs: Vec<String>,
-    /// A worktree the commit menu started adding; the finished operation offers
-    /// to open it in a new tab.
-    pub(crate) pending_worktree_open: Option<PathBuf>,
-    /// The apply the "Apply patch…" action started, so its success is reported
-    /// as a notice rather than only through the command log.
-    pending_apply_patch: Option<lamina_core::session::OperationId>,
+    /// The steps the operations this view started run when they succeed, keyed
+    /// by the id the session gave them.
+    follow_ups: FollowUps,
     /// The LFS track that also installed the filter. Its finish clears the
     /// status bar for the outcome, so the note is written again there.
     lfs_filter_note_for: Option<lamina_core::session::OperationId>,
@@ -722,8 +721,7 @@ impl RepoView {
             commit_graph_dismissed: false,
             repository_key: None,
             hidden_refs: Vec::new(),
-            pending_worktree_open: None,
-            pending_apply_patch: None,
+            follow_ups: FollowUps::default(),
             lfs_filter_note_for: None,
             cancelled_operations: Vec::new(),
             lanes: LaneWidth::default(),
@@ -1647,22 +1645,20 @@ impl RepoView {
                     // window of its own, so it is routed through the active one.
                     crate::branches::offer_force(cx.entity(), retry, cx);
                 }
-                if let Some(path) = self.pending_worktree_open.take()
-                    && !failed
-                {
-                    self.offer_open_worktree(path, cx);
-                }
                 if self.lfs_filter_note_for == Some(id) {
                     self.lfs_filter_note_for = None;
                     if !failed {
                         self.status_note = Some(t!("lfs.filter_installed").to_string());
                     }
                 }
-                if self.pending_apply_patch == Some(id) {
-                    self.pending_apply_patch = None;
-                    if !failed {
+                // Registered when the command started, so an unrelated
+                // operation ending first cannot run this one's step.
+                match self.follow_ups.finished(id, !failed) {
+                    Some(FollowUp::OpenWorktree(path)) => self.offer_open_worktree(path, cx),
+                    Some(FollowUp::PatchApplied) => {
                         self.status_note = Some(t!("patch.applied").to_string());
                     }
+                    None => {}
                 }
                 self.notify_tab_state(cx);
             }

@@ -27,6 +27,8 @@ use crate::repo_view::RepoView;
 use crate::settings::Settings;
 use crate::style::Design;
 
+use super::follow_up::FollowUp;
+
 impl RepoView {
     /// Whether any submodule is listed, so "Update all" has something to do.
     pub(crate) fn has_submodules(&self) -> bool {
@@ -773,8 +775,11 @@ impl AddWorktreeDialog {
         let offer_open = self.allow_detached;
         let _ = self.view.update(cx, |view, cx| {
             let started = view.run_operation(operation, label, window, cx);
-            if offer_open && started.is_some() && !self.remote {
-                view.pending_worktree_open = Some(path);
+            if offer_open
+                && !self.remote
+                && let Some(id) = started
+            {
+                view.follow_ups.expect(id, FollowUp::OpenWorktree(path));
             }
         });
         // Closing here would drop this dialog while it is being updated.
