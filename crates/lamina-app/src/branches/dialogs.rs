@@ -21,7 +21,7 @@ use crate::style::Design;
 
 use super::refs::UpstreamChoice;
 use super::validate::{validate_branch_name, validate_remote_name, validate_remote_url};
-use super::{BranchStart, Branches, Colors, Retry};
+use super::{BranchStart, Branches, Retry};
 
 /// What the rename dialog renames: the branch, and the remote branch it tracks
 /// when it has one.
@@ -565,30 +565,20 @@ impl BranchDialog {
 impl Render for BranchDialog {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let design = Design::new(cx.theme(), Settings::get(cx));
-        let colors = Colors {
-            sidebar_foreground: design.text,
-            muted_foreground: design.muted,
-            danger: design.remove_text,
-            design,
-        };
         let form = match &self.kind {
-            DialogKind::Create(form) => create_body(form, &colors, cx),
-            DialogKind::Rename(form) => rename_body(form, &colors, cx),
-            DialogKind::Upstream(form) => upstream_body(form, &colors, cx),
-            DialogKind::AddRemote(form) => add_remote_body(form, &colors, cx),
-            DialogKind::RenameRemote(form) => rename_remote_body(form, &colors, cx),
-            DialogKind::EditRemote(form) => edit_remote_body(form, &colors, cx),
+            DialogKind::Create(form) => create_body(form, &design, cx),
+            DialogKind::Rename(form) => rename_body(form, &design, cx),
+            DialogKind::Upstream(form) => upstream_body(form, &design, cx),
+            DialogKind::AddRemote(form) => add_remote_body(form, &design, cx),
+            DialogKind::RenameRemote(form) => rename_remote_body(form, &design, cx),
+            DialogKind::EditRemote(form) => edit_remote_body(form, &design, cx),
         };
-        let mut body = div()
-            .flex()
-            .flex_col()
-            .gap(colors.design.px(8.0))
-            .child(form);
+        let mut body = div().flex().flex_col().gap(design.px(8.0)).child(form);
         if let Some(error) = &self.error {
             body = body.child(
                 div()
-                    .text_size(colors.design.px(11.0))
-                    .text_color(colors.danger)
+                    .text_size(design.px(11.0))
+                    .text_color(design.danger())
                     .child(error.clone()),
             );
         }
@@ -597,7 +587,7 @@ impl Render for BranchDialog {
 }
 
 /// The create form: the field, and whether the new branch is checked out.
-fn create_body(form: &CreateForm, colors: &Colors, cx: &mut Context<BranchDialog>) -> Div {
+fn create_body(form: &CreateForm, design: &Design, cx: &mut Context<BranchDialog>) -> Div {
     let toggle = cx.listener(|dialog: &mut BranchDialog, checked: &bool, _, cx| {
         if let DialogKind::Create(form) = &mut dialog.kind {
             form.checkout = *checked;
@@ -607,11 +597,11 @@ fn create_body(form: &CreateForm, colors: &Colors, cx: &mut Context<BranchDialog
     div()
         .flex()
         .flex_col()
-        .gap(colors.design.px(8.0))
+        .gap(design.px(8.0))
         .child(
             div()
-                .text_size(colors.design.px(11.0))
-                .text_color(colors.muted_foreground)
+                .text_size(design.px(11.0))
+                .text_color(design.muted)
                 .child(t!(
                     "branch.dialog.new_branch_start",
                     start = form.start.label
@@ -628,7 +618,7 @@ fn create_body(form: &CreateForm, colors: &Colors, cx: &mut Context<BranchDialog
 
 /// The rename form: the new name, and the option to rename the branch on its
 /// remote too.
-fn rename_body(form: &RenameForm, colors: &Colors, cx: &mut Context<BranchDialog>) -> Div {
+fn rename_body(form: &RenameForm, design: &Design, cx: &mut Context<BranchDialog>) -> Div {
     let toggle = cx.listener(|dialog: &mut BranchDialog, checked: &bool, _, cx| {
         if let DialogKind::Rename(form) = &mut dialog.kind {
             form.rename_remote = *checked;
@@ -638,11 +628,11 @@ fn rename_body(form: &RenameForm, colors: &Colors, cx: &mut Context<BranchDialog
     let mut body = div()
         .flex()
         .flex_col()
-        .gap(colors.design.px(8.0))
+        .gap(design.px(8.0))
         .child(
             div()
-                .text_size(colors.design.px(11.0))
-                .text_color(colors.muted_foreground)
+                .text_size(design.px(11.0))
+                .text_color(design.muted)
                 .child(t!("branch.dialog.renaming", branch = form.branch)),
         )
         .child(Input::new(&form.input).w_full());
@@ -650,8 +640,8 @@ fn rename_body(form: &RenameForm, colors: &Colors, cx: &mut Context<BranchDialog
         Some(label) => {
             body = body.child(
                 div()
-                    .text_size(colors.design.px(11.0))
-                    .text_color(colors.muted_foreground)
+                    .text_size(design.px(11.0))
+                    .text_color(design.muted)
                     .child(t!("branch.dialog.current_upstream", label = label)),
             );
             if form.upstream.is_some() {
@@ -664,8 +654,8 @@ fn rename_body(form: &RenameForm, colors: &Colors, cx: &mut Context<BranchDialog
                     )
                     .child(
                         div()
-                            .text_size(colors.design.px(10.0))
-                            .text_color(colors.muted_foreground)
+                            .text_size(design.px(10.0))
+                            .text_color(design.muted)
                             .child(t!("branch.dialog.rename_remote_detail").to_string()),
                     );
             }
@@ -673,8 +663,8 @@ fn rename_body(form: &RenameForm, colors: &Colors, cx: &mut Context<BranchDialog
         None => {
             body = body.child(
                 div()
-                    .text_size(colors.design.px(11.0))
-                    .text_color(colors.muted_foreground)
+                    .text_size(design.px(11.0))
+                    .text_color(design.muted)
                     .child(t!("branch.dialog.no_upstream").to_string()),
             );
         }
@@ -683,11 +673,11 @@ fn rename_body(form: &RenameForm, colors: &Colors, cx: &mut Context<BranchDialog
 }
 
 /// The set-upstream form: the choices, with the current upstream selected.
-fn upstream_body(form: &UpstreamForm, colors: &Colors, cx: &mut Context<BranchDialog>) -> Div {
-    let mut body = div().flex().flex_col().gap(colors.design.px(8.0)).child(
+fn upstream_body(form: &UpstreamForm, design: &Design, cx: &mut Context<BranchDialog>) -> Div {
+    let mut body = div().flex().flex_col().gap(design.px(8.0)).child(
         div()
-            .text_size(colors.design.px(11.0))
-            .text_color(colors.muted_foreground)
+            .text_size(design.px(11.0))
+            .text_color(design.muted)
             .child(match &form.current {
                 Some(current) => t!(
                     "branch.dialog.tracks",
@@ -701,8 +691,8 @@ fn upstream_body(form: &UpstreamForm, colors: &Colors, cx: &mut Context<BranchDi
     if form.choices.is_empty() {
         body = body.child(
             div()
-                .text_size(colors.design.px(11.0))
-                .text_color(colors.muted_foreground)
+                .text_size(design.px(11.0))
+                .text_color(design.muted)
                 .child(t!("branch.dialog.no_remote_branches").to_string()),
         );
     } else {
@@ -724,7 +714,7 @@ fn upstream_body(form: &UpstreamForm, colors: &Colors, cx: &mut Context<BranchDi
                 crate::ui::list_row(
                     ("upstream-choice", index),
                     crate::ui::RowState::NORMAL.selected(form.selected == Some(index)),
-                    &colors.design,
+                    design,
                 )
                 .cursor_pointer()
                 .on_click(select)
@@ -743,7 +733,7 @@ fn upstream_body(form: &UpstreamForm, colors: &Colors, cx: &mut Context<BranchDi
                 .flex()
                 .flex_col()
                 .gap_1()
-                .max_h(colors.design.px(200.0))
+                .max_h(design.px(200.0))
                 .overflow_y_scroll()
                 .children(rows),
         );
@@ -752,7 +742,7 @@ fn upstream_body(form: &UpstreamForm, colors: &Colors, cx: &mut Context<BranchDi
 }
 
 /// The add-remote form: the name, the URL and whether to fetch right away.
-fn add_remote_body(form: &AddRemoteForm, colors: &Colors, cx: &mut Context<BranchDialog>) -> Div {
+fn add_remote_body(form: &AddRemoteForm, design: &Design, cx: &mut Context<BranchDialog>) -> Div {
     let toggle = cx.listener(|dialog: &mut BranchDialog, checked: &bool, _, cx| {
         if let DialogKind::AddRemote(form) = &mut dialog.kind {
             form.fetch = *checked;
@@ -762,23 +752,23 @@ fn add_remote_body(form: &AddRemoteForm, colors: &Colors, cx: &mut Context<Branc
     div()
         .flex()
         .flex_col()
-        .gap(colors.design.px(8.0))
+        .gap(design.px(8.0))
         .child(
             div()
-                .text_size(colors.design.px(11.0))
-                .text_color(colors.muted_foreground)
+                .text_size(design.px(11.0))
+                .text_color(design.muted)
                 .child(t!("branch.dialog.add_remote_detail").to_string()),
         )
         .child(
             div()
-                .text_size(colors.design.px(11.0))
+                .text_size(design.px(11.0))
                 .font_weight(FontWeight::MEDIUM)
                 .child(t!("branch.dialog.name").to_string()),
         )
         .child(Input::new(&form.name).w_full())
         .child(
             div()
-                .text_size(colors.design.px(11.0))
+                .text_size(design.px(11.0))
                 .font_weight(FontWeight::MEDIUM)
                 .child(t!("branch.dialog.url").to_string()),
         )
@@ -795,17 +785,17 @@ fn add_remote_body(form: &AddRemoteForm, colors: &Colors, cx: &mut Context<Branc
 /// follow it.
 fn rename_remote_body(
     form: &RenameRemoteForm,
-    colors: &Colors,
+    design: &Design,
     _cx: &mut Context<BranchDialog>,
 ) -> Div {
     div()
         .flex()
         .flex_col()
-        .gap(colors.design.px(8.0))
+        .gap(design.px(8.0))
         .child(
             div()
-                .text_size(colors.design.px(11.0))
-                .text_color(colors.muted_foreground)
+                .text_size(design.px(11.0))
+                .text_color(design.muted)
                 .child(t!("branch.dialog.renaming_remote", name = form.name)),
         )
         .child(Input::new(&form.input).w_full())
@@ -815,16 +805,16 @@ fn rename_remote_body(
 /// already pushes somewhere of its own.
 fn edit_remote_body(
     form: &EditRemoteForm,
-    colors: &Colors,
+    design: &Design,
     _cx: &mut Context<BranchDialog>,
 ) -> Div {
     let mut body = div()
         .flex()
         .flex_col()
-        .gap(colors.design.px(8.0))
+        .gap(design.px(8.0))
         .child(
             div()
-                .text_size(colors.design.px(11.0))
+                .text_size(design.px(11.0))
                 .font_weight(FontWeight::MEDIUM)
                 .child(t!("branch.dialog.fetch_url").to_string()),
         )
@@ -834,7 +824,7 @@ fn edit_remote_body(
             body = body
                 .child(
                     div()
-                        .text_size(colors.design.px(11.0))
+                        .text_size(design.px(11.0))
                         .font_weight(FontWeight::MEDIUM)
                         .child(t!("branch.dialog.push_url").to_string()),
                 )
@@ -843,8 +833,8 @@ fn edit_remote_body(
         None => {
             body = body.child(
                 div()
-                    .text_size(colors.design.px(11.0))
-                    .text_color(colors.muted_foreground)
+                    .text_size(design.px(11.0))
+                    .text_color(design.muted)
                     .child(t!("branch.dialog.push_uses_fetch").to_string()),
             );
         }

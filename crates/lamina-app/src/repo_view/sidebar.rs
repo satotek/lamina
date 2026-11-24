@@ -386,12 +386,6 @@ impl RepoView {
             Source::Repo(snapshot) => snapshot.remotes.as_slice(),
             Source::Fake(_) => &[],
         };
-        let colors = crate::branches::Colors {
-            design: design.clone(),
-            sidebar_foreground: design.text,
-            muted_foreground: design.muted,
-            danger: design.remove_text,
-        };
         // The snapshot's generation is the sidebar list's cache key: it changes
         // on every publish, so the flattened strings are reused between frames
         // but never across two different snapshots.
@@ -416,7 +410,7 @@ impl RepoView {
             self.session.is_some(),
             self.is_busy(),
             &self.hidden_refs,
-            &colors,
+            design,
             entity,
         )
     }
