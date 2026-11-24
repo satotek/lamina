@@ -163,8 +163,9 @@ jobs:
         with:
           tool: cargo-nextest@0.9.152
 
-      # nextest runs one process per test, so the ~25 test binaries no longer
-      # queue behind each other on the runner's cores.
+      # nextest runs one process per test, so the tests of a large binary (each
+      # crate's integration tests build as one) spread over the runner's cores
+      # instead of queueing inside it.
       - name: Test
         run: cargo nextest run --workspace --no-fail-fast
 
