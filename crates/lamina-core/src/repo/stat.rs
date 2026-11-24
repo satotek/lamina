@@ -1285,64 +1285,72 @@ mod tests {
     }
 
     #[test]
-    fn a_stat_then_the_file_list_walks_the_tree_once() {
-        let (repo, commit) = rename_repo();
-        let handle = repo.open();
+    fn the_stat_and_the_file_list_reuse_one_tree_walk() {
+        // Both request orders must reuse the stat's tree walk and run rename
+        // detection once, so one table keeps the mirror cases side by side.
+        let cases = [
+            ("stat then file list", true),
+            ("file list then stat", false),
+        ];
+        for (name, stat_first) in cases {
+            let (repo, commit) = rename_repo();
+            let handle = repo.open();
 
-        let stat = handle.commit_stat(commit).expect("commit stat");
-        assert_eq!(handle.tree_diff_count(), 1);
-        assert_eq!(
-            handle.rewrite_pass_count(),
-            0,
-            "a line count must not pay for rename detection"
-        );
-        let changes = handle.commit_changes(commit).expect("commit changes");
-        assert_eq!(
-            handle.tree_diff_count(),
-            1,
-            "the file list must reuse the stat's tree walk"
-        );
-        assert_eq!(handle.rewrite_pass_count(), 1);
-        assert_rename_sides(&stat, &changes);
+            let (stat, changes) = if stat_first {
+                let stat = handle.commit_stat(commit).expect("commit stat");
+                assert_eq!(
+                    handle.tree_diff_count(),
+                    1,
+                    "{name}: the stat walks the tree once"
+                );
+                assert_eq!(
+                    handle.rewrite_pass_count(),
+                    0,
+                    "{name}: a line count must not pay for rename detection"
+                );
+                let changes = handle.commit_changes(commit).expect("commit changes");
+                (stat, changes)
+            } else {
+                let changes = handle.commit_changes(commit).expect("commit changes");
+                let stat = handle.commit_stat(commit).expect("commit stat");
+                (stat, changes)
+            };
+            assert_eq!(
+                handle.tree_diff_count(),
+                1,
+                "{name}: the second request reuses the first tree walk"
+            );
+            assert_eq!(
+                handle.rewrite_pass_count(),
+                1,
+                "{name}: rename detection runs exactly once"
+            );
+            assert_rename_sides(&stat, &changes);
 
-        // The cached file list is not rebuilt on the next request.
-        assert_eq!(
-            handle.commit_changes(commit).expect("commit changes"),
-            changes
-        );
-        assert_eq!(handle.rewrite_pass_count(), 1);
+            // The cached file list is not rebuilt on the next request.
+            assert_eq!(
+                handle.commit_changes(commit).expect("commit changes"),
+                changes,
+                "{name}: the cached file list is returned again"
+            );
+            assert_eq!(
+                handle.rewrite_pass_count(),
+                1,
+                "{name}: no extra rename pass"
+            );
 
-        let fresh = repo.open();
-        assert_eq!(fresh.commit_stat(commit).expect("commit stat"), stat);
-        assert_eq!(
-            fresh.commit_changes(commit).expect("commit changes"),
-            changes
-        );
-    }
-
-    #[test]
-    fn a_file_list_then_the_stat_walks_the_tree_once() {
-        let (repo, commit) = rename_repo();
-        let handle = repo.open();
-
-        let changes = handle.commit_changes(commit).expect("commit changes");
-        assert_eq!(handle.tree_diff_count(), 1);
-        assert_eq!(handle.rewrite_pass_count(), 1);
-        let stat = handle.commit_stat(commit).expect("commit stat");
-        assert_eq!(
-            handle.tree_diff_count(),
-            1,
-            "the stat must reuse the file list's tree walk"
-        );
-        assert_eq!(handle.rewrite_pass_count(), 1);
-        assert_rename_sides(&stat, &changes);
-
-        let fresh = repo.open();
-        assert_eq!(
-            fresh.commit_changes(commit).expect("commit changes"),
-            changes
-        );
-        assert_eq!(fresh.commit_stat(commit).expect("commit stat"), stat);
+            let fresh = repo.open();
+            assert_eq!(
+                fresh.commit_stat(commit).expect("commit stat"),
+                stat,
+                "{name}: a fresh handle reads the same stat"
+            );
+            assert_eq!(
+                fresh.commit_changes(commit).expect("commit changes"),
+                changes,
+                "{name}: a fresh handle reads the same file list"
+            );
+        }
     }
 
     #[test]
@@ -1410,58 +1418,61 @@ mod tests {
 
     #[test]
     fn a_renamed_directory_lists_every_file() {
-        let repo = TestRepo::new();
-        repo.write("dir/a.txt", "one\ntwo\nthree\n");
-        repo.write("dir/b.txt", "unchanged\n");
-        repo.commit("root");
+        // Every case moves a directory and compares the reported renames, so
+        // the table keeps the edited-file pairing and the identical-content
+        // name pairing side by side.
+        struct Case {
+            name: &'static str,
+            files: [(&'static str, &'static str); 2],
+            edit: Option<(&'static str, &'static str)>,
+            message: &'static str,
+        }
+        let cases = [
+            Case {
+                name: "an edited file pairs with its old path",
+                files: [("a.txt", "one\ntwo\nthree\n"), ("b.txt", "unchanged\n")],
+                edit: Some(("moved/a.txt", "one\ntwo\nthree\nfour\n")),
+                message: "move and edit",
+            },
+            Case {
+                name: "identical contents must pair by file name",
+                files: [("a.txt", "same\n"), ("b.txt", "same\n")],
+                edit: None,
+                message: "move",
+            },
+        ];
 
-        repo.git(&["mv", "dir", "moved"]);
-        repo.write("moved/a.txt", "one\ntwo\nthree\nfour\n");
-        let commit = repo.commit("move and edit");
+        for case in cases {
+            let repo = TestRepo::new();
+            for (name, contents) in case.files {
+                repo.write(&format!("dir/{name}"), contents);
+            }
+            repo.commit("root");
 
-        let changes = repo.open().commit_changes(commit).expect("commit changes");
-        let renamed: Vec<(&str, &str)> = changes
-            .iter()
-            .filter(|change| change.kind == ChangeKind::Renamed)
-            .map(|change| {
-                (
-                    change.path.as_str(),
-                    change.old_path.as_deref().expect("old path"),
-                )
-            })
-            .collect();
-        assert_eq!(
-            renamed,
-            [("moved/a.txt", "dir/a.txt"), ("moved/b.txt", "dir/b.txt")]
-        );
-    }
+            repo.git(&["mv", "dir", "moved"]);
+            if let Some((path, contents)) = case.edit {
+                repo.write(path, contents);
+            }
+            let commit = repo.commit(case.message);
 
-    #[test]
-    fn identical_files_are_paired_by_name() {
-        let repo = TestRepo::new();
-        repo.write("dir/a.txt", "same\n");
-        repo.write("dir/b.txt", "same\n");
-        repo.commit("root");
-
-        repo.git(&["mv", "dir", "moved"]);
-        let commit = repo.commit("move");
-
-        let changes = repo.open().commit_changes(commit).expect("commit changes");
-        let renamed: Vec<(&str, &str)> = changes
-            .iter()
-            .filter(|change| change.kind == ChangeKind::Renamed)
-            .map(|change| {
-                (
-                    change.path.as_str(),
-                    change.old_path.as_deref().expect("old path"),
-                )
-            })
-            .collect();
-        assert_eq!(
-            renamed,
-            [("moved/a.txt", "dir/a.txt"), ("moved/b.txt", "dir/b.txt")],
-            "identical contents must pair by file name"
-        );
+            let changes = repo.open().commit_changes(commit).expect("commit changes");
+            let renamed: Vec<(&str, &str)> = changes
+                .iter()
+                .filter(|change| change.kind == ChangeKind::Renamed)
+                .map(|change| {
+                    (
+                        change.path.as_str(),
+                        change.old_path.as_deref().expect("old path"),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                renamed,
+                [("moved/a.txt", "dir/a.txt"), ("moved/b.txt", "dir/b.txt")],
+                "{}",
+                case.name
+            );
+        }
     }
 
     #[test]

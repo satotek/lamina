@@ -655,16 +655,29 @@ mod tests {
 
     #[test]
     fn refuses_a_dirty_worktree() {
-        let (repo, base) = linear_repo(1);
-        let commits = repo.rev_list(&range(base));
-        repo.write("file-0.txt", "uncommitted\n");
+        // Both entry points run the same guard before touching the repository,
+        // so the cases differ only in how the rebase is started.
+        let cases = [("rebase_edit", true), ("rebase without autostash", false)];
+        for (name, via_edit) in cases {
+            let (repo, base, main_tip, topic_tip) = two_branches();
+            repo.write("base.txt", "uncommitted\n");
 
-        let error = repo
-            .git_handle()
-            .rebase_edit(base, &picks(&commits))
-            .expect_err("dirty worktree is refused");
-        assert!(error.to_string().contains("uncommitted changes"), "{error}");
-        assert_eq!(repo.head(), commits[0], "nothing was rewritten");
+            let error = if via_edit {
+                let commits = repo.rev_list(&range(base));
+                repo.git_handle()
+                    .rebase_edit(base, &picks(&commits))
+                    .expect_err("dirty worktree is refused")
+            } else {
+                repo.git_handle()
+                    .rebase(main_tip, None, false)
+                    .expect_err("dirty worktree is refused")
+            };
+            assert!(
+                error.to_string().contains("uncommitted changes"),
+                "{name}: {error}"
+            );
+            assert_eq!(repo.head(), topic_tip, "{name}: nothing was rewritten");
+        }
     }
 
     #[test]
@@ -919,19 +932,6 @@ mod tests {
             "the uncommitted change is back after the rebase"
         );
         assert_ne!(repo.head(), base);
-    }
-
-    #[test]
-    fn a_dirty_worktree_is_refused_without_autostash() {
-        let (repo, _base, main_tip, topic_tip) = two_branches();
-        repo.write("base.txt", "dirty\n");
-
-        let error = repo
-            .git_handle()
-            .rebase(main_tip, None, false)
-            .expect_err("dirty worktree is refused");
-        assert!(error.to_string().contains("uncommitted changes"), "{error}");
-        assert_eq!(repo.head(), topic_tip, "nothing was rewritten");
     }
 
     #[test]
