@@ -1716,6 +1716,98 @@ fn a_snapshot_that_grows_past_the_commit_limit_fails_to_load() {
     peer.join().expect("peer");
 }
 
+#[test]
+fn a_frame_after_the_connection_was_declared_lost_is_not_delivered() {
+    let (client_read, client_write, mut peer_read, mut peer_write) = pipe();
+    let (late_tx, late_rx) = mpsc::channel::<()>();
+    let peer = thread::spawn(move || {
+        hello(&mut peer_read, &mut peer_write);
+        accept_subscribe(&mut peer_read, &mut peer_write);
+        let (_, id) = oid_pair(14);
+        send_chunk(&mut peer_write, id, true);
+
+        let (stream, request) = next_request(&mut peer_read, &mut peer_write).expect("diff");
+        let Request::Diff { ticket, .. } = request else {
+            panic!("expected a diff, got {request:?}");
+        };
+        write_msg(&mut peer_write, stream, &Message::Response(Response::Ok));
+        // Stop answering pings while keeping the stream open, so the link
+        // is declared dead but can still deliver one more frame.
+        let _ = late_rx.recv();
+        write_msg(
+            &mut peer_write,
+            0,
+            &Message::Event(Event::DiffReady {
+                ticket,
+                view: Box::new(diff_view(false)),
+            }),
+        );
+    });
+
+    let (tx, rx) = mpsc::channel();
+    let session = RemoteSession::connect_with(
+        client_read,
+        client_write,
+        RemoteTarget::new("scripted"),
+        move |event| {
+            let _ = tx.send(event);
+        },
+        ClientConfig {
+            ping_interval: Duration::from_millis(40),
+            missed_pings: 2,
+            first_chunk_timeout: Duration::from_secs(5),
+            ..ClientConfig::default()
+        },
+    )
+    .expect("connect");
+    let (oid, _) = oid_pair(14);
+    let ticket = session.request_diff(DiffRequest::Commit {
+        commit: oid,
+        path: "src/lib.rs".into(),
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        match rx.recv_timeout(remaining) {
+            Ok(SessionEvent::DiffFailed {
+                ticket: failed,
+                error,
+            }) if failed == ticket => {
+                assert!(
+                    error.contains(CONNECTION_LOST),
+                    "the ticket should have expired with the connection: {error}"
+                );
+                break;
+            }
+            Ok(SessionEvent::DiffReady { .. }) => panic!("the diff answer beat the loss"),
+            Ok(_) => {}
+            Err(error) => panic!("the connection was not declared lost: {error}"),
+        }
+    }
+
+    // The helper's answer is already on the wire after the loss. It must
+    // not surface behind the failure the UI has already been told about.
+    // Every event from here on is checked, including the first one: the
+    // late frame is the only thing left to arrive.
+    let _ = late_tx.send(());
+    let until = Instant::now() + Duration::from_millis(400);
+    loop {
+        let remaining = until.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match rx.recv_timeout(remaining) {
+            Ok(event) => assert!(
+                !matches!(event, SessionEvent::DiffReady { ticket: seen, .. } if seen == ticket),
+                "a frame after the loss was delivered: {event:?}"
+            ),
+            Err(_) => break,
+        }
+    }
+    peer.join().expect("peer");
+}
+
 /// The watchdog reports a lost link from the ping thread. A callback that
 /// closes the tab drops the session right there, and shutdown used to join
 /// that same thread, which panics instead of returning.
