@@ -111,6 +111,12 @@ fn run_remote(helper: &Helper, operation: Operation) {
 
 /// `HEAD` and a clean or dirty worktree, which is what undo and redo move.
 fn repository_state(repo: &TestRepo) -> (String, String) {
+    // A file rewritten in the same instant as the index is "racily clean":
+    // whether status rereads it depends on timing, and on a runner whose
+    // system config sets an LFS filter the test's own git does not see,
+    // that reread decides between "M " and "MM". Refreshing first makes
+    // every status compare contents.
+    let _ = repo.git_output(&["update-index", "-q", "--really-refresh"]);
     let head = repo.git(&["rev-parse", "HEAD"]);
     let status = repo.git(&["status", "--porcelain"]);
     (head, status)
