@@ -1,148 +1,32 @@
 //! Integration tests for repository state, conflicted paths and the merge
 //! operations, against real repositories and real git invocations.
 
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use lamina_core::git_cli::Git;
-use lamina_core::repo::Repo;
 use lamina_core::session::{
     ConflictSide, Operation, OperationId, RepoSnapshot, Session, SessionEvent,
 };
+use lamina_core::test_support::TestRepo;
 use lamina_core::{
     ChangeKind, ConflictEntry, ConflictKind, ConflictSides, HeadInfo, Oid, RepoState,
 };
-use tempfile::TempDir;
 
 /// Generous: a session test waits for watcher events and history reloads.
 const TIMEOUT: Duration = Duration::from_secs(60);
 
-struct TestRepo {
-    workdir: TempDir,
-    /// Separate dir so the empty global/system config never shows up as a
-    /// worktree change.
-    config: TempDir,
-}
-
-impl TestRepo {
-    fn new() -> Self {
-        let repo = Self {
-            workdir: TempDir::new().expect("worktree temp dir"),
-            config: TempDir::new().expect("config temp dir"),
-        };
-        fs::write(repo.config_file(), "").expect("empty git config");
-        repo.git(&["init", "-q", "-b", "main"]);
-        // The session runs its git commands without the environment overrides
-        // below, so the settings a merge or commit cannot work without are
-        // pinned in the repository config.
-        repo.git(&["config", "user.name", "Lamina Test"]);
-        repo.git(&["config", "user.email", "lamina@example.com"]);
-        repo.git(&["config", "commit.gpgsign", "false"]);
-        repo.git(&["config", "core.autocrlf", "false"]);
-        repo
-    }
-
-    fn path(&self) -> &Path {
-        self.workdir.path()
-    }
-
-    fn config_file(&self) -> PathBuf {
-        self.config.path().join("gitconfig")
-    }
-
-    fn write(&self, relative: &str, contents: &str) {
-        let path = self.path().join(relative);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("create parent dir");
-        }
-        fs::write(path, contents).expect("write file");
-    }
-
-    fn read(&self, relative: &str) -> String {
-        fs::read_to_string(self.path().join(relative)).expect("read file")
-    }
-
-    /// Isolated from the host's git config and hooks, like the other tests.
-    fn command(&self) -> Command {
-        let mut cmd = Command::new("git");
-        cmd.arg("-C").arg(self.path());
-        cmd.env("GIT_CONFIG_GLOBAL", self.config_file())
-            .env("GIT_CONFIG_SYSTEM", self.config_file())
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("XDG_CONFIG_HOME", self.config.path())
-            .env("GIT_AUTHOR_NAME", "Lamina Test")
-            .env("GIT_AUTHOR_EMAIL", "lamina@example.com")
-            .env("GIT_COMMITTER_NAME", "Lamina Test")
-            .env("GIT_COMMITTER_EMAIL", "lamina@example.com")
-            .env("GIT_AUTHOR_DATE", "2020-01-01T00:00:00Z")
-            .env("GIT_COMMITTER_DATE", "2020-01-01T00:00:00Z")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE");
-        cmd
-    }
-
-    fn git(&self, args: &[&str]) -> String {
-        let output = self.git_output(args);
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).into_owned()
-    }
-
-    fn git_output(&self, args: &[&str]) -> Output {
-        self.command().args(args).output().expect("spawn git")
-    }
-
-    fn head(&self) -> Oid {
-        self.git(&["rev-parse", "HEAD"])
-            .trim()
-            .parse()
-            .expect("parse HEAD")
-    }
-
-    fn commit_all(&self, message: &str) {
-        self.git(&["add", "-A"]);
-        self.git(&["commit", "-q", "-m", message]);
-    }
-
-    /// The same repository through the production write path, with the same
-    /// isolation so a test never reads the host's git config.
-    fn git_handle(&self) -> Git {
-        Git::new(self.path().to_path_buf())
-            .with_env("GIT_CONFIG_GLOBAL", self.config_file())
-            .with_env("GIT_CONFIG_SYSTEM", self.config_file())
-            .with_env("GIT_CONFIG_NOSYSTEM", "1")
-            .with_env("XDG_CONFIG_HOME", self.config.path())
-            .with_env("GIT_AUTHOR_NAME", "Lamina Test")
-            .with_env("GIT_AUTHOR_EMAIL", "lamina@example.com")
-            .with_env("GIT_COMMITTER_NAME", "Lamina Test")
-            .with_env("GIT_COMMITTER_EMAIL", "lamina@example.com")
-            .with_env("GIT_AUTHOR_DATE", "2020-01-01T00:00:00Z")
-            .with_env("GIT_COMMITTER_DATE", "2020-01-01T00:00:00Z")
-    }
-
-    fn open(&self) -> Repo {
-        Repo::open(self.path()).expect("open repository")
-    }
-}
-
 /// `main` and `side` both change `conflict.txt`, so merging conflicts.
 fn conflict_repo() -> TestRepo {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("conflict.txt", "base\n");
-    repo.commit_all("base");
+    repo.commit("base");
     repo.git(&["checkout", "-q", "-b", "side"]);
     repo.write("conflict.txt", "theirs\n");
-    repo.commit_all("theirs");
+    repo.commit("theirs");
     repo.git(&["checkout", "-q", "main"]);
     repo.write("conflict.txt", "ours\n");
-    repo.commit_all("ours");
+    repo.commit("ours");
     repo
 }
 
@@ -150,22 +34,22 @@ fn conflict_repo() -> TestRepo {
 /// `both.txt` both modified, `gone.txt` deleted on `side`, `added.txt` added
 /// on both branches.
 fn three_way_conflict_repo() -> TestRepo {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("both.txt", "base\n");
     repo.write("gone.txt", "base\n");
-    repo.commit_all("base");
+    repo.commit("base");
 
     repo.git(&["checkout", "-q", "-b", "side"]);
     repo.write("both.txt", "theirs\n");
     repo.git(&["rm", "-q", "gone.txt"]);
     repo.write("added.txt", "theirs\n");
-    repo.commit_all("side");
+    repo.commit("side");
 
     repo.git(&["checkout", "-q", "main"]);
     repo.write("both.txt", "ours\n");
     repo.write("gone.txt", "ours\n");
     repo.write("added.txt", "ours\n");
-    repo.commit_all("ours");
+    repo.commit("ours");
 
     let merge = repo.git_output(&["merge", "side"]);
     assert!(!merge.status.success(), "the merge should conflict");
@@ -211,16 +95,16 @@ fn conflict(path: &str, kind: ConflictKind) -> ConflictEntry {
 
 #[test]
 fn state_reports_merge_cherry_pick_and_rebase() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("a.txt", "base\n");
-    repo.commit_all("base");
+    repo.commit("base");
     repo.git(&["checkout", "-q", "-b", "side"]);
     repo.write("a.txt", "side\n");
-    repo.commit_all("side");
+    repo.commit("side");
     let side = repo.git(&["rev-parse", "side"]).trim().to_owned();
     repo.git(&["checkout", "-q", "main"]);
     repo.write("a.txt", "main\n");
-    repo.commit_all("main");
+    repo.commit("main");
 
     assert_eq!(repo.open().state().expect("state"), RepoState::Normal);
 
@@ -333,12 +217,12 @@ fn taking_a_side_stages_it_or_removes_the_deleted_path() {
 
 #[test]
 fn fast_forward_merge_moves_head_and_no_ff_records_a_merge_commit() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("a.txt", "base\n");
-    repo.commit_all("base");
+    repo.commit("base");
     repo.git(&["checkout", "-q", "-b", "side"]);
     repo.write("b.txt", "side\n");
-    repo.commit_all("side");
+    repo.commit("side");
     let side = repo.head();
     repo.git(&["checkout", "-q", "main"]);
 
@@ -351,7 +235,7 @@ fn fast_forward_merge_moves_head_and_no_ff_records_a_merge_commit() {
     // commit even though HEAD could have been moved forward.
     repo.git(&["checkout", "-q", "-b", "other"]);
     repo.write("c.txt", "other\n");
-    repo.commit_all("other");
+    repo.commit("other");
     let other = repo.head();
     repo.git(&["checkout", "-q", "main"]);
 
@@ -368,12 +252,12 @@ fn fast_forward_merge_moves_head_and_no_ff_records_a_merge_commit() {
 
 #[test]
 fn a_merge_that_cannot_start_is_still_an_error() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("a.txt", "base\n");
-    repo.commit_all("base");
+    repo.commit("base");
     repo.git(&["checkout", "-q", "-b", "side"]);
     repo.write("a.txt", "side\n");
-    repo.commit_all("side");
+    repo.commit("side");
     repo.git(&["checkout", "-q", "main"]);
     // git refuses to merge over a local change, exits 1 and leaves no merge
     // state; only a started merge may be reported as success.

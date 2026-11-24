@@ -7,76 +7,36 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use lamina_core::git_cli::Git;
 use lamina_core::repo::{Repo, SubmoduleInfo, SubmoduleStatus, WorktreeInfo};
 use lamina_core::session::{Operation, OperationId, Session, SessionEvent};
+use lamina_core::test_support::TestRepo;
 use lamina_core::{HeadInfo, Oid};
-use tempfile::TempDir;
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 
+/// A fixture whose temporary directory holds several repositories: the
+/// submodule source, the superproject and the worktree checkouts.
 struct Fixture {
-    root: TempDir,
-    config: PathBuf,
+    repo: TestRepo,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let root = TempDir::new().expect("root temp dir");
-        let config = root.path().join("gitconfig");
-        fs::write(
-            &config,
-            concat!(
-                "[protocol \"file\"]\n\tallow = always\n",
-                "[init]\n\tdefaultBranch = main\n",
-                "[user]\n\tname = Lamina Test\n\temail = test@example.com\n",
-                "[commit]\n\tgpgsign = false\n",
-                "[core]\n\tautocrlf = false\n",
-            ),
-        )
-        .expect("write test git config");
-        Self { root, config }
+        Self {
+            repo: TestRepo::new(),
+        }
     }
 
     fn path(&self) -> &Path {
-        self.root.path()
-    }
-
-    fn command(&self, workdir: &Path) -> Command {
-        let mut command = Command::new("git");
-        command
-            .current_dir(workdir)
-            .env("GIT_CONFIG_GLOBAL", &self.config)
-            .env("GIT_CONFIG_SYSTEM", &self.config)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_AUTHOR_NAME", "Lamina Test")
-            .env("GIT_AUTHOR_EMAIL", "test@example.com")
-            .env("GIT_COMMITTER_NAME", "Lamina Test")
-            .env("GIT_COMMITTER_EMAIL", "test@example.com")
-            .env("GIT_AUTHOR_DATE", "2020-01-01T00:00:00 +0000")
-            .env("GIT_COMMITTER_DATE", "2020-01-01T00:00:00 +0000")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE");
-        command
-    }
-
-    fn git_output(&self, workdir: &Path, args: &[&str]) -> Output {
-        self.command(workdir).args(args).output().expect("run git")
+        self.repo.temp_root()
     }
 
     fn git(&self, workdir: &Path, args: &[&str]) -> String {
-        let output = self.git_output(workdir, args);
-        assert!(
-            output.status.success(),
-            "git {args:?} failed:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout).expect("git stdout is UTF-8")
+        self.repo.git_in(workdir, args)
     }
 
     /// The `Git` handle the session would build: same isolated environment.
@@ -85,32 +45,21 @@ impl Fixture {
     /// or global setting, git passes it on to the `git clone` it spawns for a
     /// submodule, which is what allows the file transport there.
     fn git_handle(&self, workdir: &Path) -> Git {
-        Git::new(workdir.to_path_buf())
-            .with_env("GIT_CONFIG_GLOBAL", self.config.clone().into_os_string())
-            .with_env("GIT_CONFIG_SYSTEM", self.config.clone().into_os_string())
-            .with_env("GIT_CONFIG_NOSYSTEM", "1")
+        self.repo
+            .git_handle_in(workdir)
             .with_env("GIT_CONFIG_COUNT", "1")
             .with_env("GIT_CONFIG_KEY_0", "protocol.file.allow")
             .with_env("GIT_CONFIG_VALUE_0", "always")
-            .with_env("GIT_AUTHOR_NAME", "Lamina Test")
-            .with_env("GIT_AUTHOR_EMAIL", "test@example.com")
-            .with_env("GIT_COMMITTER_NAME", "Lamina Test")
-            .with_env("GIT_COMMITTER_EMAIL", "test@example.com")
     }
 
     fn init_repo(&self, name: &str) -> PathBuf {
-        let dir = self.path().join(name);
-        fs::create_dir_all(&dir).expect("repo dir");
+        let dir = self.repo.scratch_dir(name);
         self.git(&dir, &["init", "-q"]);
         dir
     }
 
     fn write(&self, workdir: &Path, relative: &str, contents: &str) {
-        let path = workdir.join(relative);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("create parent dir");
-        }
-        fs::write(path, contents).expect("write file");
+        self.repo.write_in(workdir, relative, contents);
     }
 
     fn commit_all(&self, workdir: &Path, message: &str) {

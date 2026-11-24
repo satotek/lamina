@@ -3,46 +3,35 @@
 //! repositories, plus `Session::content_search_streaming`.
 
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::Path;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use lamina_core::Oid;
 use lamina_core::repo::{ContentSearchMode, ContentSearchQuery, Repo};
 use lamina_core::session::{HistoryScope, QueryTicket, Session, SessionEvent};
-use tempfile::TempDir;
+use lamina_core::test_support::TestRepo;
 
 const BASE_TIME: i64 = 1_700_000_000;
 const TIMEOUT: Duration = Duration::from_secs(60);
 
+/// The shared fixture plus a clock that advances with every command, so
+/// commits land in a known order.
 struct Fixture {
-    _tmp: TempDir,
-    repo: PathBuf,
-    empty_config: PathBuf,
+    repo: TestRepo,
     next_time: i64,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let tmp = TempDir::new().expect("temp dir");
-        let repo = tmp.path().join("repo");
-        let empty_config = tmp.path().join("empty-gitconfig");
-        fs::write(&empty_config, b"").expect("empty config");
-        fs::create_dir_all(&repo).expect("repo dir");
-
-        let mut fixture = Self {
-            _tmp: tmp,
-            repo,
-            empty_config,
+        Self {
+            repo: TestRepo::with_time(BASE_TIME),
             next_time: BASE_TIME,
-        };
-        fixture.git(&["init", "--quiet", "--initial-branch=main"]);
-        fixture
+        }
     }
 
     fn path(&self) -> &Path {
-        &self.repo
+        self.repo.path()
     }
 
     fn git(&mut self, args: &[&str]) -> String {
@@ -52,37 +41,11 @@ impl Fixture {
     }
 
     fn git_at(&self, date: i64, args: &[&str]) -> String {
-        let mut command = Command::new("git");
-        command
-            .args(args)
-            .current_dir(&self.repo)
-            .env("GIT_CONFIG_GLOBAL", &self.empty_config)
-            .env("GIT_CONFIG_SYSTEM", &self.empty_config)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_AUTHOR_NAME", "Lamina Author")
-            .env("GIT_AUTHOR_EMAIL", "author@example.com")
-            .env("GIT_COMMITTER_NAME", "Lamina Committer")
-            .env("GIT_COMMITTER_EMAIL", "committer@example.com")
-            .env("GIT_AUTHOR_DATE", format!("@{date} +0000"))
-            .env("GIT_COMMITTER_DATE", format!("@{date} +0000"))
-            .env("GIT_TERMINAL_PROMPT", "0");
-        let output = command.output().expect("git is runnable");
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout)
-            .trim_end()
-            .to_string()
+        self.repo.git_dated(date, args).trim_end().to_owned()
     }
 
     fn write(&self, rel: &str, bytes: &[u8]) {
-        let path = self.repo.join(rel);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("parent dir");
-        }
-        fs::write(path, bytes).expect("write file");
+        self.repo.write_bytes(rel, bytes);
     }
 
     fn commit_all(&mut self, msg: &str) -> Oid {

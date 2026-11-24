@@ -4,10 +4,8 @@
 //! semantics, not this implementation's own expectations.
 
 use std::collections::HashSet;
-use std::fs;
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::path::Path;
+use std::process::Command;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
@@ -15,102 +13,54 @@ use lamina_core::repo::Repo;
 use lamina_core::session::{
     CommitQuery, PathHistoryCommit, QueryTicket, RepoSnapshot, Session, SessionEvent,
 };
-use tempfile::TempDir;
+use lamina_core::test_support::TestRepo;
 
 const BASE_TIME: i64 = 1_700_000_000;
 const TIMEOUT: Duration = Duration::from_secs(60);
 
-/// A repository in a temp directory driven by the `git` CLI with an isolated
-/// configuration, so nothing depends on the machine's git setup.
+/// The shared fixture plus history helpers bound to a fixed timestamp.
 struct Fixture {
-    /// Owns the temp directory; never read, only kept alive.
-    _tmp: TempDir,
-    repo: PathBuf,
-    empty_config: PathBuf,
+    repo: TestRepo,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let tmp = TempDir::new().expect("temp dir");
-        let repo = tmp.path().join("repo");
-        let empty_config = tmp.path().join("empty-gitconfig");
-        fs::write(&empty_config, b"").expect("empty config");
-        fs::create_dir_all(&repo).expect("repo dir");
-
-        let fixture = Self {
-            _tmp: tmp,
-            repo,
-            empty_config,
-        };
-        fixture.git(&["init", "--quiet", "--initial-branch=main"]);
-        fixture
+        Self {
+            repo: TestRepo::with_time(BASE_TIME),
+        }
     }
 
     fn path(&self) -> &Path {
-        &self.repo
+        self.repo.path()
     }
 
     fn git(&self, args: &[&str]) -> String {
-        self.run(&self.repo, args, BASE_TIME, "")
+        self.repo.git(args).trim_end().to_owned()
     }
 
     fn git_dated(&self, date: i64, args: &[&str]) -> String {
-        self.run(&self.repo, args, date, "")
+        self.repo.git_dated(date, args).trim_end().to_owned()
     }
 
     fn git_input(&self, args: &[&str], input: &str) -> String {
-        self.run(&self.repo, args, BASE_TIME, input)
-    }
-
-    fn run(&self, dir: &Path, args: &[&str], date: i64, input: &str) -> String {
-        let mut command = self.command(dir, args, date);
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("git is runnable");
-        child
-            .stdin
-            .as_mut()
-            .expect("piped stdin")
-            .write_all(input.as_bytes())
-            .expect("write git stdin");
-        let output = child.wait_with_output().expect("git finishes");
-
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout)
-            .trim_end()
-            .to_string()
+        self.repo.git_input(args, input).trim_end().to_owned()
     }
 
     /// `git` with the fixture's isolated environment, for a command whose
     /// failure is part of the check.
     fn command(&self, dir: &Path, args: &[&str], date: i64) -> Command {
-        let mut command = Command::new("git");
+        let date = format!("@{date} +0000");
+        let mut command = self.repo.command_in("git", dir);
         command
             .args(args)
-            .current_dir(dir)
-            .env("GIT_CONFIG_GLOBAL", &self.empty_config)
-            .env("GIT_CONFIG_SYSTEM", &self.empty_config)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_AUTHOR_NAME", "Lamina Author")
-            .env("GIT_AUTHOR_EMAIL", "author@example.com")
-            .env("GIT_COMMITTER_NAME", "Lamina Committer")
-            .env("GIT_COMMITTER_EMAIL", "committer@example.com")
-            .env("GIT_AUTHOR_DATE", format!("@{date} +0000"))
-            .env("GIT_COMMITTER_DATE", format!("@{date} +0000"))
-            .env("GIT_TERMINAL_PROMPT", "0");
+            .env("GIT_AUTHOR_DATE", &date)
+            .env("GIT_COMMITTER_DATE", &date);
         command
     }
 
     fn ref_exists(&self, name: &str) -> bool {
         self.command(
-            &self.repo,
+            self.path(),
             &["show-ref", "--verify", "--quiet", name],
             BASE_TIME,
         )
@@ -120,11 +70,7 @@ impl Fixture {
     }
 
     fn write(&self, file: &str, content: &str) {
-        let path = self.repo.join(file);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("file parent");
-        }
-        fs::write(&path, content).expect("write file");
+        self.repo.write(file, content);
     }
 
     fn commit(&self, file: &str, content: &str, date: i64, message: &str) -> String {
@@ -151,7 +97,7 @@ impl Fixture {
     }
 
     fn open(&self) -> Repo {
-        Repo::open(self.path()).expect("open repo")
+        self.repo.open()
     }
 
     fn history(&self, path: &str) -> Vec<String> {

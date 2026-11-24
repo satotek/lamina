@@ -6,8 +6,6 @@
 //! awaited by their `OperationFinished` event.
 
 use std::fs;
-use std::io::Write;
-use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -21,118 +19,20 @@ use lamina_core::session::{
     DiffRequest, DiffTicket, DiffView, FIRST_COMMIT_CHUNK, HistoryScope, Operation, OperationId,
     RepoSnapshot, Session, SessionEvent, SessionOptions,
 };
+use lamina_core::test_support::TestRepo;
 use lamina_core::{HeadInfo, RefKind, WorktreeStatus};
-use tempfile::TempDir;
 
 /// Generous: inotify, FSEvents and Windows deliver with different latencies,
 /// and a 20k-commit walk takes a while on a shared machine.
 const TIMEOUT: Duration = Duration::from_secs(60);
 
-struct TestRepo {
-    workdir: TempDir,
-    /// Separate dir so the empty global/system config never shows up as a
-    /// worktree change.
-    config: TempDir,
+/// Builds `commits` linear commits with `git fast-import`, which is orders of
+/// magnitude faster than a loop of `git commit`.
+trait FastImport {
+    fn fast_import(&self, commits: usize);
 }
 
-impl TestRepo {
-    fn new() -> Self {
-        let repo = Self {
-            workdir: TempDir::new().expect("worktree temp dir"),
-            config: TempDir::new().expect("config temp dir"),
-        };
-        fs::write(repo.config_file(), "").expect("empty git config");
-        repo.git(&["init", "-q", "-b", "main"]);
-        // The session's git commands also run with the host's global config, so
-        // pin the settings a commit cannot work without.
-        repo.git(&["config", "user.name", "Lamina Test"]);
-        repo.git(&["config", "user.email", "lamina@example.com"]);
-        repo.git(&["config", "commit.gpgsign", "false"]);
-        repo.git(&["config", "core.autocrlf", "false"]);
-        repo
-    }
-
-    fn config_file(&self) -> PathBuf {
-        self.config.path().join("gitconfig")
-    }
-
-    fn path(&self) -> &Path {
-        self.workdir.path()
-    }
-
-    fn repo_handle(&self) -> Repo {
-        Repo::open(self.path()).expect("open repository")
-    }
-
-    fn write(&self, relative: &str, contents: &str) {
-        let path = self.path().join(relative);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("create parent dir");
-        }
-        fs::write(path, contents).expect("write file");
-    }
-
-    fn read(&self, relative: &str) -> String {
-        fs::read_to_string(self.path().join(relative)).expect("read file")
-    }
-
-    /// Isolated from the host's git config and hooks, like the other tests.
-    fn command(&self) -> Command {
-        let mut cmd = Command::new("git");
-        cmd.arg("-C").arg(self.path());
-        cmd.env("GIT_CONFIG_GLOBAL", self.config_file())
-            .env("GIT_CONFIG_SYSTEM", self.config_file())
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("XDG_CONFIG_HOME", self.config.path())
-            .env("GIT_AUTHOR_NAME", "Lamina Test")
-            .env("GIT_AUTHOR_EMAIL", "lamina@example.com")
-            .env("GIT_COMMITTER_NAME", "Lamina Test")
-            .env("GIT_COMMITTER_EMAIL", "lamina@example.com")
-            .env("GIT_AUTHOR_DATE", "2020-01-01T00:00:00Z")
-            .env("GIT_COMMITTER_DATE", "2020-01-01T00:00:00Z")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE");
-        cmd
-    }
-
-    fn git(&self, args: &[&str]) -> String {
-        let output = self.command().args(args).output().expect("spawn git");
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).into_owned()
-    }
-
-    fn git_with_input(&self, args: &[&str], input: &str) -> String {
-        let mut child = self
-            .command()
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn git");
-        let mut stdin = child.stdin.take().expect("git stdin");
-        stdin.write_all(input.as_bytes()).expect("write git stdin");
-        drop(stdin);
-        let output = child.wait_with_output().expect("git output");
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).into_owned()
-    }
-
-    fn commit_all(&self, message: &str) {
-        self.git(&["add", "-A"]);
-        self.git(&["commit", "-q", "-m", message]);
-    }
-
-    /// Builds `commits` linear commits with `git fast-import`, which is orders
-    /// of magnitude faster than a loop of `git commit`.
+impl FastImport for TestRepo {
     fn fast_import(&self, commits: usize) {
         let mut stream = String::new();
         stream.push_str("blob\nmark :1\ndata 3\nhi\n\n");
@@ -146,7 +46,7 @@ impl TestRepo {
             stream.push_str(&format!("data {}\n{}\n", message.len(), message));
             stream.push_str("M 100644 :1 file.txt\n\n");
         }
-        self.git_with_input(&["fast-import", "--quiet"], &stream);
+        self.git_input(&["fast-import", "--quiet"], &stream);
         // fast-import writes refs only; the index and worktree are still those
         // of the unborn branch.
         self.git(&["reset", "--hard", "HEAD"]);
@@ -328,7 +228,7 @@ fn changed_lines(diff: &FileDiff) -> usize {
 
 #[test]
 fn first_snapshot_arrives_and_history_completes() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.fast_import(5_000);
     let harness = Harness::open(repo);
 
@@ -376,9 +276,9 @@ fn first_snapshot_arrives_and_history_completes() {
 
 #[test]
 fn external_commit_triggers_a_history_reload() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("a.txt", "one\n");
-    repo.commit_all("base");
+    repo.commit("base");
     let harness = Harness::open(repo);
     harness.wait_for_complete(1);
     harness.warm_up_watcher();
@@ -403,9 +303,9 @@ fn external_commit_triggers_a_history_reload() {
 
 #[test]
 fn editing_a_file_refreshes_status_without_reloading_history() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("a.txt", "one\n");
-    repo.commit_all("base");
+    repo.commit("base");
     let harness = Harness::open(repo);
     harness.wait_for_complete(1);
     harness.warm_up_watcher();
@@ -433,9 +333,9 @@ fn editing_a_file_refreshes_status_without_reloading_history() {
 
 #[test]
 fn stage_paths_and_commit_update_status_and_history() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("a.txt", "one\n");
-    repo.commit_all("base");
+    repo.commit("base");
     let harness = Harness::open(repo);
     harness.wait_for_complete(1);
     harness.warm_up_watcher();
@@ -504,10 +404,10 @@ fn stage_paths_and_commit_update_status_and_history() {
 
 #[test]
 fn stage_lines_stages_exactly_one_line() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     let base: String = (1..=10).map(|index| format!("line {index}\n")).collect();
     repo.write("a.txt", &base);
-    repo.commit_all("base");
+    repo.commit("base");
     let harness = Harness::open(repo);
     harness.wait_for_complete(1);
 
@@ -571,10 +471,10 @@ fn stage_lines_stages_exactly_one_line() {
 
 #[test]
 fn diff_ready_is_emitted_twice_with_highlights_for_a_known_language() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("src/main.rs", "fn main() {}\n");
     repo.write("notes.txt", "one\n");
-    repo.commit_all("base");
+    repo.commit("base");
     let harness = Harness::open(repo);
     harness.wait_for_complete(1);
 
@@ -630,14 +530,14 @@ fn diff_ready_is_emitted_twice_with_highlights_for_a_known_language() {
 
 #[test]
 fn cancelled_diff_emits_nothing() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     // 5,000 lines is still enough work that the immediate cancel below lands
     // before the diff finishes and emits its first event; the two edits keep
     // the diff non-trivial.
     let base: String = (0..5_000).map(|index| format!("line {index}\n")).collect();
     // A `.rs` path keeps the sentinel on the two-event path.
     repo.write("big.rs", &base);
-    repo.commit_all("base");
+    repo.commit("base");
     let harness = Harness::open(repo);
     harness.wait_for_complete(1);
 
@@ -667,7 +567,7 @@ fn cancelled_diff_emits_nothing() {
 
 #[test]
 fn a_reload_supersedes_an_in_flight_walk() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.fast_import(20_000);
     let harness = Harness::open(repo);
 
@@ -710,9 +610,9 @@ fn a_reload_supersedes_an_in_flight_walk() {
 
 #[test]
 fn busy_is_cleared_and_the_command_log_records_errors() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("a.txt", "one\n");
-    repo.commit_all("base");
+    repo.commit("base");
     let harness = Harness::open(repo);
     harness.wait_for_complete(1);
 
@@ -735,7 +635,7 @@ fn busy_is_cleared_and_the_command_log_records_errors() {
 
 #[test]
 fn dropping_a_loading_session_stops_its_threads() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     // A large walk is still running when the session is dropped.
     repo.fast_import(20_000);
 
@@ -770,9 +670,9 @@ fn dropping_a_loading_session_stops_its_threads() {
 
 #[test]
 fn dropping_a_session_lets_a_running_write_finish() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("a.txt", "one\n");
-    repo.commit_all("base");
+    repo.commit("base");
     let before = repo.git(&["rev-parse", "HEAD"]);
 
     // The commit is still inside its hook when the session is dropped: a
@@ -834,14 +734,14 @@ fn dropping_a_session_lets_a_running_write_finish() {
 
 #[test]
 fn dropping_a_session_during_the_initial_walk_is_prompt() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.fast_import(20_000);
 
     // How long the walk builds its reachability state before yielding anything,
     // measured on the same fixture so the bound scales with the machine. This is
     // the window a drop has to interrupt.
     let started = Instant::now();
-    let walk = repo.repo_handle().walk_commits().expect("start walk");
+    let walk = repo.open().walk_commits().expect("start walk");
     let walk_setup = started.elapsed();
     drop(walk);
     assert!(
@@ -881,9 +781,9 @@ fn dropping_a_session_during_the_initial_walk_is_prompt() {
 
 #[test]
 fn adding_a_remote_with_git_updates_remotes_without_a_reload() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("a.txt", "one\n");
-    repo.commit_all("base");
+    repo.commit("base");
     let harness = Harness::open(repo);
     harness.wait_for_complete(1);
     harness.warm_up_watcher();
@@ -933,7 +833,7 @@ fn session_is_send_and_sync() {
 
 #[test]
 fn an_empty_repository_loads_without_commits() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     let harness = Harness::open(repo);
 
     let snapshot = harness.wait_until(TIMEOUT, |snapshot| snapshot.commits.complete);
@@ -955,11 +855,11 @@ fn an_empty_repository_loads_without_commits() {
 
 #[test]
 fn request_diff_with_threads_context_lines_and_whitespace_to_the_worker() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     let base: String = (1..=40).map(|index| format!("line {index}\n")).collect();
     repo.write("a.txt", &base);
     repo.write("b.txt", &base);
-    repo.commit_all("base");
+    repo.commit("base");
     let harness = Harness::open(repo);
     harness.wait_for_complete(1);
 
@@ -1050,7 +950,7 @@ fn request_diff_with_threads_context_lines_and_whitespace_to_the_worker() {
 
 #[test]
 fn snapshot_lists_remotes_that_have_no_fetched_branches() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.git(&["remote", "add", "origin", "https://example.com/origin.git"]);
     repo.git(&[
         "remote",
@@ -1109,9 +1009,9 @@ fn snapshot_lists_remotes_that_have_no_fetched_branches() {
 
 #[test]
 fn a_missing_git_executable_fails_writes_without_panicking() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("a.txt", "one\n");
-    repo.commit_all("base");
+    repo.commit("base");
     let missing = repo.path().join("no-such-git-binary");
     let harness = Harness::open_with(
         repo,
@@ -1159,9 +1059,9 @@ fn a_missing_git_executable_fails_writes_without_panicking() {
 
 #[test]
 fn default_session_options_stage_through_git_on_path() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("a.txt", "one\n");
-    repo.commit_all("base");
+    repo.commit("base");
     let harness = Harness::open_with(repo, SessionOptions::default());
     harness.wait_for_complete(1);
 
@@ -1180,11 +1080,11 @@ fn default_session_options_stage_through_git_on_path() {
 
 #[test]
 fn commit_diff_is_read_against_the_first_parent() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("a.rs", "fn a() {}\n");
-    repo.commit_all("base");
+    repo.commit("base");
     repo.write("a.rs", "fn b() {}\n");
-    repo.commit_all("second");
+    repo.commit("second");
     let harness = Harness::open(repo);
 
     let complete = harness.wait_for_complete(2);
@@ -1208,19 +1108,19 @@ fn commit_diff_is_read_against_the_first_parent() {
 
 #[test]
 fn history_scope_walks_only_the_chosen_refs_and_all_restores_everything() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("base.txt", "base\n");
-    repo.commit_all("base");
+    repo.commit("base");
     let base = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
 
     repo.git(&["checkout", "-q", "-b", "feature"]);
     repo.write("feature.txt", "feature\n");
-    repo.commit_all("feature only");
+    repo.commit("feature only");
     let feature = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
 
     repo.git(&["checkout", "-q", "main"]);
     repo.write("main.txt", "main\n");
-    repo.commit_all("main only");
+    repo.commit("main only");
     let main = repo.git(&["rev-parse", "HEAD"]).trim().to_string();
 
     let harness = Harness::open(repo);
@@ -1315,18 +1215,18 @@ fn history_scope_walks_only_the_chosen_refs_and_all_restores_everything() {
 
 #[test]
 fn request_blame_serves_large_file_through_git_cli() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     let mut body = String::new();
     for i in 0..2_500 {
         body.push_str(&format!("line {i:04}: padding for large blame file\n"));
     }
     repo.write("big.txt", &body);
-    repo.commit_all("initial");
+    repo.commit("initial");
     let first: lamina_core::Oid = repo.git(&["rev-parse", "HEAD"]).trim().parse().unwrap();
 
     let updated = body.replacen("line 0005:", "line 0005 changed:", 1);
     repo.write("big.txt", &updated);
-    repo.commit_all("edit");
+    repo.commit("edit");
     let second: lamina_core::Oid = repo.git(&["rev-parse", "HEAD"]).trim().parse().unwrap();
 
     let harness = Harness::open(repo);
@@ -1367,10 +1267,10 @@ fn request_blame_serves_large_file_through_git_cli() {
 fn cancelling_session_blame_kills_in_flight_git_process() {
     use std::os::unix::fs::PermissionsExt;
 
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     let large = "x".repeat(70 * 1024);
     repo.write("big.txt", &format!("{large}\n"));
-    repo.commit_all("big");
+    repo.commit("big");
     let head: lamina_core::Oid = repo.git(&["rev-parse", "HEAD"]).trim().parse().unwrap();
 
     let pid_file = repo.path().join("blame.pid");
@@ -1459,7 +1359,7 @@ fn request_blame_streams_progress_before_ready_on_large_history() {
     // `git blame --incremental` emits 600 hunks (> PROGRESS_BATCH_HUNKS = 500)
     // and is guaranteed to emit at least one BlameProgress with hunks before
     // BlameReady.
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     let commit_count = 600usize;
     let mut stream = String::new();
     let mut file_body = String::new();
@@ -1482,15 +1382,15 @@ fn request_blame_streams_progress_before_ready_on_large_history() {
             mark = index + 1
         ));
     }
-    repo.git_with_input(&["fast-import", "--quiet"], &stream);
+    repo.git_input(&["fast-import", "--quiet"], &stream);
     repo.git(&["reset", "--hard", "HEAD"]);
     let head: lamina_core::Oid = repo.git(&["rev-parse", "HEAD"]).trim().parse().unwrap();
 
     // Also add a tiny shallow file in a second repo? No, let's check shallow file
     // via a separate small repo too:
-    let shallow_repo = TestRepo::new();
+    let shallow_repo = TestRepo::committing();
     shallow_repo.write("small.txt", "one\ntwo\n");
-    shallow_repo.commit_all("small");
+    shallow_repo.commit("small");
     let shallow_head: lamina_core::Oid = shallow_repo
         .git(&["rev-parse", "HEAD"])
         .trim()
@@ -1617,7 +1517,7 @@ fn request_blame_streams_progress_before_ready_on_large_history() {
 fn cancelling_mid_stream_blame_stops_events() {
     use std::os::unix::fs::PermissionsExt;
 
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     let mut body = String::new();
     for i in 0..600 {
         body.push_str(&format!(
@@ -1626,7 +1526,7 @@ fn cancelling_mid_stream_blame_stops_events() {
         ));
     }
     repo.write("big.txt", &body);
-    repo.commit_all("big");
+    repo.commit("big");
     let head: lamina_core::Oid = repo.git(&["rev-parse", "HEAD"]).trim().parse().unwrap();
 
     let pid_file = repo.path().join("midstream.pid");
@@ -1756,16 +1656,16 @@ fn cancelling_mid_stream_blame_stops_events() {
 
 #[test]
 fn incremental_watch_tracks_worktree_edits_and_falls_back_on_gitignore_and_git_add() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write(".gitignore", "*.log\n");
     repo.write("a.txt", "one\n");
     repo.write("b.txt", "one\n");
-    repo.commit_all("base");
+    repo.commit("base");
     let harness = Harness::open(repo);
     harness.wait_for_complete(1);
     harness.warm_up_watcher();
 
-    let repo_handle = harness.repo.repo_handle();
+    let repo_handle = harness.repo.open();
 
     // 1. Edit a tracked file (reuses history & refs).
     let before = harness.session.snapshot();

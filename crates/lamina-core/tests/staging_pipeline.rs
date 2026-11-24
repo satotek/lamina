@@ -9,33 +9,18 @@
 //! different edit order instead of covering new ones.
 
 use std::fs;
-use std::path::Path;
-use std::process::Command;
 
 use lamina_core::diff::{DiffOptions, LineKind, diff_text};
 use lamina_core::git_cli::{ApplyMode, Git};
 use lamina_core::patch::{LineSelection, PatchFile, PatchMode, build_patch};
 use lamina_core::repo::Repo;
-use tempfile::TempDir;
+use lamina_core::test_support::TestRepo;
 
 const FILE: &str = "src/lib.txt";
 
 struct Fixture {
-    _dir: TempDir,
-    root: std::path::PathBuf,
+    repo: TestRepo,
     git: Git,
-    config: std::path::PathBuf,
-}
-
-fn isolated(cmd: &mut Command, empty_config: &Path) {
-    cmd.env("GIT_CONFIG_GLOBAL", empty_config)
-        .env("GIT_CONFIG_SYSTEM", empty_config)
-        .env("GIT_AUTHOR_NAME", "Lamina Test")
-        .env("GIT_AUTHOR_EMAIL", "test@example.invalid")
-        .env("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z")
-        .env("GIT_COMMITTER_NAME", "Lamina Test")
-        .env("GIT_COMMITTER_EMAIL", "test@example.invalid")
-        .env("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z");
 }
 
 impl Fixture {
@@ -44,48 +29,26 @@ impl Fixture {
     }
 
     fn with_autocrlf(head_content: &str, autocrlf: bool) -> Self {
-        let dir = TempDir::new().unwrap();
-        let root = dir.path().join("repo");
-        fs::create_dir_all(root.join("src")).unwrap();
-        let empty_config = dir.path().join("empty-gitconfig");
-        fs::write(&empty_config, "").unwrap();
-
-        let run = |args: &[&str]| {
-            let mut cmd = Command::new("git");
-            cmd.args(args).current_dir(&root);
-            isolated(&mut cmd, &empty_config);
-            let out = cmd.output().unwrap();
-            assert!(out.status.success(), "git {args:?}: {out:?}");
-        };
-        run(&["init", "-q", "-b", "main"]);
-        run(&[
+        let repo = TestRepo::new();
+        // Repo-local config wins over the fixture's global file, so the line
+        // ending behaviour applies to both the index and git's own commands.
+        repo.git(&[
             "config",
             "core.autocrlf",
             if autocrlf { "true" } else { "false" },
         ]);
-        fs::write(root.join(FILE), head_content).unwrap();
-        run(&["add", "."]);
-        run(&["commit", "-q", "-m", "base"]);
+        repo.write(FILE, head_content);
+        repo.git(&["add", "."]);
+        repo.git(&["commit", "-q", "-m", "base"]);
 
-        let mut git = Git::new(root.clone());
-        for (key, value) in [
-            ("GIT_CONFIG_GLOBAL", empty_config.as_os_str()),
-            ("GIT_CONFIG_SYSTEM", empty_config.as_os_str()),
-        ] {
-            git = git.with_env(key, value);
-        }
-        Self {
-            _dir: dir,
-            root,
-            git,
-            config: empty_config,
-        }
+        let git = repo.git_handle();
+        Self { repo, git }
     }
 
     fn repo(&self) -> Repo {
         // Reopened on purpose: the UI may hold a Repo across git CLI writes,
         // which `reused_repo_sees_index_updates` covers separately.
-        Repo::open(&self.root).unwrap()
+        self.repo.open()
     }
 
     fn index(&self) -> String {
@@ -93,7 +56,7 @@ impl Fixture {
     }
 
     fn worktree(&self) -> String {
-        fs::read_to_string(self.root.join(FILE)).unwrap()
+        fs::read_to_string(self.repo.path().join(FILE)).unwrap()
     }
 
     /// The worktree file as git would store it, which is what a diff must use
@@ -104,20 +67,12 @@ impl Fixture {
     }
 
     fn head(&self) -> String {
-        let out = Command::new("git")
-            .args(["show", &format!("HEAD:{FILE}")])
-            .current_dir(&self.root)
-            .output()
-            .unwrap();
-        String::from_utf8(out.stdout).unwrap()
+        self.repo.git(&["show", &format!("HEAD:{FILE}")])
     }
 
     /// Run git in the fixture repository with the same isolated environment.
     fn git_output(&self, args: &[&str]) -> std::process::Output {
-        let mut cmd = Command::new("git");
-        cmd.args(args).current_dir(&self.root);
-        isolated(&mut cmd, &self.config);
-        cmd.output().expect("run git")
+        self.repo.git_output(args)
     }
 
     /// Applies one changed line of the diff between `old` and `new` in `mode`.
@@ -191,7 +146,7 @@ fn staging_every_line_one_by_one_reaches_the_worktree() {
         let base = base_text();
         let fx = Fixture::new(&base);
         let mut rng = Lcg(seed);
-        fs::write(fx.root.join(FILE), edited(&base, &mut rng)).unwrap();
+        fs::write(fx.repo.path().join(FILE), edited(&base, &mut rng)).unwrap();
 
         let mut steps = 0;
         while fx.apply_one_line(&fx.index(), &fx.worktree(), PatchMode::Stage, rng.next()) {
@@ -213,7 +168,7 @@ fn staging_every_line_one_by_one_with_autocrlf() {
         let mut rng = Lcg(seed);
         let edited = edited(&base, &mut rng);
         // A Windows editor writes CRLF; git stores LF in the index.
-        fs::write(fx.root.join(FILE), edited.replace('\n', "\r\n")).unwrap();
+        fs::write(fx.repo.path().join(FILE), edited.replace('\n', "\r\n")).unwrap();
 
         assert_ne!(fx.worktree(), fx.worktree_as_git(), "seed {seed}");
         assert_eq!(fx.worktree_as_git(), edited, "seed {seed}");
@@ -253,7 +208,7 @@ fn unstaging_every_line_one_by_one_reaches_head() {
         let base = base_text();
         let fx = Fixture::new(&base);
         let mut rng = Lcg(seed * 7919);
-        fs::write(fx.root.join(FILE), edited(&base, &mut rng)).unwrap();
+        fs::write(fx.repo.path().join(FILE), edited(&base, &mut rng)).unwrap();
         fx.git.stage_paths(&[FILE]).unwrap();
 
         let mut steps = 0;
@@ -271,7 +226,7 @@ fn discarding_every_line_one_by_one_restores_the_index() {
         let base = base_text();
         let fx = Fixture::new(&base);
         let mut rng = Lcg(seed * 104_729);
-        fs::write(fx.root.join(FILE), edited(&base, &mut rng)).unwrap();
+        fs::write(fx.repo.path().join(FILE), edited(&base, &mut rng)).unwrap();
 
         let mut steps = 0;
         while fx.apply_one_line(&fx.index(), &fx.worktree(), PatchMode::Discard, rng.next()) {
@@ -288,7 +243,7 @@ fn reused_repo_sees_index_updates() {
     let fx = Fixture::new(&base);
     let repo = fx.repo();
     let new = base.replace("line 30\n", "line thirty\n");
-    fs::write(fx.root.join(FILE), &new).unwrap();
+    fs::write(fx.repo.path().join(FILE), &new).unwrap();
     fx.git.stage_paths(&[FILE]).unwrap();
 
     let staged = repo.file_in_index(FILE).unwrap().unwrap();

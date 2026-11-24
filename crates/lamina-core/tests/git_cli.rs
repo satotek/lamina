@@ -12,49 +12,41 @@ use lamina_core::Error;
 use lamina_core::git_cli::{
     ApplyMode, CommandLog, CommitOptions, Git, MAX_CAPTURE_BYTES, MIN_GIT_VERSION,
 };
-use tempfile::TempDir;
+use lamina_core::test_support::TestRepo;
 
-/// A temp root plus the empty config file used for every spawned git.
+/// A fixture root with an isolated environment. A test's repositories live
+/// beside the fixture's own worktree so a clone and a bare remote each get a
+/// directory of their own.
 struct Fixture {
-    root: TempDir,
-    config: PathBuf,
+    fixture: TestRepo,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let root = tempfile::tempdir().expect("tempdir");
-        let config = root.path().join("gitconfig");
-        fs::write(&config, b"").expect("empty git config");
-        Self { root, config }
+        Self {
+            // The commit test asserts the identity git records.
+            fixture: TestRepo::with_identity("Test Author", "test@example.com"),
+        }
     }
 
     fn path(&self) -> &Path {
-        self.root.path()
+        self.fixture.path()
     }
 
     fn git_in(&self, workdir: impl AsRef<Path>) -> Git {
-        Git::new(workdir.as_ref().to_path_buf())
-            .with_env("GIT_CONFIG_GLOBAL", self.config.clone().into_os_string())
-            .with_env("GIT_CONFIG_SYSTEM", self.config.clone().into_os_string())
-            .with_env("GIT_CONFIG_NOSYSTEM", "1")
-            .with_env("GIT_AUTHOR_NAME", "Test Author")
-            .with_env("GIT_AUTHOR_EMAIL", "test@example.com")
-            .with_env("GIT_COMMITTER_NAME", "Test Author")
-            .with_env("GIT_COMMITTER_EMAIL", "test@example.com")
+        self.fixture.git_handle_in(workdir)
     }
 
     /// A fresh repository on branch `main` with no commits (unborn HEAD).
     fn repo(&self) -> Git {
-        let dir = self.path().join("repo");
-        fs::create_dir(&dir).expect("repo dir");
+        let dir = self.fixture.scratch_dir("work");
         let git = self.git_in(&dir);
         git.run(&["init", "-b", "main"], None).expect("git init");
         git
     }
 
     fn bare_remote(&self) -> (Git, PathBuf) {
-        let dir = self.path().join("remote.git");
-        fs::create_dir(&dir).expect("remote dir");
+        let dir = self.fixture.scratch_dir("remote.git");
         let git = self.git_in(&dir);
         git.run(&["init", "--bare", "-b", "main", "."], None)
             .expect("git init --bare");
@@ -62,8 +54,7 @@ impl Fixture {
     }
 
     fn clone_from(&self, remote: &Path, name: &str) -> Git {
-        let dir = self.path().join(name);
-        fs::create_dir(&dir).expect("clone dir");
+        let dir = self.fixture.scratch_dir(name);
         let git = self.git_in(&dir);
         git.run(&["clone", remote.to_str().unwrap(), "."], None)
             .expect("git clone");

@@ -3,80 +3,39 @@
 //! Every repository is a `TempDir` driven through the `git` CLI with an
 //! isolated configuration, so the host's git settings cannot change a result.
 
-use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use lamina_core::git_cli::Git;
 use lamina_core::repo::{CommitGraphAdvice, CommitGraphThresholds, Repo};
 use lamina_core::session::{Operation, Session, SessionEvent, SessionOptions};
-use tempfile::TempDir;
+use lamina_core::test_support::TestRepo;
 
-const BASE_TIME: i64 = 1_700_000_000;
 const TIMEOUT: Duration = Duration::from_secs(60);
 
+/// The shared fixture plus the graph facts the tests compare.
 struct Fixture {
-    _tmp: TempDir,
-    repo: PathBuf,
-    empty_config: PathBuf,
+    repo: TestRepo,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let tmp = TempDir::new().expect("temp dir");
-        let repo = tmp.path().join("repo");
-        let empty_config = tmp.path().join("empty-gitconfig");
-        fs::write(&empty_config, b"").expect("empty config");
-        fs::create_dir_all(&repo).expect("repo dir");
-        let fixture = Self {
-            _tmp: tmp,
-            repo,
-            empty_config,
-        };
-        fixture.git(&["init", "--quiet", "--initial-branch=main"]);
-        fixture
+        Self {
+            repo: TestRepo::new(),
+        }
     }
 
     fn path(&self) -> &Path {
-        &self.repo
+        self.repo.path()
     }
 
     fn git(&self, args: &[&str]) -> String {
-        let output = self.command(args).output().expect("git is runnable");
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout)
-            .trim_end()
-            .to_owned()
-    }
-
-    fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new("git");
-        command
-            .args(args)
-            .current_dir(&self.repo)
-            .env("GIT_CONFIG_GLOBAL", &self.empty_config)
-            .env("GIT_CONFIG_SYSTEM", &self.empty_config)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_AUTHOR_NAME", "Lamina Author")
-            .env("GIT_AUTHOR_EMAIL", "author@example.com")
-            .env("GIT_COMMITTER_NAME", "Lamina Committer")
-            .env("GIT_COMMITTER_EMAIL", "committer@example.com")
-            .env("GIT_AUTHOR_DATE", format!("@{BASE_TIME} +0000"))
-            .env("GIT_COMMITTER_DATE", format!("@{BASE_TIME} +0000"))
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        command
+        self.repo.git(args).trim_end().to_owned()
     }
 
     fn commit(&self, file: &str, contents: &str, message: &str) {
-        fs::write(self.repo.join(file), contents).expect("write file");
+        self.repo.write(file, contents);
         self.git(&["add", "--", file]);
         self.git(&["commit", "--quiet", "-m", message]);
     }
@@ -86,21 +45,15 @@ impl Fixture {
     }
 
     fn graph_path(&self) -> PathBuf {
-        self.repo.join(".git/objects/info/commit-graph")
+        self.repo.path().join(".git/objects/info/commit-graph")
     }
 
     fn open(&self) -> Repo {
-        Repo::open(&self.repo).expect("open repository")
+        self.repo.open()
     }
 
     fn git_handle(&self) -> Git {
-        Git::new(self.repo.clone())
-            .with_env("GIT_CONFIG_GLOBAL", &self.empty_config)
-            .with_env("GIT_CONFIG_NOSYSTEM", "1")
-            .with_env("GIT_AUTHOR_NAME", "Lamina Author")
-            .with_env("GIT_AUTHOR_EMAIL", "author@example.com")
-            .with_env("GIT_COMMITTER_NAME", "Lamina Committer")
-            .with_env("GIT_COMMITTER_EMAIL", "committer@example.com")
+        self.repo.git_handle()
     }
 
     fn facts(&self) -> (bool, usize, Option<CommitGraphAdvice>) {
