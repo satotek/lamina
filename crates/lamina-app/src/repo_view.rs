@@ -59,7 +59,6 @@ use gpui::{
     AnyWindowHandle, App, AppContext as _, Context, Entity, FocusHandle, Focusable as _,
     ScrollStrategy, Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
 };
-use gpui_component::WindowExt as _;
 use gpui_component::input::InputState;
 use lamina_core::diff::GapAction;
 use lamina_core::git_cli::CommandRecord;
@@ -2017,13 +2016,16 @@ impl RepoView {
         self.run_operation(Operation::DeleteBranch { name, force }, label, window, cx);
     }
 
-    /// Confirms whichever branch, remote or upstream dialog is open.
-    pub(crate) fn submit_branch_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(request) = self.branches.dialog_request(cx) else {
-            return;
-        };
+    /// Runs whichever branch dialog request its form produced; the dialog
+    /// closes once the operation is under way.
+    pub(crate) fn run_branch_dialog(
+        &mut self,
+        request: crate::branches::DialogRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let (operation, label) = match request {
-            Ok(crate::branches::DialogRequest::Create(request)) => (
+            crate::branches::DialogRequest::Create(request) => (
                 Operation::CreateBranch {
                     name: request.name.clone(),
                     start_point: request.start_point,
@@ -2031,7 +2033,7 @@ impl RepoView {
                 },
                 format!("create branch {}", request.name),
             ),
-            Ok(crate::branches::DialogRequest::Rename(request)) => (
+            crate::branches::DialogRequest::Rename(request) => (
                 Operation::RenameBranch {
                     name: request.name.clone(),
                     new_name: request.new_name.clone(),
@@ -2039,11 +2041,11 @@ impl RepoView {
                 },
                 format!("rename branch {} to {}", request.name, request.new_name),
             ),
-            Ok(crate::branches::DialogRequest::SetUpstream {
+            crate::branches::DialogRequest::SetUpstream {
                 branch,
                 remote,
                 remote_branch,
-            }) => (
+            } => (
                 Operation::SetBranchUpstream {
                     branch: branch.clone(),
                     remote: remote.clone(),
@@ -2051,7 +2053,7 @@ impl RepoView {
                 },
                 format!("set upstream of {branch} to {remote}/{remote_branch}"),
             ),
-            Ok(crate::branches::DialogRequest::AddRemote(request)) => (
+            crate::branches::DialogRequest::AddRemote(request) => (
                 Operation::AddRemote {
                     name: request.name.clone(),
                     url: request.url,
@@ -2059,14 +2061,14 @@ impl RepoView {
                 },
                 format!("add remote {}", request.name),
             ),
-            Ok(crate::branches::DialogRequest::RenameRemote { name, new_name }) => (
+            crate::branches::DialogRequest::RenameRemote { name, new_name } => (
                 Operation::RenameRemote {
                     name: name.clone(),
                     new_name: new_name.clone(),
                 },
                 format!("rename remote {name} to {new_name}"),
             ),
-            Ok(crate::branches::DialogRequest::EditRemoteUrl(request)) => (
+            crate::branches::DialogRequest::EditRemoteUrl(request) => (
                 Operation::SetRemoteUrl {
                     name: request.name.clone(),
                     fetch_url: request.fetch_url,
@@ -2074,14 +2076,8 @@ impl RepoView {
                 },
                 format!("change the URL of {}", request.name),
             ),
-            Err(message) => {
-                self.branches.set_dialog_error(message, cx);
-                cx.notify();
-                return;
-            }
         };
         self.branches.close_dialog();
-        window.close_dialog(cx);
         self.focus_root(window, cx);
         self.run_operation(operation, label, window, cx);
     }
