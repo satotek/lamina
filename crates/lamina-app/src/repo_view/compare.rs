@@ -33,9 +33,9 @@ use lamina_core::{HeadInfo, Oid};
 use super::details::file_stat_label;
 use super::split::{self, files_fraction};
 use super::{RepoView, RowsTarget};
-use crate::compare::{CompareRevision, RepoThreeWaySource};
 use crate::data;
 use crate::diff_view::{self, DiffColors, DiffContext, Row as DiffRow};
+use crate::file_compare::{CompareRevision, RepoThreeWaySource};
 use crate::repo_view::history_diff_options;
 use crate::scrollbar::WithScrollbar as _;
 use crate::style::{self, Design};
@@ -463,7 +463,7 @@ impl RepoView {
             root: self.repository_root(),
             left: self.commit_revision(*older),
             middle: self.commit_revision(*newer),
-            right: crate::compare::CompareRevision::worktree(),
+            right: crate::file_compare::CompareRevision::worktree(),
         };
         self.open_three_way_tab(source, ThreeWayCompareMode::NoBase, window, cx);
     }

@@ -29,11 +29,11 @@ use crate::actions::{
     OpenRepository, PreviousTab, ReopenClosedTab, SelectTab1, SelectTab2, SelectTab3, SelectTab4,
     SelectTab5, SelectTab6, SelectTab7, SelectTab8, SelectTab9, WORKSPACE,
 };
-use crate::compare::{
+use crate::debug_launch::{self, DebugDialog, DebugLaunch};
+use crate::file_compare::{
     CompareRevision, CompareTarget, CompareView, DialogRevision, RepoThreeWayFileSource,
     RepoThreeWaySource, RepoTwoWaySource, RevisionOption, RevisionOptions,
 };
-use crate::debug_launch::{self, DebugDialog, DebugLaunch};
 use crate::picker::{Mode, OpenTarget, Picker};
 use crate::recent::{self, RecentRepositories};
 use crate::repo_view::{Launch, RepoView};
@@ -887,7 +887,7 @@ impl Workspace {
     /// Opens the standalone Compare setup dialog over the workspace window.
     pub(crate) fn open_compare_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let options = self.revision_options(cx);
-        crate::compare::open_compare_dialog(cx.entity(), options, window, cx);
+        crate::file_compare::open_compare_dialog(cx.entity(), options, window, cx);
     }
 
     /// The active compare tab, for tests that follow its state.
@@ -998,7 +998,7 @@ impl Workspace {
         };
         let revision = |dialog: &DialogRevision| -> CompareRevision {
             let label = if dialog.label.is_empty() {
-                crate::compare::label_at_revision(&snapshot.refs, dialog.side.oid())
+                crate::file_compare::label_at_revision(&snapshot.refs, dialog.side.oid())
             } else {
                 dialog.label.clone()
             };
@@ -3043,7 +3043,7 @@ mod tests {
             "the picker offers HEAD"
         );
 
-        let sides = crate::compare::validate_revision_inputs(
+        let sides = crate::file_compare::validate_revision_inputs(
             "main",
             t!("compare.working_tree").as_ref(),
             t!("compare.working_tree").as_ref(),
