@@ -19,7 +19,6 @@ use gpui::{
 };
 use gpui_component::Disableable as _;
 use gpui_component::checkbox::Checkbox;
-use gpui_component::dialog::DialogFooter;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::PopupMenuItem;
 use gpui_component::notification::Notification;
@@ -92,42 +91,16 @@ impl RepoView {
         let view = cx.weak_entity();
         let dialog = cx.new(|cx| StashDialog::new(view, include_default, files, window, cx));
         let focus = dialog.read(cx).input_focus(cx);
-        let content = dialog.clone();
-        let footer = dialog.clone();
-        let confirm = dialog;
-        let zoom = crate::settings::Settings::get(cx).appearance.zoom();
-        window.open_dialog(cx, move |card, _, _| {
-            let content = content.clone();
-            let footer = footer.clone();
-            let confirm = confirm.clone();
-            card.title(stash_title())
-                .w(px(520.0 * zoom))
-                .content(move |body, _, _| body.child(content.clone()))
-                .footer(
-                    DialogFooter::new()
-                        .child(
-                            crate::ui::button("stash-cancel", t!("common.cancel").to_string())
-                                .size(crate::ui::ButtonSize::Medium)
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
-                        )
-                        .child(
-                            crate::ui::button("stash-submit", stash_title())
-                                .size(crate::ui::ButtonSize::Medium)
-                                .on_click(move |_, window, cx| {
-                                    footer.update(cx, |dialog, cx| dialog.submit(window, cx));
-                                }),
-                        ),
-                )
-                .on_ok(move |_, window, cx| {
-                    // The dialog closes itself once the operation is on its
-                    // way, so the confirm does not close it a second time.
-                    confirm.update(cx, |dialog, cx| dialog.submit(window, cx));
-                    false
-                })
-        });
         // The input owns `Enter` while it has focus, which is where the user
         // starts typing; `Escape` and the footer still belong to the dialog.
-        window.defer(cx, move |window, cx| focus.focus(window, cx));
+        crate::ui::FormDialog::new(stash_title(), 520.0)
+            .content(dialog)
+            .cancel("stash-cancel")
+            .submit("stash-submit", stash_title(), |dialog, window, cx| {
+                dialog.submit(window, cx);
+            })
+            .focus(focus)
+            .open(window, cx);
     }
 
     /// Applies `stash@{index}` and keeps the stash.

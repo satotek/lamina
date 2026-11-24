@@ -18,6 +18,7 @@ mod checkbox;
 mod confirm;
 pub mod file_tree;
 mod focus;
+mod form_dialog;
 pub(crate) mod gallery;
 mod hscrollbar;
 pub mod lfs;
@@ -51,6 +52,7 @@ pub use button::{
 pub use checkbox::{checkbox, gutter_checkbox};
 pub use confirm::{Confirm, confirm, confirm_with, should_ask};
 pub(crate) use focus::focus_input;
+pub use form_dialog::FormDialog;
 pub use hscrollbar::h_scrollbar;
 pub use lfs::{install_hint, lfs_badge, lfs_card};
 pub use menu::{context_menu, menu_label};

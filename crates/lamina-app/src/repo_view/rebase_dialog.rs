@@ -266,46 +266,17 @@ impl RebaseDialog {
         let owner = cx.weak_entity();
         let prompt = cx.new(|cx| RewordPrompt::new(owner, commit, short, message, window, cx));
         let focus = prompt.read(cx).message.focus_handle(cx);
-        let content = prompt.clone();
-        let footer = prompt.clone();
-        let confirm = prompt;
-        let zoom = Settings::get(cx).appearance.zoom();
-        window.open_dialog(cx, move |card, _, cx| {
-            let content = content.clone();
-            let footer = footer.clone();
-            let confirm = confirm.clone();
-            let empty = confirm.read(cx).is_empty(cx);
-            card.title(t!("edit_dialog.title").to_string())
-                .w(px(520.0 * zoom))
-                .content(move |body, _, _| body.child(content.clone()))
-                .footer(
-                    DialogFooter::new()
-                        .child(
-                            ui::button("rebase-reword-cancel", t!("common.cancel").to_string())
-                                .size(ui::ButtonSize::Medium)
-                                .on_click(|_, window, cx| window.close_dialog(cx)),
-                        )
-                        .child(
-                            ui::button(
-                                "rebase-reword-ok",
-                                t!("rebase_edit.reword_button").to_string(),
-                            )
-                            .size(ui::ButtonSize::Medium)
-                            .disabled(empty)
-                            .on_click(move |_, window, cx| {
-                                footer.update(cx, |prompt, cx| prompt.submit(window, cx));
-                            }),
-                        ),
-                )
-                .on_ok(move |_, window, cx| {
-                    if confirm.read(cx).is_empty(cx) {
-                        return false;
-                    }
-                    confirm.update(cx, |prompt, cx| prompt.submit(window, cx));
-                    false
-                })
-        });
-        window.defer(cx, move |window, cx| focus.focus(window, cx));
+        ui::FormDialog::new(t!("edit_dialog.title").to_string(), 520.0)
+            .content(prompt)
+            .cancel("rebase-reword-cancel")
+            .submit(
+                "rebase-reword-ok",
+                t!("rebase_edit.reword_button").to_string(),
+                |prompt, window, cx| prompt.submit(window, cx),
+            )
+            .can_submit(|prompt, cx| !prompt.is_empty(cx))
+            .focus(focus)
+            .open(window, cx);
     }
 
     /// Stores a reword the prompt returned. The row is found by commit
