@@ -1,112 +1,63 @@
 //! Integration tests for HEAD, refs and the commit walk.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
 
 use lamina_core::repo::Repo;
+use lamina_core::test_support::TestRepo;
 use lamina_core::{HeadInfo, RefInfo, RefKind, RemoteInfo};
-use tempfile::TempDir;
 
 const BASE_TIME: i64 = 1_700_000_000;
 
-/// A repository in a temp directory driven by the `git` CLI with an isolated
-/// configuration, so nothing depends on the machine's git setup.
+/// The shared fixture plus history helpers bound to a fixed timestamp and the
+/// author the walk assertions expect.
 struct Fixture {
-    tmp: TempDir,
-    repo: PathBuf,
-    empty_config: PathBuf,
+    repo: TestRepo,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let tmp = TempDir::new().expect("temp dir");
-        let repo = tmp.path().join("repo");
-        let empty_config = tmp.path().join("empty-gitconfig");
-        std::fs::write(&empty_config, b"").expect("empty config");
-        std::fs::create_dir_all(&repo).expect("repo dir");
-
-        let fixture = Self {
-            tmp,
-            repo,
-            empty_config,
-        };
-        fixture.git(&["init", "--quiet", "--initial-branch=main"]);
-        fixture
+        Self {
+            repo: TestRepo::with_identity("Lamina Author", "author@example.com"),
+        }
     }
 
     fn path(&self) -> &Path {
-        &self.repo
+        self.repo.path()
+    }
+
+    fn temp_root(&self) -> &Path {
+        self.repo.temp_root()
     }
 
     fn git(&self, args: &[&str]) -> String {
-        self.git_at(&self.repo, args)
+        self.repo.git(args).trim_end().to_owned()
     }
 
     fn git_at(&self, dir: &Path, args: &[&str]) -> String {
-        self.run(dir, args, BASE_TIME)
+        self.repo.git_in(dir, args).trim_end().to_owned()
     }
 
     fn git_dated(&self, date: i64, args: &[&str]) -> String {
-        self.run(&self.repo, args, date)
-    }
-
-    fn run(&self, dir: &Path, args: &[&str], date: i64) -> String {
-        self.run_with_input(dir, args, date, "")
-    }
-
-    fn run_with_input(&self, dir: &Path, args: &[&str], date: i64, input: &str) -> String {
-        use std::io::Write;
-        use std::process::Stdio;
-
-        let mut command = self.command(dir, args, date);
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("git is runnable");
-        child
-            .stdin
-            .as_mut()
-            .expect("piped stdin")
-            .write_all(input.as_bytes())
-            .expect("write git stdin");
-        let output = child.wait_with_output().expect("git finishes");
-
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout)
-            .trim_end()
-            .to_string()
+        self.repo.git_dated(date, args).trim_end().to_owned()
     }
 
     /// `git` with the fixture's isolated environment, for a command whose
     /// failure is part of the check.
     fn command(&self, dir: &Path, args: &[&str], date: i64) -> Command {
-        let mut command = Command::new("git");
+        let date = format!("@{date} +0000");
+        let mut command = self.repo.command_in("git", dir);
         command
             .args(args)
-            .current_dir(dir)
-            .env("GIT_CONFIG_GLOBAL", &self.empty_config)
-            .env("GIT_CONFIG_SYSTEM", &self.empty_config)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_AUTHOR_NAME", "Lamina Author")
-            .env("GIT_AUTHOR_EMAIL", "author@example.com")
-            .env("GIT_COMMITTER_NAME", "Lamina Committer")
-            .env("GIT_COMMITTER_EMAIL", "committer@example.com")
-            .env("GIT_AUTHOR_DATE", format!("@{date} +0000"))
-            .env("GIT_COMMITTER_DATE", format!("@{date} +0000"))
-            .env("GIT_TERMINAL_PROMPT", "0");
+            .env("GIT_AUTHOR_DATE", &date)
+            .env("GIT_COMMITTER_DATE", &date);
         command
     }
 
     fn ref_exists(&self, name: &str) -> bool {
         self.command(
-            &self.repo,
+            self.path(),
             &["show-ref", "--verify", "--quiet", name],
             BASE_TIME,
         )
@@ -116,15 +67,11 @@ impl Fixture {
     }
 
     fn git_input(&self, args: &[&str], input: &str) -> String {
-        self.run_with_input(&self.repo, args, BASE_TIME, input)
+        self.repo.git_input(args, input).trim_end().to_owned()
     }
 
     fn commit(&self, file: &str, content: &str, date: i64, message: &str) -> String {
-        let path = self.repo.join(file);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).expect("file parent");
-        }
-        std::fs::write(&path, content).expect("write file");
+        self.repo.write(file, content);
         self.git(&["add", "--", file]);
         self.git_dated(date, &["commit", "--quiet", "-m", message]);
         self.git(&["rev-parse", "HEAD"])
@@ -135,7 +82,7 @@ impl Fixture {
     }
 
     fn open(&self) -> Repo {
-        Repo::open(self.path()).expect("open repo")
+        self.repo.open()
     }
 
     fn walk_ids(&self) -> Vec<String> {
@@ -377,13 +324,13 @@ fn remote_tracking_branches_are_listed_without_head_alias() {
     let second = fixture.commit("file.txt", "two\n", BASE_TIME + 200, "second");
     fixture.git(&["branch", "topic", &first]);
 
-    let clone = fixture.tmp.path().join("clone");
+    let clone = fixture.temp_root().join("clone");
     fixture.git_at(
-        fixture.tmp.path(),
+        fixture.temp_root(),
         &[
             "clone",
             "--quiet",
-            fixture.repo.to_str().expect("utf-8 path"),
+            fixture.path().to_str().expect("utf-8 path"),
             clone.to_str().expect("utf-8 path"),
         ],
     );
@@ -808,10 +755,10 @@ fn a_remote_without_fetched_branches_is_still_listed() {
     let fixture = Fixture::new();
     fixture.commit("a.txt", "one\n", BASE_TIME, "base");
     fixture.git_at(
-        fixture.tmp.path(),
+        fixture.temp_root(),
         &["init", "--quiet", "--bare", "origin.git"],
     );
-    let bare = fixture.tmp.path().join("origin.git");
+    let bare = fixture.temp_root().join("origin.git");
     let bare_url = bare.to_str().expect("utf-8 path").to_string();
     fixture.git(&["remote", "add", "origin", &bare_url]);
     fixture.git(&["push", "--quiet", "--set-upstream", "origin", "main"]);

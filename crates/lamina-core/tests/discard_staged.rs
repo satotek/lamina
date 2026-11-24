@@ -4,47 +4,9 @@
 //! config plus a fixed identity, so the machine's git settings cannot leak in.
 
 use std::fs;
-use std::path::{Path, PathBuf};
 
 use lamina_core::git_cli::{CommitOptions, Git};
-use tempfile::TempDir;
-
-struct Fixture {
-    root: TempDir,
-    config: PathBuf,
-}
-
-impl Fixture {
-    fn new() -> Self {
-        let root = tempfile::tempdir().expect("tempdir");
-        let config = root.path().join("gitconfig");
-        fs::write(&config, b"").expect("empty git config");
-        Self { root, config }
-    }
-
-    fn path(&self) -> &Path {
-        self.root.path()
-    }
-
-    fn git(&self) -> Git {
-        let dir = self.path().join("repo");
-        fs::create_dir(&dir).expect("repo dir");
-        let git = self.git_in(&dir);
-        git.run(&["init", "-b", "main"], None).expect("git init");
-        git
-    }
-
-    fn git_in(&self, workdir: impl AsRef<Path>) -> Git {
-        Git::new(workdir.as_ref().to_path_buf())
-            .with_env("GIT_CONFIG_GLOBAL", self.config.clone().into_os_string())
-            .with_env("GIT_CONFIG_SYSTEM", self.config.clone().into_os_string())
-            .with_env("GIT_CONFIG_NOSYSTEM", "1")
-            .with_env("GIT_AUTHOR_NAME", "Test Author")
-            .with_env("GIT_AUTHOR_EMAIL", "test@example.com")
-            .with_env("GIT_COMMITTER_NAME", "Test Author")
-            .with_env("GIT_COMMITTER_EMAIL", "test@example.com")
-    }
-}
+use lamina_core::test_support::TestRepo;
 
 fn write_file(git: &Git, name: &str, contents: &str) {
     let path = git.workdir().join(name);
@@ -75,8 +37,8 @@ fn commit_file(git: &Git, name: &str, contents: &str, message: &str) {
 
 #[test]
 fn discard_staged_restores_a_modified_and_staged_file() {
-    let fixture = Fixture::new();
-    let git = fixture.git();
+    let fixture = TestRepo::new();
+    let git = fixture.git_handle();
     commit_file(&git, "tracked.txt", "one\n", "initial");
 
     write_file(&git, "tracked.txt", "two\n");
@@ -92,8 +54,8 @@ fn discard_staged_restores_a_modified_and_staged_file() {
 
 #[test]
 fn discard_staged_removes_a_file_added_to_the_index() {
-    let fixture = Fixture::new();
-    let git = fixture.git();
+    let fixture = TestRepo::new();
+    let git = fixture.git_handle();
     commit_file(&git, "tracked.txt", "one\n", "initial");
 
     write_file(&git, "nested/new.txt", "new\n");
@@ -114,8 +76,8 @@ fn discard_staged_removes_a_file_added_to_the_index() {
 
 #[test]
 fn discard_staged_restores_staged_and_unstaged_edits_together() {
-    let fixture = Fixture::new();
-    let git = fixture.git();
+    let fixture = TestRepo::new();
+    let git = fixture.git_handle();
     commit_file(&git, "tracked.txt", "one\n", "initial");
 
     write_file(&git, "tracked.txt", "two\n");
@@ -132,8 +94,8 @@ fn discard_staged_restores_staged_and_unstaged_edits_together() {
 
 #[test]
 fn discard_staged_batches_long_path_lists() {
-    let fixture = Fixture::new();
-    let git = fixture.git();
+    let fixture = TestRepo::new();
+    let git = fixture.git_handle();
 
     let mut names = Vec::new();
     for index in 0..120 {
@@ -177,8 +139,8 @@ fn discard_staged_batches_long_path_lists() {
 
 #[test]
 fn discard_staged_on_an_unborn_branch_deletes_the_staged_files() {
-    let fixture = Fixture::new();
-    let git = fixture.git();
+    let fixture = TestRepo::new();
+    let git = fixture.git_handle();
 
     write_file(&git, "first.txt", "one\n");
     git.stage_paths(&["first.txt"]).expect("stage");

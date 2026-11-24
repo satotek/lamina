@@ -1,90 +1,16 @@
 //! Integration tests for the repository watcher against real git repositories.
 
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::time::{Duration, Instant};
 
+use lamina_core::test_support::TestRepo;
 use lamina_core::watch::{Changes, RepoWatcher};
 use tempfile::TempDir;
 
 /// Generous: inotify, FSEvents and Windows all deliver with different latencies.
 const TIMEOUT: Duration = Duration::from_secs(10);
 const DEBOUNCE: Duration = Duration::from_millis(100);
-
-struct TestRepo {
-    workdir: TempDir,
-    /// Separate dir so the empty global/system config never shows up as a
-    /// worktree change.
-    config: TempDir,
-}
-
-impl TestRepo {
-    fn new() -> Self {
-        let repo = Self {
-            workdir: TempDir::new().expect("worktree temp dir"),
-            config: TempDir::new().expect("config temp dir"),
-        };
-        std::fs::write(repo.config_file(), "").expect("empty git config");
-        repo.git(&["init", "--initial-branch=main"]);
-        repo
-    }
-
-    fn config_file(&self) -> PathBuf {
-        self.config.path().join("gitconfig")
-    }
-
-    fn path(&self) -> &Path {
-        self.workdir.path()
-    }
-
-    fn git_dir(&self) -> PathBuf {
-        self.path().join(".git")
-    }
-
-    fn write(&self, relative: &str, contents: &str) {
-        let path = self.path().join(relative);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).expect("create parent dir");
-        }
-        std::fs::write(path, contents).expect("write file");
-    }
-
-    /// Run git with an isolated configuration so the host's config and hooks
-    /// cannot influence the test.
-    fn git(&self, args: &[&str]) -> String {
-        self.git_in(self.path(), args)
-    }
-
-    /// Like [`Self::git`], but with `cwd` as the repository (e.g. a linked
-    /// worktree).
-    fn git_in(&self, cwd: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(cwd)
-            .args(args)
-            .env("GIT_CONFIG_GLOBAL", self.config_file())
-            .env("GIT_CONFIG_SYSTEM", self.config_file())
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("XDG_CONFIG_HOME", self.config.path())
-            .env("GIT_AUTHOR_NAME", "Lamina Test")
-            .env("GIT_AUTHOR_EMAIL", "lamina@example.com")
-            .env("GIT_COMMITTER_NAME", "Lamina Test")
-            .env("GIT_COMMITTER_EMAIL", "lamina@example.com")
-            .env("GIT_AUTHOR_DATE", "2020-01-01T00:00:00Z")
-            .env("GIT_COMMITTER_DATE", "2020-01-01T00:00:00Z")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .output()
-            .expect("spawn git");
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).into_owned()
-    }
-}
 
 struct Harness {
     // Declared first so the watcher stops before the temp dirs are removed.

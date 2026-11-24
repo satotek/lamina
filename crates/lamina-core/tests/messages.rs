@@ -7,115 +7,54 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 
 use lamina_core::repo::Repo;
-use tempfile::TempDir;
+use lamina_core::test_support::TestRepo;
 
-struct TestRepo {
-    workdir: TempDir,
-    /// Separate dir so the empty global/system config never shows up as a
-    /// worktree change.
-    config: TempDir,
+/// Git queries the message tests compare against, built on the shared fixture.
+trait Messages {
+    fn git_bytes(&self, args: &[&str]) -> Vec<u8>;
+    /// For commands whose failure is the point.
+    fn git_try(&self, args: &[&str]) -> Output;
+    fn git_try_in(&self, cwd: &Path, args: &[&str]) -> Output;
+    /// A scratch file for `-F`; outside the worktree so it never gets staged.
+    fn message_file(&self, name: &str) -> PathBuf;
+    /// The stored message of `commit`, as git reports it minus the one newline
+    /// `--format=%B` always appends (`%B` is the raw body plus `strbuf_complete_line`).
+    fn stored_message(&self, commit: &str) -> String;
+    /// [`stored_message`](Self::stored_message) for another repository, such as a
+    /// linked worktree.
+    fn stored_message_in(&self, cwd: &Path, commit: &str) -> String;
+    /// The raw bytes of the commit message in the object, with no decoding.
+    fn raw_object_message(&self, commit: &str) -> Vec<u8>;
+    /// git's own `strip` cleanup of `input`, as `git stripspace` implements it.
+    fn stripspace(&self, input: &[u8]) -> String;
+    /// The path git uses for `name` in `cwd`, absolute.
+    fn git_path(&self, cwd: &Path, name: &str) -> PathBuf;
 }
 
-impl TestRepo {
-    fn new() -> Self {
-        let repo = Self {
-            workdir: TempDir::new().expect("worktree temp dir"),
-            config: TempDir::new().expect("config temp dir"),
-        };
-        fs::write(repo.config_file(), "").expect("empty git config");
-        repo.git(&["init", "-q", "-b", "main"]);
-        repo
-    }
-
-    fn path(&self) -> &Path {
-        self.workdir.path()
-    }
-
-    fn config_file(&self) -> PathBuf {
-        self.config.path().join("gitconfig")
-    }
-
-    /// Isolated from the host's git config and hooks, like the other tests.
-    fn command(&self, cwd: &Path) -> Command {
-        let mut cmd = Command::new("git");
-        cmd.arg("-C").arg(cwd);
-        cmd.env("GIT_CONFIG_GLOBAL", self.config_file())
-            .env("GIT_CONFIG_SYSTEM", self.config_file())
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("XDG_CONFIG_HOME", self.config.path())
-            .env("GIT_AUTHOR_NAME", "Lamina Test")
-            .env("GIT_AUTHOR_EMAIL", "lamina@example.com")
-            .env("GIT_COMMITTER_NAME", "Lamina Test")
-            .env("GIT_COMMITTER_EMAIL", "lamina@example.com")
-            .env("GIT_AUTHOR_DATE", "2020-01-01T00:00:00Z")
-            .env("GIT_COMMITTER_DATE", "2020-01-01T00:00:00Z")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE");
-        cmd
-    }
-
-    fn output_in(&self, cwd: &Path, args: &[&str]) -> Output {
-        self.command(cwd).args(args).output().expect("spawn git")
-    }
-
-    fn git_in(&self, cwd: &Path, args: &[&str]) -> String {
-        let output = self.output_in(cwd, args);
-        assert!(
-            output.status.success(),
-            "git {args:?} in {} failed: {}",
-            cwd.display(),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).into_owned()
-    }
-
+impl Messages for TestRepo {
     fn git_bytes(&self, args: &[&str]) -> Vec<u8> {
-        self.output_in(self.path(), args).stdout
+        self.git_output(args).stdout
     }
 
-    fn git(&self, args: &[&str]) -> String {
-        self.git_in(self.path(), args)
-    }
-
-    /// For commands whose failure is the point.
     fn git_try(&self, args: &[&str]) -> Output {
-        self.output_in(self.path(), args)
+        self.git_output(args)
     }
 
     fn git_try_in(&self, cwd: &Path, args: &[&str]) -> Output {
-        self.output_in(cwd, args)
+        self.git_output_in(cwd, args)
     }
 
-    fn write(&self, relative: &str, contents: &str) {
-        let path = self.path().join(relative);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("create parent dir");
-        }
-        fs::write(path, contents).expect("write file");
-    }
-
-    /// A scratch file for `-F`; outside the worktree so it never gets staged.
     fn message_file(&self, name: &str) -> PathBuf {
-        self.config.path().join(name)
+        self.temp_path(name)
     }
 
-    fn commit_all(&self, message: &str) {
-        self.git(&["add", "-A"]);
-        self.git(&["commit", "-q", "-m", message]);
-    }
-
-    /// The stored message of `commit`, as git reports it minus the one newline
-    /// `--format=%B` always appends (`%B` is the raw body plus `strbuf_complete_line`).
     fn stored_message(&self, commit: &str) -> String {
         self.stored_message_in(self.path(), commit)
     }
 
-    /// [`stored_message`](Self::stored_message) for another repository, such as a
-    /// linked worktree.
     fn stored_message_in(&self, cwd: &Path, commit: &str) -> String {
         let raw = self.git_in(cwd, &["log", "-1", "--format=%B", commit]);
         raw.strip_suffix('\n')
@@ -123,7 +62,6 @@ impl TestRepo {
             .to_owned()
     }
 
-    /// The raw bytes of the commit message in the object, with no decoding.
     fn raw_object_message(&self, commit: &str) -> Vec<u8> {
         let object = self.git_bytes(&["cat-file", "commit", commit]);
         let start = object
@@ -134,10 +72,9 @@ impl TestRepo {
         object[start..].to_vec()
     }
 
-    /// git's own `strip` cleanup of `input`, as `git stripspace` implements it.
     fn stripspace(&self, input: &[u8]) -> String {
         let mut child = self
-            .command(self.path())
+            .command("git")
             .arg("stripspace")
             .arg("--strip-comments")
             .stdin(Stdio::piped())
@@ -155,7 +92,6 @@ impl TestRepo {
         String::from_utf8_lossy(&output.stdout).into_owned()
     }
 
-    /// The path git uses for `name` in `cwd`, absolute.
     fn git_path(&self, cwd: &Path, name: &str) -> PathBuf {
         let reported = self.git_in(cwd, &["rev-parse", "--git-path", name]);
         let path = PathBuf::from(reported.trim());
@@ -165,23 +101,19 @@ impl TestRepo {
             cwd.join(path)
         }
     }
-
-    fn open(&self) -> Repo {
-        Repo::open(self.path()).expect("open repository")
-    }
 }
 
 /// `main` and `side` both change `conflict.txt`, so merging conflicts.
 fn conflict_repo() -> TestRepo {
     let repo = TestRepo::new();
     repo.write("conflict.txt", "base\n");
-    repo.commit_all("base");
+    repo.commit("base");
     repo.git(&["checkout", "-q", "-b", "side"]);
     repo.write("conflict.txt", "theirs\n");
-    repo.commit_all("theirs");
+    repo.commit("theirs");
     repo.git(&["checkout", "-q", "main"]);
     repo.write("conflict.txt", "ours\n");
-    repo.commit_all("ours");
+    repo.commit("ours");
     repo
 }
 
@@ -210,7 +142,7 @@ fn commit_message_keeps_every_paragraph() {
         "second body paragraph",
     ]);
     repo.write("a.txt", "b\n");
-    repo.commit_all("later commit");
+    repo.commit("later commit");
 
     let open = repo.open();
     let head = repo.git(&["rev-parse", "HEAD~1"]).trim().to_owned();
@@ -235,7 +167,7 @@ fn commit_message_keeps_every_paragraph() {
 fn commit_message_of_a_commit_without_a_body() {
     let repo = TestRepo::new();
     repo.write("a.txt", "a\n");
-    repo.commit_all("subject only");
+    repo.commit("subject only");
 
     let message = repo
         .open()
@@ -424,13 +356,13 @@ fn auto_comment_char_is_treated_as_hash() {
 fn squash_message_falls_back_to_squash_msg() {
     let repo = TestRepo::new();
     repo.write("base.txt", "base\n");
-    repo.commit_all("base");
+    repo.commit("base");
     repo.git(&["checkout", "-q", "-b", "side"]);
     repo.write("side.txt", "side\n");
-    repo.commit_all("side work");
+    repo.commit("side work");
     repo.git(&["checkout", "-q", "main"]);
     repo.write("main.txt", "main\n");
-    repo.commit_all("main work");
+    repo.commit("main work");
     // A squash without conflicts leaves SQUASH_MSG only.
     repo.git(&["merge", "--squash", "side"]);
 
@@ -485,8 +417,7 @@ fn squash_message_wins_when_merge_msg_only_holds_comments() {
 #[test]
 fn merge_message_reads_the_linked_worktrees_own_file() {
     let repo = conflict_repo();
-    let linked = TempDir::new().expect("linked worktree dir");
-    let linked_path = linked.path().join("wt");
+    let linked_path = repo.temp_path("linked-worktree");
     repo.git(&[
         "worktree",
         "add",
@@ -543,12 +474,12 @@ fn merge_message_reads_the_linked_worktrees_own_file() {
 fn merge_message_is_none_without_an_operation() {
     let repo = TestRepo::new();
     repo.write("a.txt", "a\n");
-    repo.commit_all("base");
+    repo.commit("base");
     assert_eq!(repo.open().merge_message().expect("merge message"), None);
 
     repo.git(&["checkout", "-q", "-b", "side"]);
     repo.write("b.txt", "b\n");
-    repo.commit_all("side");
+    repo.commit("side");
     repo.git(&["checkout", "-q", "main"]);
     // A fast-forward merge writes no message, because there is nothing to commit.
     repo.git(&["merge", "--ff-only", "side"]);

@@ -2,109 +2,15 @@
 //! `Session::request_in_progress_details` against real git repositories.
 
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 use lamina_core::Oid;
-use lamina_core::repo::{InProgressDetails, Repo};
+use lamina_core::repo::InProgressDetails;
 use lamina_core::session::{Session, SessionEvent};
-use tempfile::TempDir;
+use lamina_core::test_support::TestRepo;
 
 const TIMEOUT: Duration = Duration::from_secs(30);
-
-struct TestRepo {
-    workdir: TempDir,
-    config: TempDir,
-}
-
-impl TestRepo {
-    fn new() -> Self {
-        let repo = Self {
-            workdir: TempDir::new().expect("worktree temp dir"),
-            config: TempDir::new().expect("config temp dir"),
-        };
-        fs::write(
-            repo.config_file(),
-            "[user]\n\tname = Lamina Test\n\temail = lamina@example.invalid\n\
-             [commit]\n\tgpgsign = false\n\
-             [tag]\n\tgpgsign = false\n\
-             [core]\n\tautocrlf = false\n\
-             [init]\n\tdefaultBranch = main\n",
-        )
-        .expect("write isolated gitconfig");
-        repo.git(&["init", "-q", "-b", "main"]);
-        repo
-    }
-
-    fn path(&self) -> &Path {
-        self.workdir.path()
-    }
-
-    fn config_file(&self) -> PathBuf {
-        self.config.path().join("gitconfig")
-    }
-
-    fn write(&self, relative: &str, contents: &str) {
-        let path = self.path().join(relative);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("create parent dir");
-        }
-        fs::write(path, contents).expect("write file");
-    }
-
-    fn command(&self) -> Command {
-        let mut cmd = Command::new("git");
-        cmd.arg("-C").arg(self.path());
-        cmd.env("GIT_CONFIG_GLOBAL", self.config_file())
-            .env("GIT_CONFIG_SYSTEM", self.config_file())
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("XDG_CONFIG_HOME", self.config.path())
-            .env("GIT_AUTHOR_NAME", "Lamina Test")
-            .env("GIT_AUTHOR_EMAIL", "lamina@example.invalid")
-            .env("GIT_COMMITTER_NAME", "Lamina Test")
-            .env("GIT_COMMITTER_EMAIL", "lamina@example.invalid")
-            .env("GIT_AUTHOR_DATE", "1700000000 +0000")
-            .env("GIT_COMMITTER_DATE", "1700000000 +0000")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE");
-        cmd
-    }
-
-    fn git(&self, args: &[&str]) -> String {
-        let output = self.git_output(args);
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).into_owned()
-    }
-
-    fn git_output(&self, args: &[&str]) -> Output {
-        self.command().args(args).output().expect("spawn git")
-    }
-
-    fn commit(&self, message: &str) -> Oid {
-        self.git(&["add", "-A"]);
-        self.git(&["commit", "-q", "-m", message]);
-        self.head()
-    }
-
-    fn head(&self) -> Oid {
-        self.git(&["rev-parse", "HEAD"])
-            .trim()
-            .parse()
-            .expect("valid object id")
-    }
-
-    fn open(&self) -> Repo {
-        Repo::open(self.path()).expect("open repo")
-    }
-}
 
 fn short(id: Oid) -> String {
     id.to_hex().to_string()[..7].to_owned()
@@ -360,7 +266,7 @@ fn stopped_am_reads_step_total_and_subject() {
     fixture.write("a.txt", "patch 2 conflict\n");
     fixture.commit("Patch 2 conflicts");
 
-    let mbox_dir = fixture.config.path().join("patches");
+    let mbox_dir = fixture.temp_path("patches");
     fs::create_dir_all(&mbox_dir).expect("mbox dir");
     let mbox_str = mbox_dir.to_string_lossy().into_owned();
     fixture.git(&["format-patch", "-q", "-o", &mbox_str, "main"]);

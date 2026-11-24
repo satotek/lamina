@@ -8,11 +8,11 @@
 
 use std::fs;
 use std::io::Write as _;
-use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use lamina_core::diff::{DiffLine, FileDiff, Hunk, LineKind};
 use lamina_core::patch::{LineEnding, LineSelection, PatchFile, PatchMode, build_patch};
+use lamina_core::test_support::TestRepo;
 
 #[test]
 fn stages_only_the_selected_added_line() {
@@ -447,42 +447,20 @@ fn build(file: &ParsedFile, selection: &LineSelection, mode: PatchMode) -> Optio
 }
 
 struct Repo {
-    /// Kept alive so the temporary directory outlives the repository.
-    _root: tempfile::TempDir,
-    work: PathBuf,
-    config: PathBuf,
+    repo: TestRepo,
 }
 
 impl Repo {
     fn new() -> Self {
-        let root = tempfile::tempdir().expect("temporary directory");
-        let work = root.path().join("work");
-        fs::create_dir(&work).expect("work tree");
-        // An empty file keeps the tests independent of the machine's git config.
-        let config = root.path().join("gitconfig");
-        fs::write(&config, "").expect("empty git config");
-        let repo = Self {
-            _root: root,
-            work,
-            config,
-        };
-        repo.git(&["init", "-q", "-b", "main"]);
-        repo
+        Self {
+            repo: TestRepo::new(),
+        }
     }
 
     fn command(&self) -> Command {
-        let mut command = Command::new("git");
+        let mut command = self.repo.command("git");
+        // The parser below compares against git's default diff spelling.
         command
-            .current_dir(&self.work)
-            .env("GIT_CONFIG_GLOBAL", &self.config)
-            .env("GIT_CONFIG_SYSTEM", &self.config)
-            .env("GIT_AUTHOR_NAME", "Lamina Test")
-            .env("GIT_AUTHOR_EMAIL", "lamina@example.com")
-            .env("GIT_COMMITTER_NAME", "Lamina Test")
-            .env("GIT_COMMITTER_EMAIL", "lamina@example.com")
-            .env("GIT_AUTHOR_DATE", "2005-04-07T22:13:13 +0200")
-            .env("GIT_COMMITTER_DATE", "2005-04-07T22:13:13 +0200")
-            .env("GIT_TERMINAL_PROMPT", "0")
             .args(["-c", "core.autocrlf=false"])
             .args(["-c", "core.safecrlf=false"])
             .args(["-c", "diff.noprefix=false"])
@@ -501,19 +479,15 @@ impl Repo {
     }
 
     fn write(&self, path: &str, contents: &str) {
-        let path = self.work.join(path);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("parent directory");
-        }
-        fs::write(path, contents).expect("write file");
+        self.repo.write(path, contents);
     }
 
     fn read(&self, path: &str) -> Vec<u8> {
-        fs::read(self.work.join(path)).expect("read file")
+        fs::read(self.repo.path().join(path)).expect("read file")
     }
 
     fn remove(&self, path: &str) {
-        fs::remove_file(self.work.join(path)).expect("remove file");
+        fs::remove_file(self.repo.path().join(path)).expect("remove file");
     }
 
     fn commit(&self, message: &str) {

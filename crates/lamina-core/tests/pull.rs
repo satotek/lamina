@@ -6,86 +6,48 @@
 //! plus a bare remote and a second clone, run with an isolated git config the
 //! same way the other core tests do.
 
-use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use lamina_core::RepoState;
 use lamina_core::git_cli::Git;
 use lamina_core::repo::Repo;
-use tempfile::TempDir;
+use lamina_core::test_support::TestRepo;
 
+/// A work tree, its bare remote and a second clone, all inside one fixture.
 struct Fixture {
-    root: TempDir,
-    config: PathBuf,
+    repo: TestRepo,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let root = TempDir::new().expect("root temp dir");
-        let config = root.path().join("gitconfig");
-        fs::write(&config, "").expect("empty git config");
-        let fixture = Self { root, config };
-        fixture.git(
-            fixture.root.path(),
+        let repo = TestRepo::new();
+        repo.git_in(
+            repo.temp_root(),
             &["init", "-q", "--bare", "-b", "main", "remote.git"],
         );
-        fs::create_dir_all(fixture.work()).expect("work dir");
-        fixture.git(&fixture.work(), &["init", "-q", "-b", "main"]);
-        fixture
+        let work = repo.scratch_dir("work");
+        repo.git_in(&work, &["init", "-q", "-b", "main"]);
+        Self { repo }
     }
 
     fn work(&self) -> PathBuf {
-        self.root.path().join("work")
+        self.repo.temp_path("work")
     }
 
     fn remote_arg(&self) -> String {
-        self.root
-            .path()
-            .join("remote.git")
+        self.repo
+            .temp_path("remote.git")
             .to_str()
             .expect("utf-8 path")
             .to_owned()
     }
 
-    fn command(&self, cwd: &Path) -> Command {
-        let mut command = Command::new("git");
-        command
-            .arg("-C")
-            .arg(cwd)
-            .env("GIT_CONFIG_GLOBAL", &self.config)
-            .env("GIT_CONFIG_SYSTEM", &self.config)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("XDG_CONFIG_HOME", self.root.path())
-            .env("GIT_AUTHOR_NAME", "Lamina Test")
-            .env("GIT_AUTHOR_EMAIL", "lamina@example.com")
-            .env("GIT_COMMITTER_NAME", "Lamina Test")
-            .env("GIT_COMMITTER_EMAIL", "lamina@example.com")
-            .env("GIT_AUTHOR_DATE", "2020-01-01T00:00:00Z")
-            .env("GIT_COMMITTER_DATE", "2020-01-01T00:00:00Z")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE");
-        command
-    }
-
     fn git(&self, cwd: &Path, args: &[&str]) -> String {
-        let output = self.command(cwd).args(args).output().expect("spawn git");
-        assert!(
-            output.status.success(),
-            "git {args:?} in {} failed: {}",
-            cwd.display(),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).into_owned()
+        self.repo.git_in(cwd, args)
     }
 
     fn write(&self, dir: &Path, name: &str, contents: &str) {
-        let path = dir.join(name);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("create parent dirs");
-        }
-        fs::write(path, contents).expect("write file");
+        self.repo.write_in(dir, name, contents);
     }
 
     fn commit_all(&self, dir: &Path, message: &str) {
@@ -107,10 +69,10 @@ impl Fixture {
 
     /// Commit in the second clone and push it, moving the upstream.
     fn push_from_other(&self, name: &str, contents: &str) {
-        let other = self.root.path().join("other");
+        let other = self.repo.temp_path("other");
         if !other.exists() {
             self.git(
-                self.root.path(),
+                self.repo.temp_root(),
                 &["clone", "-q", &self.remote_arg(), "other"],
             );
         }
@@ -122,17 +84,7 @@ impl Fixture {
     /// The same repository through the production write path, isolated from
     /// the host's git config.
     fn git_handle(&self) -> Git {
-        Git::new(self.work())
-            .with_env("GIT_CONFIG_GLOBAL", &self.config)
-            .with_env("GIT_CONFIG_SYSTEM", &self.config)
-            .with_env("GIT_CONFIG_NOSYSTEM", "1")
-            .with_env("XDG_CONFIG_HOME", self.root.path())
-            .with_env("GIT_AUTHOR_NAME", "Lamina Test")
-            .with_env("GIT_AUTHOR_EMAIL", "lamina@example.com")
-            .with_env("GIT_COMMITTER_NAME", "Lamina Test")
-            .with_env("GIT_COMMITTER_EMAIL", "lamina@example.com")
-            .with_env("GIT_AUTHOR_DATE", "2020-01-01T00:00:00Z")
-            .with_env("GIT_COMMITTER_DATE", "2020-01-01T00:00:00Z")
+        self.repo.git_handle_in(self.work())
     }
 
     fn state(&self) -> RepoState {

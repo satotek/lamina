@@ -2,158 +2,42 @@
 //! tags, per-region conflict resolution and continue/abort — against real
 //! repositories and real git invocations.
 
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use lamina_core::git_cli::Git;
-use lamina_core::repo::Repo;
 use lamina_core::session::{
     InProgressDetails, Operation, OperationId, RepoSnapshot, ResetMode, Session, SessionEvent,
 };
-use lamina_core::{ConflictEntry, ConflictKind, HeadInfo, Oid, RefKind, RepoState};
-use tempfile::TempDir;
+use lamina_core::test_support::TestRepo;
+use lamina_core::{ConflictEntry, ConflictKind, HeadInfo, RefKind, RepoState};
 
 /// Generous: a session test waits for watcher events and history reloads.
 const TIMEOUT: Duration = Duration::from_secs(60);
 
-struct TestRepo {
-    workdir: TempDir,
-    /// Separate dir so the empty global/system config never shows up as a
-    /// worktree change.
-    config: TempDir,
+/// `git status --porcelain=v2`, the reference the snapshot is checked against.
+trait PorcelainStatus {
+    fn status(&self) -> String;
 }
 
-impl TestRepo {
-    fn new() -> Self {
-        let repo = Self {
-            workdir: TempDir::new().expect("worktree temp dir"),
-            config: TempDir::new().expect("config temp dir"),
-        };
-        fs::write(repo.config_file(), "").expect("empty git config");
-        repo.git(&["init", "-q", "-b", "main"]);
-        // The session runs its git commands without the environment overrides
-        // below, so the settings a commit, tag or pick cannot work without are
-        // pinned in the repository config.
-        repo.git(&["config", "user.name", "Lamina Test"]);
-        repo.git(&["config", "user.email", "lamina@example.com"]);
-        repo.git(&["config", "commit.gpgsign", "false"]);
-        repo.git(&["config", "tag.gpgsign", "false"]);
-        repo.git(&["config", "core.autocrlf", "false"]);
-        repo
-    }
-
-    fn path(&self) -> &Path {
-        self.workdir.path()
-    }
-
-    fn config_file(&self) -> PathBuf {
-        self.config.path().join("gitconfig")
-    }
-
-    fn write(&self, relative: &str, contents: &str) {
-        let path = self.path().join(relative);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("create parent dir");
-        }
-        fs::write(path, contents).expect("write file");
-    }
-
-    fn read(&self, relative: &str) -> String {
-        fs::read_to_string(self.path().join(relative)).expect("read file")
-    }
-
-    /// Isolated from the host's git config and hooks.
-    fn command(&self) -> Command {
-        let mut cmd = Command::new("git");
-        cmd.arg("-C").arg(self.path());
-        cmd.env("GIT_CONFIG_GLOBAL", self.config_file())
-            .env("GIT_CONFIG_SYSTEM", self.config_file())
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("XDG_CONFIG_HOME", self.config.path())
-            .env("GIT_AUTHOR_NAME", "Lamina Test")
-            .env("GIT_AUTHOR_EMAIL", "lamina@example.com")
-            .env("GIT_COMMITTER_NAME", "Lamina Test")
-            .env("GIT_COMMITTER_EMAIL", "lamina@example.com")
-            .env("GIT_AUTHOR_DATE", "2020-01-01T00:00:00Z")
-            .env("GIT_COMMITTER_DATE", "2020-01-01T00:00:00Z")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE");
-        cmd
-    }
-
-    fn git(&self, args: &[&str]) -> String {
-        let output = self.git_output(args);
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).into_owned()
-    }
-
-    fn git_output(&self, args: &[&str]) -> Output {
-        self.command().args(args).output().expect("spawn git")
-    }
-
-    fn head(&self) -> Oid {
-        self.oid("HEAD")
-    }
-
-    fn oid(&self, reference: &str) -> Oid {
-        self.git(&["rev-parse", reference])
-            .trim()
-            .parse()
-            .expect("parse object id")
-    }
-
-    fn commit_all(&self, message: &str) {
-        self.git(&["add", "-A"]);
-        self.git(&["commit", "-q", "-m", message]);
-    }
-
-    /// `git status --porcelain=v2`, the reference the snapshot is checked
-    /// against.
+impl PorcelainStatus for TestRepo {
     fn status(&self) -> String {
         self.git(&["status", "--porcelain=v2"])
-    }
-
-    /// The same repository through the production write path, with the same
-    /// isolation so a test never reads the host's git config.
-    fn git_handle(&self) -> Git {
-        Git::new(self.path().to_path_buf())
-            .with_env("GIT_CONFIG_GLOBAL", self.config_file())
-            .with_env("GIT_CONFIG_SYSTEM", self.config_file())
-            .with_env("GIT_CONFIG_NOSYSTEM", "1")
-            .with_env("XDG_CONFIG_HOME", self.config.path())
-            .with_env("GIT_AUTHOR_NAME", "Lamina Test")
-            .with_env("GIT_AUTHOR_EMAIL", "lamina@example.com")
-            .with_env("GIT_COMMITTER_NAME", "Lamina Test")
-            .with_env("GIT_COMMITTER_EMAIL", "lamina@example.com")
-            .with_env("GIT_AUTHOR_DATE", "2020-01-01T00:00:00Z")
-            .with_env("GIT_COMMITTER_DATE", "2020-01-01T00:00:00Z")
-    }
-
-    fn open(&self) -> Repo {
-        Repo::open(self.path()).expect("open repository")
     }
 }
 
 /// `main` and `side` both change `conflict.txt`, so any pick, revert or rebase
 /// between them conflicts.
 fn conflict_repo() -> TestRepo {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("conflict.txt", "base\n");
-    repo.commit_all("base");
+    repo.commit("base");
     repo.git(&["checkout", "-q", "-b", "side"]);
     repo.write("conflict.txt", "theirs\n");
-    repo.commit_all("theirs");
+    repo.commit("theirs");
     repo.git(&["checkout", "-q", "main"]);
     repo.write("conflict.txt", "ours\n");
-    repo.commit_all("ours");
+    repo.commit("ours");
     repo
 }
 
@@ -297,12 +181,12 @@ impl Harness {
 
 #[test]
 fn cherry_pick_of_a_clean_commit_lands_on_the_current_branch() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("a.txt", "base\n");
-    repo.commit_all("base");
+    repo.commit("base");
     repo.git(&["checkout", "-q", "-b", "side"]);
     repo.write("b.txt", "side\n");
-    repo.commit_all("side");
+    repo.commit("side");
     let picked = repo.head();
     repo.git(&["checkout", "-q", "main"]);
     let before = repo.head();
@@ -346,17 +230,17 @@ fn cherry_pick_of_a_clean_commit_lands_on_the_current_branch() {
 
 #[test]
 fn cherry_pick_of_an_already_applied_commit_is_skipped_and_reported() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("a.txt", "base\n");
-    repo.commit_all("base");
+    repo.commit("base");
     repo.git(&["checkout", "-q", "-b", "side"]);
     repo.write("b.txt", "side\n");
-    repo.commit_all("side");
+    repo.commit("side");
     let picked = repo.head();
     // `main` already carries the same change, so the pick commits nothing.
     repo.git(&["checkout", "-q", "main"]);
     repo.write("b.txt", "side\n");
-    repo.commit_all("already there");
+    repo.commit("already there");
     let before = repo.head();
 
     let harness = Harness::open(repo);
@@ -394,23 +278,23 @@ fn cherry_pick_of_an_already_applied_commit_is_skipped_and_reported() {
 
 #[test]
 fn a_cherry_pick_sequence_skips_an_empty_commit_in_the_middle() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("a.txt", "base\n");
-    repo.commit_all("base");
+    repo.commit("base");
     repo.git(&["checkout", "-q", "-b", "side"]);
     repo.write("one.txt", "one\n");
-    repo.commit_all("one");
+    repo.commit("one");
     repo.write("shared.txt", "shared\n");
-    repo.commit_all("shared");
+    repo.commit("shared");
     let empty = repo.head();
     repo.write("three.txt", "three\n");
-    repo.commit_all("three");
-    let first = repo.oid("side~2");
+    repo.commit("three");
+    let first = repo.rev("side~2");
     let last = repo.head();
 
     repo.git(&["checkout", "-q", "main"]);
     repo.write("shared.txt", "shared\n");
-    repo.commit_all("shared already");
+    repo.commit("shared already");
 
     let outcome = repo
         .git_handle()
@@ -437,23 +321,23 @@ fn a_cherry_pick_sequence_skips_an_empty_commit_in_the_middle() {
 
 #[test]
 fn a_cherry_pick_sequence_skips_an_empty_first_commit() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("a.txt", "base\n");
-    repo.commit_all("base");
+    repo.commit("base");
     repo.git(&["checkout", "-q", "-b", "side"]);
     repo.write("shared.txt", "shared\n");
-    repo.commit_all("shared");
+    repo.commit("shared");
     let empty = repo.head();
     repo.write("one.txt", "one\n");
-    repo.commit_all("one");
+    repo.commit("one");
     repo.write("three.txt", "three\n");
-    repo.commit_all("three");
-    let middle = repo.oid("side~1");
+    repo.commit("three");
+    let middle = repo.rev("side~1");
     let last = repo.head();
 
     repo.git(&["checkout", "-q", "main"]);
     repo.write("shared.txt", "shared\n");
-    repo.commit_all("shared already");
+    repo.commit("shared already");
 
     let outcome = repo
         .git_handle()
@@ -468,23 +352,23 @@ fn a_cherry_pick_sequence_skips_an_empty_first_commit() {
 
 #[test]
 fn a_cherry_pick_sequence_skips_an_empty_last_commit() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("a.txt", "base\n");
-    repo.commit_all("base");
+    repo.commit("base");
     repo.git(&["checkout", "-q", "-b", "side"]);
     repo.write("one.txt", "one\n");
-    repo.commit_all("one");
+    repo.commit("one");
     let first = repo.head();
     repo.write("three.txt", "three\n");
-    repo.commit_all("three");
+    repo.commit("three");
     let middle = repo.head();
     repo.write("shared.txt", "shared\n");
-    repo.commit_all("shared");
+    repo.commit("shared");
     let empty = repo.head();
 
     repo.git(&["checkout", "-q", "main"]);
     repo.write("shared.txt", "shared\n");
-    repo.commit_all("shared already");
+    repo.commit("shared already");
 
     let outcome = repo
         .git_handle()
@@ -499,25 +383,25 @@ fn a_cherry_pick_sequence_skips_an_empty_last_commit() {
 
 #[test]
 fn a_cherry_pick_sequence_of_only_empty_picks_leaves_the_branch_alone() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("a.txt", "base\n");
-    repo.commit_all("base");
+    repo.commit("base");
     repo.git(&["checkout", "-q", "-b", "side"]);
     repo.write("one.txt", "one\n");
-    repo.commit_all("one");
+    repo.commit("one");
     let first = repo.head();
     repo.write("two.txt", "two\n");
-    repo.commit_all("two");
+    repo.commit("two");
     let middle = repo.head();
     repo.write("three.txt", "three\n");
-    repo.commit_all("three");
+    repo.commit("three");
     let last = repo.head();
 
     repo.git(&["checkout", "-q", "main"]);
     repo.write("one.txt", "one\n");
     repo.write("two.txt", "two\n");
     repo.write("three.txt", "three\n");
-    repo.commit_all("all already");
+    repo.commit("all already");
     let before = repo.head();
 
     let outcome = repo
@@ -539,17 +423,17 @@ fn a_cherry_pick_sequence_of_only_empty_picks_leaves_the_branch_alone() {
 
 #[test]
 fn a_cherry_pick_sequence_skips_an_initially_empty_commit() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("a.txt", "base\n");
-    repo.commit_all("base");
+    repo.commit("base");
     repo.git(&["checkout", "-q", "-b", "side"]);
     repo.write("one.txt", "one\n");
-    repo.commit_all("one");
+    repo.commit("one");
     let first = repo.head();
     repo.git(&["commit", "-q", "--allow-empty", "-m", "marker"]);
     let empty = repo.head();
     repo.write("three.txt", "three\n");
-    repo.commit_all("three");
+    repo.commit("three");
     let last = repo.head();
 
     repo.git(&["checkout", "-q", "main"]);
@@ -567,25 +451,25 @@ fn a_cherry_pick_sequence_skips_an_initially_empty_commit() {
 
 #[test]
 fn a_cherry_pick_sequence_skips_an_empty_pick_before_a_conflict() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("conflict.txt", "base\n");
-    repo.commit_all("base");
+    repo.commit("base");
     repo.git(&["checkout", "-q", "-b", "side"]);
     repo.write("shared.txt", "shared\n");
-    repo.commit_all("empty on main");
+    repo.commit("empty on main");
     let empty = repo.head();
     repo.write("conflict.txt", "theirs\n");
-    repo.commit_all("theirs");
+    repo.commit("theirs");
     let conflicting = repo.head();
     repo.write("three.txt", "three\n");
-    repo.commit_all("three");
+    repo.commit("three");
     let last = repo.head();
 
     repo.git(&["checkout", "-q", "main"]);
     repo.write("conflict.txt", "ours\n");
-    repo.commit_all("ours");
+    repo.commit("ours");
     repo.write("shared.txt", "shared\n");
-    repo.commit_all("shared already");
+    repo.commit("shared already");
 
     let harness = Harness::open(repo);
     harness.wait_for_complete(6);
@@ -611,7 +495,7 @@ fn a_cherry_pick_sequence_skips_an_empty_pick_before_a_conflict() {
     );
     assert_eq!(
         harness.repo.head(),
-        harness.repo.oid("main"),
+        harness.repo.rev("main"),
         "only the empty pick was skipped, so no commit was added before the stop"
     );
     assert_eq!(harness.repo.read("shared.txt"), "shared\n");
@@ -659,11 +543,11 @@ fn a_cherry_pick_sequence_skips_an_empty_pick_before_a_conflict() {
 
 #[test]
 fn revert_of_an_already_reverted_commit_is_reported_without_a_state() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("a.txt", "one\n");
-    repo.commit_all("one");
+    repo.commit("one");
     repo.write("a.txt", "two\n");
-    repo.commit_all("two");
+    repo.commit("two");
     let reverted = repo.head();
     // Revert it once for real; reverting it again has nothing left to undo.
     repo.git(&["revert", "--no-edit", &reverted.to_string()]);
@@ -703,7 +587,7 @@ fn revert_of_an_already_reverted_commit_is_reported_without_a_state() {
 #[test]
 fn cherry_pick_conflict_is_not_an_error_and_continues_after_resolving() {
     let repo = conflict_repo();
-    let picked = repo.oid("side");
+    let picked = repo.rev("side");
     let harness = Harness::open(repo);
     harness.wait_for_complete(3);
 
@@ -722,7 +606,7 @@ fn cherry_pick_conflict_is_not_an_error_and_continues_after_resolving() {
     );
     assert_eq!(
         harness.repo.head(),
-        harness.repo.oid("main"),
+        harness.repo.rev("main"),
         "a stopped pick leaves HEAD where it was"
     );
     assert!(
@@ -785,7 +669,7 @@ fn cherry_pick_conflict_is_not_an_error_and_continues_after_resolving() {
 #[test]
 fn aborting_a_conflicted_cherry_pick_restores_head_and_the_worktree() {
     let repo = conflict_repo();
-    let picked = repo.oid("side");
+    let picked = repo.rev("side");
     let before = repo.head();
     let harness = Harness::open(repo);
     harness.wait_for_complete(3);
@@ -816,11 +700,11 @@ fn aborting_a_conflicted_cherry_pick_restores_head_and_the_worktree() {
 
 #[test]
 fn revert_of_a_clean_commit_restores_its_parent() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("a.txt", "one\n");
-    repo.commit_all("one");
+    repo.commit("one");
     repo.write("a.txt", "two\n");
-    repo.commit_all("two");
+    repo.commit("two");
     let reverted = repo.head();
 
     let harness = Harness::open(repo);
@@ -849,12 +733,12 @@ fn revert_of_a_clean_commit_restores_its_parent() {
 
 #[test]
 fn checkout_commit_detaches_without_moving_the_branch() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("a.txt", "one\n");
-    repo.commit_all("one");
+    repo.commit("one");
     let first = repo.head();
     repo.write("a.txt", "two\n");
-    repo.commit_all("two");
+    repo.commit("two");
     let second = repo.head();
 
     let harness = Harness::open(repo);
@@ -870,7 +754,7 @@ fn checkout_commit_detaches_without_moving_the_branch() {
     assert_eq!(done.head, Some(HeadInfo::Detached { target: first }));
     assert_eq!(harness.repo.read("a.txt"), "one\n");
     assert_eq!(
-        harness.repo.oid("main"),
+        harness.repo.rev("main"),
         second,
         "the branch the checkout left still points at its tip"
     );
@@ -879,15 +763,15 @@ fn checkout_commit_detaches_without_moving_the_branch() {
 
 #[test]
 fn revert_of_a_merge_commit_uses_the_first_parent() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("base.txt", "base\n");
-    repo.commit_all("base");
+    repo.commit("base");
     repo.git(&["checkout", "-q", "-b", "feature"]);
     repo.write("feature.txt", "feature\n");
-    repo.commit_all("feature");
+    repo.commit("feature");
     repo.git(&["checkout", "-q", "main"]);
     repo.write("main.txt", "main\n");
-    repo.commit_all("main");
+    repo.commit("main");
     repo.git(&["merge", "--no-ff", "-q", "-m", "merge feature", "feature"]);
     let merge = repo.head();
 
@@ -919,15 +803,15 @@ fn revert_of_a_merge_commit_uses_the_first_parent() {
 
 #[test]
 fn revert_conflict_stops_and_abort_restores_the_branch() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("a.txt", "one\n");
-    repo.commit_all("one");
+    repo.commit("one");
     repo.write("a.txt", "two\n");
-    repo.commit_all("two");
+    repo.commit("two");
     let reverted = repo.head();
     // Reverting `two` against `three` cannot apply cleanly.
     repo.write("a.txt", "three\n");
-    repo.commit_all("three");
+    repo.commit("three");
     let before = repo.head();
 
     let harness = Harness::open(repo);
@@ -962,13 +846,13 @@ fn revert_conflict_stops_and_abort_restores_the_branch() {
 
 #[test]
 fn reset_soft_mixed_and_hard_move_head_index_and_worktree() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("a.txt", "one\n");
-    repo.commit_all("one");
+    repo.commit("one");
     let first = repo.head();
     repo.write("a.txt", "two\n");
     repo.write("b.txt", "new\n");
-    repo.commit_all("two");
+    repo.commit("two");
 
     let harness = Harness::open(repo);
     harness.wait_for_complete(2);
@@ -1025,12 +909,12 @@ fn reset_soft_mixed_and_hard_move_head_index_and_worktree() {
 
 #[test]
 fn tags_are_lightweight_or_annotated_and_can_be_deleted() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("a.txt", "one\n");
-    repo.commit_all("one");
+    repo.commit("one");
     let first = repo.head();
     repo.write("a.txt", "two\n");
-    repo.commit_all("two");
+    repo.commit("two");
     let second = repo.head();
 
     let harness = Harness::open(repo);
@@ -1151,7 +1035,7 @@ fn tags_are_lightweight_or_annotated_and_can_be_deleted() {
 #[test]
 fn rebase_conflict_continues_without_an_editor() {
     let repo = conflict_repo();
-    let original = repo.oid("side");
+    let original = repo.rev("side");
     repo.git(&["checkout", "-q", "side"]);
     let rebase = repo.git_output(&["rebase", "main"]);
     assert!(!rebase.status.success(), "the rebase should conflict");
@@ -1209,7 +1093,7 @@ fn rebase_conflict_continues_without_an_editor() {
 #[test]
 fn aborting_a_conflicted_rebase_restores_the_branch() {
     let repo = conflict_repo();
-    let original = repo.oid("side");
+    let original = repo.rev("side");
     repo.git(&["checkout", "-q", "side"]);
     let rebase = repo.git_output(&["rebase", "main"]);
     assert!(!rebase.status.success(), "the rebase should conflict");
@@ -1236,9 +1120,9 @@ fn aborting_a_conflicted_rebase_restores_the_branch() {
 
 #[test]
 fn resolve_with_content_refuses_paths_outside_the_worktree() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("a.txt", "base\n");
-    repo.commit_all("base");
+    repo.commit("base");
     let git_config = repo.read(".git/config");
 
     let harness = Harness::open(repo);
@@ -1277,9 +1161,9 @@ fn resolve_with_content_refuses_paths_outside_the_worktree() {
 
 #[test]
 fn continue_and_abort_report_when_nothing_is_in_progress() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("a.txt", "one\n");
-    repo.commit_all("one");
+    repo.commit("one");
 
     let harness = Harness::open(repo);
     harness.wait_for_complete(1);
@@ -1303,13 +1187,13 @@ fn continue_and_abort_report_when_nothing_is_in_progress() {
 
 #[test]
 fn bisect_is_aborted_with_reset_and_has_nothing_to_continue() {
-    let repo = TestRepo::new();
+    let repo = TestRepo::committing();
     repo.write("a.txt", "one\n");
-    repo.commit_all("one");
+    repo.commit("one");
     repo.write("a.txt", "two\n");
-    repo.commit_all("two");
+    repo.commit("two");
     repo.write("a.txt", "three\n");
-    repo.commit_all("three");
+    repo.commit("three");
     let before = repo.head();
 
     repo.git(&["bisect", "start", "HEAD", "HEAD~2"]);

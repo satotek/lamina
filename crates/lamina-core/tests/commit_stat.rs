@@ -3,100 +3,22 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-use lamina_core::repo::Repo;
 use lamina_core::session::{Session, SessionEvent};
+use lamina_core::test_support::TestRepo;
 use lamina_core::{ChangeKind, CommitStat, Oid};
-use tempfile::TempDir;
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 
-struct TestRepo {
-    dir: TempDir,
-    /// Holds the empty config file; kept alive for the lifetime of the test.
-    _env: TempDir,
-    config: PathBuf,
+/// The reference statistic: `git show --numstat` as (path -> (added, removed,
+/// binary)) for a commit against its first parent (or the empty tree).
+trait Numstat {
+    fn git_numstat(&self, commit: Oid) -> BTreeMap<String, (u64, u64, bool)>;
 }
 
-impl TestRepo {
-    fn new() -> Self {
-        let dir = TempDir::new().expect("repo temp dir");
-        let env = TempDir::new().expect("env temp dir");
-        let config = env.path().join("gitconfig");
-        fs::write(&config, "").expect("write empty config");
-
-        let repo = TestRepo {
-            dir,
-            _env: env,
-            config,
-        };
-        repo.git(&["init", "-q", "-b", "main"]);
-        repo
-    }
-
-    fn path(&self) -> &Path {
-        self.dir.path()
-    }
-
-    fn open(&self) -> Repo {
-        Repo::open(self.path()).expect("open repository")
-    }
-
-    fn write(&self, relative: &str, contents: &str) {
-        self.write_bytes(relative, contents.as_bytes());
-    }
-
-    fn write_bytes(&self, relative: &str, contents: &[u8]) {
-        let path = self.path().join(relative);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("create parent dirs");
-        }
-        fs::write(path, contents).expect("write file");
-    }
-
-    fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new("git");
-        command
-            .current_dir(self.path())
-            .args(args)
-            .env("GIT_CONFIG_GLOBAL", &self.config)
-            .env("GIT_CONFIG_SYSTEM", &self.config)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_AUTHOR_NAME", "Lamina Test")
-            .env("GIT_AUTHOR_EMAIL", "test@example.com")
-            .env("GIT_COMMITTER_NAME", "Lamina Test")
-            .env("GIT_COMMITTER_EMAIL", "test@example.com")
-            .env("GIT_AUTHOR_DATE", "2020-01-01T00:00:00 +0000")
-            .env("GIT_COMMITTER_DATE", "2020-01-01T00:00:00 +0000")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE");
-        command
-    }
-
-    fn git(&self, args: &[&str]) -> String {
-        let output = self.command(args).output().expect("run git");
-        assert!(
-            output.status.success(),
-            "git {args:?} failed:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout).expect("git stdout is UTF-8")
-    }
-
-    fn head(&self) -> Oid {
-        self.git(&["rev-parse", "HEAD"])
-            .trim()
-            .parse()
-            .expect("parse HEAD")
-    }
-
-    /// `git show --numstat` as (path -> (added, removed, binary)), the
-    /// reference for a commit against its first parent (or the empty tree).
+impl Numstat for TestRepo {
     fn git_numstat(&self, commit: Oid) -> BTreeMap<String, (u64, u64, bool)> {
         let output = self.git(&[
             "show",

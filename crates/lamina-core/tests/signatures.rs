@@ -15,7 +15,7 @@ use lamina_core::Oid;
 use lamina_core::git_cli::Git;
 use lamina_core::repo::{CommitSignature, Repo, SignatureFormat, SignatureValidity};
 use lamina_core::session::{Session, SessionEvent};
-use tempfile::TempDir;
+use lamina_core::test_support::TestRepo;
 
 const TIMEOUT: Duration = Duration::from_secs(20);
 const SIGNER_EMAIL: &str = "signer@example.invalid";
@@ -42,40 +42,28 @@ fn msys_path(text: &str) -> String {
 }
 
 struct IsolatedRepo {
-    workdir: TempDir,
-    env_dir: TempDir,
+    repo: TestRepo,
 }
 
 impl IsolatedRepo {
     fn new() -> Self {
-        let repo = Self {
-            workdir: TempDir::new().expect("workdir tempdir"),
-            env_dir: TempDir::new().expect("env tempdir"),
-        };
-        fs::write(repo.global_config(), "").expect("write global config");
-        fs::create_dir_all(repo.gnupg_home()).expect("create gnupg home");
-        repo.git(&["init", "-q", "-b", "main"]);
-        repo.git(&["config", "user.name", "Lamina Test"]);
-        repo.git(&["config", "user.email", SIGNER_EMAIL]);
-        repo.git(&["config", "commit.gpgsign", "false"]);
-        repo.git(&["config", "core.autocrlf", "false"]);
-        repo
+        let repo = TestRepo::with_identity("Lamina Test", SIGNER_EMAIL);
+        // The session runs git without the fixture's environment.
+        repo.configure_local();
+        fs::create_dir_all(repo.temp_path("gnupg")).expect("create gnupg home");
+        Self { repo }
     }
 
     fn path(&self) -> &Path {
-        self.workdir.path()
+        self.repo.path()
     }
 
     fn env_path(&self) -> &Path {
-        self.env_dir.path()
-    }
-
-    fn global_config(&self) -> PathBuf {
-        self.env_dir.path().join("gitconfig")
+        self.repo.temp_root()
     }
 
     fn gnupg_home(&self) -> PathBuf {
-        self.env_dir.path().join("gnupg")
+        self.repo.temp_path("gnupg")
     }
 
     /// `GNUPGHOME` for this fixture's home, in the spelling gpg expects.
@@ -84,40 +72,20 @@ impl IsolatedRepo {
     }
 
     fn repo(&self) -> Repo {
-        Repo::open(self.path()).expect("open repo")
+        self.repo.open()
     }
 
     fn git_handle(&self) -> Git {
-        Git::new(self.path().to_path_buf())
-            .with_env("GIT_CONFIG_GLOBAL", self.global_config())
-            .with_env("GIT_CONFIG_NOSYSTEM", "1")
+        self.repo
+            .git_handle()
             .with_env("XDG_CONFIG_HOME", self.env_path())
             .with_env("GNUPGHOME", self.gnupg_home_env())
-            .with_env("GIT_AUTHOR_NAME", "Lamina Test")
-            .with_env("GIT_AUTHOR_EMAIL", SIGNER_EMAIL)
-            .with_env("GIT_COMMITTER_NAME", "Lamina Test")
-            .with_env("GIT_COMMITTER_EMAIL", SIGNER_EMAIL)
-            .with_env("GIT_AUTHOR_DATE", "1700000000 +0000")
-            .with_env("GIT_COMMITTER_DATE", "1700000000 +0000")
     }
 
     fn command(&self, program: &str) -> Command {
-        let mut cmd = Command::new(program);
-        cmd.current_dir(self.path())
-            .env("GIT_CONFIG_GLOBAL", self.global_config())
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("XDG_CONFIG_HOME", self.env_path())
-            .env("GNUPGHOME", self.gnupg_home_env())
-            .env("GIT_AUTHOR_NAME", "Lamina Test")
-            .env("GIT_AUTHOR_EMAIL", SIGNER_EMAIL)
-            .env("GIT_COMMITTER_NAME", "Lamina Test")
-            .env("GIT_COMMITTER_EMAIL", SIGNER_EMAIL)
-            .env("GIT_AUTHOR_DATE", "1700000000 +0000")
-            .env("GIT_COMMITTER_DATE", "1700000000 +0000")
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE");
+        let mut cmd = self.repo.command(program);
+        cmd.env("XDG_CONFIG_HOME", self.env_path())
+            .env("GNUPGHOME", self.gnupg_home_env());
         cmd
     }
 
@@ -148,7 +116,7 @@ impl IsolatedRepo {
 
     /// Generates an unencrypted Ed25519 SSH signing key inside the temp dir.
     fn create_ssh_key(&self, name: &str) -> (PathBuf, String) {
-        let key_path = self.env_dir.path().join(name);
+        let key_path = self.repo.temp_path(name);
         let output = Command::new("ssh-keygen")
             .args([
                 "-t",

@@ -5,112 +5,61 @@
 //! other core tests do. Counts are checked against `git rev-list
 //! --left-right --count`, which is the external reference for ahead/behind.
 
-use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use lamina_core::UpstreamInfo;
+use lamina_core::git_cli::Git;
 use lamina_core::repo::Repo;
 use lamina_core::session::{Operation, Session, SessionEvent};
-use tempfile::TempDir;
+use lamina_core::test_support::TestRepo;
 
 const TIMEOUT: Duration = Duration::from_secs(60);
 
+/// A work tree, its bare remote and a second clone, all inside one fixture.
 struct Fixture {
-    root: TempDir,
-    config: PathBuf,
+    repo: TestRepo,
 }
 
 impl Fixture {
     fn new() -> Self {
-        let root = TempDir::new().expect("root temp dir");
-        let config = root.path().join("gitconfig");
-        fs::write(&config, "").expect("empty git config");
-        let fixture = Self { root, config };
-        fixture.git(
-            fixture.root.path(),
+        let repo = TestRepo::new();
+        repo.git_in(
+            repo.temp_root(),
             &["init", "-q", "--bare", "-b", "main", "remote.git"],
         );
-        fs::create_dir_all(fixture.work()).expect("work dir");
-        fixture.git(&fixture.work(), &["init", "-q", "-b", "main"]);
-        fixture
+        let work = repo.scratch_dir("work");
+        repo.git_in(&work, &["init", "-q", "-b", "main"]);
+        Self { repo }
     }
 
     fn work(&self) -> PathBuf {
-        self.root.path().join("work")
+        self.repo.temp_path("work")
     }
 
-    fn remote(&self) -> PathBuf {
-        self.root.path().join("remote.git")
+    fn temp_root(&self) -> &Path {
+        self.repo.temp_root()
     }
 
     fn remote_arg(&self) -> String {
-        self.remote().to_str().expect("utf-8 path").to_owned()
-    }
-
-    fn command(&self, cwd: &Path) -> Command {
-        let mut command = Command::new("git");
-        command
-            .arg("-C")
-            .arg(cwd)
-            .env("GIT_CONFIG_GLOBAL", &self.config)
-            .env("GIT_CONFIG_SYSTEM", &self.config)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("XDG_CONFIG_HOME", self.root.path())
-            .env("GIT_AUTHOR_NAME", "Lamina Test")
-            .env("GIT_AUTHOR_EMAIL", "lamina@example.com")
-            .env("GIT_COMMITTER_NAME", "Lamina Test")
-            .env("GIT_COMMITTER_EMAIL", "lamina@example.com")
-            .env("GIT_AUTHOR_DATE", "2020-01-01T00:00:00Z")
-            .env("GIT_COMMITTER_DATE", "2020-01-01T00:00:00Z")
-            .env_remove("GIT_DIR")
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_INDEX_FILE");
-        command
+        self.repo
+            .temp_path("remote.git")
+            .to_str()
+            .expect("utf-8 path")
+            .to_owned()
     }
 
     fn git(&self, cwd: &Path, args: &[&str]) -> String {
-        let output = self.command(cwd).args(args).output().expect("spawn git");
-        assert!(
-            output.status.success(),
-            "git {args:?} in {} failed: {}",
-            cwd.display(),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).into_owned()
+        self.repo.git_in(cwd, args)
     }
 
     fn git_with_input(&self, cwd: &Path, args: &[&str], input: &str) -> String {
-        let mut child = self
-            .command(cwd)
-            .args(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("spawn git");
-        let mut stdin = child.stdin.take().expect("git stdin");
-        stdin.write_all(input.as_bytes()).expect("write git stdin");
-        drop(stdin);
-        let output = child.wait_with_output().expect("git output");
-        assert!(
-            output.status.success(),
-            "git {args:?} in {} failed: {}",
-            cwd.display(),
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8_lossy(&output.stdout).into_owned()
+        self.repo.git_input_in(cwd, args, input)
     }
 
     fn write(&self, dir: &Path, name: &str, contents: &str) {
-        let path = dir.join(name);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).expect("create parent dirs");
-        }
-        fs::write(path, contents).expect("write file");
+        self.repo.write_in(dir, name, contents);
     }
 
     fn commit_all(&self, dir: &Path, message: &str) {
@@ -120,6 +69,12 @@ impl Fixture {
 
     fn config_value(&self, dir: &Path, key: &str, value: &str) {
         self.git(dir, &["config", key, value]);
+    }
+
+    /// The production write path for the work tree, isolated from the host's
+    /// git config.
+    fn git_handle(&self, cwd: &Path) -> Git {
+        self.repo.git_handle_in(cwd)
     }
 }
 
@@ -187,9 +142,9 @@ fn scenario() -> Scenario {
     fixture.git(&work, &["switch", "-q", "main"]);
 
     // The second clone advances and deletes branches on the remote.
-    let other = fixture.root.path().join("other");
+    let other = fixture.temp_root().join("other");
     fixture.git(
-        fixture.root.path(),
+        fixture.temp_root(),
         &["clone", "-q", &fixture.remote_arg(), "other"],
     );
     fixture.git(&other, &["switch", "-q", "behind"]);
@@ -417,9 +372,9 @@ fn fetch_emits_operation_progress() {
     fixture.git(&work, &["push", "-q", "-u", "origin", "main"]);
 
     // New remote commits give the fetch something to report.
-    let other = fixture.root.path().join("other");
+    let other = fixture.temp_root().join("other");
     fixture.git(
-        fixture.root.path(),
+        fixture.temp_root(),
         &["clone", "-q", &fixture.remote_arg(), "other"],
     );
     commit_many(&fixture, &other, "remote", 5);
@@ -504,11 +459,7 @@ fn progress_variants_build_the_same_commands() {
     fixture.git(&work, &["remote", "add", "origin", &fixture.remote_arg()]);
     fixture.git(&work, &["push", "-q", "-u", "origin", "main"]);
 
-    let git = Git::new(work.clone())
-        .with_env("GIT_CONFIG_GLOBAL", fixture.config.clone())
-        .with_env("GIT_CONFIG_SYSTEM", fixture.config.clone())
-        .with_env("GIT_CONFIG_NOSYSTEM", "1")
-        .with_env("XDG_CONFIG_HOME", fixture.root.path());
+    let git = fixture.git_handle(&work);
     let args = |git: &Git| -> Vec<Vec<String>> {
         git.log().iter().map(|record| record.args.clone()).collect()
     };
