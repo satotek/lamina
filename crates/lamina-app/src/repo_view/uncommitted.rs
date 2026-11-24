@@ -513,10 +513,11 @@ mod tests {
         assert_eq!(graph.head_index, Some(head_idx));
         assert_eq!(graph.connector_lane, Some(head_row.node_lane));
         assert!(!graph.connector_muted);
-        assert!(
-            graph.worktree_edge_at(head_idx).is_none(),
-            "the circle sits directly above the first row"
-        );
+        let edge = graph
+            .worktree_edge_at(head_idx)
+            .expect("HEAD's row finishes the join the circle's row stopped at its bottom edge");
+        assert!(edge.to_node);
+        assert_eq!(edge.lane, graph.connector_lane.unwrap());
         assert_eq!(graph.merge_lane, Some(feature_row.node_lane));
     }
 
