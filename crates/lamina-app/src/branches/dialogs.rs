@@ -6,12 +6,11 @@
 use std::path::Path;
 
 use gpui::{
-    App, AppContext as _, ClickEvent, Context, Div, Entity, Focusable as _, FontWeight,
+    App, AppContext as _, ClickEvent, Context, Div, Entity, EntityId, Focusable as _, FontWeight,
     InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, div, px,
+    StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, div,
 };
 use gpui_component::checkbox::Checkbox;
-use gpui_component::dialog::DialogFooter;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{ActiveTheme as _, WindowExt as _};
 use lamina_core::session::RemoteBranch;
@@ -41,6 +40,10 @@ pub(crate) struct RenameSource {
 /// the picked upstream, an error after a refused submit — without the view
 /// needing a field for a dialog that is open only briefly.
 pub(super) struct BranchDialog {
+    /// Weak: the dialog asks the view to run the operation and can outlive it.
+    view: WeakEntity<RepoView>,
+    /// This dialog's own id, so a refused submit can redraw it from `&mut App`.
+    entity: EntityId,
     kind: DialogKind,
     error: Option<String>,
     /// `Enter` inside a text field submits, as it does everywhere else in the
@@ -216,10 +219,10 @@ pub(crate) enum DialogRequest {
 impl Branches {
     /// Opens `kind` as a modal dialog over the window.
     ///
-    /// A `gpui_component` dialog rather than a card drawn over the sidebar: it
-    /// traps focus, answers `Esc` with Cancel, and hands focus back to the root
-    /// when it closes. The form is an entity of its own so the body follows the
-    /// fields while the dialog stays open.
+    /// The shared [`crate::ui::FormDialog`] builder traps focus, answers `Esc`
+    /// with Cancel, and hands focus back to the root when the card closes. The
+    /// form is an entity of its own so the body follows the fields while the
+    /// dialog stays open.
     fn open_dialog(
         &mut self,
         kind: DialogKind,
@@ -232,59 +235,20 @@ impl Branches {
         // would otherwise give focus back to the closing menu.
         let dialog = cx.new(|cx| BranchDialog::new(view.clone(), kind, cx));
         let (title, ok_label) = dialog.read(cx).labels();
-        let can_submit = dialog.read(cx).can_submit();
-        let zoom = Settings::get(cx).appearance.zoom();
-        let content = dialog.clone();
-        window.open_dialog(cx, move |card, _, _| {
-            let content = content.clone();
-            let submit = view.clone();
-            let confirm = view.clone();
-            let cancel = view.clone();
-            let closed = view.clone();
-            card.title(title.clone())
-                .w(px(420.0 * zoom))
-                .content(move |body, _, _| body.child(content.clone()))
-                .footer(
-                    DialogFooter::new()
-                        .child(
-                            crate::ui::button(
-                                "branch-dialog-cancel",
-                                t!("common.cancel").to_string(),
-                            )
-                            .size(crate::ui::ButtonSize::Medium)
-                            .on_click(move |_, window, cx| {
-                                // Closing the window dialog directly skips its
-                                // own callbacks, so the view is told here.
-                                let _ = cancel.update(cx, |view, _| view.branches.close_dialog());
-                                window.close_dialog(cx);
-                            }),
-                        )
-                        .child(
-                            crate::ui::button("branch-dialog-ok", ok_label.clone())
-                                .size(crate::ui::ButtonSize::Medium)
-                                .disabled(!can_submit)
-                                .on_click(move |_, window, cx| {
-                                    let _ = submit.update(cx, |view, cx| {
-                                        view.submit_branch_dialog(window, cx);
-                                    });
-                                }),
-                        ),
-                )
-                .on_ok(move |_, window, cx| {
-                    // A refused submit leaves the dialog open with its error.
-                    let _ = confirm.update(cx, |view, cx| {
-                        view.submit_branch_dialog(window, cx);
-                    });
-                    false
-                })
-                .on_close(move |_, _, cx| {
-                    // `Esc`, the close button and a backdrop click dismiss the
-                    // window dialog; keep the view in step with it.
-                    let _ = closed.update(cx, |view, _| {
-                        view.branches.close_dialog();
-                    });
-                })
-        });
+        let closed = view;
+        crate::ui::FormDialog::new(title, 420.0)
+            .content(dialog.clone())
+            .cancel("branch-dialog-cancel")
+            .submit("branch-dialog-ok", ok_label, |dialog, window, cx| {
+                dialog.submit(window, cx);
+            })
+            .can_submit(|dialog, _| dialog.can_submit())
+            .on_close(move |_, cx| {
+                // `Esc`, the close button, Cancel and a backdrop click dismiss
+                // the window dialog; keep the view in step with it.
+                let _ = closed.update(cx, |view, _| view.branches.close_dialog());
+            })
+            .open(window, cx);
         self.dialog = Some(dialog);
     }
 
@@ -415,23 +379,6 @@ impl Branches {
             cx,
         );
     }
-
-    /// Shows `message` in the open dialog, if one is.
-    pub(crate) fn set_dialog_error(&mut self, message: String, cx: &mut App) {
-        let Some(dialog) = &self.dialog else {
-            return;
-        };
-        dialog.update(cx, |dialog, cx| {
-            dialog.error = Some(message);
-            cx.notify();
-        });
-    }
-
-    /// Whatever the open dialog submits, validated. `None` when no dialog is
-    /// open, so the caller can tell "nothing to submit" from "invalid".
-    pub(crate) fn dialog_request(&self, cx: &App) -> Option<Result<DialogRequest, String>> {
-        Some(self.dialog.as_ref()?.read(cx).request(cx))
-    }
 }
 /// The row the set-upstream dialog starts on: the branch's configured upstream
 /// when it is among the choices, otherwise the first one, and nothing when
@@ -444,6 +391,7 @@ fn initial_upstream_selection(choices: &[UpstreamChoice], current: Option<&str>)
 
 impl BranchDialog {
     fn new(view: WeakEntity<RepoView>, kind: DialogKind, cx: &mut Context<Self>) -> Self {
+        let entity = cx.entity_id();
         let inputs = match &kind {
             DialogKind::Create(form) => vec![form.input.clone()],
             DialogKind::Rename(form) => vec![form.input.clone()],
@@ -458,10 +406,9 @@ impl BranchDialog {
         };
         let mut input_events = Vec::new();
         for input in inputs {
-            let view = view.clone();
             input_events.push(cx.subscribe(
                 &input,
-                move |_dialog, _input, event: &InputEvent, cx| {
+                move |dialog, _input, event: &InputEvent, cx| {
                     if !matches!(
                         event,
                         InputEvent::PressEnter {
@@ -474,18 +421,37 @@ impl BranchDialog {
                     let Some(handle) = cx.active_window() else {
                         return;
                     };
-                    let view = view.clone();
-                    let _ = handle.update(cx, |_, window, cx| {
-                        let _ = view.update(cx, |view, cx| view.submit_branch_dialog(window, cx));
-                    });
+                    let _ = handle.update(cx, |_, window, cx| dialog.submit(window, cx));
                 },
             ));
         }
         Self {
+            view,
+            entity,
             kind,
             error: None,
             _input_events: input_events,
         }
+    }
+
+    /// Validates the form and hands the request to the view, which runs it and
+    /// closes the dialog once the operation is on its way.
+    fn submit(&mut self, window: &mut Window, cx: &mut App) {
+        let request = match self.request(cx) {
+            Ok(request) => request,
+            // A refused submit leaves the dialog open with the reason.
+            Err(message) => {
+                self.error = Some(message);
+                cx.notify(self.entity);
+                return;
+            }
+        };
+        let Some(view) = self.view.upgrade() else {
+            return;
+        };
+        view.update(cx, |view, cx| view.run_branch_dialog(request, window, cx));
+        // Closing here would drop this dialog while it is being updated.
+        window.defer(cx, |window, cx| window.close_dialog(cx));
     }
 
     /// The dialog's heading and the footer button that submits it.

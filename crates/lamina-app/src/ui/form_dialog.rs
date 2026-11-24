@@ -25,6 +25,7 @@ use crate::settings::Settings;
 
 type SubmitHandler<E> = Rc<dyn Fn(&mut E, &mut Window, &mut Context<E>)>;
 type SubmitGate<E> = Rc<dyn Fn(&E, &App) -> bool>;
+type CloseHandler = Rc<dyn Fn(&mut Window, &mut App)>;
 
 struct Submit<E> {
     id: SharedString,
@@ -48,6 +49,7 @@ pub struct FormDialog<E: Render> {
     /// `submit` would give.
     can_submit: Option<SubmitGate<E>>,
     focus: Option<FocusHandle>,
+    on_close: Option<CloseHandler>,
 }
 
 impl<E: Render> FormDialog<E> {
@@ -60,6 +62,7 @@ impl<E: Render> FormDialog<E> {
             submit: None,
             can_submit: None,
             focus: None,
+            on_close: None,
         }
     }
 
@@ -105,6 +108,15 @@ impl<E: Render> FormDialog<E> {
         self
     }
 
+    /// Runs when the card is dismissed without submitting: Cancel, `Esc`, the
+    /// close button or a backdrop click. A caller that keeps its own record of
+    /// the open form needs it, because a dialog closed this way never reaches
+    /// the submit handler.
+    pub fn on_close(mut self, on_close: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        self.on_close = Some(Rc::new(on_close));
+        self
+    }
+
     pub fn open(self, window: &mut Window, cx: &mut App) {
         let Self {
             title,
@@ -114,6 +126,7 @@ impl<E: Render> FormDialog<E> {
             submit,
             can_submit,
             focus,
+            on_close,
         } = self;
         let Some(content) = content else {
             return;
@@ -127,10 +140,19 @@ impl<E: Render> FormDialog<E> {
             let enabled = can_submit
                 .as_ref()
                 .is_none_or(|can_submit| can_submit(content.read(cx), cx));
+            let cancel_close = on_close.clone();
+            let card_close = on_close.clone();
             let mut footer = DialogFooter::new().child(
                 button(cancel_id.clone(), cancel_label.clone())
                     .size(ButtonSize::Medium)
-                    .on_click(|_, window, cx| window.close_dialog(cx)),
+                    .on_click(move |_, window, cx| {
+                        // Closing the dialog directly skips its own callbacks,
+                        // so Cancel runs the same hook the other dismissals do.
+                        if let Some(on_close) = &cancel_close {
+                            on_close(window, cx);
+                        }
+                        window.close_dialog(cx);
+                    }),
             );
             if let Some(submit) = &submit {
                 let entity = content.clone();
@@ -168,6 +190,11 @@ impl<E: Render> FormDialog<E> {
                     // way, so the confirm does not close it a second time.
                     ok_entity.update(cx, |entity, cx| handler(entity, window, cx));
                     false
+                })
+                .on_close(move |_, window, cx| {
+                    if let Some(on_close) = &card_close {
+                        on_close(window, cx);
+                    }
                 })
         });
         if let Some(focus) = focus {
