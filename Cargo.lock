@@ -5155,6 +5155,7 @@ dependencies = [
  "gix",
  "imara-diff",
  "insta",
+ "lamina-core",
  "log",
  "memchr",
  "notify",
