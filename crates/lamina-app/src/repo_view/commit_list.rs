@@ -224,8 +224,9 @@ impl RepoView {
         let show_tags = design.show_tags;
         let show_signatures = design.show_commit_signatures;
         let show_changed_counts = design.show_changed_file_count;
-        let request_signatures = show_signatures && self.session.is_some() && !self.smoke;
-        let request_changed_counts = show_changed_counts && self.session.is_some() && !self.smoke;
+        let request_signatures = show_signatures && self.session.is_some() && !self.harness.smoke;
+        let request_changed_counts =
+            show_changed_counts && self.session.is_some() && !self.harness.smoke;
         let list_entity = entity.clone();
         let defer_entity = entity.clone();
         let source_for_list = source.clone();

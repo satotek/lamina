@@ -91,7 +91,9 @@ impl RepoView {
         commits: Vec<Oid>,
         cx: &mut Context<Self>,
     ) {
-        if self.smoke || self.session.is_none() || !Settings::get(cx).history.show_commit_signatures
+        if self.harness.smoke
+            || self.session.is_none()
+            || !Settings::get(cx).history.show_commit_signatures
         {
             return;
         }
@@ -127,7 +129,7 @@ impl RepoView {
 
     fn flush_visible_signatures(&mut self, cx: &mut Context<Self>) {
         self.signatures.debounce = None;
-        if self.smoke || !Settings::get(cx).history.show_commit_signatures {
+        if self.harness.smoke || !Settings::get(cx).history.show_commit_signatures {
             self.signatures.pending_visible.clear();
             return;
         }
@@ -161,7 +163,7 @@ impl RepoView {
         ) {
             session.cancel_query(prev);
         }
-        if self.smoke || !Settings::get(cx).history.show_commit_signatures {
+        if self.harness.smoke || !Settings::get(cx).history.show_commit_signatures {
             return;
         }
         let (Some(commit), Some(session)) = (commit, self.session.as_ref()) else {

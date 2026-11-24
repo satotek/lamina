@@ -596,7 +596,7 @@ impl RepoView {
             return;
         };
         self.uncommitted_diff
-            .flush_requests(session.as_ref(), self.smoke);
+            .flush_requests(session.as_ref(), self.harness.smoke);
         cx.notify();
     }
 

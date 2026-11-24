@@ -34,7 +34,7 @@ impl RepoView {
         let fit = TitleBarFit::new(window.viewport_size().width.as_f32(), has_back, design.zoom);
         let source = self.source();
         let head = source.as_ref().and_then(Source::head);
-        let repo = match &self.fake {
+        let repo = match &self.harness.fake {
             Some(_) => t!("title_bar.synthetic_repo").to_string(),
             None => self.name.clone().unwrap_or_else(|| "lamina".to_owned()),
         };

@@ -241,7 +241,7 @@ impl RepoView {
         visible: Vec<Oid>,
         cx: &mut Context<Self>,
     ) {
-        if self.smoke
+        if self.harness.smoke
             || self.session.is_none()
             || !Settings::get(cx).history.show_changed_file_count
         {
@@ -267,7 +267,7 @@ impl RepoView {
         }
         self.changed_counts.debounce = None;
 
-        if self.smoke || !Settings::get(cx).history.show_changed_file_count {
+        if self.harness.smoke || !Settings::get(cx).history.show_changed_file_count {
             self.changed_counts.pending.clear();
             return;
         }
