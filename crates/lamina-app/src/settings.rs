@@ -842,157 +842,225 @@ mod tests {
     }
 
     #[test]
-    fn the_history_layout_survives_a_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.json");
+    fn settings_survive_a_round_trip() {
+        /// One group of settings that must come back from the file unchanged.
+        struct Case {
+            name: &'static str,
+            /// Changes the settings; it also checks what they started as.
+            set: fn(&mut Settings),
+            /// Checks the reloaded settings against what was saved.
+            check: fn(&Settings, &Settings, &Path, &str),
+        }
 
-        let mut settings = Settings::default();
-        assert_eq!(
-            settings.layout.history_list_fraction,
-            DEFAULT_HISTORY_LIST_FRACTION
-        );
-        settings.layout.history_list_fraction = 0.42;
-        settings.layout.history_files_fraction = 0.31;
-        settings.layout.history_details_maximized = true;
-        settings.save(&path).unwrap();
+        let cases: &[Case] = &[
+            Case {
+                name: "the history layout",
+                set: |settings| {
+                    assert_eq!(
+                        settings.layout.history_list_fraction,
+                        DEFAULT_HISTORY_LIST_FRACTION
+                    );
+                    settings.layout.history_list_fraction = 0.42;
+                    settings.layout.history_files_fraction = 0.31;
+                    settings.layout.history_details_maximized = true;
+                },
+                check: |loaded, saved, _, case| {
+                    assert_eq!(loaded.layout, saved.layout, "{case}: the layout");
+                    assert!(
+                        loaded.layout.history_details_maximized,
+                        "{case}: the detail pane stays maximized"
+                    );
+                    assert!(
+                        (loaded.layout.history_list_fraction - 0.42).abs() < f32::EPSILON,
+                        "{case}: fractions are stored as fractions, not as the pixels of one window"
+                    );
+                },
+            },
+            Case {
+                name: "the sidebar collapsed state",
+                set: |settings| {
+                    assert!(
+                        !settings.layout.sidebar_collapsed,
+                        "the sidebar starts open"
+                    );
+                    settings.layout.sidebar_collapsed = true;
+                },
+                check: |loaded, _, path, case| {
+                    assert!(
+                        loaded.layout.sidebar_collapsed,
+                        "{case}: the sidebar stays closed"
+                    );
+                    // A file written before the key existed opens the sidebar
+                    // again.
+                    std::fs::write(path, r#"{"layout":{"history_list_fraction":0.4}}"#).unwrap();
+                    assert!(
+                        !Settings::load(path).layout.sidebar_collapsed,
+                        "{case}: a file written before the key existed opens the sidebar again"
+                    );
+                },
+            },
+            Case {
+                name: "the selected themes",
+                set: |settings| {
+                    settings.appearance.light_theme = "catppuccin-latte".to_owned();
+                    settings.appearance.dark_theme = "catppuccin-mocha".to_owned();
+                },
+                check: |loaded, _, _, case| {
+                    assert_eq!(
+                        loaded.appearance.light_theme, "catppuccin-latte",
+                        "{case}: the light theme"
+                    );
+                    assert_eq!(
+                        loaded.appearance.dark_theme, "catppuccin-mocha",
+                        "{case}: the dark theme"
+                    );
+                },
+            },
+            Case {
+                name: "the language",
+                set: |settings| {
+                    settings.appearance.language = crate::i18n::Language::Japanese;
+                },
+                check: |loaded, _, path, case| {
+                    assert_eq!(
+                        loaded.appearance.language,
+                        crate::i18n::Language::Japanese,
+                        "{case}: the language"
+                    );
+                    let json = std::fs::read_to_string(path).unwrap();
+                    assert!(
+                        json.contains("\"language\": \"japanese\""),
+                        "{case}: the file stores a stable id, not a display name: {json}"
+                    );
+                },
+            },
+            Case {
+                name: "the commit graph ignores",
+                set: |settings| {
+                    let asked = PathBuf::from("/work/repo-a");
+                    let silenced = PathBuf::from("/work/repo-b");
+                    assert!(settings.commit_graph.asks(&asked));
+                    settings.commit_graph.ignore(silenced.clone());
+                    assert!(settings.commit_graph.asks(&asked));
+                    assert!(!settings.commit_graph.asks(&silenced));
+                },
+                check: |loaded, _, _, case| {
+                    assert!(
+                        loaded.commit_graph.asks(&PathBuf::from("/work/repo-a")),
+                        "{case}: a repository that was not silenced is asked again"
+                    );
+                    assert!(
+                        !loaded.commit_graph.asks(&PathBuf::from("/work/repo-b")),
+                        "{case}: a silenced repository stays silent"
+                    );
+                },
+            },
+            Case {
+                name: "the hidden history refs",
+                set: |settings| {
+                    let first = PathBuf::from("/work/repo-a");
+                    let second = PathBuf::from("/work/repo-b");
+                    assert!(settings.history.hidden_refs(&first).is_empty());
+                    settings.history.hide_ref(&first, "refs/heads/topic".into());
+                    settings
+                        .history
+                        .hide_ref(&first, "refs/remotes/origin/topic".into());
+                    settings
+                        .history
+                        .hide_ref(&second, "refs/heads/other".into());
+                },
+                check: |loaded, _, _, case| {
+                    let first = PathBuf::from("/work/repo-a");
+                    let second = PathBuf::from("/work/repo-b");
+                    assert_eq!(
+                        loaded.history.hidden_refs(&first),
+                        ["refs/heads/topic", "refs/remotes/origin/topic"],
+                        "{case}: one repository's hidden refs do not leak into another's"
+                    );
+                    assert_eq!(
+                        loaded.history.hidden_refs(&second),
+                        ["refs/heads/other"],
+                        "{case}: the second repository's hidden refs"
+                    );
 
-        let loaded = Settings::load(&path);
-        assert_eq!(loaded.layout, settings.layout);
-        assert!(loaded.layout.history_details_maximized);
-        assert!(
-            (loaded.layout.history_list_fraction - 0.42).abs() < f32::EPSILON,
-            "fractions are stored as fractions, not as the pixels of one window"
-        );
+                    let mut loaded = loaded.clone();
+                    loaded.history.show_all_refs(&first);
+                    assert!(
+                        loaded.history.hidden_refs(&first).is_empty(),
+                        "{case}: showing all hides nothing"
+                    );
+                    assert_eq!(
+                        loaded.history.hidden_refs(&second),
+                        ["refs/heads/other"],
+                        "{case}: showing all for one repository leaves the other alone"
+                    );
+                },
+            },
+        ];
+
+        for case in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("settings.json");
+            let mut settings = Settings::default();
+            (case.set)(&mut settings);
+            settings.save(&path).unwrap();
+            (case.check)(&Settings::load(&path), &settings, &path, case.name);
+        }
     }
 
     #[test]
-    fn the_sidebar_collapsed_state_survives_a_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.json");
+    fn a_file_without_a_key_takes_its_default() {
+        struct Case {
+            name: &'static str,
+            contents: &'static str,
+            check: fn(&Settings, &str),
+        }
 
-        let mut settings = Settings::default();
-        assert!(
-            !settings.layout.sidebar_collapsed,
-            "the sidebar starts open"
-        );
-        settings.layout.sidebar_collapsed = true;
-        settings.save(&path).unwrap();
-        assert!(Settings::load(&path).layout.sidebar_collapsed);
+        let cases: &[Case] = &[
+            Case {
+                name: "a file without the layout",
+                contents: r#"{"appearance":{"theme":"dark"}}"#,
+                check: |loaded, case| {
+                    assert_eq!(
+                        loaded.layout,
+                        LayoutSettings::default(),
+                        "{case}: the default split"
+                    );
+                },
+            },
+            Case {
+                name: "a file without a language",
+                // The file an older build wrote has no `language` key.
+                contents: r#"{"appearance":{"theme":"dark","ui_font_size":14.0}}"#,
+                check: |loaded, case| {
+                    assert_eq!(
+                        loaded.appearance.language,
+                        crate::i18n::Language::System,
+                        "{case}: the language follows the system"
+                    );
+                    assert_eq!(
+                        loaded.appearance.theme,
+                        ThemeMode::Dark,
+                        "{case}: the rest of the file still loads"
+                    );
+                    assert_eq!(
+                        loaded.appearance.light_theme, "lamina-light",
+                        "{case}: the light theme default"
+                    );
+                    assert_eq!(
+                        loaded.appearance.dark_theme, "lamina-dark",
+                        "{case}: the dark theme default"
+                    );
+                },
+            },
+        ];
 
-        // A file written before the key existed opens the sidebar again.
-        std::fs::write(&path, r#"{"layout":{"history_list_fraction":0.4}}"#).unwrap();
-        assert!(!Settings::load(&path).layout.sidebar_collapsed);
-    }
-
-    #[test]
-    fn a_file_without_the_layout_takes_the_default_split() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-        std::fs::write(&path, r#"{"appearance":{"theme":"dark"}}"#).unwrap();
-        assert_eq!(Settings::load(&path).layout, LayoutSettings::default());
-    }
-
-    #[test]
-    fn a_file_without_a_language_follows_the_system() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-        // The file an older build wrote has no `language` key.
-        std::fs::write(
-            &path,
-            r#"{"appearance":{"theme":"dark","ui_font_size":14.0}}"#,
-        )
-        .unwrap();
-        let settings = Settings::load(&path);
-        assert_eq!(settings.appearance.language, crate::i18n::Language::System);
-        assert_eq!(settings.appearance.theme, ThemeMode::Dark);
-        assert_eq!(settings.appearance.light_theme, "lamina-light");
-        assert_eq!(settings.appearance.dark_theme, "lamina-dark");
-    }
-
-    #[test]
-    fn selected_themes_survive_a_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-        let mut settings = Settings::default();
-        settings.appearance.light_theme = "catppuccin-latte".to_owned();
-        settings.appearance.dark_theme = "catppuccin-mocha".to_owned();
-        settings.save(&path).unwrap();
-        let loaded = Settings::load(&path);
-        assert_eq!(loaded.appearance.light_theme, "catppuccin-latte");
-        assert_eq!(loaded.appearance.dark_theme, "catppuccin-mocha");
-    }
-
-    #[test]
-    fn the_language_survives_a_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-        let mut settings = Settings::default();
-        settings.appearance.language = crate::i18n::Language::Japanese;
-        settings.save(&path).unwrap();
-        assert_eq!(
-            Settings::load(&path).appearance.language,
-            crate::i18n::Language::Japanese
-        );
-        let json = std::fs::read_to_string(&path).unwrap();
-        assert!(
-            json.contains("\"language\": \"japanese\""),
-            "the file stores a stable id, not a display name: {json}"
-        );
-    }
-
-    #[test]
-    fn commit_graph_ignores_are_per_repository_and_survive_a_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-        let asked = PathBuf::from("/work/repo-a");
-        let silenced = PathBuf::from("/work/repo-b");
-
-        let mut settings = Settings::default();
-        assert!(settings.commit_graph.asks(&asked));
-        settings.commit_graph.ignore(silenced.clone());
-        assert!(settings.commit_graph.asks(&asked));
-        assert!(!settings.commit_graph.asks(&silenced));
-
-        settings.save(&path).unwrap();
-        let loaded = Settings::load(&path);
-        assert!(loaded.commit_graph.asks(&asked));
-        assert!(!loaded.commit_graph.asks(&silenced));
-    }
-
-    #[test]
-    fn hidden_history_refs_are_per_repository_and_survive_a_round_trip() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("settings.json");
-        let first = PathBuf::from("/work/repo-a");
-        let second = PathBuf::from("/work/repo-b");
-
-        let mut settings = Settings::default();
-        assert!(settings.history.hidden_refs(&first).is_empty());
-        settings.history.hide_ref(&first, "refs/heads/topic".into());
-        settings
-            .history
-            .hide_ref(&first, "refs/remotes/origin/topic".into());
-        settings
-            .history
-            .hide_ref(&second, "refs/heads/other".into());
-
-        settings.save(&path).unwrap();
-        let loaded = Settings::load(&path);
-        assert_eq!(
-            loaded.history.hidden_refs(&first),
-            ["refs/heads/topic", "refs/remotes/origin/topic"],
-            "one repository's hidden refs do not leak into another's"
-        );
-        assert_eq!(loaded.history.hidden_refs(&second), ["refs/heads/other"]);
-
-        let mut loaded = loaded;
-        loaded.history.show_all_refs(&first);
-        assert!(loaded.history.hidden_refs(&first).is_empty());
-        assert_eq!(
-            loaded.history.hidden_refs(&second),
-            ["refs/heads/other"],
-            "showing all for one repository leaves the other alone"
-        );
+        for case in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("settings.json");
+            std::fs::write(&path, case.contents).unwrap();
+            (case.check)(&Settings::load(&path), case.name);
+        }
     }
 
     #[test]
