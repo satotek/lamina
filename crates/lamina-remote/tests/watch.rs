@@ -292,8 +292,12 @@ fn an_unwatched_helper_stays_quiet_until_reload() {
     let deadline = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline {
         match helper.events.recv_timeout(Duration::from_millis(200)) {
-            Ok(SessionEvent::SnapshotUpdated { generation }) if generation > baseline => {
-                panic!("an unwatched helper published generation {generation}");
+            // A late publish from the initial load may still arrive; only one
+            // that has seen the outside edit proves the helper was watching.
+            Ok(SessionEvent::SnapshotUpdated { generation })
+                if generation > baseline && helper.has_path("outside.txt") =>
+            {
+                panic!("an unwatched helper published the outside edit in generation {generation}");
             }
             Ok(_) => {}
             Err(RecvTimeoutError::Timeout) => {}
