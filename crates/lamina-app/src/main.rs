@@ -57,6 +57,7 @@ mod legacy;
 mod menus;
 mod merge_editor;
 mod metrics;
+mod natural_sort;
 mod palette;
 mod picker;
 mod proxy;

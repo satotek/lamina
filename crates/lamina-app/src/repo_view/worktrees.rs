@@ -322,7 +322,7 @@ impl RepoView {
             .map(|reference| reference.short_name.clone())
             .filter(|name| !checked_out.iter().any(|checked| *checked == name))
             .collect();
-        let branches: Vec<String> = crate::branches::natural_sorted(&candidates)
+        let branches: Vec<String> = crate::natural_sort::natural_sorted(&candidates)
             .into_iter()
             .map(str::to_owned)
             .collect();
