@@ -1,9 +1,9 @@
 //! The visual language shared by every pane.
 //!
 //! One palette, taken from the design's light and dark tables, plus the small
-//! helpers that colour avatars, badges and dates the same way everywhere. Each
-//! module still defines the subset of colours it paints with, but the values
-//! come from here so a change lands in one place.
+//! helpers that colour avatars, badges and dates the same way everywhere.
+//! Modules paint straight from [`Design`] and ask for the meaning they need
+//! through its semantic accessors, so a change lands in one place.
 
 pub mod theme;
 
@@ -238,6 +238,30 @@ impl Design {
     /// Captions, badges and status details.
     pub fn tiny(&self) -> f32 {
         (self.ui - self.scale(2.5)).max(self.scale(8.0))
+    }
+
+    /// The colour of a failure: a rejected operation, a removed file or a
+    /// destructive action.
+    pub fn danger(&self) -> Hsla {
+        self.remove_text
+    }
+
+    /// The colour of a warning: a modified file, an unresolved conflict or a
+    /// call for attention that is not a failure.
+    pub fn warning(&self) -> Hsla {
+        self.tag_text
+    }
+
+    /// The wash behind warning-tinted content, such as the lines of an
+    /// unresolved conflict.
+    pub fn warning_soft(&self) -> Hsla {
+        self.tag_background
+    }
+
+    /// The colour of a success: an added file, a completed operation or a side
+    /// kept from a conflict.
+    pub fn success(&self) -> Hsla {
+        self.add_text
     }
 
     /// The colour of one syntax class.
@@ -807,6 +831,27 @@ mod tests {
             (design.remove_background, design.remove_text)
         );
         assert_eq!(kind_marker(ChangeKind::Renamed), "R");
+    }
+
+    fn assert_semantic_colours(design: &Design) {
+        assert_eq!(design.danger(), design.remove_text);
+        assert_eq!(design.warning(), design.tag_text);
+        assert_eq!(design.warning_soft(), design.tag_background);
+        assert_eq!(design.success(), design.add_text);
+    }
+
+    #[test]
+    fn semantic_colours_name_the_change_colours_in_every_theme() {
+        assert_semantic_colours(&Design::default());
+        assert_semantic_colours(&dark_design());
+        for entry in theme::all() {
+            let palette = &entry.palette;
+            let design = design_for_theme(
+                &palette.id,
+                palette.appearance == theme::ThemeAppearance::Dark,
+            );
+            assert_semantic_colours(&design);
+        }
     }
 
     fn dark_design() -> Design {

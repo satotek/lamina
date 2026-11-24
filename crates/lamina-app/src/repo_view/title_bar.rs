@@ -301,18 +301,7 @@ impl RepoView {
             .flex_none()
             .occlude()
             .when_some(undo_redo, |nav, buttons| nav.child(buttons))
-            .child(self.remote_buttons(
-                source.as_ref(),
-                &remote::Colors {
-                    foreground: design.text,
-                    muted_foreground: design.muted,
-                    border: design.border,
-                    accent: design.accent,
-                    accent_foreground: design.on_accent,
-                    zoom: design.zoom,
-                },
-                fit.remote_compact,
-            ))
+            .child(self.remote_buttons(source.as_ref(), design, fit.remote_compact))
             .child(stash_button(
                 design,
                 fit.stash_label,

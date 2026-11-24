@@ -15,10 +15,10 @@ use lamina_core::session::{Operation, RepoSnapshot};
 use lamina_core::{ChangeKind, FileChange};
 
 use super::ignore;
-use super::{Colors, PendingKind, Selection, Side, WorktreePanel};
+use super::{PendingKind, Selection, Side, WorktreePanel};
 use crate::repo_view::RepoView;
 use crate::scrollbar::WithScrollbar as _;
-use crate::style;
+use crate::style::{self, Design};
 
 const LIST_WIDTH: f32 = 300.0;
 /// Height of one file row, matching the commit list and the design.
@@ -27,13 +27,13 @@ const ROW_HEIGHT: f32 = 28.0;
 const MAX_LIST_ROWS: usize = 8;
 
 /// What every row of one section needs: the same selection, row order and
-/// colors, cloned once per render instead of once per row.
+/// palette, cloned once per render instead of once per row.
 struct RowContext {
     entity: Entity<RepoView>,
     /// The section's paths in row order, for shift-ranges and arrow moves.
     rows: Rc<Vec<String>>,
     selection: Selection,
-    colors: Colors,
+    design: Design,
     lfs: Arc<HashMap<String, LfsInfo>>,
     locks: Rc<HashMap<String, LfsLock>>,
     locking_available: bool,
@@ -48,7 +48,7 @@ impl WorktreePanel {
         &self,
         entity: Entity<RepoView>,
         snapshot: &RepoSnapshot,
-        colors: &Colors,
+        design: &Design,
         lfs: &Arc<HashMap<String, LfsInfo>>,
         locks: &Rc<HashMap<String, LfsLock>>,
         locking_available: bool,
@@ -58,11 +58,11 @@ impl WorktreePanel {
         div()
             .flex()
             .flex_col()
-            .w(colors.design.px(LIST_WIDTH))
+            .w(design.px(LIST_WIDTH))
             .flex_none()
             .min_h_0()
             .border_r_1()
-            .border_color(colors.border)
+            .border_color(design.border)
             .child(self.conflicts.section(
                 entity.clone(),
                 &snapshot.conflicts,
@@ -73,7 +73,7 @@ impl WorktreePanel {
                 entity.clone(),
                 Side::Unstaged,
                 &snapshot.status.unstaged,
-                colors,
+                design,
                 lfs,
                 locks,
                 locking_available,
@@ -82,7 +82,7 @@ impl WorktreePanel {
                 entity,
                 Side::Staged,
                 &snapshot.status.staged,
-                colors,
+                design,
                 lfs,
                 locks,
                 locking_available,
@@ -99,7 +99,7 @@ impl WorktreePanel {
         entity: Entity<RepoView>,
         side: Side,
         files: &[FileChange],
-        colors: &Colors,
+        design: &Design,
         lfs: &Arc<HashMap<String, LfsInfo>>,
         locks: &Rc<HashMap<String, LfsLock>>,
         locking_available: bool,
@@ -160,14 +160,14 @@ impl WorktreePanel {
             crate::ui::section_header(
                 gpui::ElementId::named_usize("file-section", side as usize),
                 title,
-                &colors.design,
+                design,
             )
             .count(files.len())
             .trailing(button)
             .px_3()
             .pt_3()
             .pb_1p5()
-            .h(colors.design.px(24.0))
+            .h(design.px(24.0))
             .rounded(px(0.0)),
         );
 
@@ -176,9 +176,9 @@ impl WorktreePanel {
                 .child(
                     div()
                         .px_3()
-                        .h(colors.design.px(24.0))
-                        .text_size(colors.design.px(11.0))
-                        .text_color(colors.muted_foreground)
+                        .h(design.px(24.0))
+                        .text_size(design.px(11.0))
+                        .text_color(design.muted)
                         .child(t!("common.none").to_string()),
                 )
                 .into_any_element();
@@ -188,7 +188,7 @@ impl WorktreePanel {
             entity,
             rows: Rc::new(files.iter().map(|change| change.path.clone()).collect()),
             selection: self.selection.clone(),
-            colors: colors.clone(),
+            design: design.clone(),
             lfs: Arc::clone(lfs),
             locks: Rc::clone(locks),
             locking_available,
@@ -224,7 +224,7 @@ impl WorktreePanel {
         })
         .track_scroll(&scroll)
         .with_scrollbar(&scroll)
-        .h(colors.design.px(ROW_HEIGHT * visible_rows as f32))
+        .h(design.px(ROW_HEIGHT * visible_rows as f32))
         .flex_none();
 
         section = section.child(list);
@@ -245,21 +245,21 @@ fn file_row(
     let row = crate::ui::list_row(
         gpui::ElementId::named_usize(format!("worktree-file-{}", side as u8), index),
         crate::ui::RowState::NORMAL.selected(is_selected),
-        &context.colors.design,
+        &context.design,
     )
-    .child(crate::ui::change_badge(kind, &context.colors.design))
+    .child(crate::ui::change_badge(kind, &context.design))
     .child(div().flex_1().min_w_0().truncate().child(name.to_owned()))
     .when(context.lfs.contains_key(&path), |row| {
-        row.child(crate::ui::lfs_badge(&context.colors.design))
+        row.child(crate::ui::lfs_badge(&context.design))
     })
     .when_some(dir, |row, dir| {
         row.child(
             div()
-                .max_w(context.colors.design.px(120.0))
+                .max_w(context.design.px(120.0))
                 .flex_none()
                 .truncate()
-                .text_size(context.colors.design.px(11.0))
-                .text_color(context.colors.muted_foreground)
+                .text_size(context.design.px(11.0))
+                .text_color(context.design.muted)
                 .child(dir.to_owned()),
         )
     });
@@ -301,7 +301,7 @@ fn file_row(
         });
     crate::ui::context_menu(
         gpui::ElementId::named_usize(format!("worktree-file-menu-{}", side as u8), index),
-        &context.colors.design,
+        &context.design,
         trigger,
         move |menu, window, cx| {
             let count = menu_entity.read(cx).worktree.selection.len();

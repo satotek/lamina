@@ -13,12 +13,10 @@ use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, FontWeight, Hsla, IntoElement, ParentElement, SharedString,
-    Styled, UniformListScrollHandle, Window, div, px, uniform_list,
+    AnyElement, App, Context, Entity, FontWeight, Hsla, IntoElement, ParentElement, Styled,
+    UniformListScrollHandle, Window, div, px, uniform_list,
 };
-use gpui_component::{
-    ActiveTheme as _, Disableable as _, Selectable as _, Theme, spinner::Spinner,
-};
+use gpui_component::{ActiveTheme as _, Disableable as _, Selectable as _, spinner::Spinner};
 use lamina_core::session::{
     DiffRequest, DiffTicket, DiffView, PathHistoryCommit, QueryTicket, RepoSnapshot,
 };
@@ -694,7 +692,7 @@ impl RepoView {
         let Some(history) = self.file_history.as_ref() else {
             return div().into_any_element();
         };
-        let colors = Colors::from_theme(cx.theme(), Settings::get(cx));
+        let design = Design::new(cx.theme(), Settings::get(cx));
 
         let back = {
             let entity = entity.clone();
@@ -757,17 +755,17 @@ impl RepoView {
             .flex()
             .items_center()
             .gap_3()
-            .h(colors.design.px(40.0))
+            .h(design.px(40.0))
             .flex_none()
             .px_3p5()
-            .bg(colors.background)
+            .bg(design.background)
             .border_b_1()
-            .border_color(colors.border)
+            .border_color(design.border)
             .child(back)
             .child(
                 div()
                     .flex_none()
-                    .text_size(colors.design.px(12.0))
+                    .text_size(design.px(12.0))
                     .font_weight(FontWeight::SEMIBOLD)
                     .child(t!("file_history.title").to_string()),
             )
@@ -776,9 +774,9 @@ impl RepoView {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .font_family(colors.mono.clone())
-                    .text_size(colors.design.px(11.5))
-                    .text_color(colors.accent)
+                    .font_family(design.mono.clone())
+                    .text_size(design.px(11.5))
+                    .text_color(design.accent)
                     .child(history.path.clone()),
             )
             .child(compare_three)
@@ -786,14 +784,14 @@ impl RepoView {
             .child(
                 div()
                     .flex_none()
-                    .text_size(colors.design.px(11.0))
-                    .text_color(colors.muted_foreground)
+                    .text_size(design.px(11.0))
+                    .text_color(design.muted)
                     .child(count),
             );
 
-        let diff_colors = DiffColors::from_design(&colors.design);
-        let list = self.file_history_list(entity.clone(), &colors);
-        let diff = self.file_history_diff(&colors, &diff_colors, cx);
+        let diff_colors = DiffColors::from_design(&design);
+        let list = self.file_history_list(entity.clone(), &design);
+        let diff = self.file_history_diff(&design, &diff_colors, cx);
 
         div()
             .flex()
@@ -801,7 +799,7 @@ impl RepoView {
             .flex_1()
             .min_h_0()
             .min_w_0()
-            .bg(colors.background)
+            .bg(design.background)
             .child(header)
             .child(
                 div()
@@ -815,12 +813,12 @@ impl RepoView {
             .into_any_element()
     }
 
-    fn file_history_list(&self, entity: Entity<Self>, colors: &Colors) -> AnyElement {
+    fn file_history_list(&self, entity: Entity<Self>, design: &Design) -> AnyElement {
         let Some(history) = self.file_history.as_ref() else {
             return div().into_any_element();
         };
         if let Some(error) = &history.error {
-            return list_message(error, colors.danger, colors);
+            return list_message(error, design.danger(), design);
         }
         let walking = history.walking();
         if history.rows().is_empty() && walking {
@@ -830,30 +828,26 @@ impl RepoView {
                 .items_center()
                 .justify_center()
                 .gap_2()
-                .w(colors.design.px(LIST_WIDTH))
+                .w(design.px(LIST_WIDTH))
                 .flex_none()
                 .border_r_1()
-                .border_color(colors.border)
-                .child(Spinner::new().color(colors.muted_foreground))
+                .border_color(design.border)
+                .child(Spinner::new().color(design.muted))
                 .child(
                     div()
-                        .text_size(colors.design.px(11.0))
-                        .text_color(colors.muted_foreground)
+                        .text_size(design.px(11.0))
+                        .text_color(design.muted)
                         .child(t!("file_history.walking").to_string()),
                 )
                 .into_any_element();
         }
         if history.rows().is_empty() {
-            return list_message(
-                t!("file_history.empty").to_string(),
-                colors.muted_foreground,
-                colors,
-            );
+            return list_message(t!("file_history.empty").to_string(), design.muted, design);
         }
 
         let selected = history.selected;
         let picked = history.picked.clone();
-        let list_colors = colors.clone();
+        let list_design = design.clone();
         let rows = history.rows_shared();
         let requested = history.path.clone();
         let count = rows.len() + usize::from(walking);
@@ -861,7 +855,7 @@ impl RepoView {
             range
                 .map(|position| {
                     if position >= rows.len() {
-                        return loading_row(&list_colors);
+                        return loading_row(&list_design);
                     }
                     let entry = &rows[position];
                     let commit = &entry.commit;
@@ -869,7 +863,7 @@ impl RepoView {
                     let date = style::date_label(
                         commit.author_time,
                         style::now_epoch(),
-                        list_colors.design.date_format,
+                        list_design.date_format,
                     );
                     let rename = rename_label(&requested, Some(entry.path.as_str()));
                     let pick_entity = entity.clone();
@@ -878,18 +872,18 @@ impl RepoView {
                     let element = crate::ui::list_row(
                         ("file-history-row", position),
                         crate::ui::RowState::NORMAL.selected(selected == Some(commit_id)),
-                        &list_colors.design,
+                        &list_design,
                     )
                     // Two lines: the summary, and the name the file had there
                     // when a rename makes the row older than the requested
                     // path. Every row keeps the taller height so the list stays
                     // uniform.
-                    .h(list_colors.design.px(38.0))
+                    .h(list_design.px(38.0))
                     .gap_3()
                     .mx(px(0.0))
                     .w_full()
                     .px_3()
-                    .text_size(px(list_colors.design.small()))
+                    .text_size(px(list_design.small()))
                     .child(
                         crate::ui::checkbox(("file-history-pick", position), picked_here)
                             .disabled(pick_disabled)
@@ -911,33 +905,33 @@ impl RepoView {
                                 div()
                                     .min_w_0()
                                     .truncate()
-                                    .text_size(list_colors.design.px(10.0))
-                                    .text_color(list_colors.muted_foreground)
+                                    .text_size(list_design.px(10.0))
+                                    .text_color(list_design.muted)
                                     .child(rename)
                             })),
                     )
                     .child(
                         div()
-                            .w(list_colors.design.px(92.0))
+                            .w(list_design.px(92.0))
                             .flex_none()
                             .truncate()
-                            .text_color(list_colors.muted_foreground)
+                            .text_color(list_design.muted)
                             .child(commit.author_name.clone()),
                     )
                     .child(
                         div()
-                            .w(list_colors.design.px(96.0))
+                            .w(list_design.px(96.0))
                             .flex_none()
                             .truncate()
-                            .text_color(list_colors.muted_foreground)
+                            .text_color(list_design.muted)
                             .child(date),
                     )
                     .child(
                         div()
-                            .w(list_colors.design.px(58.0))
+                            .w(list_design.px(58.0))
                             .flex_none()
-                            .font_family(list_colors.mono.clone())
-                            .text_color(list_colors.muted_foreground)
+                            .font_family(list_design.mono.clone())
+                            .text_color(list_design.muted)
                             .child(data::short_oid(commit_id)),
                     );
                     let entity = entity.clone();
@@ -954,16 +948,16 @@ impl RepoView {
         })
         .track_scroll(&history.scroll)
         .with_scrollbar(&history.scroll)
-        .w(colors.design.px(LIST_WIDTH))
+        .w(design.px(LIST_WIDTH))
         .flex_none()
         .border_r_1()
-        .border_color(colors.border)
+        .border_color(design.border)
         .into_any_element()
     }
 
     fn file_history_diff(
         &self,
-        colors: &Colors,
+        design: &Design,
         diff_colors: &DiffColors,
         cx: &mut App,
     ) -> AnyElement {
@@ -978,17 +972,17 @@ impl RepoView {
             .items_center()
             .justify_between()
             .gap_3()
-            .h(colors.design.px(36.0))
+            .h(design.px(36.0))
             .flex_none()
             .px_3p5()
-            .bg(colors.title_bar)
+            .bg(design.chrome)
             .border_b_1()
-            .border_color(colors.border)
-            .text_size(colors.design.px(11.0))
+            .border_color(design.border)
+            .text_size(design.px(11.0))
             .child(
                 div()
                     .truncate()
-                    .font_family(colors.mono.clone())
+                    .font_family(design.mono.clone())
                     .child(path),
             )
             .child(
@@ -999,7 +993,7 @@ impl RepoView {
                     .child(
                         div()
                             .flex_none()
-                            .text_color(colors.muted_foreground)
+                            .text_color(design.muted)
                             .child(match commit {
                                 Some(commit) => t!(
                                     &crate::i18n::count_key(
@@ -1047,32 +1041,28 @@ impl RepoView {
             );
 
         let body = if let Some(error) = &history.diff_error {
-            message(error, colors.danger, colors)
+            message(error, design.danger(), design)
         } else if history.selected.is_none() {
             message(
                 t!("file_history.select_commit").to_string(),
-                colors.muted_foreground,
-                colors,
+                design.muted,
+                design,
             )
         } else if let Some(view) = &history.view {
             if let Some(image) =
-                crate::image_diff::body(&self.image_diff, view, &colors.design, self.entity(), cx)
+                crate::image_diff::body(&self.image_diff, view, design, self.entity(), cx)
             {
                 image
             } else if view.diff.binary {
-                message(
-                    t!("worktree.binary_file").to_string(),
-                    colors.muted_foreground,
-                    colors,
-                )
+                message(t!("worktree.binary_file").to_string(), design.muted, design)
             } else if history.diff_rows.is_empty() {
                 message(
                     t!("worktree.no_text_changes").to_string(),
-                    colors.muted_foreground,
-                    colors,
+                    design.muted,
+                    design,
                 )
             } else {
-                let list = self.history_diff_rows(colors, diff_colors, cx);
+                let list = self.history_diff_rows(design, diff_colors, cx);
                 match history.context.notice() {
                     Some(notice) => div()
                         .flex()
@@ -1082,7 +1072,7 @@ impl RepoView {
                         .child(crate::ui::banner(
                             crate::ui::BannerKind::Warning,
                             notice,
-                            &colors.design,
+                            design,
                         ))
                         .child(list)
                         .into_any_element(),
@@ -1090,7 +1080,7 @@ impl RepoView {
                 }
             }
         } else {
-            crate::ui::loading_state(t!("worktree.computing_diff").to_string(), &colors.design)
+            crate::ui::loading_state(t!("worktree.computing_diff").to_string(), design)
                 .into_any_element()
         };
 
@@ -1107,7 +1097,7 @@ impl RepoView {
 
     fn history_diff_rows(
         &self,
-        colors: &Colors,
+        design: &Design,
         diff_colors: &DiffColors,
         cx: &mut App,
     ) -> AnyElement {
@@ -1120,7 +1110,7 @@ impl RepoView {
                 rows: Rc::clone(&history.diff_rows),
                 view: history.view.clone(),
                 colors: *diff_colors,
-                mono: colors.mono.clone(),
+                mono: design.mono.clone(),
                 scroll: &history.diff_scroll,
                 on_gap: self.gap_handler(),
             },
@@ -1130,65 +1120,33 @@ impl RepoView {
 }
 
 /// The list's last row while the walk runs.
-fn loading_row(colors: &Colors) -> AnyElement {
-    crate::ui::list_row(
-        "file-history-loading",
-        crate::ui::RowState::NORMAL,
-        &colors.design,
-    )
-    .gap_2()
-    .h(colors.design.px(38.0))
-    .mx(px(0.0))
-    .w_full()
-    .px_3()
-    .text_size(px(colors.design.small()))
-    .text_color(colors.muted_foreground)
-    .child(Spinner::new().color(colors.muted_foreground))
-    .child(t!("common.loading").to_string())
-    .into_any_element()
-}
-
-fn list_message(text: impl Into<gpui::SharedString>, color: Hsla, colors: &Colors) -> AnyElement {
-    div()
-        .flex()
-        .w(colors.design.px(LIST_WIDTH))
-        .flex_none()
-        .border_r_1()
-        .border_color(colors.border)
-        .child(crate::ui::message(text, color, &colors.design))
+fn loading_row(design: &Design) -> AnyElement {
+    crate::ui::list_row("file-history-loading", crate::ui::RowState::NORMAL, design)
+        .gap_2()
+        .h(design.px(38.0))
+        .mx(px(0.0))
+        .w_full()
+        .px_3()
+        .text_size(px(design.small()))
+        .text_color(design.muted)
+        .child(Spinner::new().color(design.muted))
+        .child(t!("common.loading").to_string())
         .into_any_element()
 }
 
-fn message(text: impl Into<gpui::SharedString>, color: Hsla, colors: &Colors) -> AnyElement {
-    crate::ui::message(text, color, &colors.design).into_any_element()
+fn list_message(text: impl Into<gpui::SharedString>, color: Hsla, design: &Design) -> AnyElement {
+    div()
+        .flex()
+        .w(design.px(LIST_WIDTH))
+        .flex_none()
+        .border_r_1()
+        .border_color(design.border)
+        .child(crate::ui::message(text, color, design))
+        .into_any_element()
 }
 
-#[derive(Clone)]
-struct Colors {
-    design: Design,
-    background: Hsla,
-    muted_foreground: Hsla,
-    border: Hsla,
-    title_bar: Hsla,
-    accent: Hsla,
-    danger: Hsla,
-    mono: SharedString,
-}
-
-impl Colors {
-    fn from_theme(theme: &Theme, settings: &Settings) -> Self {
-        let design = Design::new(theme, settings);
-        Self {
-            background: design.background,
-            muted_foreground: design.muted,
-            border: design.border,
-            title_bar: design.chrome,
-            accent: design.accent,
-            danger: design.remove_text,
-            mono: design.mono.clone(),
-            design,
-        }
-    }
+fn message(text: impl Into<gpui::SharedString>, color: Hsla, design: &Design) -> AnyElement {
+    crate::ui::message(text, color, design).into_any_element()
 }
 
 #[cfg(test)]

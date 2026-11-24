@@ -8,8 +8,9 @@ use lamina_core::HeadInfo;
 use lamina_core::Oid;
 use lamina_core::session::{RepoSnapshot, RepositorySession};
 
-use super::{Colors, PendingKind, WorktreePanel};
+use super::{PendingKind, WorktreePanel};
 use crate::repo_view::RepoView;
+use crate::style::Design;
 
 impl WorktreePanel {
     pub(super) fn commit_box(
@@ -17,7 +18,7 @@ impl WorktreePanel {
         entity: Entity<RepoView>,
         snapshot: &RepoSnapshot,
         cx: &mut Context<RepoView>,
-        colors: &Colors,
+        design: &Design,
     ) -> AnyElement {
         let Some(input) = self.message_input.clone() else {
             return div().into_any_element();
@@ -30,14 +31,14 @@ impl WorktreePanel {
             &message,
             snapshot.busy.is_some() || self.pending.is_some(),
         );
-        let limit = colors.design.summary_hint;
+        let limit = design.summary_hint;
         let length = summary_len(&message);
         let over = length > limit as usize;
         let hint = summary_hint(&message, limit);
 
         let amend_box = {
             let entity = entity.clone();
-            let colors = colors.clone();
+            let design = design.clone();
             let checked = self.amend;
             div()
                 .id("amend-checkbox")
@@ -46,23 +47,23 @@ impl WorktreePanel {
                 .gap_1()
                 .flex_none()
                 .cursor_pointer()
-                .text_size(colors.design.px(11.0))
-                .text_color(colors.foreground)
+                .text_size(design.px(11.0))
+                .text_color(design.text)
                 .on_click(move |_, window, cx| {
                     entity.update(cx, |this, cx| this.toggle_amend(window, cx));
                 })
                 .child(
                     div()
-                        .w(colors.design.px(12.0))
-                        .h(colors.design.px(12.0))
+                        .w(design.px(12.0))
+                        .h(design.px(12.0))
                         .flex()
                         .items_center()
                         .justify_center()
-                        .rounded(colors.design.px(3.0))
+                        .rounded(design.px(3.0))
                         .border_1()
-                        .border_color(colors.border)
-                        .text_size(colors.design.px(9.0))
-                        .text_color(colors.accent)
+                        .border_color(design.border)
+                        .text_size(design.px(9.0))
+                        .text_color(design.accent)
                         .child(if checked { "✓" } else { "" }),
                 )
                 .child(t!("worktree.amend").to_string())
@@ -84,11 +85,11 @@ impl WorktreePanel {
             .loading(committing)
             .child(
                 div()
-                    .px(colors.design.px(5.0))
-                    .py(colors.design.px(1.0))
-                    .rounded(colors.design.px(4.0))
-                    .bg(colors.accent_foreground.opacity(0.18))
-                    .text_size(colors.design.px(10.5))
+                    .px(design.px(5.0))
+                    .py(design.px(1.0))
+                    .rounded(design.px(4.0))
+                    .bg(design.on_accent.opacity(0.18))
+                    .text_size(design.px(10.5))
                     .child(commit_key_label()),
             )
             .on_click(move |_, _, cx| {
@@ -106,18 +107,18 @@ impl WorktreePanel {
 
         let status = match (&self.error, &self.notice) {
             (Some(error), _) => div()
-                .text_size(colors.design.px(10.0))
-                .text_color(colors.danger)
+                .text_size(design.px(10.0))
+                .text_color(design.danger())
                 .child(error.clone())
                 .into_any_element(),
             (None, Some(notice)) => div()
-                .text_size(colors.design.px(10.0))
-                .text_color(colors.success)
+                .text_size(design.px(10.0))
+                .text_color(design.success())
                 .child(notice.clone())
                 .into_any_element(),
             (None, None) => div()
-                .text_size(colors.design.px(10.0))
-                .text_color(colors.muted_foreground)
+                .text_size(design.px(10.0))
+                .text_color(design.muted)
                 .child(if snapshot.busy.is_some() {
                     t!("worktree.working").to_string()
                 } else {
@@ -133,21 +134,21 @@ impl WorktreePanel {
             .w_full()
             .gap_2()
             .p_3()
-            .bg(colors.title_bar)
+            .bg(design.chrome)
             .border_t_1()
-            .border_color(colors.border)
+            .border_color(design.border)
             .child(
                 div()
-                    .text_size(colors.design.px(11.0))
+                    .text_size(design.px(11.0))
                     .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(colors.muted_foreground)
+                    .text_color(design.muted)
                     .child(t!("worktree.commit_message").to_string()),
             )
             .child(
                 Textarea::new(&input)
-                    .h(colors.design.px(84.0))
+                    .h(design.px(84.0))
                     .w_full()
-                    .text_size(px(colors.design.code)),
+                    .text_size(px(design.code)),
             )
             .child(
                 div()
@@ -160,20 +161,16 @@ impl WorktreePanel {
                         row.child(
                             div()
                                 .flex_none()
-                                .text_size(colors.design.px(10.0))
-                                .text_color(colors.warning)
+                                .text_size(design.px(10.0))
+                                .text_color(design.warning())
                                 .child(hint),
                         )
                     })
                     .child(
                         div()
                             .flex_none()
-                            .text_size(colors.design.px(11.0))
-                            .text_color(if over {
-                                colors.warning
-                            } else {
-                                colors.muted_foreground
-                            })
+                            .text_size(design.px(11.0))
+                            .text_color(if over { design.warning() } else { design.muted })
                             .child(format!("{length} / {limit}")),
                     )
                     .child(div().flex_1())
