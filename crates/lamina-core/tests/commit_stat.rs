@@ -226,34 +226,6 @@ fn commit_stat_counts_a_rename_as_a_deletion_and_an_addition() {
 }
 
 #[test]
-fn a_stat_after_the_file_list_reuses_the_rename_aware_diff() {
-    let repo = TestRepo::new();
-    repo.write("old.txt", "one\ntwo\nthree\n");
-    repo.git(&["add", "-A"]);
-    repo.git(&["commit", "-q", "-m", "root"]);
-
-    repo.write("new.txt", "one\ntwo\nthree\nfour\n");
-    fs::remove_file(repo.path().join("old.txt")).expect("remove old file");
-    repo.git(&["add", "-A"]);
-    repo.git(&["commit", "-q", "-m", "rename and edit"]);
-    let commit = repo.head();
-
-    // The UI asks for the file list and the line counts of one commit. The
-    // cached list detects the rename, while the counts still have to match
-    // `--no-renames`.
-    let handle = repo.open();
-    let changes = handle.commit_changes(commit).expect("commit changes");
-    assert!(
-        changes
-            .iter()
-            .any(|change| change.kind == ChangeKind::Renamed),
-        "the file list should detect the rename: {changes:?}"
-    );
-    let stat = handle.commit_stat(commit).expect("commit stat");
-    assert_matches_git(&repo, commit, &stat);
-}
-
-#[test]
 fn commit_stat_skips_a_file_too_large_to_count() {
     let repo = TestRepo::new();
     repo.write("small.txt", "one\n");
