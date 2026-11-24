@@ -39,8 +39,8 @@ use crate::worktree_panel::MainMode;
 
 impl Render for RepoView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let started = self.metrics.begin_frame();
-        self.target_frame_ms = RepoView::target_frame_ms(window, cx);
+        let started = self.harness.metrics.begin_frame();
+        self.harness.target_frame_ms = RepoView::target_frame_ms(window, cx);
         self.sync_title(window);
         // A message an action left behind retires on its own; doing it before
         // the bar is built keeps a stale line from being drawn one more frame.
@@ -56,15 +56,15 @@ impl Render for RepoView {
             self.lanes.observe(&snapshot.commits);
         }
 
-        if self.overlay && self.metrics.log_due() {
-            let stats = self.metrics.stats();
+        if self.harness.overlay && self.harness.metrics.log_due() {
+            let stats = self.harness.metrics.stats();
             eprintln!(
                 "frame {:.2} ms ({:.1} fps, p95 {:.2} ms) · build {:.2} ms",
                 stats.frame_ms, stats.fps, stats.p95_ms, stats.render_ms
             );
         }
 
-        if self.smoke {
+        if self.harness.smoke {
             self.advance_smoke(cx);
         }
 
@@ -370,13 +370,13 @@ impl Render for RepoView {
             root = root.child(body).child(self.status_bar(&design));
         }
 
-        if self.overlay {
+        if self.harness.overlay {
             root = root.child(self.overlay_panel(&design));
         }
 
-        self.metrics.end_frame(started);
+        self.harness.metrics.end_frame(started);
 
-        if self.overlay && !self.finished {
+        if self.harness.overlay && !self.harness.finished {
             window.request_animation_frame();
         }
 
@@ -386,8 +386,8 @@ impl Render for RepoView {
 
 impl RepoView {
     fn overlay_panel(&self, design: &Design) -> AnyElement {
-        let stats = self.metrics.stats();
-        let target = self.target_frame_ms;
+        let stats = self.harness.metrics.stats();
+        let target = self.harness.target_frame_ms;
         let target_hz = if target > 0.0 { 1000.0 / target } else { 60.0 };
         let commits = self.commit_count();
 
@@ -421,7 +421,7 @@ impl RepoView {
                     "chrome.frame_render",
                     render = format!("{:.2}", stats.render_ms),
                     samples = stats.samples,
-                    frames = self.metrics.frames()
+                    frames = self.harness.metrics.frames()
                 )
                 .to_string(),
             )

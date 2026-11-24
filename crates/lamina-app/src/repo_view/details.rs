@@ -190,7 +190,7 @@ impl RepoView {
         if let (Some(session), Some(ticket)) = (self.session.as_ref(), previous) {
             session.cancel_query(ticket);
         }
-        if self.smoke {
+        if self.harness.smoke {
             return;
         }
         let (Some(commit), Some(session)) = (commit, self.session.as_ref()) else {
@@ -208,7 +208,7 @@ impl RepoView {
             return;
         };
         // The smoke run measures the renderer, not git reads.
-        if self.smoke {
+        if self.harness.smoke {
             return;
         }
         let Some(session) = self.session.as_ref() else {
@@ -373,7 +373,7 @@ impl RepoView {
             }
         }
 
-        if self.fake.is_some() {
+        if self.harness.fake.is_some() {
             block = block.child(
                 div()
                     .text_size(design.px(11.0))

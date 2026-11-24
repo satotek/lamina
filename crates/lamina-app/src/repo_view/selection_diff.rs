@@ -118,7 +118,7 @@ impl RepoView {
     /// Plans the current multi-selection, unless the range already on screen is
     /// for it. Cheap to call from every selection change and repaint.
     pub(super) fn sync_selection_diff(&mut self, cx: &mut Context<Self>) {
-        if !self.selection.is_multi() || self.smoke || self.session.is_none() {
+        if !self.selection.is_multi() || self.harness.smoke || self.session.is_none() {
             self.drop_selection_diff();
             return;
         }

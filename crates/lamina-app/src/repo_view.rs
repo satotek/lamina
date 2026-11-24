@@ -17,6 +17,7 @@ mod common;
 pub(crate) mod compare;
 mod custom_commands;
 mod details;
+mod dev_harness;
 mod diff_pane;
 mod edit_dialog;
 mod editor;
@@ -66,7 +67,7 @@ use lamina_core::lfs::{LfsInfo, LfsLock};
 use lamina_core::repo::{SubmoduleInfo, WorktreeInfo};
 use lamina_core::session::{
     DiffOptions, DiffRequest, DiffTicket, DiffView, Operation, OperationId, QueryTicket,
-    RepoLocation, RepoReader, RepositorySession, Session, SessionEvent, SessionOptions,
+    RepoLocation, RepositorySession, Session, SessionEvent, SessionOptions,
 };
 use lamina_core::{FileChange, HeadInfo, Oid, RefKind, RepoState};
 
@@ -74,18 +75,18 @@ use crate::activity::{Activity, ActivityKind};
 use crate::branch_switcher::BranchSwitcher;
 use crate::branches::{BranchStart, Branches};
 use crate::data::{self, LaneWidth, Source};
-use crate::debug_launch::{self, DebugDialog, DebugLaunch, SnapshotRevMatch, TreeTarget};
+use crate::debug_launch::{self, DebugDialog, DebugLaunch, TreeTarget};
 use crate::diff_view::{self, DiffContext, Row as DiffRow};
 use crate::fake::{self, FakeRepo};
 use crate::file_history::FileHistory;
 use crate::image_diff;
-use crate::metrics::FrameMetrics;
 use crate::pull_requests::{PullRequests, RefreshCause};
 use crate::remote::Remote;
 use crate::search::SearchState;
 use crate::worktree_panel::{MainMode, WorktreePanel};
 use commit_selection::CommitSelection;
 
+use dev_harness::{DebugLaunchRunner, DevHarness, RevSlot};
 use follow_up::{FollowUp, FollowUps};
 use in_progress::{FinishedOperation, InProgress};
 
@@ -395,7 +396,6 @@ pub struct RepoView {
     /// and a fresh session restarts those at 1, so an answer has to prove it
     /// belongs to the session on screen before it reaches it.
     session_epoch: u64,
-    fake: Option<Rc<FakeRepo>>,
     error: Option<(String, String)>,
     name: Option<String>,
     /// The workspace hosting this view, weak so swapping the view releases it.
@@ -547,8 +547,6 @@ pub struct RepoView {
     diff_error: Option<String>,
     /// The mode, zoom and swipe position of the image diff on screen.
     pub(crate) image_diff: image_diff::State,
-    /// Pre-flattened synthetic diffs so `--fake` does not rebuild one per frame.
-    fake_diffs: Rc<Vec<Rc<Vec<DiffRow>>>>,
 
     last_command: Option<String>,
     pub(crate) status_error: Option<String>,
@@ -569,12 +567,9 @@ pub struct RepoView {
     remote_copy_task: Option<Task<()>>,
 
     title: String,
-    target_frame_ms: f32,
-    overlay: bool,
-    smoke: bool,
-    finished: bool,
-    metrics: FrameMetrics,
-    debug_launch: Option<DebugLaunchRunner>,
+    /// The switches and state of the dev and test entry points (`--fake`,
+    /// `LAMINA_SMOKE`, the frame overlay, `--debug-launch`).
+    harness: DevHarness,
 
     _appearance: Subscription,
     /// Notifies the view when the settings change, so sizes and colours that
@@ -695,7 +690,6 @@ impl RepoView {
         let mut view = Self {
             session: None,
             session_epoch: 0,
-            fake: None,
             error: None,
             name: None,
             workspace,
@@ -770,7 +764,6 @@ impl RepoView {
             diff_context: DiffContext::default(),
             diff_error: None,
             image_diff: image_diff::State::new(),
-            fake_diffs: Rc::new(Vec::new()),
             last_command: None,
             status_error: None,
             multi_pick: None,
@@ -780,12 +773,7 @@ impl RepoView {
             remote_copy: None,
             remote_copy_task: None,
             title,
-            target_frame_ms: 1000.0 / 60.0,
-            overlay: smoke,
-            smoke,
-            finished: false,
-            metrics: FrameMetrics::default(),
-            debug_launch: None,
+            harness: DevHarness::new(smoke),
             _appearance: appearance,
             _settings: settings,
             _activation: activation,
@@ -816,7 +804,7 @@ impl RepoView {
 
         match launch {
             Launch::Fake { repo } => {
-                view.fake_diffs = Rc::new(
+                view.harness.fake_diffs = Rc::new(
                     (0..8u32)
                         .map(|seed| Rc::new(diff_view::flatten(&fake::sample_diff(seed))))
                         .collect::<Vec<_>>(),
@@ -824,7 +812,7 @@ impl RepoView {
                 // The synthetic graph knows its widest row; a real one learns it
                 // from the chunks as they arrive.
                 view.lanes.observe_max(repo.max_width);
-                view.fake = Some(repo);
+                view.harness.fake = Some(repo);
                 view.selected = Some(0);
             }
             Launch::Repo {
@@ -843,7 +831,7 @@ impl RepoView {
                         let is_snapshot = matches!(event, SessionEvent::SnapshotUpdated { .. });
                         let Ok(run_debug) = this.update(cx, |this, cx| {
                             this.on_event(event, cx);
-                            is_snapshot && this.active && this.debug_launch.is_some()
+                            is_snapshot && this.active && this.harness.debug_launch.is_some()
                         }) else {
                             break;
                         };
@@ -1133,7 +1121,7 @@ impl RepoView {
     /// one of them is on screen, and [`Self::expand_diff_gap`] picks the one
     /// whose rows it should rebuild.
     pub(crate) fn gap_handler(&self) -> Option<diff_view::GapHandler> {
-        if self.fake.is_some() {
+        if self.harness.fake.is_some() {
             return None;
         }
         let entity = self.entity();
@@ -1362,7 +1350,7 @@ impl RepoView {
     }
 
     pub(crate) fn source(&self) -> Option<Source> {
-        if let Some(fake) = &self.fake {
+        if let Some(fake) = &self.harness.fake {
             Some(Source::Fake(Rc::clone(fake)))
         } else {
             self.session
@@ -1529,14 +1517,14 @@ impl RepoView {
                     self.notify_if_active(cx);
                     return;
                 }
-                if self.debug_launch.is_some()
+                if self.harness.debug_launch.is_some()
                     && self
                         .session
                         .as_ref()
                         .is_none_or(|session| session.snapshot().head.is_none())
                 {
                     eprintln!("debug-launch: error: repository load failed: {error}");
-                    self.debug_launch = None;
+                    self.harness.debug_launch = None;
                 }
                 self.status_error = Some(error);
                 self.notify_if_active(cx);
@@ -2087,7 +2075,7 @@ impl RepoView {
 
     /// Whether the synthetic uncommitted row sits at the top of the commit list.
     pub(crate) fn has_uncommitted_row(&self, cx: &App) -> bool {
-        if self.smoke || self.fake.is_some() || self.search.filter().is_some() {
+        if self.harness.smoke || self.harness.fake.is_some() || self.search.filter().is_some() {
             return false;
         }
         if !crate::settings::Settings::get(cx)
@@ -2316,7 +2304,7 @@ impl RepoView {
         // The smoke run scrolls as fast as it can; loading a file list and a
         // diff for every row would measure git instead of the renderer.
         if let Some(commit) = commit
-            && !self.smoke
+            && !self.harness.smoke
             && !multi
         {
             self.load_files(commit, cx);
@@ -2796,7 +2784,7 @@ impl RepoView {
     }
 
     fn toggle_frame_stats(&mut self, cx: &mut Context<Self>) {
-        self.overlay = !self.overlay;
+        self.harness.overlay = !self.harness.overlay;
         cx.notify();
     }
 
@@ -2972,32 +2960,32 @@ impl RepoView {
             // Selection only: the smoke run measures scrolling, not git.
             self.selected = Some(next);
         }
-        if self.metrics.frames() >= SMOKE_FRAMES {
+        if self.harness.metrics.frames() >= SMOKE_FRAMES {
             self.finish_smoke_run(cx);
         }
     }
 
     fn finish_smoke_run(&mut self, cx: &mut Context<Self>) {
-        if self.finished {
+        if self.harness.finished {
             return;
         }
-        self.finished = true;
-        let stats = self.metrics.stats();
+        self.harness.finished = true;
+        let stats = self.harness.metrics.stats();
         eprintln!(
             "smoke: {} frames, {:.2} ms/frame mean, {:.1} fps, p95 {:.2} ms, build {:.2} ms, target {:.1} ms, {} commits",
-            self.metrics.frames(),
+            self.harness.metrics.frames(),
             stats.frame_ms,
             stats.fps,
             stats.p95_ms,
             stats.render_ms,
-            self.target_frame_ms,
+            self.harness.target_frame_ms,
             self.commit_count()
         );
         cx.quit();
     }
 
     fn sync_title(&mut self, window: &mut Window) {
-        let title = if self.fake.is_some() {
+        let title = if self.harness.fake.is_some() {
             t!("history.window_synthetic").to_string()
         } else if let Some(name) = &self.name {
             // Runs every frame. A remote tab with no session has no head, and
@@ -3042,7 +3030,7 @@ impl RepoView {
         }
         if self.session.is_none() {
             if debug.has_repo_actions() {
-                if self.fake.is_some() {
+                if self.harness.fake.is_some() {
                     eprintln!(
                         "debug-launch: error: repository options require a real repository (cannot be used with --fake)"
                     );
@@ -3060,7 +3048,7 @@ impl RepoView {
             return;
         }
 
-        self.debug_launch = Some(DebugLaunchRunner::new(debug));
+        self.harness.debug_launch = Some(DebugLaunchRunner::new(debug));
         if self
             .session
             .as_ref()
@@ -3072,7 +3060,7 @@ impl RepoView {
 
     fn step_debug_launch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session) = self.session.as_ref() else {
-            self.debug_launch = None;
+            self.harness.debug_launch = None;
             return;
         };
         let snapshot = session.snapshot();
@@ -3081,7 +3069,7 @@ impl RepoView {
         if snapshot.head.is_none() {
             return;
         }
-        let Some(mut runner) = self.debug_launch.take() else {
+        let Some(mut runner) = self.harness.debug_launch.take() else {
             return;
         };
 
@@ -3126,7 +3114,7 @@ impl RepoView {
         };
 
         if !select_ready || !tree_ready || !blame_ready {
-            self.debug_launch = Some(runner);
+            self.harness.debug_launch = Some(runner);
             return;
         }
 
@@ -3313,7 +3301,7 @@ impl RepoView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(runner) = self.debug_launch.as_mut() else {
+        let Some(runner) = self.harness.debug_launch.as_mut() else {
             return;
         };
         match slot {
@@ -3331,110 +3319,6 @@ impl RepoView {
             }
         }
         self.step_debug_launch(window, cx);
-    }
-}
-
-#[derive(Clone, Copy)]
-enum RevSlot {
-    Select(usize),
-    Tree,
-    Blame,
-}
-
-struct DebugLaunchRunner {
-    launch: DebugLaunch,
-    /// One slot per comma-separated `--select` revision; a multi-selection
-    /// needs every revision in the loaded history before it can be applied.
-    select_oids: Vec<Option<Result<Oid, String>>>,
-    select_resolving: bool,
-    tree_oid: Option<Result<Oid, String>>,
-    tree_resolving: bool,
-    blame_oid: Option<Result<Oid, String>>,
-    blame_resolving: bool,
-}
-
-impl DebugLaunchRunner {
-    fn new(launch: DebugLaunch) -> Self {
-        let select_oids = launch
-            .select
-            .as_deref()
-            .map(debug_launch::select_revs)
-            .map(|revs| vec![None; revs.len()])
-            .unwrap_or_default();
-        Self {
-            launch,
-            select_oids,
-            select_resolving: false,
-            tree_oid: None,
-            tree_resolving: false,
-            blame_oid: None,
-            blame_resolving: false,
-        }
-    }
-
-    /// Returns `true` when this revision is settled (either resolved and present
-    /// in `snapshot.commit_index`, or resolved to a final error / missing after
-    /// `snapshot.commits.complete`).
-    fn resolve_rev(
-        &mut self,
-        rev: &str,
-        which: RevSlot,
-        snapshot: &lamina_core::session::RepoSnapshot,
-        repo: Arc<dyn RepoReader>,
-        window: &mut Window,
-        cx: &mut Context<RepoView>,
-    ) -> bool {
-        let (slot, resolving) = match which {
-            RevSlot::Select(index) => (&mut self.select_oids[index], &mut self.select_resolving),
-            RevSlot::Tree => (&mut self.tree_oid, &mut self.tree_resolving),
-            RevSlot::Blame => (&mut self.blame_oid, &mut self.blame_resolving),
-        };
-
-        if slot.is_none() {
-            if *resolving {
-                return false;
-            }
-            match debug_launch::resolve_in_snapshot(snapshot, rev) {
-                SnapshotRevMatch::Found(oid) => *slot = Some(Ok(oid)),
-                SnapshotRevMatch::Ambiguous(count) => {
-                    *slot = Some(Err(format!(
-                        "ambiguous revision '{rev}' ({count} matching commits)"
-                    )));
-                }
-                SnapshotRevMatch::NotFound => {
-                    *resolving = true;
-                    let window_handle = window.window_handle();
-                    let rev_owned = rev.to_owned();
-                    cx.spawn(async move |this, cx| {
-                        let resolved = cx
-                            .background_executor()
-                            .spawn(async move {
-                                match repo.resolve_commit(&rev_owned) {
-                                    Ok(Some(id)) => Ok(id),
-                                    Ok(None) => Err(format!(
-                                        "revision '{rev_owned}' did not resolve to a commit"
-                                    )),
-                                    Err(err) => Err(err.to_string()),
-                                }
-                            })
-                            .await;
-                        let _ = window_handle.update(cx, |_, window, cx| {
-                            let _ = this.update(cx, |this, cx| {
-                                this.finish_debug_rev_lookup(which, resolved, window, cx);
-                            });
-                        });
-                    })
-                    .detach();
-                    return false;
-                }
-            }
-        }
-
-        match slot {
-            Some(Ok(oid)) => snapshot.commit_index.contains_key(oid) || snapshot.commits.complete,
-            Some(Err(_)) => true,
-            None => false,
-        }
     }
 }
 
@@ -3475,6 +3359,7 @@ fn command_line(record: &CommandRecord) -> String {
 mod tests {
     use super::*;
     use lamina_core::diff::FileDiff;
+    use lamina_core::session::RepoReader;
     use std::path::PathBuf;
     use std::time::{Duration, SystemTime};
 

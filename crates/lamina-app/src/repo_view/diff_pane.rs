@@ -25,9 +25,13 @@ impl RepoView {
             return self.blame_pane(design, cx);
         }
 
-        let rows = if self.fake.is_some() {
+        let rows = if self.harness.fake.is_some() {
             self.selected
-                .and_then(|index| self.fake_diffs.get(index % self.fake_diffs.len().max(1)))
+                .and_then(|index| {
+                    self.harness
+                        .fake_diffs
+                        .get(index % self.harness.fake_diffs.len().max(1))
+                })
                 .map_or_else(|| Rc::new(Vec::new()), Rc::clone)
         } else {
             Rc::clone(&self.diff_rows)
@@ -117,7 +121,7 @@ impl RepoView {
                         .flex_1()
                         .min_h_0()
                         .child(self.diff_header(design, rows.len(), cx))
-                        .child(if self.fake.is_some() {
+                        .child(if self.harness.fake.is_some() {
                             self.diff_rows_list(rows, None, design, cx)
                         } else {
                             self.real_diff_body(design, cx)
@@ -163,8 +167,8 @@ impl RepoView {
     }
 
     fn diff_header(&self, design: &Design, row_count: usize, cx: &App) -> AnyElement {
-        let (path, kind) = match (&self.fake, &self.files, self.selected_file) {
-            _ if self.fake.is_some() => (t!("history.synthetic_diff").to_string(), None),
+        let (path, kind) = match (&self.harness.fake, &self.files, self.selected_file) {
+            _ if self.harness.fake.is_some() => (t!("history.synthetic_diff").to_string(), None),
             (_, Some(files), Some(index)) => match files.get(index) {
                 Some(change) => (change.path.clone(), Some(change.kind)),
                 None => (t!("compare.no_file_selected").to_string(), None),
@@ -172,7 +176,7 @@ impl RepoView {
             _ => (t!("compare.no_file_selected").to_string(), None),
         };
         let (name, dir) = style::path_parts(&path);
-        let right = match self.fake {
+        let right = match self.harness.fake {
             Some(_) => t!(
                 &crate::i18n::count_key("diff.header.rows", row_count),
                 count = row_count
@@ -240,7 +244,9 @@ impl RepoView {
                     .child(right),
             )
             .child(
-                if self.fake.is_none() && self.diff.view().is_some_and(|view| !view.diff.binary) {
+                if self.harness.fake.is_none()
+                    && self.diff.view().is_some_and(|view| !view.diff.binary)
+                {
                     let active = self.diff_context.is_whole_file();
                     let entity = self.entity();
                     ui::button("toggle-whole-file", t!("history.whole_file").to_string())
