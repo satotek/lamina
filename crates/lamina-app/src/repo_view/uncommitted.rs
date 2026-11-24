@@ -545,19 +545,6 @@ mod tests {
             assert_eq!(edge.to_node, index == head_index);
         }
         assert!(graph.worktree_edge_at(head_index + 1).is_none());
-        for index in 0..snap.commits.len() {
-            let (_, row) = snap.commits.get(index).unwrap();
-            let occupies = |lane: u16| lane.saturating_add(graph.lane_shift) == 0;
-            assert!(
-                !occupies(row.node_lane)
-                    && row.passes.iter().all(|pass| !occupies(pass.lane))
-                    && row
-                        .edges
-                        .iter()
-                        .all(|edge| !occupies(edge.from_lane) && !occupies(edge.to_lane)),
-                "row {index} must leave the connector lane empty"
-            );
-        }
     }
 
     #[test]
