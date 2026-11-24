@@ -19,11 +19,11 @@ use std::sync::Arc;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, FocusHandle, Hsla, InteractiveElement, ParentElement,
-    SharedString, Styled, Subscription, UniformListScrollHandle, Window, actions, div,
+    AnyElement, App, Context, Entity, FocusHandle, InteractiveElement, ParentElement, Styled,
+    Subscription, UniformListScrollHandle, Window, actions, div,
 };
+use gpui_component::ActiveTheme as _;
 use gpui_component::input::{InputEvent, TextareaState};
-use gpui_component::{ActiveTheme as _, Theme};
 use lamina_core::diff::{Expansion, GapAction};
 use lamina_core::lfs::{LfsInfo, LfsLock};
 use lamina_core::patch::LineSelection;
@@ -1820,50 +1820,13 @@ fn discard_staged_detail(paths: &[String]) -> String {
 // Rendering
 // ---------------------------------------------------------------------------
 
-#[derive(Clone)]
-struct Colors {
-    /// The shared design palette, sizes and history settings.
-    design: Design,
-    background: Hsla,
-    foreground: Hsla,
-    muted_foreground: Hsla,
-    border: Hsla,
-    title_bar: Hsla,
-    accent: Hsla,
-    accent_foreground: Hsla,
-    danger: Hsla,
-    warning: Hsla,
-    success: Hsla,
-    mono: SharedString,
-}
-
-impl Colors {
-    fn from_theme(theme: &Theme, settings: &Settings) -> Self {
-        let design = Design::new(theme, settings);
-        Self {
-            background: design.background,
-            foreground: design.text,
-            muted_foreground: design.muted,
-            border: design.border,
-            title_bar: design.chrome,
-            accent: design.accent,
-            accent_foreground: design.on_accent,
-            danger: design.remove_text,
-            warning: design.tag_text,
-            success: design.add_text,
-            mono: design.mono.clone(),
-            design,
-        }
-    }
-}
-
 /// `--fake` has no session, but the view still opens; it explains why it is
 /// empty and keeps a way back to the synthetic history.
 fn synthetic_state(
     entity: Entity<RepoView>,
     panel: &WorktreePanel,
     cx: &mut Context<RepoView>,
-    colors: &Colors,
+    design: &Design,
 ) -> AnyElement {
     let back = {
         let entity = entity.clone();
@@ -1892,17 +1855,17 @@ fn synthetic_state(
         div()
             .flex()
             .items_center()
-            .h(colors.design.px(30.0))
+            .h(design.px(30.0))
             .flex_none()
             .px_3()
-            .bg(colors.title_bar)
+            .bg(design.chrome)
             .border_b_1()
-            .border_color(colors.border)
+            .border_color(design.border)
             .child(back),
     )
     .child(crate::ui::empty_state(
         t!("worktree.synthetic_empty").to_string(),
-        &colors.design,
+        design,
     ))
     .into_any_element()
 }
@@ -1917,9 +1880,9 @@ impl RepoView {
         self.worktree.flush_input(window, cx);
         self.worktree.ensure_focus(cx);
 
-        let colors = Colors::from_theme(cx.theme(), Settings::get(cx));
+        let design = Design::new(cx.theme(), Settings::get(cx));
         let Some(session) = self.session.as_ref() else {
-            return synthetic_state(entity, &self.worktree, cx, &colors);
+            return synthetic_state(entity, &self.worktree, cx, &design);
         };
         let snapshot = session.snapshot();
         // The conflict editor names the commits a stopped rebase, cherry-pick
@@ -1970,7 +1933,7 @@ impl WorktreePanel {
         locking_available: bool,
         cx: &mut Context<RepoView>,
     ) -> AnyElement {
-        let colors = Colors::from_theme(cx.theme(), Settings::get(cx));
+        let design = Design::new(cx.theme(), Settings::get(cx));
         let selected_conflict = self.selected_conflict().map(str::to_owned);
         let full_window = self.conflicts.is_full_window();
         let mut body = div()
@@ -2052,7 +2015,7 @@ impl WorktreePanel {
             body = body.child(self.lists(
                 entity.clone(),
                 snapshot,
-                &colors,
+                &design,
                 &lfs,
                 &locks,
                 locking_available,
@@ -2068,7 +2031,7 @@ impl WorktreePanel {
                 &self.image_diff,
                 cx,
             ),
-            None => self.diff_pane(entity.clone(), snapshot, &colors, cx),
+            None => self.diff_pane(entity.clone(), snapshot, &design, cx),
         });
         if let Some(focus) = &self.focus {
             body = body.track_focus(focus);
@@ -2081,11 +2044,11 @@ impl WorktreePanel {
             .flex_1()
             .min_w_0()
             .min_h_0()
-            .bg(colors.background);
+            .bg(design.background);
 
         root = root.child(body);
         if !full_window {
-            root = root.child(self.commit_box(entity.clone(), snapshot, cx, &colors));
+            root = root.child(self.commit_box(entity.clone(), snapshot, cx, &design));
         }
 
         root.into_any_element()

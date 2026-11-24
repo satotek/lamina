@@ -17,8 +17,7 @@ use std::collections::BTreeSet;
 
 use gpui::prelude::*;
 use gpui::{
-    AnyElement, App, Context, Entity, FontWeight, Hsla, IntoElement, Window, actions, div, px,
-    relative,
+    AnyElement, App, Context, Entity, FontWeight, IntoElement, Window, actions, div, relative,
 };
 use gpui_component::dialog::DialogFooter;
 use gpui_component::notification::Notification;
@@ -31,6 +30,7 @@ use log::{info, warn};
 use crate::activity::ActivityKind;
 use crate::data::Source;
 use crate::repo_view::RepoView;
+use crate::style::Design;
 
 /// Width of the slim progress bar in the status bar.
 const PROGRESS_WIDTH: f32 = 90.0;
@@ -451,23 +451,6 @@ pub(crate) struct Remote {
     streak: FailureStreak,
 }
 
-/// Palette subset the remote controls paint with, taken from the window
-/// chrome's palette so the title bar and status bar read as one surface.
-pub(crate) struct Colors {
-    pub(crate) foreground: Hsla,
-    pub(crate) muted_foreground: Hsla,
-    pub(crate) border: Hsla,
-    pub(crate) accent: Hsla,
-    pub(crate) accent_foreground: Hsla,
-    pub(crate) zoom: f32,
-}
-
-impl Colors {
-    fn px(&self, value: f32) -> gpui::Pixels {
-        px(value * self.zoom)
-    }
-}
-
 impl Remote {
     pub(crate) fn is_running(&self) -> bool {
         self.running.is_some()
@@ -632,18 +615,18 @@ impl Remote {
     }
 
     /// The status bar's operation segment, and nothing while idle.
-    fn status(&self, colors: &Colors) -> Option<AnyElement> {
+    fn status(&self, design: &Design) -> Option<AnyElement> {
         let running = self.running.as_ref()?;
         let mut row = div()
             .flex()
             .items_center()
             .gap_2()
             .flex_none()
-            .max_w(colors.px(560.0))
+            .max_w(design.px(560.0))
             .child(
                 div()
                     .flex_none()
-                    .text_color(colors.accent)
+                    .text_color(design.accent)
                     .child(running.kind.label()),
             );
         if let Some(text) = &running.text {
@@ -654,22 +637,22 @@ impl Remote {
                 .child(
                     div()
                         .flex_none()
-                        .w(colors.px(PROGRESS_WIDTH))
-                        .h(colors.px(4.0))
+                        .w(design.px(PROGRESS_WIDTH))
+                        .h(design.px(4.0))
                         .rounded_full()
-                        .bg(colors.border)
+                        .bg(design.border)
                         .child(
                             div()
                                 .h_full()
                                 .rounded_full()
-                                .bg(colors.accent)
+                                .bg(design.accent)
                                 .w(relative(percent as f32 / 100.0)),
                         ),
                 )
                 .child(
                     div()
                         .flex_none()
-                        .text_color(colors.muted_foreground)
+                        .text_color(design.muted)
                         .child(format!("{percent}%")),
                 );
         }
@@ -763,7 +746,7 @@ impl RepoView {
     pub(crate) fn remote_buttons(
         &self,
         source: Option<&Source>,
-        colors: &Colors,
+        design: &Design,
         compact: bool,
     ) -> AnyElement {
         let targets = source.map_or_else(Targets::default, |source| match source {
@@ -795,9 +778,9 @@ impl RepoView {
                 .flex_col()
                 .items_center()
                 .justify_center()
-                .gap(colors.px(2.0))
-                .text_size(colors.px(10.0))
-                .child(Icon::new(icon_name).with_size(colors.px(16.0)));
+                .gap(design.px(2.0))
+                .text_size(design.px(10.0))
+                .child(Icon::new(icon_name).with_size(design.px(16.0)));
             if !compact {
                 content = content.child(label.clone());
             }
@@ -808,33 +791,29 @@ impl RepoView {
                 content = content.child(
                     div()
                         .absolute()
-                        .top(colors.px(top))
-                        .right(colors.px(right))
-                        .min_w(colors.px(14.0))
-                        .h(colors.px(14.0))
-                        .px(colors.px(3.0))
+                        .top(design.px(top))
+                        .right(design.px(right))
+                        .min_w(design.px(14.0))
+                        .h(design.px(14.0))
+                        .px(design.px(3.0))
                         .rounded_full()
-                        .bg(colors.accent)
-                        .text_color(colors.accent_foreground)
-                        .text_size(colors.px(9.0))
+                        .bg(design.accent)
+                        .text_color(design.on_accent)
+                        .text_size(design.px(9.0))
                         .font_weight(FontWeight::SEMIBOLD)
                         .child(count.to_string()),
                 );
             }
             crate::ui::content_button(id)
                 .ghost()
-                .w(colors.px(if compact {
+                .w(design.px(if compact {
                     ICON_BUTTON_WIDTH
                 } else {
                     LABELLED_BUTTON_WIDTH
                 }))
-                .h(colors.px(40.0))
+                .h(design.px(40.0))
                 .p_0()
-                .text_color(if enabled {
-                    colors.foreground
-                } else {
-                    colors.muted_foreground
-                })
+                .text_color(if enabled { design.text } else { design.muted })
                 .disabled(!enabled)
                 .tooltip(tooltip)
                 .on_click(move |_, window, cx| {
@@ -892,7 +871,7 @@ impl RepoView {
         div()
             .flex()
             .items_center()
-            .gap(colors.px(2.0))
+            .gap(design.px(2.0))
             .flex_none()
             .child(fetch)
             .child(pull)
@@ -901,8 +880,8 @@ impl RepoView {
     }
 
     /// The status bar's running-operation segment.
-    pub(crate) fn remote_status(&self, colors: &Colors) -> Option<AnyElement> {
-        self.remote.status(colors)
+    pub(crate) fn remote_status(&self, design: &Design) -> Option<AnyElement> {
+        self.remote.status(design)
     }
 
     /// Why a remote command cannot run right now, if it cannot.

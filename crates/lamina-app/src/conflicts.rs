@@ -947,7 +947,7 @@ fn install_editor(model: MergeModel, cx: &mut Context<RepoView>) -> Option<Merge
 }
 
 /// The fill and the gutter mark for one result line.
-fn mark_colors(mark: LineMark, colors: &Colors) -> (Hsla, Hsla) {
+fn mark_colors(mark: LineMark, colors: &ConflictColors) -> (Hsla, Hsla) {
     match mark {
         LineMark::Side(Side::A) => (colors.side_a_soft, colors.side_a),
         LineMark::Side(Side::B) => (colors.side_b_soft, colors.side_b),
@@ -959,7 +959,7 @@ fn mark_colors(mark: LineMark, colors: &Colors) -> (Hsla, Hsla) {
         LineMark::AutoMerged(Side::B) => {
             (colors.side_b_soft.opacity(0.45), colors.side_b.opacity(0.5))
         }
-        LineMark::Unresolved => (colors.warning_soft, colors.warning),
+        LineMark::Unresolved => (colors.design.warning_soft(), colors.design.warning()),
     }
 }
 
@@ -968,7 +968,7 @@ fn mark_colors(mark: LineMark, colors: &Colors) -> (Hsla, Hsla) {
 /// Consecutive lines with the same origin share one decoration, so a resolved
 /// conflict is one fill and one gutter mark per side rather than one per line.
 fn refresh_decorations(editor: &MergeEditor, cx: &mut App) {
-    let colors = Colors::from_theme(cx.theme(), Settings::get(cx));
+    let colors = ConflictColors::from_theme(cx.theme(), Settings::get(cx));
     let text = editor.model.text();
     let ranges = line_ranges(&text);
     let marks = editor.model.result_marks();
@@ -1545,18 +1545,12 @@ impl RepoView {
 // Rendering.
 // ---------------------------------------------------------------------------
 
+/// The conflict panes' palette: the shared design plus the colours only the
+/// merge views paint with.
 #[derive(Clone)]
-struct Colors {
+struct ConflictColors {
+    /// The shared design palette, sizes and history settings.
     design: Design,
-    background: Hsla,
-    muted: Hsla,
-    muted_foreground: Hsla,
-    border: Hsla,
-    danger: Hsla,
-    warning: Hsla,
-    /// The wash behind unresolved result lines.
-    warning_soft: Hsla,
-    success: Hsla,
     /// Side A and B each keep one colour everywhere: the pane header, the
     /// conflict block on that side and the result line the side produced.
     side_a: Hsla,
@@ -1574,18 +1568,10 @@ struct Colors {
     diff: DiffColors,
 }
 
-impl Colors {
+impl ConflictColors {
     fn from_theme(theme: &Theme, settings: &Settings) -> Self {
         let design = Design::new(theme, settings);
         Self {
-            background: design.background,
-            muted: design.field,
-            muted_foreground: design.muted,
-            border: design.border,
-            danger: design.remove_text,
-            warning: design.tag_text,
-            warning_soft: design.tag_background,
-            success: design.add_text,
             side_a: design.accent,
             side_a_soft: design.accent_soft,
             side_a_selected: design.selected,
@@ -1630,7 +1616,7 @@ fn conflict_row(
     path: String,
     kind: ConflictKind,
     selected: Option<&str>,
-    colors: &Colors,
+    colors: &ConflictColors,
 ) -> AnyElement {
     let is_selected = selected == Some(path.as_str());
     let entity = entity.clone();
@@ -1662,7 +1648,7 @@ fn conflict_row(
                 .flex_none()
                 .truncate()
                 .text_size(colors.design.px(11.0))
-                .text_color(colors.muted_foreground)
+                .text_color(colors.design.muted)
                 .child(dir.to_owned()),
         )
     })
@@ -1670,7 +1656,7 @@ fn conflict_row(
         div()
             .flex_none()
             .text_size(colors.design.px(9.5))
-            .text_color(colors.muted_foreground)
+            .text_color(colors.design.muted)
             .child(kind_label(kind)),
     )
     .into_any_element()
@@ -1688,7 +1674,7 @@ impl Conflicts {
         if conflicts.is_empty() {
             return div().into_any_element();
         }
-        let colors = Colors::from_theme(cx.theme(), Settings::get(cx));
+        let colors = ConflictColors::from_theme(cx.theme(), Settings::get(cx));
         let entries: Rc<Vec<(String, ConflictKind)>> = Rc::new(
             conflicts
                 .iter()
@@ -1740,7 +1726,7 @@ impl Conflicts {
                         div()
                             .text_size(colors.design.px(11.0))
                             .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .text_color(colors.danger)
+                            .text_color(colors.design.danger())
                             .child(t!("conflict.header", count = conflicts.len()).to_string()),
                     ),
             )
@@ -1758,7 +1744,7 @@ impl Conflicts {
         images: &crate::image_diff::State,
         cx: &Context<RepoView>,
     ) -> AnyElement {
-        let colors = Colors::from_theme(cx.theme(), Settings::get(cx));
+        let colors = ConflictColors::from_theme(cx.theme(), Settings::get(cx));
         let style = DiffStyle::from_settings(cx, &colors.design.mono);
         let busy = snapshot.busy.is_some() || self.pending.is_some();
         let loaded = self.data_for(path);
@@ -1771,7 +1757,7 @@ impl Conflicts {
             .flex_1()
             .min_h_0()
             .w_full()
-            .bg(colors.background);
+            .bg(colors.design.background);
 
         if self.marker_warning.as_deref() == Some(path) {
             column = column.child(self.marker_warning_bar(entity.clone(), &colors));
@@ -1811,11 +1797,11 @@ impl Conflicts {
 
         column = column.child(match (&self.error, loaded) {
             (Some(error), _) => {
-                crate::ui::message(error, colors.danger, &colors.design).into_any_element()
+                crate::ui::message(error, colors.design.danger(), &colors.design).into_any_element()
             }
             (None, None) => crate::ui::message(
                 t!("conflict.reading").to_string(),
-                colors.muted_foreground,
+                colors.design.muted,
                 &colors.design,
             )
             .into_any_element(),
@@ -1845,7 +1831,7 @@ impl Conflicts {
                     .flex()
                     .items_center()
                     .text_size(colors.design.px(10.0))
-                    .text_color(colors.success)
+                    .text_color(colors.design.success())
                     .child(notice.clone()),
             );
         }
@@ -1870,7 +1856,7 @@ impl Conflicts {
         loaded: Option<&Loaded>,
         editor: Option<&MergeEditor>,
         entity: &Entity<RepoView>,
-        colors: &Colors,
+        colors: &ConflictColors,
         busy: bool,
     ) -> AnyElement {
         let (name, dir) = style::path_parts(path);
@@ -1882,15 +1868,15 @@ impl Conflicts {
             .h(colors.design.px(40.0))
             .flex_none()
             .px_3p5()
-            .bg(colors.background)
+            .bg(colors.design.background)
             .border_b_1()
-            .border_color(colors.border)
+            .border_color(colors.design.border)
             .text_size(colors.design.px(12.0))
             .child(
                 gpui_component::Icon::from(IconName::TriangleAlert)
                     .w(colors.design.px(14.0))
                     .h(colors.design.px(14.0))
-                    .text_color(colors.warning),
+                    .text_color(colors.design.warning()),
             )
             .child(
                 div()
@@ -1906,7 +1892,7 @@ impl Conflicts {
                                 .min_w_0()
                                 .truncate()
                                 .text_size(colors.design.px(11.5))
-                                .text_color(colors.muted_foreground)
+                                .text_color(colors.design.muted)
                                 .child(dir.to_owned()),
                         )
                     })
@@ -1915,7 +1901,7 @@ impl Conflicts {
                             div()
                                 .flex_none()
                                 .text_size(colors.design.px(10.0))
-                                .text_color(colors.warning)
+                                .text_color(colors.design.warning())
                                 .child(kind_label(loaded.data.kind)),
                         )
                     }),
@@ -1931,9 +1917,9 @@ impl Conflicts {
                         .text_size(colors.design.px(11.0))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
                         .text_color(if editor.model.all_resolved() {
-                            colors.success
+                            colors.design.success()
                         } else {
-                            colors.warning
+                            colors.design.warning()
                         })
                         .child(counter),
                 )
@@ -2053,7 +2039,7 @@ impl Conflicts {
         row.into_any_element()
     }
 
-    fn marker_warning_bar(&self, entity: Entity<RepoView>, colors: &Colors) -> AnyElement {
+    fn marker_warning_bar(&self, entity: Entity<RepoView>, colors: &ConflictColors) -> AnyElement {
         let cancel = {
             let entity = entity.clone();
             crate::ui::button("marker-cancel", t!("common.cancel").to_string()).on_click(
@@ -2081,7 +2067,7 @@ impl Conflicts {
 
 /// The little menu that keeps the two whole-conflict actions off the header:
 /// take the base, or put the conflict back to its markers.
-fn conflict_menu(entity: Entity<RepoView>, colors: &Colors, busy: bool) -> AnyElement {
+fn conflict_menu(entity: Entity<RepoView>, colors: &ConflictColors, busy: bool) -> AnyElement {
     let base_entity = entity.clone();
     let reset_entity = entity;
     crate::ui::context_menu(
@@ -2122,7 +2108,7 @@ fn editor_body(
     loaded: &Loaded,
     editor: &MergeEditor,
     entity: &Entity<RepoView>,
-    colors: &Colors,
+    colors: &ConflictColors,
     style: &DiffStyle,
     busy: bool,
     show_base: bool,
@@ -2149,7 +2135,7 @@ fn editor_body(
 fn whole_file_body(
     loaded: &Loaded,
     entity: &Entity<RepoView>,
-    colors: &Colors,
+    colors: &ConflictColors,
     busy: bool,
 ) -> AnyElement {
     let data = &loaded.data;
@@ -2173,7 +2159,7 @@ fn whole_file_body(
         .child(whole_file_choices(data.kind, entity, colors, busy))
         .child(crate::ui::message(
             message,
-            colors.muted_foreground,
+            colors.design.muted,
             &colors.design,
         ))
         .child(
@@ -2182,7 +2168,7 @@ fn whole_file_body(
                 .px_3()
                 .pb_2()
                 .text_size(colors.design.px(10.0))
-                .text_color(colors.muted_foreground)
+                .text_color(colors.design.muted)
                 .child(sizes_line(data)),
         )
         .into_any_element()
@@ -2194,7 +2180,7 @@ fn image_body(
     loaded: &Loaded,
     images: &crate::image_diff::State,
     entity: &Entity<RepoView>,
-    colors: &Colors,
+    colors: &ConflictColors,
     busy: bool,
 ) -> AnyElement {
     let data = &loaded.data;
@@ -2234,7 +2220,7 @@ fn image_body(
         row = row.child(picture(
             t!("conflict.base_header").to_string(),
             side,
-            colors.muted_foreground,
+            colors.design.muted,
         ));
     }
     if let Some(side) = stages.theirs.as_ref() {
@@ -2261,7 +2247,7 @@ fn image_body(
 fn whole_file_choices(
     kind: ConflictKind,
     entity: &Entity<RepoView>,
-    colors: &Colors,
+    colors: &ConflictColors,
     busy: bool,
 ) -> AnyElement {
     let mut row = div()
@@ -2272,7 +2258,7 @@ fn whole_file_choices(
         .px_3()
         .py_2()
         .border_b_1()
-        .border_color(colors.border);
+        .border_color(colors.design.border);
     for (index, choice) in choices(kind).into_iter().enumerate() {
         let entity = entity.clone();
         row = row.child(
@@ -2295,7 +2281,7 @@ fn side_panes(
     loaded: &Loaded,
     editor: &MergeEditor,
     entity: &Entity<RepoView>,
-    colors: &Colors,
+    colors: &ConflictColors,
     style: &DiffStyle,
     show_base: bool,
     scroll: UniformListScrollHandle,
@@ -2508,7 +2494,7 @@ fn side_header(
     all_ticked: bool,
     entity: &Entity<RepoView>,
     design: &Design,
-    colors: &Colors,
+    colors: &ConflictColors,
     with_border: bool,
 ) -> AnyElement {
     let color = colors.side(side);
@@ -2632,7 +2618,7 @@ fn take_actions(
     entity: &Entity<RepoView>,
     conflict: usize,
     side: Side,
-    colors: &Colors,
+    colors: &ConflictColors,
 ) -> AnyElement {
     let take_entity = entity.clone();
     let take = crate::ui::button(
@@ -2788,7 +2774,12 @@ fn side_cell(
 }
 
 /// The editable result under the side panes.
-fn result_pane(editor: &MergeEditor, colors: &Colors, style: &DiffStyle, busy: bool) -> AnyElement {
+fn result_pane(
+    editor: &MergeEditor,
+    colors: &ConflictColors,
+    style: &DiffStyle,
+    busy: bool,
+) -> AnyElement {
     let model = &editor.model;
     let status = match model.counter() {
         Some(_) if model.all_resolved() && !model.has_markers() => {
@@ -2819,7 +2810,7 @@ fn result_pane(editor: &MergeEditor, colors: &Colors, style: &DiffStyle, busy: b
         div()
             .size(colors.design.px(7.0))
             .rounded_full()
-            .bg(colors.warning),
+            .bg(colors.design.warning()),
     );
     legend = legend.child(
         div()
@@ -2867,9 +2858,9 @@ fn result_pane(editor: &MergeEditor, colors: &Colors, style: &DiffStyle, busy: b
                 .h(colors.design.px(22.0))
                 .flex_none()
                 .px_2()
-                .bg(colors.muted.opacity(0.4))
+                .bg(colors.design.field.opacity(0.4))
                 .text_size(colors.design.px(9.5))
-                .text_color(colors.muted_foreground)
+                .text_color(colors.design.muted)
                 .child(t!("conflict.result").to_string())
                 .child(div().flex_1().min_w_0().truncate().child(status))
                 .child(legend)

@@ -9,7 +9,6 @@ use gpui_component::tooltip::Tooltip;
 use std::time::{Duration, Instant};
 
 use super::RepoView;
-use crate::remote;
 use crate::style::Design;
 
 /// How long the bar keeps a message before treating it as stale. Long enough
@@ -138,14 +137,7 @@ impl RepoView {
         // actual argv as secondary text, because that is what users ask for
         // when a command is slow.
         let activity = self.activity.status(Instant::now());
-        let operation = self.remote_status(&remote::Colors {
-            foreground: design.text,
-            muted_foreground: design.muted,
-            border: design.border,
-            accent: design.accent,
-            accent_foreground: design.on_accent,
-            zoom: design.zoom,
-        });
+        let operation = self.remote_status(design);
 
         let mut leading = div()
             .flex()

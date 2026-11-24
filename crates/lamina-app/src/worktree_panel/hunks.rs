@@ -17,11 +17,11 @@ use lamina_core::highlight::LineHighlights;
 use lamina_core::patch::LineSelection;
 use lamina_core::session::{DiffView, Operation, RepoSnapshot};
 
-use super::{Colors, HunkAction, LineAction, PanelRow, RowPosition, Selected, Side, WorktreePanel};
+use super::{HunkAction, LineAction, PanelRow, RowPosition, Selected, Side, WorktreePanel};
 use crate::diff_view::{self, DiffColors, GapHandler, Row as DiffRow, RowOptions};
 use crate::repo_view::RepoView;
 use crate::scrollbar::WithScrollbar as _;
-use crate::style;
+use crate::style::{self, Design};
 
 /// Flattens a diff, keeping the hunk/line coordinates the patch builder needs.
 ///
@@ -127,7 +127,7 @@ impl WorktreePanel {
         &self,
         entity: Entity<RepoView>,
         snapshot: &RepoSnapshot,
-        colors: &Colors,
+        design: &Design,
         cx: &mut App,
     ) -> AnyElement {
         let selected = self.selected.clone();
@@ -155,16 +155,16 @@ impl WorktreePanel {
         let mut header = div()
             .flex()
             .items_center()
-            .gap(colors.design.px(10.0))
-            .h(colors.design.px(40.0))
+            .gap(design.px(10.0))
+            .h(design.px(40.0))
             .flex_none()
             .px_3p5()
-            .bg(colors.background)
+            .bg(design.background)
             .border_b_1()
-            .border_color(colors.border)
-            .text_size(colors.design.px(12.0));
+            .border_color(design.border)
+            .text_size(design.px(12.0));
         if let Some(kind) = kind {
-            header = header.child(crate::ui::change_badge(kind, &colors.design));
+            header = header.child(crate::ui::change_badge(kind, design));
         }
         header = header
             .child(
@@ -180,8 +180,8 @@ impl WorktreePanel {
                                 .ml_2()
                                 .min_w_0()
                                 .truncate()
-                                .text_size(colors.design.px(11.5))
-                                .text_color(colors.muted_foreground)
+                                .text_size(design.px(11.5))
+                                .text_color(design.muted)
                                 .child(dir.to_owned()),
                         )
                     }),
@@ -189,13 +189,13 @@ impl WorktreePanel {
             .child(
                 div()
                     .flex_none()
-                    .text_size(colors.design.px(11.0))
-                    .text_color(colors.muted_foreground)
+                    .text_size(design.px(11.0))
+                    .text_color(design.muted)
                     .child(side.map(Side::label).unwrap_or_default()),
             );
 
         if let (Some(selected), Some(_)) = (&selected, self.diff.view()) {
-            header = header.child(self.line_actions(entity.clone(), selected, colors));
+            header = header.child(self.line_actions(entity.clone(), selected, design));
         }
 
         if let Some(view) = self.diff.view()
@@ -204,7 +204,7 @@ impl WorktreePanel {
             header = header.child(crate::ui::status_badge(
                 label,
                 crate::ui::BadgeTone::Neutral,
-                &colors.design,
+                design,
             ));
         }
 
@@ -242,7 +242,7 @@ impl WorktreePanel {
 
         let image = match (&self.diff_error, self.diff.view()) {
             (None, Some(view)) => {
-                crate::image_diff::body(&self.image_diff, view, &colors.design, entity.clone(), cx)
+                crate::image_diff::body(&self.image_diff, view, design, entity.clone(), cx)
             }
             _ => None,
         };
@@ -251,18 +251,17 @@ impl WorktreePanel {
         } else {
             match (&self.diff_error, self.diff.view()) {
                 (Some(error), _) => {
-                    crate::ui::message(error, colors.danger, &colors.design).into_any_element()
+                    crate::ui::message(error, design.danger(), design).into_any_element()
                 }
-                (None, None) => crate::ui::loading_state(
-                    t!("worktree.computing_diff").to_string(),
-                    &colors.design,
-                )
-                .into_any_element(),
+                (None, None) => {
+                    crate::ui::loading_state(t!("worktree.computing_diff").to_string(), design)
+                        .into_any_element()
+                }
                 (None, Some(view)) if view.lfs.is_some() => {
                     let summary = view.lfs.clone().expect("checked above");
                     let missing = summary.old.as_ref().is_some_and(|side| !side.present)
                         || summary.new.as_ref().is_some_and(|side| !side.present);
-                    let mut card = crate::ui::lfs_card(summary, &colors.design);
+                    let mut card = crate::ui::lfs_card(summary, design);
                     if missing && let Some(selected) = &selected {
                         let path = selected.path.clone();
                         let entity = entity.clone();
@@ -284,26 +283,26 @@ impl WorktreePanel {
                         }));
                     }
                     let body = if !self.rows.is_empty() {
-                        self.diff_list(entity.clone(), view, colors)
+                        self.diff_list(entity.clone(), view, design)
                     } else if view.diff.binary {
                         crate::ui::message(
                             t!("worktree.binary_file").to_string(),
-                            colors.muted_foreground,
-                            &colors.design,
+                            design.muted,
+                            design,
                         )
                         .into_any_element()
                     } else if missing {
                         crate::ui::message(
                             t!("worktree.not_downloaded").to_string(),
-                            colors.muted_foreground,
-                            &colors.design,
+                            design.muted,
+                            design,
                         )
                         .into_any_element()
                     } else {
                         crate::ui::message(
                             t!("worktree.no_text_changes").to_string(),
-                            colors.muted_foreground,
-                            &colors.design,
+                            design.muted,
+                            design,
                         )
                         .into_any_element()
                     };
@@ -316,20 +315,18 @@ impl WorktreePanel {
                         .child(body)
                         .into_any_element()
                 }
-                (None, Some(view)) if view.diff.binary => crate::ui::message(
-                    t!("worktree.binary_file").to_string(),
-                    colors.muted_foreground,
-                    &colors.design,
-                )
-                .into_any_element(),
+                (None, Some(view)) if view.diff.binary => {
+                    crate::ui::message(t!("worktree.binary_file").to_string(), design.muted, design)
+                        .into_any_element()
+                }
                 (None, Some(_)) if self.rows.is_empty() => crate::ui::message(
                     t!("worktree.no_text_changes").to_string(),
-                    colors.muted_foreground,
-                    &colors.design,
+                    design.muted,
+                    design,
                 )
                 .into_any_element(),
                 (None, Some(view)) => {
-                    let list = self.diff_list(entity, view, colors);
+                    let list = self.diff_list(entity, view, design);
                     match self.context.notice() {
                         Some(notice) => div()
                             .flex()
@@ -339,7 +336,7 @@ impl WorktreePanel {
                             .child(crate::ui::banner(
                                 crate::ui::BannerKind::Warning,
                                 notice,
-                                &colors.design,
+                                design,
                             ))
                             .child(list)
                             .into_any_element(),
@@ -364,14 +361,14 @@ impl WorktreePanel {
         &self,
         entity: Entity<RepoView>,
         selected: &Selected,
-        colors: &Colors,
+        design: &Design,
     ) -> AnyElement {
         let count = self.picked.len();
         if count == 0 {
             return div()
                 .flex_none()
-                .text_size(colors.design.px(11.0))
-                .text_color(colors.muted_foreground)
+                .text_size(design.px(11.0))
+                .text_color(design.muted)
                 .child(t!("worktree.pick_hint").to_string())
                 .into_any_element();
         }
@@ -423,15 +420,15 @@ impl WorktreePanel {
         &self,
         entity: Entity<RepoView>,
         view: &Arc<DiffView>,
-        colors: &Colors,
+        design: &Design,
     ) -> AnyElement {
         let rows = Rc::clone(&self.rows);
         let picked = self.picked.clone();
-        let diff_colors = DiffColors::from_design(&colors.design);
-        let mono = colors.mono.clone();
+        let diff_colors = DiffColors::from_design(design);
+        let mono = design.mono.clone();
         let view = Arc::clone(view);
         let side = self.selected.as_ref().map(|selected| selected.side);
-        let list_colors = colors.clone();
+        let list_design = design.clone();
 
         uniform_list("worktree-diff", rows.len(), move |range, _window, cx| {
             let style = diff_view::DiffStyle::from_settings(cx, &mono).one_line_per_row();
@@ -453,7 +450,7 @@ impl WorktreePanel {
                             (*old_start, *old_len, *new_start, *new_len),
                             style.row_height(),
                             &diff_colors,
-                            &list_colors,
+                            &list_design,
                         ),
                         DiffRow::Gap { gap, hidden } => {
                             let entity = entity.clone();
@@ -509,7 +506,7 @@ fn hunk_header_row(
     (old_start, old_len, new_start, new_len): (u32, u32, u32, u32),
     height: f32,
     diff_colors: &DiffColors,
-    colors: &Colors,
+    design: &Design,
 ) -> AnyElement {
     let RowPosition::Hunk(hunk) = *position else {
         return div().into_any_element();
@@ -571,10 +568,10 @@ fn hunk_header_row(
         .items_center()
         .h(px(height))
         .w_full()
-        .bg(colors.design.panel)
+        .bg(design.panel)
         .border_t_1()
-        .border_color(colors.border)
-        .text_size(colors.design.px(11.0))
+        .border_color(design.border)
+        .text_size(design.px(11.0))
         .text_color(diff_colors.muted)
         .child(
             div()
@@ -582,7 +579,7 @@ fn hunk_header_row(
                 .min_w_0()
                 .pl_2()
                 .truncate()
-                .font_family(colors.mono.clone())
+                .font_family(design.mono.clone())
                 .child(format!(
                     "@@ -{old_start},{old_len} +{new_start},{new_len} @@"
                 )),
