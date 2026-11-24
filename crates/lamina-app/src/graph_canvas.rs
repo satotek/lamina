@@ -1085,6 +1085,24 @@ fn paint_uncommitted_row(
     }
 }
 
+/// Unscaled x of a join from the commit node up to the connector lane.
+///
+/// `None` when both ends are past the cap, so none of the curve is visible.
+/// A node past the cap is the clip-edge marker. Starting the curve at the
+/// node's real lane would place that end outside the canvas, and the mask
+/// would show the stroke leaving the clip above the marker.
+fn connector_join_x(lane: u16, node_lane: u16, visible: u16) -> Option<(f32, f32)> {
+    if lane.min(node_lane) >= visible {
+        return None;
+    }
+    let node_x = if node_lane >= visible {
+        clip_edge()
+    } else {
+        lane_offset(node_lane)
+    };
+    Some((node_x, lane_offset(lane)))
+}
+
 /// Curve from a node at mid-row up to a connector lane at the top edge.
 ///
 /// `t = 0` is the node, so the shared dash gaps leave the dot's outline
@@ -1141,10 +1159,10 @@ fn paint_connector(
     let middle = top + height / 2.0;
     let left = bounds.origin.x;
     if to_node && lane != node_lane {
-        if lane.min(node_lane) >= visible {
+        let Some((node_x, lane_x)) = connector_join_x(lane, node_lane, visible) else {
             return;
-        }
-        let curve = join_curve(lane_offset_at(node_lane, zoom), lane_offset_at(lane, zoom));
+        };
+        let curve = join_curve(node_x * zoom, lane_x * zoom);
         paint_dashed_curve(left, top, height, curve, color, zoom, window);
         return;
     }
@@ -1971,6 +1989,26 @@ mod tests {
         assert_eq!(painted_node_lane(4, 1), 5);
         // head_lane 15 with one private column paints past the cap.
         assert_eq!(painted_node_lane(15, 1), 16);
+    }
+
+    #[test]
+    fn a_join_past_the_cap_starts_at_the_clip_edge_marker() {
+        let visible = MAX_LANES;
+        // HEAD on core lane 15, shifted once, paints on lane 16.
+        let node_lane = 16;
+        assert!(node_lane >= visible);
+        let (node_x, lane_x) =
+            connector_join_x(0, node_lane, visible).expect("the private lane is still visible");
+        assert_eq!(node_x, clip_edge());
+        assert_eq!(lane_x, lane_offset(0));
+        assert_ne!(node_x, lane_offset(node_lane));
+
+        let (inside, _) = connector_join_x(0, 3, visible).expect("both ends are visible");
+        assert_eq!(inside, lane_offset(3));
+        assert!(
+            connector_join_x(visible, node_lane, visible).is_none(),
+            "a curve with both ends past the cap has nothing to draw"
+        );
     }
 
     #[test]
