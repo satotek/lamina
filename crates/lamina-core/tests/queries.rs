@@ -886,109 +886,18 @@ fn streaming_path_history_batches_concatenate_to_the_full_result() {
 }
 
 #[test]
-fn streaming_path_history_started_during_initial_walk_finishes_complete_list() {
-    let fixture = Fixture::new();
-    // 20,000 commits across many snapshot chunks (FIRST_COMMIT_CHUNK = 200,
-    // COMMIT_CHUNK = 4,096). Every 20th commit changes `target.txt`, including
-    // commit 0 (the oldest commit, well outside the first snapshot).
-    let mut stream = String::new();
-    for index in 0..20_000 {
-        let mark = index + 1;
-        stream.push_str(&format!("blob\nmark :{mark}\ndata 6\n{index:06}\n"));
-        let message = format!("commit {index}");
-        stream.push_str("commit refs/heads/main\n");
-        stream.push_str(&format!(
-            "committer Lamina Test <lamina@example.com> {} +0000\n",
-            BASE_TIME + index as i64
-        ));
-        stream.push_str(&format!("data {}\n{}\n", message.len(), message));
-        let file = if index % 20 == 0 {
-            "target.txt"
-        } else {
-            "other.txt"
-        };
-        stream.push_str(&format!("M 100644 :{mark} {file}\n\n"));
-    }
-    fixture.git_input(&["fast-import", "--quiet"], &stream);
-    fixture.git(&["reset", "--hard", "HEAD"]);
-
-    let expected: Vec<String> = fixture.history("target.txt");
-    assert_eq!(expected.len(), 1_000);
-    assert_eq!(expected, fixture.git_history("target.txt"));
-
-    let harness = Harness::open_partial(fixture);
-    let initial = harness.session.snapshot();
-    assert!(
-        !initial.commits.complete,
-        "expected the initial walk to still be running after the first chunk (loaded {})",
-        initial.commits.len()
-    );
-
-    let ticket = harness
-        .session
-        .path_history_streaming("target.txt".to_string());
-
-    let deadline = Instant::now() + TIMEOUT;
-    let mut batches: Vec<PathHistoryCommit> = Vec::new();
-    let mut done_count = 0usize;
-    let mut later_snapshots = 0usize;
-    loop {
-        let complete = harness.session.snapshot().commits.complete;
-        if done_count > 0 && complete {
-            break;
-        }
-        let now = Instant::now();
-        assert!(
-            now < deadline,
-            "timed out waiting for streaming path history and initial walk (done={done_count}, complete={complete})"
-        );
-        match harness.events.recv_timeout(deadline - now) {
-            Ok(SessionEvent::SnapshotUpdated { generation }) if generation > initial.generation => {
-                later_snapshots += 1;
-            }
-            Ok(SessionEvent::PathHistoryBatch {
-                ticket: got,
-                entries,
-            }) if got == ticket => {
-                assert_eq!(done_count, 0, "received batch after PathHistoryDone");
-                batches.extend(entries.iter().cloned());
-            }
-            Ok(SessionEvent::PathHistoryDone { ticket: got }) if got == ticket => {
-                done_count += 1;
-            }
-            Ok(SessionEvent::QueryFailed { ticket: got, error }) if got == ticket => {
-                panic!("streaming path history failed: {error}");
-            }
-            Ok(_) => {}
-            Err(RecvTimeoutError::Timeout) => {}
-            Err(RecvTimeoutError::Disconnected) => panic!("session event channel closed"),
-        }
-    }
-
-    assert!(
-        later_snapshots > 0,
-        "expected later SnapshotUpdated events during/after the query"
-    );
-    assert_eq!(done_count, 1);
-
-    let got_ids: Vec<String> = batches
-        .iter()
-        .map(|entry| entry.commit.id.to_string())
-        .collect();
-    assert_eq!(
-        got_ids, expected,
-        "path history started mid-walk must return the complete list without restarting"
-    );
-    assert!(batches.iter().all(|entry| entry.path == "target.txt"));
-}
-
-#[test]
-fn streaming_path_history_during_initial_walk_follows_renames() {
+fn streaming_path_history_during_initial_walk_returns_the_full_list_and_follows_renames() {
     let fixture = Fixture::new();
     let mut stream = String::new();
+    // One 10,000-commit fixture serves both streaming checks, which used to
+    // build separate 20,000- and 10,000-commit repositories of the same shape.
+    //
     // Commits 0..10 touch `old.txt`, commit 10 renames to `new.txt`, and
-    // commits 11..10,000 touch `other.txt` (with commit 9,999 also touching `new.txt`)
-    // so the initial walk publishes multiple chunks while the query runs.
+    // commits 11..10,000 touch `other.txt` (with commit 9,999 also touching
+    // `new.txt`). Every 20th commit also touches `target.txt`, including commit
+    // 0 (the oldest commit, well outside the first snapshot). The initial walk
+    // publishes several chunks (FIRST_COMMIT_CHUNK = 200, COMMIT_CHUNK =
+    // 4,096) while both queries run.
     for index in 0..10_000 {
         let mark = index + 1;
         let payload = format!("line {index:06}\nmore content to make rename detection clear\n");
@@ -1004,20 +913,28 @@ fn streaming_path_history_during_initial_walk_follows_renames() {
         ));
         stream.push_str(&format!("data {}\n{}\n", message.len(), message));
         if index < 10 {
-            stream.push_str(&format!("M 100644 :{mark} old.txt\n\n"));
+            stream.push_str(&format!("M 100644 :{mark} old.txt\n"));
         } else if index == 10 {
             stream.push_str("D old.txt\n");
-            stream.push_str(&format!("M 100644 :{mark} new.txt\n\n"));
+            stream.push_str(&format!("M 100644 :{mark} new.txt\n"));
         } else if index == 9_999 {
-            stream.push_str(&format!("M 100644 :{mark} new.txt\n\n"));
+            stream.push_str(&format!("M 100644 :{mark} new.txt\n"));
         } else {
-            stream.push_str(&format!("M 100644 :{mark} other.txt\n\n"));
+            stream.push_str(&format!("M 100644 :{mark} other.txt\n"));
         }
+        if index % 20 == 0 {
+            stream.push_str(&format!("M 100644 :{mark} target.txt\n"));
+        }
+        stream.push('\n');
     }
     fixture.git_input(&["fast-import", "--quiet"], &stream);
     fixture.git(&["reset", "--hard", "HEAD"]);
 
-    let expected: Vec<(String, String)> = fixture
+    let expected_target: Vec<String> = fixture.history("target.txt");
+    assert_eq!(expected_target.len(), 500);
+    assert_eq!(expected_target, fixture.git_history("target.txt"));
+
+    let expected_rename: Vec<(String, String)> = fixture
         .open()
         .path_history_entries("new.txt")
         .expect("path history entries")
@@ -1026,45 +943,151 @@ fn streaming_path_history_during_initial_walk_follows_renames() {
             (entry.commit.to_string(), entry.path)
         })
         .collect();
-    assert_eq!(expected.len(), 12);
-    assert_eq!(expected[0].1, "new.txt");
-    assert_eq!(expected[1].1, "new.txt");
-    assert!(expected[2..].iter().all(|(_, path)| path == "old.txt"));
+    assert_eq!(expected_rename.len(), 12);
+    assert_eq!(expected_rename[0].1, "new.txt");
+    assert_eq!(expected_rename[1].1, "new.txt");
+    assert!(
+        expected_rename[2..]
+            .iter()
+            .all(|(_, path)| path == "old.txt")
+    );
 
     let harness = Harness::open_partial(fixture);
-    assert!(!harness.session.snapshot().commits.complete);
+    let initial = harness.session.snapshot();
+    assert!(
+        !initial.commits.complete,
+        "expected the initial walk to still be running after the first chunk (loaded {})",
+        initial.commits.len()
+    );
 
-    let ticket = harness
+    let target_ticket = harness
+        .session
+        .path_history_streaming("target.txt".to_string());
+    let rename_ticket = harness
         .session
         .path_history_streaming("new.txt".to_string());
-    let batches = harness.wait_for_stream(ticket);
-    let got: Vec<(String, String)> = batches
-        .into_iter()
-        .flatten()
-        .map(|entry| (entry.commit.id.to_string(), entry.path))
+
+    let deadline = Instant::now() + TIMEOUT;
+    let mut target_batches: Vec<PathHistoryCommit> = Vec::new();
+    let mut rename_batches: Vec<PathHistoryCommit> = Vec::new();
+    let mut target_done = 0usize;
+    let mut rename_done = 0usize;
+    let mut later_snapshots = 0usize;
+    loop {
+        let complete = harness.session.snapshot().commits.complete;
+        if target_done > 0 && rename_done > 0 && complete {
+            break;
+        }
+        let now = Instant::now();
+        assert!(
+            now < deadline,
+            "timed out waiting for streaming path history and initial walk (target_done={target_done}, rename_done={rename_done}, complete={complete})"
+        );
+        match harness.events.recv_timeout(deadline - now) {
+            Ok(SessionEvent::SnapshotUpdated { generation }) if generation > initial.generation => {
+                later_snapshots += 1;
+            }
+            Ok(SessionEvent::PathHistoryBatch {
+                ticket: got,
+                entries,
+            }) if got == target_ticket => {
+                assert_eq!(target_done, 0, "received batch after PathHistoryDone");
+                target_batches.extend(entries.iter().cloned());
+            }
+            Ok(SessionEvent::PathHistoryBatch {
+                ticket: got,
+                entries,
+            }) if got == rename_ticket => {
+                assert_eq!(rename_done, 0, "received batch after PathHistoryDone");
+                rename_batches.extend(entries.iter().cloned());
+            }
+            Ok(SessionEvent::PathHistoryDone { ticket: got }) if got == target_ticket => {
+                target_done += 1;
+            }
+            Ok(SessionEvent::PathHistoryDone { ticket: got }) if got == rename_ticket => {
+                rename_done += 1;
+            }
+            Ok(SessionEvent::QueryFailed { ticket: got, error })
+                if got == target_ticket || got == rename_ticket =>
+            {
+                panic!("streaming path history failed: {error}");
+            }
+            Ok(_) => {}
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => panic!("session event channel closed"),
+        }
+    }
+
+    assert!(
+        later_snapshots > 0,
+        "expected later SnapshotUpdated events during/after the query"
+    );
+    assert_eq!((target_done, rename_done), (1, 1));
+
+    let target_ids: Vec<String> = target_batches
+        .iter()
+        .map(|entry| entry.commit.id.to_string())
         .collect();
-    assert_eq!(got, expected);
+    assert_eq!(
+        target_ids, expected_target,
+        "path history started mid-walk must return the complete list without restarting"
+    );
+    assert!(
+        target_batches
+            .iter()
+            .all(|entry| entry.path == "target.txt")
+    );
+
+    let rename_got: Vec<(String, String)> = rename_batches
+        .iter()
+        .map(|entry| (entry.commit.id.to_string(), entry.path.clone()))
+        .collect();
+    assert_eq!(
+        rename_got, expected_rename,
+        "a stream started mid-walk must follow renames like a full walk"
+    );
+
     harness.wait_for_complete(10_000);
 }
 
 #[test]
-fn cancelling_a_streaming_path_history_stops_further_batches() {
+fn cancelling_a_streaming_path_history_stops_batches_during_and_after_the_initial_walk() {
     let fixture = Fixture::new();
     fixture.fast_import(20_000);
-    let harness = Harness::open(fixture, 20_000);
 
-    let ticket = harness
+    // The first query starts while the initial walk is still publishing chunks;
+    // the second runs once it finished. Both used to get their own 20,000-commit
+    // fixture.
+    let harness = Harness::open_partial(fixture);
+    assert!(!harness.session.snapshot().commits.complete);
+
+    let during_walk = harness
         .session
         .path_history_streaming("file.txt".to_string());
-    let first = harness.wait_for_batch(ticket);
-    assert!(!first.is_empty(), "the first batch carried no rows");
+    let first = harness.wait_for_batch(during_walk);
+    assert!(!first.is_empty());
+    harness.session.cancel_query(during_walk);
 
-    harness.session.cancel_query(ticket);
+    // Cancelling the stream must leave the initial walk alone.
+    harness.wait_for_complete(20_000);
+    let _ = harness.stream_events(during_walk, Duration::from_millis(150));
+    let after = harness.stream_events(during_walk, Duration::from_millis(250));
+    assert!(
+        after.is_empty(),
+        "a cancelled stream emitted events after cancel: {after:?}"
+    );
+
+    let after_walk = harness
+        .session
+        .path_history_streaming("file.txt".to_string());
+    let first = harness.wait_for_batch(after_walk);
+    assert!(!first.is_empty(), "the first batch carried no rows");
+    harness.session.cancel_query(after_walk);
 
     // Batches already handed to the channel may still be in flight; draining a
     // window first makes the check below about the walk, not about the queue.
-    let _ = harness.stream_events(ticket, Duration::from_millis(200));
-    let after = harness.stream_events(ticket, Duration::from_millis(400));
+    let _ = harness.stream_events(after_walk, Duration::from_millis(200));
+    let after = harness.stream_events(after_walk, Duration::from_millis(400));
     for event in &after {
         match event {
             SessionEvent::PathHistoryBatch { .. } => {
@@ -1076,30 +1099,6 @@ fn cancelling_a_streaming_path_history_stops_further_batches() {
             _ => {}
         }
     }
-}
-
-#[test]
-fn cancelling_streaming_path_history_during_initial_walk_leaves_walk_running() {
-    let fixture = Fixture::new();
-    fixture.fast_import(20_000);
-    let harness = Harness::open_partial(fixture);
-    assert!(!harness.session.snapshot().commits.complete);
-
-    let ticket = harness
-        .session
-        .path_history_streaming("file.txt".to_string());
-    let first = harness.wait_for_batch(ticket);
-    assert!(!first.is_empty());
-
-    harness.session.cancel_query(ticket);
-
-    harness.wait_for_complete(20_000);
-    let _ = harness.stream_events(ticket, Duration::from_millis(150));
-    let after = harness.stream_events(ticket, Duration::from_millis(250));
-    assert!(
-        after.is_empty(),
-        "a cancelled stream emitted events after cancel: {after:?}"
-    );
 }
 
 #[test]
@@ -1135,9 +1134,11 @@ fn session_cancelled_query_emits_nothing() {
 fn cancelled_path_query_frees_the_worker_and_drop_does_not_wait() {
     let fixture = Fixture::new();
     // fast-import leaves history without a commit-graph, so the walk really has
-    // to visit every commit before it can answer an empty path.
-    fixture.fast_import(20_000);
-    let harness = Harness::open(fixture, 20_000);
+    // to visit every commit before it can answer an empty path. 5,000 commits
+    // keep that walk at roughly twice the 50 ms floor the timings below need,
+    // at a quarter of the fixture the test used to build.
+    fixture.fast_import(5_000);
+    let harness = Harness::open(fixture, 5_000);
 
     // How long the walk that has to be abandoned takes.
     let start = Instant::now();
@@ -1157,7 +1158,7 @@ fn cancelled_path_query_frees_the_worker_and_drop_does_not_wait() {
     // A search only reads the published snapshot, so it can only be slow if
     // the worker is still walking the cancelled path.
     let start = Instant::now();
-    let after = harness.session.search_commits(search("commit 19999"));
+    let after = harness.session.search_commits(search("commit 4999"));
     harness.wait_for_query(after);
     let waited = start.elapsed();
     assert!(
