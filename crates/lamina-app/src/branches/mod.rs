@@ -20,8 +20,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use gpui::{
-    AnyElement, App, Entity, FocusHandle, Hsla, InteractiveElement, IntoElement, ParentElement,
-    Pixels, Size, Styled, UniformListScrollHandle, Window, actions, div, uniform_list,
+    AnyElement, App, Entity, FocusHandle, InteractiveElement, IntoElement, ParentElement, Pixels,
+    Size, Styled, UniformListScrollHandle, Window, actions, div, uniform_list,
 };
 use lamina_core::repo::{SubmoduleInfo, WorktreeInfo};
 use lamina_core::session::OperationId;
@@ -64,16 +64,6 @@ const ITEM_HEIGHT: f32 = 28.0;
 /// element, which is on the focus path whenever the history view has focus.
 pub fn bind(cx: &mut App) {
     crate::keymap::bind_group(cx, crate::keymap::Group::Branches);
-}
-
-/// The colours the sections and dialogs paint with, taken from the window
-/// chrome's palette so the sidebar reads as one surface.
-#[derive(Clone)]
-pub(crate) struct Colors {
-    pub(crate) design: Design,
-    pub(crate) sidebar_foreground: Hsla,
-    pub(crate) muted_foreground: Hsla,
-    pub(crate) danger: Hsla,
 }
 
 /// One collapsible section of the sidebar.
@@ -419,17 +409,17 @@ impl Branches {
         enabled: bool,
         busy: bool,
         hidden_refs: &[String],
-        colors: &Colors,
+        design: &Design,
         entity: &Entity<RepoView>,
     ) -> AnyElement {
         let head = data.head_branch.clone();
-        let items = self.items(data, revision, upstreams, remotes, extras, &colors.design);
-        self.restore_scroll(&items, &colors.design);
+        let items = self.items(data, revision, upstreams, remotes, extras, design);
+        self.restore_scroll(&items, design);
         self.scroll_to_requested_section(&items);
 
         let reveal = self.reveal.clone();
         let selected_extra = self.selected_extra.clone();
-        let list_colors = colors.clone();
+        let list_design = design.clone();
         let list_entity = entity.clone();
         let list_pull_requests = pull_requests.clone();
         let list_hidden = hidden_refs.to_vec();
@@ -445,7 +435,7 @@ impl Branches {
                         enabled,
                         busy,
                         &list_hidden,
-                        &list_colors,
+                        &list_design,
                         list_entity.clone(),
                     )
                 })
@@ -529,7 +519,7 @@ impl Branches {
                 });
         }
         column = column.child(list);
-        if let Some(menu) = self.drop_menu_overlay(colors, entity) {
+        if let Some(menu) = self.drop_menu_overlay(design, entity) {
             column = column.child(menu);
         }
         column.into_any_element()

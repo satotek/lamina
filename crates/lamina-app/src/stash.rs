@@ -28,7 +28,7 @@ use lamina_core::session::Operation;
 use lamina_core::{ChangeKind, StashInfo};
 
 use crate::repo_view::RepoView;
-use crate::style;
+use crate::style::{self, Design};
 use crate::ui::RowTipExt as _;
 
 /// Title of the stash dialog and of the notifications it raises.
@@ -270,7 +270,7 @@ pub(crate) fn sidebar_row(
     revealed: bool,
     enabled: bool,
     busy: bool,
-    colors: &crate::branches::Colors,
+    design: &Design,
     entity: Entity<RepoView>,
 ) -> AnyElement {
     let label = stash_message(name).to_owned();
@@ -278,17 +278,17 @@ pub(crate) fn sidebar_row(
     let row = crate::ui::list_row(
         ("stash", index),
         crate::ui::RowState::NORMAL.revealed(revealed),
-        &colors.design,
+        design,
     )
-    .h(colors.design.px(28.0))
+    .h(design.px(28.0))
     .w_full()
     .min_w_0()
     .overflow_hidden()
     .mx(px(0.0))
-    .pr(colors.design.px(18.0))
-    .rounded(colors.design.px(7.0))
-    .text_size(px(colors.design.small()))
-    .text_color(colors.sidebar_foreground)
+    .pr(design.px(18.0))
+    .rounded(design.px(7.0))
+    .text_size(px(design.small()))
+    .text_color(design.text)
     .child(div().flex_1().min_w_0().truncate().child(label))
     .row_tooltip(move |_window, cx| {
         let text = tooltip_entity
@@ -307,7 +307,7 @@ pub(crate) fn sidebar_row(
 
     crate::ui::context_menu(
         ("stash-menu", index),
-        &colors.design,
+        design,
         row,
         move |menu, _window, cx| {
             let detail = entity.read(cx).stash_detail(index);

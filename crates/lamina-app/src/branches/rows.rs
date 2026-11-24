@@ -25,7 +25,7 @@ use crate::ui::RowTipExt as _;
 
 use super::refs::{local_name_for_remote, ref_full_name};
 use super::tree::SidebarItem;
-use super::{Branches, Colors, ExtraSelection, ITEM_HEIGHT, RevealState, Section, same_path};
+use super::{Branches, ExtraSelection, ITEM_HEIGHT, RevealState, Section, same_path};
 
 /// A branch row being dragged onto another branch.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -70,7 +70,7 @@ pub(super) fn item_element(
     enabled: bool,
     busy: bool,
     hidden_refs: &[String],
-    colors: &Colors,
+    design: &Design,
     entity: Entity<RepoView>,
 ) -> AnyElement {
     match item {
@@ -78,7 +78,7 @@ pub(super) fn item_element(
             section,
             count,
             open,
-        } => section_header(*section, *count, *open, busy, colors, entity),
+        } => section_header(*section, *count, *open, busy, design, entity),
         SidebarItem::Folder {
             key,
             segment,
@@ -87,7 +87,7 @@ pub(super) fn item_element(
             depth,
             section,
         } => folder_row(
-            key, segment, *count, *open, *depth, *section, colors, entity,
+            key, segment, *count, *open, *depth, *section, design, entity,
         ),
         SidebarItem::RemoteGroup {
             name,
@@ -100,7 +100,7 @@ pub(super) fn item_element(
             *count,
             *collapsed,
             busy,
-            colors,
+            design,
             entity,
         ),
         SidebarItem::LocalBranch {
@@ -126,7 +126,7 @@ pub(super) fn item_element(
             hidden_refs.contains(&ref_full_name(RefKind::LocalBranch, name)),
             enabled,
             busy,
-            colors,
+            design,
             entity,
         ),
         SidebarItem::RemoteBranch {
@@ -146,7 +146,7 @@ pub(super) fn item_element(
             hidden_refs.contains(&ref_full_name(RefKind::RemoteBranch, name)),
             enabled,
             busy,
-            colors,
+            design,
             entity,
         ),
         SidebarItem::Tag {
@@ -162,7 +162,7 @@ pub(super) fn item_element(
             reveal.is_ref(RefKind::Tag, name),
             enabled,
             busy,
-            colors,
+            design,
             entity,
         ),
         // The stash row and its menu live in `stash`, which can read the
@@ -173,7 +173,7 @@ pub(super) fn item_element(
             reveal.is_stash(*index),
             enabled,
             busy,
-            colors,
+            design,
             entity,
         ),
         SidebarItem::Submodule {
@@ -186,7 +186,7 @@ pub(super) fn item_element(
             let selected =
                 matches!(selected_extra, Some(ExtraSelection::Submodule(sel)) if sel == path);
             submodule_row(
-                *index, name, path, detail, *status, selected, enabled, busy, colors, entity,
+                *index, name, path, detail, *status, selected, enabled, busy, design, entity,
             )
         }
         SidebarItem::Worktree {
@@ -217,12 +217,12 @@ pub(super) fn item_element(
                 selected,
                 enabled,
                 busy,
-                colors,
+                design,
                 entity,
             )
         }
         SidebarItem::Placeholder { text, .. } => {
-            empty_row_at(text, colors.design.px(42.0), colors).into_any_element()
+            empty_row_at(text, design.px(42.0), design).into_any_element()
         }
     }
 }
@@ -235,35 +235,34 @@ fn section_header(
     count: usize,
     open: bool,
     busy: bool,
-    colors: &Colors,
+    design: &Design,
     entity: Entity<RepoView>,
 ) -> AnyElement {
     let index = section.index();
     let click_entity = entity.clone();
-    let mut header =
-        crate::ui::section_header(("branch-section", index), section.title(), &colors.design)
-            .count(count)
-            .disclosure(open)
-            .icon(style::glyph_icon(
-                section.icon(),
-                colors.design.scale(14.0),
-                colors.muted_foreground,
-            ))
-            // A list item is only as tall as the heading measured, so every
-            // section heading must match a row's height.
-            .h(colors.design.px(ITEM_HEIGHT))
-            .pr(colors.design.px(18.0))
-            .on_click(move |_, cx| {
-                click_entity.update(cx, |view, cx| {
-                    view.branches.toggle(index);
-                    cx.notify();
-                });
+    let mut header = crate::ui::section_header(("branch-section", index), section.title(), design)
+        .count(count)
+        .disclosure(open)
+        .icon(style::glyph_icon(
+            section.icon(),
+            design.scale(14.0),
+            design.muted,
+        ))
+        // A list item is only as tall as the heading measured, so every
+        // section heading must match a row's height.
+        .h(design.px(ITEM_HEIGHT))
+        .pr(design.px(18.0))
+        .on_click(move |_, cx| {
+            click_entity.update(cx, |view, cx| {
+                view.branches.toggle(index);
+                cx.notify();
             });
+        });
     if busy && section == Section::Local {
         header = header.trailing(
             div()
                 .flex_none()
-                .text_size(colors.design.px(9.0))
+                .text_size(design.px(9.0))
                 .font_weight(FontWeight::NORMAL)
                 .child(t!("branch.working").to_string()),
         );
@@ -274,7 +273,7 @@ fn section_header(
             let menu_entity = entity.clone();
             crate::ui::context_menu(
                 ("branch-section-menu", index),
-                &colors.design,
+                design,
                 header,
                 move |menu, _window, cx| section_menu(menu, section, busy, &menu_entity, cx),
             )
@@ -295,7 +294,7 @@ fn folder_row(
     open: bool,
     depth: usize,
     section: Section,
-    colors: &Colors,
+    design: &Design,
     entity: Entity<RepoView>,
 ) -> AnyElement {
     let click_key = key.to_owned();
@@ -309,18 +308,18 @@ fn folder_row(
     crate::ui::list_row(
         ElementId::Name(format!("branch-folder-{key}").into()),
         crate::ui::RowState::NORMAL,
-        &colors.design,
+        design,
     )
-    .h(colors.design.px(ITEM_HEIGHT))
+    .h(design.px(ITEM_HEIGHT))
     .w_full()
     .min_w_0()
     .overflow_hidden()
     .mx(px(0.0))
-    .pr(colors.design.px(18.0))
-    .pl(colors.design.px(base + depth as f32 * 14.0))
-    .rounded(colors.design.px(7.0))
-    .text_size(px(colors.design.small()))
-    .text_color(colors.sidebar_foreground)
+    .pr(design.px(18.0))
+    .pl(design.px(base + depth as f32 * 14.0))
+    .rounded(design.px(7.0))
+    .text_size(px(design.small()))
+    .text_color(design.text)
     .cursor_pointer()
     .child(
         Icon::new(if open {
@@ -328,8 +327,8 @@ fn folder_row(
         } else {
             IconName::ChevronRight
         })
-        .with_size(colors.design.px(12.0))
-        .text_color(colors.muted_foreground),
+        .with_size(design.px(12.0))
+        .text_color(design.muted),
     )
     .child(
         Icon::new(if open {
@@ -337,8 +336,8 @@ fn folder_row(
         } else {
             IconName::FolderClosed
         })
-        .with_size(colors.design.px(13.0))
-        .text_color(colors.muted_foreground),
+        .with_size(design.px(13.0))
+        .text_color(design.muted),
     )
     .child(
         div()
@@ -350,8 +349,8 @@ fn folder_row(
     .child(
         div()
             .flex_none()
-            .text_size(px(colors.design.tiny()))
-            .text_color(colors.muted_foreground)
+            .text_size(px(design.tiny()))
+            .text_color(design.muted)
             .child(count.to_string()),
     )
     .on_hover(move |hovered, _, cx| {
@@ -400,10 +399,10 @@ impl Render for BranchDragChip {
 fn branch_drop_target(
     row: Stateful<Div>,
     target: &str,
-    colors: &Colors,
+    design: &Design,
     entity: Entity<RepoView>,
 ) -> Stateful<Div> {
-    branch_drop_target_with(row, target, colors.design.accent_soft, entity)
+    branch_drop_target_with(row, target, design.accent_soft, entity)
 }
 
 /// The shape a drop target takes outside a sidebar row, such as a branch chip
@@ -620,29 +619,28 @@ fn remote_group_header(
     count: usize,
     collapsed: bool,
     busy: bool,
-    colors: &Colors,
+    design: &Design,
     entity: Entity<RepoView>,
 ) -> AnyElement {
     let click_group = name.to_owned();
     let click_entity = entity.clone();
-    let mut header =
-        crate::ui::section_header(format!("remote-group-{name}"), name, &colors.design)
-            .disclosure(!collapsed)
-            .icon(style::glyph_icon(
-                style::glyph::CLOUD,
-                colors.design.scale(14.0),
-                colors.sidebar_foreground,
-            ))
-            .text_size(px(colors.design.small()))
-            .text_color(colors.sidebar_foreground)
-            .h(colors.design.px(ITEM_HEIGHT))
-            .on_click(move |_, cx| {
-                let group = click_group.clone();
-                click_entity.update(cx, |view, cx| {
-                    view.branches.toggle_remote_group(group);
-                    cx.notify();
-                });
+    let mut header = crate::ui::section_header(format!("remote-group-{name}"), name, design)
+        .disclosure(!collapsed)
+        .icon(style::glyph_icon(
+            style::glyph::CLOUD,
+            design.scale(14.0),
+            design.text,
+        ))
+        .text_size(px(design.small()))
+        .text_color(design.text)
+        .h(design.px(ITEM_HEIGHT))
+        .on_click(move |_, cx| {
+            let group = click_group.clone();
+            click_entity.update(cx, |view, cx| {
+                view.branches.toggle_remote_group(group);
+                cx.notify();
             });
+        });
     if count > 0 {
         header = header.count(count);
     }
@@ -651,7 +649,7 @@ fn remote_group_header(
     let menu_name = name.to_owned();
     let header = crate::ui::context_menu(
         format!("remote-group-menu-{name}"),
-        &colors.design,
+        design,
         header,
         move |menu, _window, cx| {
             let ssh = menu_entity.read(cx).is_ssh();
@@ -761,7 +759,7 @@ fn local_row(
     hidden: bool,
     enabled: bool,
     busy: bool,
-    colors: &Colors,
+    design: &Design,
     entity: Entity<RepoView>,
 ) -> AnyElement {
     let mut row = row_with_icon(
@@ -769,9 +767,9 @@ fn local_row(
         Some(style::glyph::BRANCH),
         label,
         crate::ui::RowState::NORMAL.head(active).revealed(revealed),
-        colors,
+        design,
     )
-    .pl(colors.design.px(depth as f32 * 14.0))
+    .pl(design.px(depth as f32 * 14.0))
     .cursor_pointer();
     if upstream_gone {
         let mut marker = div()
@@ -781,8 +779,8 @@ fn local_row(
             .items_center()
             .child(
                 Icon::new(IconName::Unlink)
-                    .with_size(colors.design.px(12.0))
-                    .text_color(colors.design.tag_text),
+                    .with_size(design.px(12.0))
+                    .text_color(design.tag_text),
             );
         if let Some(note) = upstream_note.clone() {
             marker =
@@ -793,8 +791,8 @@ fn local_row(
         let mut label = div()
             .id(("local-branch-upstream", index))
             .flex_none()
-            .text_size(px(colors.design.tiny()))
-            .text_color(colors.muted_foreground)
+            .text_size(px(design.tiny()))
+            .text_color(design.muted)
             .child(label.to_owned());
         if let Some(note) = upstream_note.clone() {
             label =
@@ -808,8 +806,8 @@ fn local_row(
         // the closed eye is the same icon the menu's "Hide in history" uses.
         row = row.child(
             Icon::new(IconName::EyeOff)
-                .with_size(colors.design.px(12.0))
-                .text_color(colors.muted_foreground),
+                .with_size(design.px(12.0))
+                .text_color(design.muted),
         );
     }
 
@@ -817,7 +815,7 @@ fn local_row(
         row = row.child(crate::pull_requests::badge(
             pull_request,
             pull_request_note,
-            &colors.design,
+            design,
         ));
     }
 
@@ -828,7 +826,7 @@ fn local_row(
     // One click shows the branch in the graph; a second one checks it out.
     let click_entity = entity.clone();
     let branch = name.to_owned();
-    let drag_design = colors.design.clone();
+    let drag_design = design.clone();
     row = row
         .on_click(move |event, window, cx| {
             let branch = branch.clone();
@@ -853,13 +851,13 @@ fn local_row(
                 })
             },
         );
-    row = branch_drop_target(row, name, colors, entity.clone());
+    row = branch_drop_target(row, name, design, entity.clone());
 
     let entity_menu = entity.clone();
     let branch = name.to_owned();
     crate::ui::context_menu(
         ("local-branch-menu", index),
-        &colors.design,
+        design,
         row,
         move |menu, window, cx| {
             // A disabled entry says why, the way the commit menu's entries do.
@@ -1141,21 +1139,21 @@ fn remote_row(
     hidden: bool,
     enabled: bool,
     busy: bool,
-    colors: &Colors,
+    design: &Design,
     entity: Entity<RepoView>,
 ) -> AnyElement {
     let mut row_element = row(
         ("remote-branch", index),
         label,
         crate::ui::RowState::NORMAL.revealed(revealed),
-        colors,
+        design,
     )
-    .pl(colors.design.px(42.0 + depth as f32 * 14.0));
+    .pl(design.px(42.0 + depth as f32 * 14.0));
     if hidden {
         row_element = row_element.child(
             Icon::new(IconName::EyeOff)
-                .with_size(colors.design.px(12.0))
-                .text_color(colors.muted_foreground),
+                .with_size(design.px(12.0))
+                .text_color(design.muted),
         );
     }
     // A remote ref without a local counterpart (the symbolic `origin/HEAD`)
@@ -1167,7 +1165,7 @@ fn remote_row(
         return row_element.into_any_element();
     }
 
-    let drag_design = colors.design.clone();
+    let drag_design = design.clone();
     let row_element = row_element.on_drag(
         DraggedBranch {
             kind: RefKind::RemoteBranch,
@@ -1205,7 +1203,7 @@ fn remote_row(
     let remote = name.to_owned();
     crate::ui::context_menu(
         ("remote-branch-menu", index),
-        &colors.design,
+        design,
         row_element,
         move |menu, _window, cx| {
             let blocked = busy.then_some(t!("branch.reason.busy").to_string());
@@ -1301,7 +1299,7 @@ fn tag_row(
     revealed: bool,
     enabled: bool,
     busy: bool,
-    colors: &Colors,
+    design: &Design,
     entity: Entity<RepoView>,
 ) -> AnyElement {
     let tag = name.to_owned();
@@ -1312,9 +1310,9 @@ fn tag_row(
         Some(style::glyph::TAG),
         label,
         crate::ui::RowState::NORMAL.revealed(revealed),
-        colors,
+        design,
     )
-    .pl(colors.design.px(depth as f32 * 14.0))
+    .pl(design.px(depth as f32 * 14.0))
     .cursor_pointer()
     .on_click(move |_, window, cx| {
         entity.update(cx, |view, cx| {
@@ -1326,7 +1324,7 @@ fn tag_row(
     }
     crate::ui::context_menu(
         ("tag-menu", index),
-        &colors.design,
+        design,
         row_element,
         move |menu, _window, cx| {
             let blocked = prefer_ssh(
@@ -1366,28 +1364,28 @@ fn submodule_row(
     selected: bool,
     enabled: bool,
     busy: bool,
-    colors: &Colors,
+    design: &Design,
     entity: Entity<RepoView>,
 ) -> AnyElement {
     let tooltip_text = detail.to_owned();
     let mut row_element = crate::ui::list_row(
         ("submodule", index),
         crate::ui::RowState::NORMAL.selected(selected),
-        &colors.design,
+        design,
     )
-    .h(colors.design.px(ITEM_HEIGHT))
+    .h(design.px(ITEM_HEIGHT))
     .w_full()
     .min_w_0()
     .overflow_hidden()
     .mx(px(0.0))
-    .pr(colors.design.px(18.0))
-    .rounded(colors.design.px(7.0))
-    .text_size(px(colors.design.small()))
-    .text_color(colors.sidebar_foreground)
+    .pr(design.px(18.0))
+    .rounded(design.px(7.0))
+    .text_size(px(design.small()))
+    .text_color(design.text)
     .child(div().flex_1().min_w_0().truncate().child(name.to_owned()))
     .row_tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx));
     if let Some((label, tone)) = submodule_badge(status) {
-        row_element = row_element.child(crate::ui::status_badge(label, tone, &colors.design));
+        row_element = row_element.child(crate::ui::status_badge(label, tone, design));
     }
 
     // An uninitialised submodule has no checkout to open; its row only offers
@@ -1419,7 +1417,7 @@ fn submodule_row(
     let menu_path = path.to_owned();
     crate::ui::context_menu(
         ("submodule-menu", index),
-        &colors.design,
+        design,
         row_element,
         move |menu, _window, cx| {
             let ssh = menu_entity.read(cx).is_ssh();
@@ -1555,7 +1553,7 @@ fn worktree_row(
     selected: bool,
     enabled: bool,
     busy: bool,
-    colors: &Colors,
+    design: &Design,
     entity: Entity<RepoView>,
 ) -> AnyElement {
     let tooltip_text = detail.to_owned();
@@ -1565,31 +1563,31 @@ fn worktree_row(
         // badge says t!("branch.worktree.main").to_string() rather than the tint, because a linked worktree can
         // be the one on screen.
         crate::ui::RowState::NORMAL.head(current).selected(selected),
-        &colors.design,
+        design,
     )
-    .h(colors.design.px(ITEM_HEIGHT))
+    .h(design.px(ITEM_HEIGHT))
     .w_full()
     .min_w_0()
     .overflow_hidden()
     .mx(px(0.0))
-    .pr(colors.design.px(18.0))
-    .rounded(colors.design.px(7.0))
-    .text_size(px(colors.design.small()))
-    .text_color(colors.sidebar_foreground)
+    .pr(design.px(18.0))
+    .rounded(design.px(7.0))
+    .text_size(px(design.small()))
+    .text_color(design.text)
     .child(div().flex_1().min_w_0().truncate().child(label.to_owned()))
     .row_tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx));
     if is_main {
         row_element = row_element.child(crate::ui::status_badge(
             t!("branch.worktree.main").to_string(),
             crate::ui::BadgeTone::Accent,
-            &colors.design,
+            design,
         ));
     }
     if locked {
         let badge = crate::ui::status_badge(
             t!("branch.worktree.locked").to_string(),
             crate::ui::BadgeTone::Warning,
-            &colors.design,
+            design,
         );
         let reason = lock_reason.map(str::to_owned);
         let wrapper = div().id(("worktree-lock", index)).flex_none();
@@ -1604,7 +1602,7 @@ fn worktree_row(
         row_element = row_element.child(crate::ui::status_badge(
             t!("branch.worktree.missing").to_string(),
             crate::ui::BadgeTone::Danger,
-            &colors.design,
+            design,
         ));
     }
 
@@ -1637,7 +1635,7 @@ fn worktree_row(
     let copy_path = path.to_owned();
     crate::ui::context_menu(
         ("worktree-menu", index),
-        &colors.design,
+        design,
         row_element,
         move |menu, _window, cx| {
             let ssh = menu_entity.read(cx).is_ssh();
@@ -1851,9 +1849,9 @@ fn row(
     id: impl Into<ElementId>,
     name: &str,
     state: crate::ui::RowState,
-    colors: &Colors,
+    design: &Design,
 ) -> Stateful<Div> {
-    row_with_icon(id, None, name, state, colors)
+    row_with_icon(id, None, name, state, design)
 }
 
 fn row_with_icon(
@@ -1861,11 +1859,11 @@ fn row_with_icon(
     item_icon: Option<&'static [u8]>,
     name: &str,
     state: crate::ui::RowState,
-    colors: &Colors,
+    design: &Design,
 ) -> Stateful<Div> {
     let name = strip_stash_prefix(name);
-    let row = crate::ui::list_row(id, state, &colors.design)
-        .h(colors.design.px(ITEM_HEIGHT))
+    let row = crate::ui::list_row(id, state, design)
+        .h(design.px(ITEM_HEIGHT))
         // A list item is laid out at its content width unless it is told to
         // fill, which would leave most of the row outside its hitbox.
         .w_full()
@@ -1874,19 +1872,14 @@ fn row_with_icon(
         .mx(px(0.0))
         // Leave room on the right so trailing labels stay clear of the
         // overlay vertical scrollbar.
-        .pr(colors.design.px(18.0))
-        .rounded(colors.design.px(7.0))
-        .text_size(px(colors.design.small()))
-        .text_color(colors.sidebar_foreground);
+        .pr(design.px(18.0))
+        .rounded(design.px(7.0))
+        .text_size(px(design.small()))
+        .text_color(design.text);
     let row = match item_icon {
-        Some(item_icon) => row.child(
-            glyph(
-                item_icon,
-                colors.design.scale(14.0),
-                colors.muted_foreground,
-            )
-            .flex_none(),
-        ),
+        Some(item_icon) => {
+            row.child(glyph(item_icon, design.scale(14.0), design.muted).flex_none())
+        }
         None => row,
     };
     row.child(div().flex_1().min_w_0().truncate().child(name.to_owned()))
@@ -1911,15 +1904,15 @@ fn strip_stash_prefix(name: &str) -> &str {
 /// A section's "nothing here" line. Its indent follows the place it belongs
 /// to: branch rows sit under the section labels, remote branches under a
 /// remote's own header.
-fn empty_row_at(text: &str, indent: Pixels, colors: &Colors) -> Div {
+fn empty_row_at(text: &str, indent: Pixels, design: &Design) -> Div {
     div()
         .pl(indent)
         .pr_2()
-        .h(colors.design.px(ITEM_HEIGHT))
+        .h(design.px(ITEM_HEIGHT))
         .flex()
         .items_center()
-        .text_size(colors.design.px(11.0))
-        .text_color(colors.muted_foreground)
+        .text_size(design.px(11.0))
+        .text_color(design.muted)
         .child(text.to_owned())
 }
 
@@ -1931,11 +1924,10 @@ impl Branches {
     /// of the sidebar uses. Clicking anywhere else dismisses it.
     pub(super) fn drop_menu_overlay(
         &self,
-        colors: &Colors,
+        design: &Design,
         entity: &Entity<RepoView>,
     ) -> Option<AnyElement> {
         let menu = self.drop_menu.as_ref()?;
-        let design = &colors.design;
         let dismiss = {
             let entity = entity.clone();
             move |_: &gpui::MouseDownEvent, window: &mut Window, cx: &mut App| {
@@ -2374,14 +2366,8 @@ mod tests {
 
         use crate::Launch;
 
-        fn test_colors() -> Colors {
-            let design = Design::default();
-            Colors {
-                sidebar_foreground: design.text,
-                muted_foreground: design.muted,
-                danger: design.remove_text,
-                design,
-            }
+        fn test_design() -> Design {
+            Design::default()
         }
 
         let temp = tempfile::tempdir().expect("tempdir");
@@ -2444,7 +2430,7 @@ mod tests {
                 _window: &mut Window,
                 _cx: &mut gpui::Context<Self>,
             ) -> impl IntoElement {
-                let colors = test_colors();
+                let design = test_design();
                 let slot = self.row_bounds.clone();
                 let list_width = px(152.0);
                 div()
@@ -2467,7 +2453,7 @@ mod tests {
                         true,
                         false,
                         false,
-                        &colors,
+                        &design,
                         self.repo.clone(),
                     ))
                     .child(local_row(
@@ -2485,7 +2471,7 @@ mod tests {
                         true,
                         false,
                         false,
-                        &colors,
+                        &design,
                         self.repo.clone(),
                     ))
                     .child(local_row(
@@ -2503,7 +2489,7 @@ mod tests {
                         true,
                         false,
                         false,
-                        &colors,
+                        &design,
                         self.repo.clone(),
                     ))
                     // A folder row draws in the same narrow list without
@@ -2515,7 +2501,7 @@ mod tests {
                         true,
                         0,
                         Section::Local,
-                        &colors,
+                        &design,
                         self.repo.clone(),
                     ))
                     .on_children_prepainted(move |children, _, _| {
@@ -2559,7 +2545,7 @@ mod tests {
         // Checking every painted pill quad guarantees both the upstream marker
         // and the PR badge stay inside the row and clear of the 16 px overlay
         // vertical scrollbar.
-        let badge_bg: gpui::Background = test_colors().design.accent_soft.into();
+        let badge_bg: gpui::Background = test_design().accent_soft.into();
         vcx.update(|window, _| {
             let scale = window.scale_factor();
             let badge_quads: Vec<_> = window
