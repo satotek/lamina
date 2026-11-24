@@ -760,7 +760,7 @@ fn paint_row(
     // The node goes on top of the fade: only the lines are clipped, and a
     // commit dot on the edge lane must stay crisp. The shift matches the lines
     // above, so a branch that started higher up still arrives at this dot.
-    let node_lane = row.node_lane.saturating_add(row.shift);
+    let node_lane = painted_node_lane(row.node_lane, row.shift);
     let node_x = if node_lane < visible {
         paint_node(
             bounds,
@@ -797,6 +797,14 @@ fn paint_row(
     {
         paint_boundary_stub(bounds, middle, x, row.muted, zoom, window);
     }
+}
+
+/// Core lane plus the uniform overlay shift.
+///
+/// Lines move by the same amount. The dot has to move with them, or a branch
+/// that continues past HEAD arrives beside the commit instead of on it.
+fn painted_node_lane(node_lane: u16, shift: u16) -> u16 {
+    node_lane.saturating_add(shift)
 }
 
 /// Three short dashes below a shallow boundary's node: the parents exist on
@@ -1938,6 +1946,31 @@ mod tests {
             reserved < edge.node_lane.saturating_add(1),
             "HEAD's node column belongs to HEAD's row"
         );
+    }
+
+    #[test]
+    fn a_row_below_head_with_no_edges_keeps_the_shift() {
+        let (rows, graph) = buried_head(4);
+        let below = rows.get(3).unwrap();
+        assert!(below.passes.is_empty());
+        assert!(below.edges.is_empty());
+        let overlay = graph.overlay_at(3);
+        assert!(overlay.shift > 0);
+        assert!(overlay.worktree.is_none());
+        assert!(overlay.merge.is_none());
+        assert_eq!(
+            column_lanes(below, overlay),
+            row_lanes(below).saturating_add(overlay.shift),
+            "nothing but the shift widens a row the connector does not cross"
+        );
+    }
+
+    #[test]
+    fn the_painted_node_lane_includes_the_overlay_shift() {
+        assert_eq!(painted_node_lane(0, 0), 0);
+        assert_eq!(painted_node_lane(4, 1), 5);
+        // head_lane 15 with one private column paints past the cap.
+        assert_eq!(painted_node_lane(15, 1), 16);
     }
 
     #[test]
