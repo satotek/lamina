@@ -4,7 +4,8 @@
 //!
 //! ```text
 //! LAMINA_BENCH_REPO=/path/to/linux \
-//!     cargo test -p lamina-core --release --test signature_bench -- --ignored --nocapture
+//!     cargo test -p lamina-core --release --test it -- --ignored --nocapture \
+//!     signature_bench::
 //! ```
 
 use std::path::PathBuf;

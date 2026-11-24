@@ -59,3 +59,9 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Network
 lamina-core = { path = ".", features = ["test-support"] }
 insta = "1.49.0"
 tempfile = "3.27.0"
+
+# The integration tests share one binary so Cargo links one test executable
+# instead of one per file.
+[[test]]
+name = "it"
+path = "tests/it/main.rs"

@@ -5,7 +5,8 @@
 //!
 //! ```text
 //! LAMINA_BENCH_REPO=/path/to/linux \
-//!     cargo test -p lamina-core --release --test commit_diff_bench -- --ignored --nocapture
+//!     cargo test -p lamina-core --release --test it -- --ignored --nocapture \
+//!     commit_diff_bench::
 //! ```
 //!
 //! `LAMINA_BENCH_COMMIT` selects the commit and defaults to the huge merge this
