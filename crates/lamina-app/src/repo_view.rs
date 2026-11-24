@@ -46,7 +46,7 @@ mod worktrees;
 
 pub(crate) use history_ops::history_filter_menu;
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -389,6 +389,15 @@ pub(crate) fn history_diff_options(cx: &App) -> DiffOptions {
     }
 }
 
+/// One connector plan. `commits` is a cheap clone — chunks are shared — so a
+/// later snapshot can be recognised without comparing every row.
+struct WorktreeGraphCache {
+    commits: lamina_core::session::CommitList,
+    head: Option<Oid>,
+    merge: Option<Oid>,
+    graph: crate::graph_canvas::UncommittedGraph,
+}
+
 pub struct RepoView {
     pub(crate) session: Option<Box<dyn RepositorySession>>,
     /// Bumped whenever `session` is replaced. A prompt names an operation id,
@@ -468,6 +477,10 @@ pub struct RepoView {
 
     /// Running maximum of graph widths, updated as chunks arrive.
     lanes: LaneWidth,
+    /// Connector plan for the history on screen. Status refreshes keep the
+    /// same commit chunks, so the walk above HEAD is not repeated per frame
+    /// or per edit.
+    worktree_graph: RefCell<Option<WorktreeGraphCache>>,
     /// The focused row; the details pane and the single commit actions read it.
     pub(crate) selected: Option<usize>,
     /// True when the synthetic uncommitted row at visual index 0 is selected.
@@ -725,6 +738,7 @@ impl RepoView {
             lfs_filter_note_for: None,
             cancelled_operations: Vec::new(),
             lanes: LaneWidth::default(),
+            worktree_graph: RefCell::new(None),
             selected: None,
             uncommitted_selected: false,
             uncommitted_diff: uncommitted_diff::UncommittedDiffState::default(),
@@ -2119,7 +2133,25 @@ impl RepoView {
         let session = self.session.as_ref()?;
         let snapshot = session.snapshot();
         let details = self.in_progress.details_for(snapshot.state);
-        Some(uncommitted::graph_info(&snapshot, details))
+        let (head, merge) = uncommitted::graph_anchors(&snapshot, details);
+        if let Some(cached) = self.worktree_graph.borrow().as_ref()
+            && cached.commits.same_chunks(&snapshot.commits)
+            && cached.head == head
+            && cached.merge == merge
+        {
+            return Some(cached.graph);
+        }
+        // The scan walks every row above HEAD. Doing it per frame, or on each
+        // worktree edit, would miss the point of keeping the connector out of
+        // the core layout. A matching history hits the branch above.
+        let graph = uncommitted::graph_info(&snapshot, details);
+        *self.worktree_graph.borrow_mut() = Some(WorktreeGraphCache {
+            commits: snapshot.commits.clone(),
+            head,
+            merge,
+            graph,
+        });
+        Some(graph)
     }
 
     /// Maps a commit index in the unfiltered history list to its visual row
