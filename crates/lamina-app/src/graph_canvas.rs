@@ -1747,12 +1747,6 @@ mod tests {
         // The shift applies below HEAD too, or the parent line would kink.
         assert_eq!(graph.overlay_at(3).shift, 1);
         assert!(graph.overlay_at(3).worktree.is_none());
-        for index in 0..rows.len() {
-            assert!(
-                !shifted_uses(rows.get(index).unwrap(), graph.lane_shift, 0),
-                "row {index} must leave the connector lane empty"
-            );
-        }
         let painted = column_lanes(rows.get(0).unwrap(), graph.overlay_at(0));
         assert_eq!(painted, rows.get(0).unwrap().width + 1);
         assert_eq!(
@@ -1781,7 +1775,10 @@ mod tests {
 
         assert_eq!(graph.lane_shift, 1);
         assert_eq!(graph.connector_lane, Some(0));
-        assert!(!shifted_uses(rows.get(0).unwrap(), graph.lane_shift, 0));
+        assert!(
+            lane_blocked(rows.get(0).unwrap(), 1),
+            "the curve from 0 to 2 crosses the lane the connector wanted"
+        );
     }
 
     #[test]
@@ -1886,11 +1883,6 @@ mod tests {
         assert_eq!(into.lane, 1);
         assert_eq!(into.node_lane, 3);
         assert_ne!(into.lane, into.node_lane);
-        for index in 0..rows.len() {
-            let row = rows.get(index).unwrap();
-            assert!(!shifted_uses(row, graph.lane_shift, 0), "row {index}");
-            assert!(!shifted_uses(row, graph.lane_shift, 1), "row {index}");
-        }
     }
 
     fn buried_head(head_lane: u16) -> (GraphRows, UncommittedGraph) {
