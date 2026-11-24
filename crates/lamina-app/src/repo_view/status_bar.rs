@@ -318,7 +318,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use gpui::{QuitMode, VisualTestContext};
-    use lamina_core::session::Operation;
+    use lamina_core::session::{Operation, SessionEvent};
     use lamina_core::test_support::TestRepo;
 
     use super::RepoView;
@@ -416,7 +416,15 @@ mod tests {
 
         vcx.update(|_window, cx| {
             view.update(cx, |view, cx| {
+                let running = view
+                    .session
+                    .as_ref()
+                    .and_then(|session| session.snapshot().busy)
+                    .expect("the commit is running");
                 assert!(view.cancel_running_operation(cx));
+                // The session's start event can reach the view after the
+                // cancel on a busy machine. It must not wipe the note.
+                view.on_event(SessionEvent::OperationStarted { id: running }, cx);
                 assert!(
                     view.activity.is_empty(),
                     "cancel left the activity segment in place"

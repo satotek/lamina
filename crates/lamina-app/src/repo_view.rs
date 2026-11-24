@@ -463,6 +463,9 @@ pub struct RepoView {
     /// The LFS track that also installed the filter. Its finish clears the
     /// status bar for the outcome, so the note is written again there.
     lfs_filter_note_for: Option<lamina_core::session::OperationId>,
+    /// Operations cancelled before their start event reached the view. That
+    /// late event must not wipe the "cancelled" note the cancel just wrote.
+    cancelled_operations: Vec<OperationId>,
 
     /// Running maximum of graph widths, updated as chunks arrive.
     lanes: LaneWidth,
@@ -722,6 +725,7 @@ impl RepoView {
             pending_worktree_open: None,
             pending_apply_patch: None,
             lfs_filter_note_for: None,
+            cancelled_operations: Vec::new(),
             lanes: LaneWidth::default(),
             selected: None,
             uncommitted_selected: false,
@@ -1540,14 +1544,18 @@ impl RepoView {
                 self.notify_if_active(cx);
             }
             SessionEvent::OperationFinished { id, error } => {
+                let was_cancelled = self.cancelled_operations.contains(&id);
+                self.cancelled_operations
+                    .retain(|cancelled| *cancelled != id);
                 let failed = error.is_some();
                 // The outcome replaces whatever an earlier action left, so an
                 // old failure cannot sit beside a fresh success. A cancelled
                 // command is the exception: cancel already wrote its note, and
                 // this late report must not erase it.
-                let cancelled = error
-                    .as_deref()
-                    .is_some_and(|error| error.contains(lamina_core::error::OPERATION_CANCELLED));
+                let cancelled = was_cancelled
+                    || error.as_deref().is_some_and(|error| {
+                        error.contains(lamina_core::error::OPERATION_CANCELLED)
+                    });
                 if !cancelled {
                     self.clear_status();
                 }
@@ -1662,7 +1670,9 @@ impl RepoView {
                 // A new command makes the previous outcome history; without
                 // this a worktree or "not available" message outlived every
                 // later action.
-                self.clear_status();
+                if !self.cancelled_operations.contains(&id) {
+                    self.clear_status();
+                }
                 // The snapshot published with `busy` still holds the status
                 // from before the command, which is what the switch compares
                 // against.
@@ -1907,6 +1917,7 @@ impl RepoView {
                 session.cancel_operation(*id);
             }
         }
+        self.cancelled_operations.extend(ids);
         self.activity.clear();
         self.remote.take_running_id();
         self.status_error = None;
