@@ -111,11 +111,8 @@ fn run_remote(helper: &Helper, operation: Operation) {
 
 /// `HEAD` and a clean or dirty worktree, which is what undo and redo move.
 fn repository_state(repo: &TestRepo) -> (String, String) {
-    // A file rewritten in the same instant as the index is "racily clean":
-    // whether status rereads it depends on timing, and on a runner whose
-    // system config sets an LFS filter the test's own git does not see,
-    // that reread decides between "M " and "MM". Refreshing first makes
-    // every status compare contents.
+    // A file rewritten in the same instant as the index is "racily clean";
+    // refreshing first makes every status compare contents.
     let _ = repo.git_output(&["update-index", "-q", "--really-refresh"]);
     let head = repo.git(&["rev-parse", "HEAD"]);
     let status = repo.git(&["status", "--porcelain"]);
@@ -417,6 +414,21 @@ fn pointer_repo() -> TestRepo {
     repo.write("data.bin", &pointer);
     repo.write(".gitattributes", "*.bin filter=lfs\n");
     repo.commit("pointer");
+    // The sessions' git reads the system config, the test's own git does not
+    // (GIT_CONFIG_NOSYSTEM). A runner whose system config sets the LFS filter
+    // left the sessions cleaning data.bin while the test's status compared
+    // raw bytes, so the two sides disagreed at random. Configuring the filter
+    // in the repository gives both the same view.
+    if repo.git_output(&["lfs", "version"]).status.success() {
+        for (key, value) in [
+            ("filter.lfs.clean", "git-lfs clean -- %f"),
+            ("filter.lfs.smudge", "git-lfs smudge -- %f"),
+            ("filter.lfs.process", "git-lfs filter-process"),
+            ("filter.lfs.required", "true"),
+        ] {
+            repo.git(&["config", key, value]);
+        }
+    }
     let object = repo
         .path()
         .join(".git")
