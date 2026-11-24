@@ -54,5 +54,8 @@ system-configuration = "0.8"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Networking_WinHttp"] }
 
 [dev-dependencies]
+# Integration tests import `lamina_core::test_support`, which is behind this
+# feature.
+lamina-core = { path = ".", features = ["test-support"] }
 insta = "1.49.0"
 tempfile = "3.27.0"
