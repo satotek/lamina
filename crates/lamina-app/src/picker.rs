@@ -622,7 +622,7 @@ impl Picker {
     pub(crate) fn open_compare(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_creator(window, cx, |workspace, _, window, cx| {
             let options = workspace.read(cx).revision_options(cx);
-            crate::compare::open_compare_dialog(workspace, options, window, cx);
+            crate::file_compare::open_compare_dialog(workspace, options, window, cx);
         });
     }
 

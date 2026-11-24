@@ -37,7 +37,6 @@ mod branch_switcher;
 mod branches;
 mod clone_dialog;
 mod commands;
-mod compare;
 mod component_theme;
 mod conflicts;
 mod data;
@@ -45,6 +44,7 @@ mod debug_launch;
 mod diff_view;
 mod external_tools;
 mod fake;
+mod file_compare;
 mod file_history;
 mod fonts;
 mod git_config_view;
@@ -228,7 +228,7 @@ fn open_start(start: StartMode, debug: DebugLaunch, cx: &mut App) {
         StartMode::Path(path) => open_window(Some(Launch::open(&path)), false, debug, cx),
         StartMode::Compare(paths) => {
             let window_size = requested_window_size(&debug);
-            match compare::validate_ordered_paths(&paths) {
+            match file_compare::validate_ordered_paths(&paths) {
                 Ok(target) => {
                     workspace::open_compare_window(target, window_size, cx);
                 }

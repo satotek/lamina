@@ -541,9 +541,9 @@ impl RepoView {
             return;
         };
         let revision =
-            |summary: String, oid: Oid| crate::compare::CompareRevision::commit(summary, oid);
-        let file_source = crate::compare::RepoThreeWayFileSource {
-            source: crate::compare::RepoThreeWaySource {
+            |summary: String, oid: Oid| crate::file_compare::CompareRevision::commit(summary, oid);
+        let file_source = crate::file_compare::RepoThreeWayFileSource {
+            source: crate::file_compare::RepoThreeWaySource {
                 reader,
                 root: self.repository_root(),
                 left: revision(left_summary, left),
