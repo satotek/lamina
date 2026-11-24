@@ -318,16 +318,9 @@ pub(crate) fn plan_worktree_connector<'a>(
         .merge
         .filter(|end| end.index < len && row_at(end.index).is_some());
     let merge_blocked = merge.is_some_and(|end| !lane_clear_until(&row_at, end.index, end.lane));
-    // Two dashes on one column paint on top of each other. A shared core lane
-    // takes a second private column even when the history itself leaves it
-    // empty between the circle and the nearer target.
-    let merge_collides = merge.is_some_and(|end| {
-        !head_private
-            && head_index.is_some_and(|head| head != end.index)
-            && ends.head_present
-            && end.lane == ends.head_lane
-    });
-    let merge_private = merge.is_some() && (merge_blocked || merge_collides);
+    // The higher of two nodes on one core lane already blocks that lane for
+    // the lower target, so a shared column is private through `merge_blocked`.
+    let merge_private = merge_blocked;
 
     let shift = u16::from(head_private) + u16::from(merge_private);
     let connector_lane = if ends.head_present {
