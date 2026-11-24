@@ -1068,7 +1068,7 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::repo::{PathHistoryEntry, Repo};
-    use crate::test_support::{TestRepo, shallow_clone_fixture};
+    use crate::test_support::{AUTHOR_EMAIL, AUTHOR_NAME, TestRepo, shallow_clone_fixture};
     use gix::object::tree::diff::ChangeDetached;
     use gix::objs::{FindExt as _, TreeRefIter};
 
@@ -1193,6 +1193,53 @@ mod tests {
         out
     }
 
+    /// Append `count` commits that each overwrite `unrelated.txt`, using one
+    /// `fast-import` run instead of one `git add` + `git commit` pair per
+    /// commit: the chain is plain and linear, so the import keeps its shape
+    /// (same messages, contents, parents and timestamps) while removing the
+    /// per-commit process startup that dominated the fixture.
+    fn append_unrelated_commits(
+        fixture: &TestRepo,
+        message_prefix: &str,
+        content_prefix: &str,
+        count: usize,
+    ) {
+        use std::fmt::Write as _;
+
+        // `fast-import` requires an explicit committer. Reusing the fixture's
+        // own timestamp keeps these commits date-identical to the rest of the
+        // history, so date-order ties resolve the same way.
+        let time = fixture
+            .git(&["log", "-1", "--format=%ct"])
+            .trim()
+            .to_owned();
+        let mut stream = String::new();
+        let mut previous = "refs/heads/main^0".to_owned();
+        for index in 0..count {
+            let mark = index + 1;
+            let message = format!("{message_prefix} {index}");
+            let contents = format!("{content_prefix} {index}\n");
+            let _ = writeln!(stream, "commit refs/heads/main");
+            let _ = writeln!(stream, "mark :{mark}");
+            let _ = writeln!(
+                stream,
+                "committer {AUTHOR_NAME} <{AUTHOR_EMAIL}> {time} +0000"
+            );
+            let _ = writeln!(stream, "data {}", message.len());
+            let _ = writeln!(stream, "{message}");
+            let _ = writeln!(stream, "from {previous}");
+            let _ = writeln!(stream, "M 100644 inline unrelated.txt");
+            let _ = writeln!(stream, "data {}", contents.len());
+            let _ = writeln!(stream, "{contents}");
+            previous = format!(":{mark}");
+        }
+        let _ = writeln!(stream, "done");
+        fixture.git_input(&["fast-import", "--quiet"], &stream);
+        // fast-import moves refs only; later fixture commits stage the
+        // worktree, so it has to match the imported HEAD again.
+        fixture.git(&["reset", "-q", "--hard", "HEAD"]);
+    }
+
     #[test]
     fn file_history_stops_at_the_shallow_boundary() {
         let (_source, clone) = shallow_clone_fixture(&["--depth", "2"]);
@@ -1247,12 +1294,13 @@ mod tests {
         fixture.write("sub/b.txt", &format!("{body}iota\nkappa\n"));
         fixture.commit("rename with edit");
 
-        // Main branch adds unrelated commits (> INLINE_WARMUP to exercise worker pool too).
+        // Main branch adds unrelated commits. The total stays above
+        // INLINE_WARMUP (256), so the commits past the warmup still go through
+        // the batching path; 150 here and 140 after the delete keep the
+        // fixture near 300 commits, half the previous 620, without dropping a
+        // scenario.
         fixture.git(&["checkout", "-q", "main"]);
-        for i in 0..320 {
-            fixture.write("unrelated.txt", &format!("tick {i}\n"));
-            fixture.commit(&format!("unrelated {i}"));
-        }
+        append_unrelated_commits(&fixture, "unrelated", "tick", 150);
 
         // Merge feature into main.
         fixture.git(&[
@@ -1268,10 +1316,7 @@ mod tests {
         // then rename directory.
         fixture.git(&["rm", "--quiet", "sub/b.txt"]);
         fixture.commit("delete sub/b.txt");
-        for i in 0..300 {
-            fixture.write("unrelated.txt", &format!("post-delete {i}\n"));
-            fixture.commit(&format!("post-delete {i}"));
-        }
+        append_unrelated_commits(&fixture, "post-delete", "post-delete", 140);
         fixture.write("sub/b.txt", &format!("{body}readded\nlambda\nmu\n"));
         fixture.commit("re-add sub/b.txt");
         std::fs::create_dir_all(fixture.path().join("final")).expect("create final dir");
@@ -1290,7 +1335,13 @@ mod tests {
                 fixture.git(&["commit-graph", "write", "--reachable", "--changed-paths"]);
             }
             let repo = fixture.open();
-            for query_path in ["final/c.txt", "new_dir", "unrelated.txt", "missing.txt", ""] {
+            // Three paths, one per scenario: the rename chain across the merge,
+            // the deletion and the re-addition (`final/c.txt`), a renamed
+            // directory pathspec (`new_dir`), and the repository root (`""`),
+            // which reports every commit and is the only test covering that
+            // branch. Longer per-file histories add rows but no new branch, and
+            // an absent path is covered by `path_history_for_an_unknown_path_is_empty`.
+            for query_path in ["final/c.txt", "new_dir", ""] {
                 let actual: Vec<PathHistoryEntry> = repo
                     .path_history_entries(query_path)
                     .expect("optimized walk")
