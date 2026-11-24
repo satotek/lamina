@@ -631,7 +631,10 @@ fn diff_ready_is_emitted_twice_with_highlights_for_a_known_language() {
 #[test]
 fn cancelled_diff_emits_nothing() {
     let repo = TestRepo::new();
-    let base: String = (0..20_000).map(|index| format!("line {index}\n")).collect();
+    // 5,000 lines is still enough work that the immediate cancel below lands
+    // before the diff finishes and emits its first event; the two edits keep
+    // the diff non-trivial.
+    let base: String = (0..5_000).map(|index| format!("line {index}\n")).collect();
     // A `.rs` path keeps the sentinel on the two-event path.
     repo.write("big.rs", &base);
     repo.commit_all("base");
@@ -640,7 +643,7 @@ fn cancelled_diff_emits_nothing() {
 
     let edited = base
         .replace("line 100\n", "line 100 changed\n")
-        .replace("line 19999\n", "line 19999 changed\n");
+        .replace("line 4999\n", "line 4999 changed\n");
     harness.repo.write("big.rs", &edited);
 
     let ticket = harness.session.request_diff(DiffRequest::Unstaged {

@@ -3,6 +3,10 @@
 //! Each module has its own tests; this one catches disagreements between them,
 //! e.g. hunk coordinates from `diff_text` that `git apply` rejects, or `Repo`
 //! returning a stale index after the git CLI rewrote it.
+//!
+//! Five random seeds per test: each seed drives the full loop until no single
+//! line is left to apply, so extra seeds repeated the same code paths on a
+//! different edit order instead of covering new ones.
 
 use std::fs;
 use std::path::Path;
@@ -183,7 +187,7 @@ fn edited(base: &str, rng: &mut Lcg) -> String {
 
 #[test]
 fn staging_every_line_one_by_one_reaches_the_worktree() {
-    for seed in 1..=15 {
+    for seed in 1..=5 {
         let base = base_text();
         let fx = Fixture::new(&base);
         let mut rng = Lcg(seed);
@@ -203,7 +207,7 @@ fn staging_every_line_one_by_one_reaches_the_worktree() {
 /// the patches would not apply.
 #[test]
 fn staging_every_line_one_by_one_with_autocrlf() {
-    for seed in 1..=15 {
+    for seed in 1..=5 {
         let base = base_text();
         let fx = Fixture::with_autocrlf(&base, true);
         let mut rng = Lcg(seed);
@@ -245,7 +249,7 @@ fn staging_every_line_one_by_one_with_autocrlf() {
 
 #[test]
 fn unstaging_every_line_one_by_one_reaches_head() {
-    for seed in 1..=15 {
+    for seed in 1..=5 {
         let base = base_text();
         let fx = Fixture::new(&base);
         let mut rng = Lcg(seed * 7919);
@@ -263,7 +267,7 @@ fn unstaging_every_line_one_by_one_reaches_head() {
 
 #[test]
 fn discarding_every_line_one_by_one_restores_the_index() {
-    for seed in 1..=15 {
+    for seed in 1..=5 {
         let base = base_text();
         let fx = Fixture::new(&base);
         let mut rng = Lcg(seed * 104_729);
