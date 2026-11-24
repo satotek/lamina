@@ -134,18 +134,16 @@ pub fn row_lanes(row: GraphRow<'_>) -> u16 {
 /// Every row grows by the same shift, so lane centres stay aligned down the
 /// list. A dashed run that reaches further than the shifted row still widens
 /// the rows it is painted on; otherwise the line would fall past the indent
-/// and the summary would cover it.
+/// and the summary would cover it. The target node's column is not part of
+/// that: the node already lives on its own row, and reserving it above HEAD
+/// would step those summaries left.
 pub fn column_lanes(row: GraphRow<'_>, overlay: GraphOverlay) -> u16 {
     let mut lanes = row_lanes(row).saturating_add(overlay.shift);
     if let Some(edge) = overlay.worktree {
-        lanes = lanes
-            .max(edge.lane.saturating_add(1))
-            .max(edge.node_lane.saturating_add(1));
+        lanes = lanes.max(edge.lane.saturating_add(1));
     }
     if let Some(edge) = overlay.merge {
-        lanes = lanes
-            .max(edge.lane.saturating_add(1))
-            .max(edge.node_lane.saturating_add(1));
+        lanes = lanes.max(edge.lane.saturating_add(1));
     }
     lanes.max(1)
 }
@@ -1892,6 +1890,61 @@ mod tests {
             assert!(!shifted_uses(row, graph.lane_shift, 0), "row {index}");
             assert!(!shifted_uses(row, graph.lane_shift, 1), "row {index}");
         }
+    }
+
+    fn buried_head(head_lane: u16) -> (GraphRows, UncommittedGraph) {
+        let mut rows = GraphRows::new();
+        // The top row never reaches HEAD's column. A later row does, so the
+        // connector takes a private lane instead of that column.
+        push_row(&mut rows, 0, &[(0, 0)], &[]);
+        push_row(&mut rows, head_lane, &[(head_lane, head_lane)], &[]);
+        push_row(&mut rows, head_lane, &[], &[]);
+        push_row(&mut rows, 0, &[], &[]);
+        let graph = plan(
+            &rows,
+            ConnectorEnds {
+                head_index: Some(2),
+                head_lane,
+                head_color: 1,
+                head_present: true,
+                merge: None,
+            },
+        );
+        (rows, graph)
+    }
+
+    #[test]
+    fn rows_above_a_shifted_head_do_not_widen_to_its_node() {
+        let (rows, graph) = buried_head(4);
+        assert!(graph.head_lane > 0);
+        assert_eq!(graph.lane_shift, 1);
+        assert_eq!(graph.connector_lane, Some(0));
+        assert!(graph.connector_muted);
+
+        let above = rows.get(0).unwrap();
+        let overlay = graph.overlay_at(0);
+        let edge = overlay
+            .worktree
+            .expect("the private connector crosses this row");
+        assert!(!edge.to_node);
+        assert_eq!(edge.lane, 0);
+        assert_eq!(
+            edge.node_lane,
+            graph.head_lane.saturating_add(graph.lane_shift)
+        );
+        assert_eq!(row_lanes(above), 1);
+        let reserved = column_lanes(above, overlay);
+        assert_eq!(
+            reserved,
+            row_lanes(above)
+                .saturating_add(graph.lane_shift)
+                .max(edge.lane.saturating_add(1)),
+            "the row keeps the shifted layout and the connector's own lane"
+        );
+        assert!(
+            reserved < edge.node_lane.saturating_add(1),
+            "HEAD's node column belongs to HEAD's row"
+        );
     }
 
     #[test]
