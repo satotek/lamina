@@ -39,7 +39,7 @@ impl RepoView {
         design: &Design,
         cx: &App,
     ) -> Option<AnyElement> {
-        if !self.commit_graph_offer || self.commit_graph_writing || !self.commit_graph_allowed(cx) {
+        if !self.commit_graph.is_offered() || !self.commit_graph_allowed(cx) {
             return None;
         }
 
@@ -94,7 +94,7 @@ impl RepoView {
         if self.session.is_none() || self.is_busy() {
             return;
         }
-        self.commit_graph_writing = true;
+        self.commit_graph.begin_write();
         self.run_operation(
             Operation::WriteCommitGraph,
             t!("history.commit_graph_op").to_string(),
@@ -106,8 +106,7 @@ impl RepoView {
 
     /// Hides the offer until the repository is opened again.
     pub(super) fn dismiss_commit_graph(&mut self, cx: &mut Context<Self>) {
-        self.commit_graph_offer = false;
-        self.commit_graph_dismissed = true;
+        self.commit_graph.dismiss();
         cx.notify();
     }
 
@@ -119,8 +118,109 @@ impl RepoView {
         settings::update(cx, |settings| {
             settings.commit_graph.ignore(repository);
         });
-        self.commit_graph_offer = false;
-        self.commit_graph_dismissed = true;
+        self.commit_graph.dismiss();
         cx.notify();
+    }
+}
+
+/// The one-time offer to write a commit-graph.
+///
+/// The history loader raises it, the banner's buttons answer it, and the
+/// operation the answer starts settles it. A write that fails returns to
+/// `Offered` so the user can retry; every other answer is final until the
+/// repository is opened again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum CommitGraphOffer {
+    /// Nothing suggested a write yet.
+    #[default]
+    Hidden,
+    /// The banner asks the user.
+    Offered,
+    /// The offered write is running.
+    Writing,
+    /// The banner was answered, or shown and dismissed.
+    Dismissed,
+}
+
+impl CommitGraphOffer {
+    /// The history loader found a missing or stale graph.
+    ///
+    /// Only the initial state changes: an offer already on screen stays, a
+    /// running write is not interrupted, and an answered offer stays answered.
+    pub(super) fn suggest(&mut self) -> bool {
+        if *self != Self::Hidden {
+            return false;
+        }
+        *self = Self::Offered;
+        true
+    }
+
+    pub(super) fn is_offered(&self) -> bool {
+        *self == Self::Offered
+    }
+
+    /// The user clicked Write; the operation queue has the job from here.
+    pub(super) fn begin_write(&mut self) {
+        *self = Self::Writing;
+    }
+
+    /// The write reported back. A failure is offered again so the user can
+    /// retry; a success is as final as dismissing the banner.
+    pub(super) fn write_finished(&mut self, succeeded: bool) {
+        if *self != Self::Writing {
+            return;
+        }
+        *self = if succeeded {
+            Self::Dismissed
+        } else {
+            Self::Offered
+        };
+    }
+
+    /// "Not now" and "Don't ask" both hide the offer for this view.
+    pub(super) fn dismiss(&mut self) {
+        *self = Self::Dismissed;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CommitGraphOffer;
+
+    #[test]
+    fn a_write_returns_to_the_offer_when_it_fails() {
+        let mut offer = CommitGraphOffer::Hidden;
+        assert!(offer.suggest());
+        offer.begin_write();
+        offer.write_finished(false);
+        assert!(offer.is_offered());
+    }
+
+    #[test]
+    fn a_successful_write_and_a_dismissal_are_final() {
+        let mut written = CommitGraphOffer::Hidden;
+        written.suggest();
+        written.begin_write();
+        written.write_finished(true);
+        assert_eq!(written, CommitGraphOffer::Dismissed);
+
+        let mut dismissed = CommitGraphOffer::Offered;
+        dismissed.dismiss();
+        assert_eq!(dismissed, CommitGraphOffer::Dismissed);
+    }
+
+    #[test]
+    fn a_running_write_is_not_offered_again_or_interrupted() {
+        let mut offer = CommitGraphOffer::Offered;
+        offer.begin_write();
+        assert!(!offer.suggest());
+        assert_eq!(offer, CommitGraphOffer::Writing);
+    }
+
+    #[test]
+    fn a_finished_write_does_not_undo_an_answer() {
+        let mut offer = CommitGraphOffer::Dismissed;
+        offer.write_finished(false);
+        assert_eq!(offer, CommitGraphOffer::Dismissed);
     }
 }

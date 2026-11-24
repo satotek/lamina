@@ -443,14 +443,8 @@ pub struct RepoView {
     /// result records the commit the user was reading rather than the result
     /// the filter had already selected.
     search_origin: Option<navigation::Place>,
-    /// The history loader suggested writing a commit-graph and the user has
-    /// not answered yet.
-    commit_graph_offer: bool,
-    /// True while the offered write runs, so a reload cannot re-show it.
-    commit_graph_writing: bool,
-    /// The user chose "Not now"; later reloads stay quiet until the repository
-    /// is opened again.
-    commit_graph_dismissed: bool,
+    /// The one-time offer to write a commit-graph.
+    commit_graph: commit_graph::CommitGraphOffer,
     /// Canonical working-tree root, the key "Don't ask" is stored under.
     pub(crate) repository_key: Option<PathBuf>,
     /// Full ref names the history graph leaves out. The refs themselves stay in
@@ -710,9 +704,7 @@ impl RepoView {
             reflog: reflog::ReflogState::default(),
             navigation: navigation::NavigationHistory::default(),
             search_origin: None,
-            commit_graph_offer: false,
-            commit_graph_writing: false,
-            commit_graph_dismissed: false,
+            commit_graph: commit_graph::CommitGraphOffer::default(),
             repository_key: None,
             hidden_refs: Vec::new(),
             follow_ups: FollowUps::default(),
@@ -1562,15 +1554,9 @@ impl RepoView {
                         self.pending_reveal_conflicts = true;
                     }
                 }
-                if self.commit_graph_writing {
-                    self.commit_graph_writing = false;
-                    // A successful write reloads the history and the offer is
-                    // answered; a failed one leaves it up so the user can retry.
-                    if error.is_none() {
-                        self.commit_graph_offer = false;
-                        self.commit_graph_dismissed = true;
-                    }
-                }
+                // A successful write reloads the history and the offer is
+                // answered; a failed one puts it back up so the user can retry.
+                self.commit_graph.write_finished(error.is_none());
                 self.worktree.on_operation_finished(id, error.as_deref());
                 let state = self
                     .session
@@ -1693,11 +1679,7 @@ impl RepoView {
                 self.prompt_for_credentials(id, prompt, secret, cx);
             }
             SessionEvent::CommitGraphSuggested { .. } => {
-                if !self.commit_graph_writing
-                    && !self.commit_graph_dismissed
-                    && self.commit_graph_allowed(cx)
-                {
-                    self.commit_graph_offer = true;
+                if self.commit_graph_allowed(cx) && self.commit_graph.suggest() {
                     self.notify_if_active(cx);
                 }
             }
