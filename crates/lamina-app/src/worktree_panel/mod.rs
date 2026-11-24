@@ -1929,9 +1929,9 @@ impl RepoView {
             entity,
             &snapshot,
             details.as_ref(),
-            Arc::clone(&self.worktree_lfs),
-            Rc::clone(&self.lfs_locks),
-            self.lfs_locking_available,
+            Arc::clone(&self.lfs.worktree),
+            Rc::clone(&self.lfs.locks),
+            self.lfs.locking_available,
             cx,
         )
     }

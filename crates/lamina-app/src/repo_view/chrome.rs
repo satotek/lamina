@@ -267,8 +267,8 @@ impl Render for RepoView {
             if let Some(banner) = self.connection_banner(entity.clone(), &design) {
                 main = main.child(banner);
             }
-            if let Some(text) = self.lfs_notice.clone()
-                && !self.lfs_notice_dismissed
+            if let Some(text) = self.lfs.notice.clone()
+                && !self.lfs.notice_dismissed
             {
                 let dismiss_entity = self.entity();
                 main = main.child(
@@ -277,7 +277,7 @@ impl Render for RepoView {
                             .size(crate::ui::ButtonSize::Tiny)
                             .on_click(move |_, _, cx| {
                                 dismiss_entity.update(cx, |this, cx| {
-                                    this.lfs_notice_dismissed = true;
+                                    this.lfs.notice_dismissed = true;
                                     cx.notify();
                                 });
                             }),

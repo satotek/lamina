@@ -220,7 +220,7 @@ impl RepoView {
     fn reset_commit_pane(&mut self) {
         self.files_epoch = self.files_epoch.wrapping_add(1);
         self.files = None;
-        self.files_lfs = Arc::new(HashMap::new());
+        self.lfs.files = Arc::new(HashMap::new());
         self.files_error = None;
         self.selected_file = None;
         self.cancel_diff();
@@ -251,7 +251,7 @@ impl RepoView {
             })
             .collect();
         self.files = Some(files);
-        self.files_lfs = Arc::new(HashMap::new());
+        self.lfs.files = Arc::new(HashMap::new());
         self.files_error = None;
         if comparison.files.is_empty() {
             self.selected_file = None;

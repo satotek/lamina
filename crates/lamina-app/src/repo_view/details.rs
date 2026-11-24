@@ -831,7 +831,7 @@ impl RepoView {
             _ => true,
         };
         let work_dir = Arc::new(self.work_dir());
-        let lfs = Arc::clone(&self.files_lfs);
+        let lfs = Arc::clone(&self.lfs.files);
         let list_design = design.clone();
         let entries: Arc<Vec<(String, ChangeKind)>> = Arc::new(
             files
