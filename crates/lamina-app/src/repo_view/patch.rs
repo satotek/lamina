@@ -16,6 +16,7 @@ use lamina_core::Oid;
 use lamina_core::session::Operation;
 
 use super::RepoView;
+use super::follow_up::FollowUp;
 
 impl RepoView {
     /// "Save as patch…": asks where, then writes `git format-patch -1 <id>`.
@@ -141,7 +142,7 @@ impl RepoView {
     fn start_apply_patch(&mut self, patch: Vec<u8>, window: &mut Window, cx: &mut Context<Self>) {
         let label = t!("patch.op.apply").to_string();
         if let Some(id) = self.run_operation(Operation::ApplyPatch { patch }, label, window, cx) {
-            self.pending_apply_patch = Some(id);
+            self.follow_ups.expect(id, FollowUp::PatchApplied);
         }
     }
 
