@@ -124,7 +124,7 @@ impl SshChild {
             let _ = child.wait();
         }
         if let Some(handle) = lock(&self.stderr).take() {
-            let _ = handle.join();
+            join_stderr_reader(handle);
         }
     }
 }
@@ -636,6 +636,27 @@ fn hide_console(command: &mut Command) {
     {
         let _ = command;
     }
+}
+
+/// How long a killed `ssh`'s stderr reader gets to reach EOF.
+const STDERR_DRAIN: Duration = Duration::from_millis(2000);
+
+/// Joins the stderr reader of an `ssh` that was just killed, but only briefly.
+///
+/// Killing `ssh` usually closes the pipe, and the wait lets the reader keep
+/// the last lines for the error text. A process `ssh` started (a
+/// `ProxyCommand`, or the remote command itself when a shell did not `exec`
+/// it) can inherit the pipe and outlive the kill; joining then would hang
+/// the caller until that process exits, so the reader is left behind.
+pub(crate) fn join_stderr_reader(handle: JoinHandle<()>) {
+    let deadline = std::time::Instant::now() + STDERR_DRAIN;
+    while !handle.is_finished() {
+        if std::time::Instant::now() >= deadline {
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    let _ = handle.join();
 }
 
 pub(crate) fn capture_stderr(mut stderr: impl Read, buf: &Mutex<Vec<u8>>) {

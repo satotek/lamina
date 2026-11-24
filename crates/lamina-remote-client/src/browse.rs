@@ -176,7 +176,7 @@ impl RemoteBrowser {
                 // to be reaped here too or it outlives the failed open.
                 let _ = child.kill();
                 let _ = child.wait();
-                let _ = stderr_thread.join();
+                ssh::join_stderr_reader(stderr_thread);
                 return Err(Error::other(format!("could not read from ssh: {error}")));
             }
         };
@@ -344,7 +344,7 @@ impl RemoteBrowser {
             let _ = child.wait();
         }
         if let Some(handle) = lock(&self.stderr).take() {
-            let _ = handle.join();
+            ssh::join_stderr_reader(handle);
         }
         // The frame reader is dropped, not joined: it may still be inside a
         // read that only the killed child's pipe would end, and `Drop` must
