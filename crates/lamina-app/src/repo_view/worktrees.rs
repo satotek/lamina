@@ -13,10 +13,9 @@ use std::path::{Path, PathBuf};
 use gpui::prelude::*;
 use gpui::{
     App, Context, Entity, Focusable as _, FontWeight, IntoElement, Render, Subscription,
-    WeakEntity, Window, div, px,
+    WeakEntity, Window, div,
 };
 use gpui_component::checkbox::Checkbox;
-use gpui_component::dialog::DialogFooter;
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::notification::Notification;
 use gpui_component::{ActiveTheme as _, Disableable as _, WindowExt as _};
@@ -432,43 +431,16 @@ fn show_worktree_dialog(
     cx: &mut Context<RepoView>,
 ) {
     let focus = dialog.read(cx).input_focus(cx);
-    let content = dialog.clone();
-    let footer = dialog.clone();
-    let confirm = dialog;
-    window.open_dialog(cx, move |card, _, cx| {
-        let zoom = Settings::get(cx).appearance.zoom();
-        let content = content.clone();
-        let footer = footer.clone();
-        let confirm = confirm.clone();
-        card.title(t!("worktree.add.title").to_string())
-            .w(px(520.0 * zoom))
-            .content(move |body, _, _| body.child(content.clone()))
-            .footer(
-                DialogFooter::new()
-                    .child(
-                        crate::ui::button("worktree-add-cancel", t!("common.cancel").to_string())
-                            .size(crate::ui::ButtonSize::Medium)
-                            .on_click(|_, window, cx| window.close_dialog(cx)),
-                    )
-                    .child(
-                        crate::ui::button(
-                            "worktree-add-submit",
-                            t!("worktree.add.title").to_string(),
-                        )
-                        .size(crate::ui::ButtonSize::Medium)
-                        .on_click(move |_, window, cx| {
-                            footer.update(cx, |dialog, cx| dialog.submit(window, cx));
-                        }),
-                    ),
-            )
-            .on_ok(move |_, window, cx| {
-                // The dialog closes itself once the operation is on its way, so
-                // the confirm does not close it a second time.
-                confirm.update(cx, |dialog, cx| dialog.submit(window, cx));
-                false
-            })
-    });
-    window.defer(cx, move |window, cx| focus.focus(window, cx));
+    crate::ui::FormDialog::new(t!("worktree.add.title").to_string(), 520.0)
+        .content(dialog)
+        .cancel("worktree-add-cancel")
+        .submit(
+            "worktree-add-submit",
+            t!("worktree.add.title").to_string(),
+            |dialog, window, cx| dialog.submit(window, cx),
+        )
+        .focus(focus)
+        .open(window, cx);
 }
 
 /// The default checkout directory for `branch`: a sibling of the repository

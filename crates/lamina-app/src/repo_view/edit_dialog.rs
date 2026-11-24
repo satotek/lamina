@@ -12,7 +12,6 @@ use gpui::{
 };
 use gpui_component::ActiveTheme as _;
 use gpui_component::WindowExt as _;
-use gpui_component::dialog::DialogFooter;
 use gpui_component::input::{InputEvent, Textarea, TextareaState};
 use lamina_core::Oid;
 
@@ -42,45 +41,17 @@ pub(super) fn open(
     let dialog =
         cx.new(|cx| RewordDialog::new(handle, commit, short, message, warning, window, cx));
     let focus = dialog.read(cx).message_focus(cx);
-    let content = dialog.clone();
-    let footer = dialog.clone();
-    let confirm = dialog;
-    window.open_dialog(cx, move |card, _, cx| {
-        let zoom = Settings::get(cx).appearance.zoom();
-        let content = content.clone();
-        let footer = footer.clone();
-        let confirm = confirm.clone();
-        let empty = confirm.read(cx).is_empty(cx);
-        card.title(t!("edit_dialog.title"))
-            .w(px(520.0 * zoom))
-            .content(move |body, _, _| body.child(content.clone()))
-            .footer(
-                DialogFooter::new()
-                    .child(
-                        ui::button("reword-cancel", t!("common.cancel"))
-                            .size(ui::ButtonSize::Medium)
-                            .on_click(|_, window, cx| window.close_dialog(cx)),
-                    )
-                    .child(
-                        ui::button("reword-ok", t!("edit_dialog.reword").to_string())
-                            .size(ui::ButtonSize::Medium)
-                            .disabled(empty)
-                            .on_click(move |_, window, cx| {
-                                footer.update(cx, |dialog, cx| dialog.submit(window, cx));
-                            }),
-                    ),
-            )
-            .on_ok(move |_, window, cx| {
-                // Enter reaches the dialog rather than the focused button; an
-                // empty editor keeps it open instead of closing with nothing.
-                if confirm.read(cx).is_empty(cx) {
-                    return false;
-                }
-                confirm.update(cx, |dialog, cx| dialog.submit(window, cx));
-                false
-            })
-    });
-    window.defer(cx, move |window, cx| focus.focus(window, cx));
+    ui::FormDialog::new(t!("edit_dialog.title"), 520.0)
+        .content(dialog)
+        .cancel("reword-cancel")
+        .submit(
+            "reword-ok",
+            t!("edit_dialog.reword").to_string(),
+            |dialog, window, cx| dialog.submit(window, cx),
+        )
+        .can_submit(|dialog, cx| !dialog.is_empty(cx))
+        .focus(focus)
+        .open(window, cx);
 }
 
 struct RewordDialog {
