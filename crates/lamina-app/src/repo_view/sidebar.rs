@@ -390,10 +390,7 @@ impl RepoView {
             design: design.clone(),
             sidebar_foreground: design.text,
             muted_foreground: design.muted,
-            border: design.border,
-            foreground: design.text,
             danger: design.remove_text,
-            overlay: design.panel,
         };
         // The snapshot's generation is the sidebar list's cache key: it changes
         // on every publish, so the flattened strings are reused between frames

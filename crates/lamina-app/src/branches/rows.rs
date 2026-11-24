@@ -2379,10 +2379,7 @@ mod tests {
             Colors {
                 sidebar_foreground: design.text,
                 muted_foreground: design.muted,
-                border: design.border,
-                foreground: design.text,
                 danger: design.remove_text,
-                overlay: design.panel,
                 design,
             }
         }

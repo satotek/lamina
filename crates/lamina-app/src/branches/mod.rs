@@ -33,7 +33,7 @@ use crate::repo_view::RepoView;
 use crate::scrollbar::WithScrollbar as _;
 use crate::style::{self, Design};
 
-use dialogs::Dialog;
+use dialogs::BranchDialog;
 use refs::{is_dirty_worktree, is_not_fully_merged};
 use rows::{DropMenu, item_element};
 use tree::{ItemCache, ScrollAnchor};
@@ -53,14 +53,7 @@ pub(crate) use refs::{local_name_for_remote, upstream_label, upstream_note};
 pub(crate) use rows::branch_drop_target_with;
 pub(crate) use validate::validate_branch_name;
 
-actions!(
-    lamina,
-    [
-        CreateBranchFromHead,
-        ConfirmBranchDialog,
-        CancelBranchDialog,
-    ]
-);
+actions!(lamina, [CreateBranchFromHead]);
 
 /// Height of one line of the sidebar list. `uniform_list` lays every item out
 /// at the height it measured once, so headers, rows and placeholders must all
@@ -80,10 +73,7 @@ pub(crate) struct Colors {
     pub(crate) design: Design,
     pub(crate) sidebar_foreground: Hsla,
     pub(crate) muted_foreground: Hsla,
-    pub(crate) border: Hsla,
-    pub(crate) foreground: Hsla,
     pub(crate) danger: Hsla,
-    pub(crate) overlay: Hsla,
 }
 
 /// One collapsible section of the sidebar.
@@ -312,19 +302,20 @@ pub(crate) struct Branches {
     folder_focus: RefCell<Option<String>>,
     /// The menu a branch dropped on another branch opened.
     drop_menu: Option<DropMenu>,
-    dialog: Option<Dialog>,
+    /// The branch dialog that is open, if any. Its form lives in the entity so
+    /// the body redraws while the user fills it in.
+    dialog: Option<Entity<BranchDialog>>,
     /// Operations this module started, keyed by the id the session returned.
     /// The label is what the status bar prefixes a failure with.
     running: HashMap<OperationId, Running>,
-    /// Last viewport size seen, so a dialog opened from an operation result can
-    /// still paint a window-sized backdrop.
+    /// Last viewport size seen, so the branch drop menu can paint a
+    /// window-sized backdrop that covers everything outside its card.
     viewport: Size<Pixels>,
     /// Focus target for the sidebar section list, so `Enter` can open a
     /// selected submodule or worktree row.
     list_focus: Option<FocusHandle>,
-    /// Focus target for dialog cards. Created once by the view because a
-    /// `FocusHandle` needs an `App`, and reused: only one dialog is open and it
-    /// is the only element tracking the handle while it lives.
+    /// Focus target for the branch drop menu's card, so `Escape` dismisses it.
+    /// Created once by the view because a `FocusHandle` needs an `App`.
     dialog_focus: Option<FocusHandle>,
     /// A destructive operation git refused for a reason the stronger form can
     /// override. The view offers it through [`crate::ui::confirm`], which needs
@@ -540,9 +531,6 @@ impl Branches {
         column = column.child(list);
         if let Some(menu) = self.drop_menu_overlay(colors, entity) {
             column = column.child(menu);
-        }
-        if let Some(dialog) = self.dialog_overlay(colors, entity) {
-            column = column.child(dialog);
         }
         column.into_any_element()
     }

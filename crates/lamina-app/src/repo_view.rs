@@ -58,6 +58,7 @@ use gpui::{
     AnyWindowHandle, App, AppContext as _, Context, Entity, FocusHandle, Focusable as _,
     ScrollStrategy, Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
 };
+use gpui_component::WindowExt as _;
 use gpui_component::input::InputState;
 use lamina_core::diff::GapAction;
 use lamina_core::git_cli::CommandRecord;
@@ -1958,12 +1959,16 @@ impl RepoView {
             InputState::new(window, cx).placeholder(t!("branch.placeholder.name").to_string())
         });
         let handle = input.focus_handle(cx);
+        self.focus_root(window, cx);
         self.branches.open_create(
+            cx.weak_entity(),
             input,
             BranchStart {
                 point: start_point,
                 label,
             },
+            window,
+            cx,
         );
         // The dialog renders on the next frame; focus it once it is there.
         window.defer(cx, move |window, cx| handle.focus(window, cx));
@@ -2074,12 +2079,13 @@ impl RepoView {
                 format!("change the URL of {}", request.name),
             ),
             Err(message) => {
-                self.branches.set_dialog_error(message);
+                self.branches.set_dialog_error(message, cx);
                 cx.notify();
                 return;
             }
         };
         self.branches.close_dialog();
+        window.close_dialog(cx);
         self.focus_root(window, cx);
         self.run_operation(operation, label, window, cx);
     }

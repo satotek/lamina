@@ -184,7 +184,7 @@ use crate::actions::{
 use crate::branch_switcher::{
     BranchSwitcherConfirm, BranchSwitcherDismiss, BranchSwitcherNext, BranchSwitcherPrevious,
 };
-use crate::branches::{CancelBranchDialog, ConfirmBranchDialog, CreateBranchFromHead};
+use crate::branches::CreateBranchFromHead;
 use crate::conflicts::{
     MarkFileResolved, NextConflict, PreviousConflict, ResetConflict, TakeBase, TakeBothOursFirst,
     TakeBothTheirsFirst, TakeOurs, TakeTheirs, UseOurs, UseTheirs,
@@ -213,7 +213,6 @@ use crate::zoom::{ResetZoom, ZoomIn, ZoomOut};
 /// here keeps every context string visible in one table.
 const WORKTREE_PANEL: &str = "WorktreePanel";
 const WORKTREE_PANEL_LIST: &str = "WorktreePanel && !Input";
-const BRANCH_DIALOG: &str = "BranchDialog";
 const BRANCH_SWITCHER_FIELD: &str = "BranchSwitcher > Input";
 const GIT_CONFIG_VIEW: &str = "GitConfigView";
 const SETTINGS_VIEW: &str = "SettingsView";
@@ -889,22 +888,6 @@ pub static ACTIONS: &[ActionSpec] = &[
         [binding("secondary-shift-b", Some(REPO_VIEW))],
         27,
         true
-    ),
-    action!(
-        "lamina::ConfirmBranchDialog",
-        "Create the branch",
-        Branches,
-        Some(BRANCH_DIALOG),
-        ConfirmBranchDialog,
-        [binding("enter", Some(BRANCH_DIALOG))]
-    ),
-    action!(
-        "lamina::CancelBranchDialog",
-        "Cancel the branch dialog",
-        Branches,
-        Some(BRANCH_DIALOG),
-        CancelBranchDialog,
-        [binding("escape", Some(BRANCH_DIALOG))]
     ),
     // --- branch_switcher::bind -------------------------------------------
     action!(
@@ -2267,8 +2250,6 @@ mod tests {
             ("secondary-enter", "CommitMessage", "WorktreePanel"),
             ("escape", "ShowHistory", "WorktreePanel"),
             ("secondary-shift-b", "CreateBranchFromHead", "RepoView"),
-            ("enter", "ConfirmBranchDialog", "BranchDialog"),
-            ("escape", "CancelBranchDialog", "BranchDialog"),
             ("up", "BranchSwitcherPrevious", "BranchSwitcher > Input"),
             ("down", "BranchSwitcherNext", "BranchSwitcher > Input"),
             ("enter", "BranchSwitcherConfirm", "BranchSwitcher > Input"),
