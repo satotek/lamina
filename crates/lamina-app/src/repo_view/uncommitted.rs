@@ -9,7 +9,7 @@ use lamina_core::session::RepoSnapshot;
 use lamina_core::{HeadInfo, Oid, RepoState};
 
 use super::in_progress::details_match_state;
-use crate::graph_canvas::UncommittedGraph;
+use crate::graph_canvas::{ConnectorEnds, MergeEnd, UncommittedGraph, plan_worktree_connector};
 use crate::worktree_panel::visible_unstaged;
 
 /// Counts displayed by the synthetic row and its details summary.
@@ -203,50 +203,71 @@ fn append_change_counts(parts: &mut Vec<String>, counts: UncommittedCounts) {
     }
 }
 
+/// HEAD's commit id and, while merging, `MERGE_HEAD`'s. The connector plan is
+/// cached against this pair: a status refresh keeps the same history, so the
+/// lanes do not need to be walked again.
+pub(crate) fn graph_anchors(
+    snapshot: &RepoSnapshot,
+    details: Option<&InProgressDetails>,
+) -> (Option<Oid>, Option<Oid>) {
+    (
+        head_target(snapshot.head.as_ref()),
+        merge_tip(snapshot.state, details),
+    )
+}
+
+fn merge_tip(state: RepoState, details: Option<&InProgressDetails>) -> Option<Oid> {
+    if state != RepoState::Merging {
+        return None;
+    }
+    match details.filter(|details| details_match_state(details, RepoState::Merging)) {
+        Some(InProgressDetails::Merge { heads, .. }) => heads.first().and_then(|head| head.id),
+        _ => None,
+    }
+}
+
 /// Resolves the synthetic row's graph lane, HEAD dashed edge, and optional
 /// MERGE_HEAD dashed edge directly from `snapshot` without altering core graph
 /// types.
+///
+/// The core layout is left alone on purpose. Whether the working tree is dirty
+/// flips on every edit, and feeding a synthetic node into that layout would
+/// rebuild every row. The connector is chosen here, once per history, and the
+/// rows only shift while they are painted.
 pub(crate) fn graph_info(
     snapshot: &RepoSnapshot,
     details: Option<&InProgressDetails>,
 ) -> UncommittedGraph {
     let head_oid = head_target(snapshot.head.as_ref());
-    let head_row = head_oid
-        .and_then(|oid| snapshot.commit_index.get(&oid).copied())
-        .and_then(|idx| snapshot.commits.get(idx))
-        .map(|(_, row)| row);
-    let (head_lane, head_color) = head_row.map_or((0, 0), |row| (row.node_lane, row.node_color));
+    let head_index = head_oid.and_then(|oid| snapshot.commit_index.get(&oid).copied());
+    let (head_lane, head_color) = head_index
+        .and_then(|index| snapshot.commits.get(index))
+        .map(|(_, row)| (row.node_lane, row.node_color))
+        .unwrap_or((0, 0));
 
     // The row, not only the lane: the dashed edge has to run down through the
     // rows in between, so it needs to know where the target node sits.
-    let merge_row = if snapshot.state == RepoState::Merging {
-        match details.filter(|d| details_match_state(d, RepoState::Merging)) {
-            Some(InProgressDetails::Merge { heads, .. }) => heads
-                .first()
-                .and_then(|head| head.id)
-                .and_then(|oid| snapshot.commit_index.get(&oid).copied()),
-            _ => None,
-        }
-    } else {
-        None
-    };
-    let merge_target = merge_row
-        .and_then(|idx| snapshot.commits.get(idx))
-        .map(|(_, row)| (row.node_lane, row.node_color));
+    let merge = merge_tip(snapshot.state, details).and_then(|oid| {
+        let index = *snapshot.commit_index.get(&oid)?;
+        let (_, row) = snapshot.commits.get(index)?;
+        Some(MergeEnd {
+            index,
+            lane: row.node_lane,
+            color: row.node_color,
+        })
+    });
 
-    let lanes = head_lane
-        .max(merge_target.map_or(0, |(lane, _)| lane))
-        .saturating_add(1)
-        .max(1);
-
-    UncommittedGraph {
-        head_lane,
-        head_color,
-        has_head_edge: head_oid.is_some(),
-        merge_target,
-        merge_target_index: merge_row,
-        lanes,
-    }
+    plan_worktree_connector(
+        snapshot.commits.len(),
+        |index| snapshot.commits.get(index).map(|(_, row)| row),
+        ConnectorEnds {
+            head_index,
+            head_lane,
+            head_color,
+            head_present: head_oid.is_some(),
+            merge,
+        },
+    )
 }
 
 #[cfg(test)]
@@ -485,5 +506,17 @@ mod tests {
             head_row.node_lane, feature_row.node_lane,
             "diverged branches occupy distinct lanes"
         );
+        assert_eq!(
+            graph.lane_shift, 0,
+            "HEAD is the newest commit and MERGE_HEAD's lane is free above it"
+        );
+        assert_eq!(graph.head_index, Some(head_idx));
+        assert_eq!(graph.connector_lane, Some(head_row.node_lane));
+        assert!(!graph.connector_muted);
+        assert!(
+            graph.worktree_edge_at(head_idx).is_none(),
+            "the circle sits directly above the first row"
+        );
+        assert_eq!(graph.merge_lane, Some(feature_row.node_lane));
     }
 }

@@ -185,9 +185,13 @@ impl RepoView {
             .as_ref()
             .map(|session| session.snapshot().state)
             .unwrap_or(lamina_core::RepoState::Normal);
+        // The shift is applied to every commit row, so the column decision has
+        // to see it even when the widest core row is not on screen.
+        let lane_shift = uncommitted_graph.map_or(0, |graph| graph.lane_shift);
         let widest = self
             .lanes
             .widest()
+            .saturating_add(lane_shift)
             .max(uncommitted_graph.map_or(1, |graph| graph.lanes));
 
         // The decision uses the widest graph in the list, not the row's own:
@@ -236,15 +240,8 @@ impl RepoView {
                         let focus = focus.clone();
                         if has_uncommitted && position == 0 {
                             let row_ui_state = row_state(uncommitted_selected, false);
-                            let graph =
-                                uncommitted_graph.unwrap_or(graph_canvas::UncommittedGraph {
-                                    head_lane: 0,
-                                    head_color: 0,
-                                    has_head_edge: false,
-                                    merge_target: None,
-                                    merge_target_index: None,
-                                    lanes: 1,
-                                });
+                            let graph = uncommitted_graph
+                                .unwrap_or_else(graph_canvas::UncommittedGraph::placeholder);
                             let summary = uncommitted_summary
                                 .clone()
                                 .unwrap_or_else(|| t!("history.uncommitted.summary").to_string());
@@ -340,6 +337,16 @@ impl RepoView {
                         }
                         let date = style::date_label(row.time, now, date_format);
                         let filtered = filter.is_some();
+                        // Filtered rows hide the graph, so they do not reserve
+                        // the connector lane. The search indent stays put.
+                        let overlay = if filtered {
+                            graph_canvas::GraphOverlay::none()
+                        } else {
+                            uncommitted_graph
+                                .map_or_else(graph_canvas::GraphOverlay::none, |graph| {
+                                    graph.overlay_at(index)
+                                })
+                        };
                         let click_entity = entity.clone();
                         let click_order = order.clone();
                         let right_entity = entity.clone();
@@ -351,7 +358,10 @@ impl RepoView {
                         let row_graph_width = if filtered {
                             graph_canvas::search_indent_at(row_design.zoom)
                         } else {
-                            graph_canvas::indent_at(row.graph.width, row_design.zoom)
+                            graph_canvas::indent_at(
+                                graph_canvas::column_lanes(row.graph, overlay),
+                                row_design.zoom,
+                            )
                         };
                         let desc_width = columns.description_width(width, row_graph_width);
                         let chip_desc_width = if show_changed_counts {
@@ -380,7 +390,7 @@ impl RepoView {
                                 &row,
                                 sig_state.as_ref(),
                                 changed_count,
-                                uncommitted_graph.and_then(|graph| graph.merge_edge_at(index)),
+                                overlay,
                                 row_ui_state,
                                 &date,
                                 &row_design,
@@ -760,7 +770,7 @@ fn commit_row(
     data: &RowData<'_>,
     signature: Option<&crate::ui::CommitSignatureState>,
     changed_count: Option<usize>,
-    merge_edge: Option<graph_canvas::MergeEdge>,
+    overlay: graph_canvas::GraphOverlay,
     state: crate::ui::RowState,
     date: &str,
     design: &Design,
@@ -782,7 +792,7 @@ fn commit_row(
         .child(graph_canvas::graph_column(
             data.graph,
             data.shallow_boundary,
-            merge_edge,
+            overlay,
             design.lane,
             fade,
             design.muted,
@@ -873,6 +883,7 @@ fn uncommitted_row(
             graph,
             design.lane,
             fade,
+            design.muted,
             design.zoom,
         ))
         .child(

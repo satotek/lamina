@@ -10,6 +10,14 @@
 //! canvas itself is as wide as the row needs, and the row's text starts after
 //! it, so a row with two lanes does not pay for the widest row in history.
 //!
+//! A dirty working tree draws a hollow circle above HEAD. That connector is
+//! not part of the core layout: dirtiness flips on every edit, and pushing a
+//! synthetic node through the layout would rebuild the whole history. When
+//! HEAD's own lane is not empty all the way up, every row shifts right by one
+//! (or two, while a merge also needs a private column) and the dashes occupy
+//! the inserted lane. The shift is the same on every row, including rows below
+//! HEAD, so a line that continues past HEAD does not kink.
+//!
 //! Rows wider than [`MAX_LANES`] reserve no more than the cap: their extra
 //! lanes are clipped, a gradient fades them out, and a node beyond the cap
 //! becomes a small marker on the edge so the row still shows its commit.
@@ -121,35 +129,57 @@ pub fn row_lanes(row: GraphRow<'_>) -> u16 {
     row.width.max(painted).max(1)
 }
 
+/// Lanes a commit row reserves once `overlay` has shifted the core layout.
+///
+/// Every row grows by the same shift, so lane centres stay aligned down the
+/// list. A dashed run that reaches further than the shifted row still widens
+/// the rows it is painted on; otherwise the line would fall past the indent
+/// and the summary would cover it.
+pub fn column_lanes(row: GraphRow<'_>, overlay: GraphOverlay) -> u16 {
+    let mut lanes = row_lanes(row).saturating_add(overlay.shift);
+    if let Some(edge) = overlay.worktree {
+        lanes = lanes
+            .max(edge.lane.saturating_add(1))
+            .max(edge.node_lane.saturating_add(1));
+    }
+    if let Some(edge) = overlay.merge {
+        lanes = lanes
+            .max(edge.lane.saturating_add(1))
+            .max(edge.node_lane.saturating_add(1));
+    }
+    lanes.max(1)
+}
+
 /// A row's graph, sized to that row's own indent.
 ///
 /// `fade` is the colour behind the row, used by the gradient at a clipped edge.
 /// `boundary` draws a dashed stub under the node for a shallow clone's last
 /// fetched commit, where the line to the parents was never fetched; `muted`
-/// paints that stub. `merge_edge` is the dashed run a merge in progress adds on
-/// the way down to `MERGE_HEAD`.
+/// paints that stub and a working-tree connector that has a lane of its own.
+/// `overlay` is the render-time shift plus the dashed runs a dirty tree or a
+/// merge in progress add on top of the core layout.
 pub fn graph_column(
     row: GraphRow<'_>,
     boundary: bool,
-    merge_edge: Option<MergeEdge>,
+    overlay: GraphOverlay,
     colors: [Hsla; LANES],
     fade: Hsla,
     muted: Hsla,
     zoom: f32,
 ) -> impl IntoElement {
-    // A row above MERGE_HEAD's node may not have that lane yet, and the dashed
-    // run would fall outside the row's indent and never be painted.
-    let lanes = row_lanes(row).max(merge_edge.map_or(0, |edge| edge.lane.saturating_add(1)));
+    let lanes = column_lanes(row, overlay);
     let width = px(indent_at(lanes, zoom));
     // The paint closure must own its data; only visible rows are copied.
     let row = OwnedRow {
         node_lane: row.node_lane,
         node_color: row.node_color,
         lanes,
+        shift: overlay.shift,
         passes: row.passes.to_vec(),
         edges: row.edges.to_vec(),
         boundary,
-        merge_edge,
+        worktree: overlay.worktree,
+        merge_edge: overlay.merge,
         muted,
     };
 
@@ -163,54 +193,306 @@ pub fn graph_column(
 }
 
 /// Graph geometry for the synthetic uncommitted row at the top of the list.
+///
+/// Lane numbers on the connector and the merge edge are where the row paints
+/// them, after [`Self::lane_shift`]. `head_lane` and [`Self::merge_target`] stay
+/// in the core layout's coordinates so callers can compare them with a
+/// [`GraphRow`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UncommittedGraph {
+    /// HEAD's node lane in the core layout, before [`Self::lane_shift`].
     pub head_lane: u16,
     pub head_color: u16,
+    /// HEAD names a commit. Its row may still be unloaded.
     pub has_head_edge: bool,
+    /// Loaded row of HEAD. `None` while that commit is not in the list.
+    pub head_index: Option<usize>,
+    /// Core lane and colour of `MERGE_HEAD`.
     pub merge_target: Option<(u16, u16)>,
     /// Row of the `MERGE_HEAD` commit in the commit list, when the graph shows
     /// it. The target's lane alone cannot say how far down to draw.
     pub merge_target_index: Option<usize>,
+    /// Lanes the uncommitted row reserves, including any private lane.
     pub lanes: u16,
+    /// Lanes inserted on the left of every commit row. Private connectors
+    /// occupy `0..lane_shift`; core lane `n` paints at `n + lane_shift`. Zero
+    /// when each connector can ride a lane the rows above its target leave
+    /// empty, which is the case when HEAD is the first row.
+    pub lane_shift: u16,
+    /// Painted lane of the hollow circle and the dashes above HEAD.
+    /// `None` when HEAD is not loaded, so nothing is drawn towards a node the
+    /// list does not show.
+    pub connector_lane: Option<u16>,
+    /// The connector has a lane of its own, so it is not painted in HEAD's
+    /// branch colour.
+    pub connector_muted: bool,
+    /// Painted lane the merge dashes follow.
+    pub merge_lane: Option<u16>,
 }
 
 /// The dashed line a merge in progress draws on its way to `MERGE_HEAD`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MergeEdge {
-    /// `MERGE_HEAD`'s node lane, which the edge follows down the list.
+    /// Lane the dashes follow. This is `MERGE_HEAD`'s own lane when that column
+    /// stays empty above the target, and a private lane when it does not.
     pub lane: u16,
     /// `MERGE_HEAD`'s node colour.
     pub color: u16,
     /// This row holds the target node, so the edge stops at the node instead of
     /// running through the row.
     pub to_node: bool,
+    /// Painted lane of the target node. Differs from [`Self::lane`] when the
+    /// dashes had to take a private column and curve in.
+    pub node_lane: u16,
+}
+
+/// The dashed line from the working-tree circle down to HEAD.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorktreeEdge {
+    /// Lane the dashes follow.
+    pub lane: u16,
+    /// Painted lane of HEAD's node.
+    pub node_lane: u16,
+    /// HEAD's node colour. Ignored when [`Self::muted`] is set.
+    pub color: u16,
+    /// Paint with the row's muted colour. A private lane is not a branch.
+    pub muted: bool,
+    /// This row holds HEAD, so the dashes end at its node.
+    pub to_node: bool,
+}
+
+/// Render-time addition to one commit row: a uniform lane shift, plus whatever
+/// dashed runs pass through this row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GraphOverlay {
+    pub shift: u16,
+    pub worktree: Option<WorktreeEdge>,
+    pub merge: Option<MergeEdge>,
+}
+
+impl GraphOverlay {
+    pub fn none() -> Self {
+        Self {
+            shift: 0,
+            worktree: None,
+            merge: None,
+        }
+    }
+}
+
+/// Inputs for [`plan_worktree_connector`]. Lanes are core-layout lanes.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ConnectorEnds {
+    pub head_index: Option<usize>,
+    pub head_lane: u16,
+    pub head_color: u16,
+    /// An object id for HEAD exists, even when its row has not loaded.
+    pub head_present: bool,
+    pub merge: Option<MergeEnd>,
+}
+
+/// `MERGE_HEAD` when that commit is loaded and a merge is in progress.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MergeEnd {
+    pub index: usize,
+    pub lane: u16,
+    pub color: u16,
+}
+
+/// Decides the working-tree connector from rows the core layout already built.
+///
+/// `row_at` is only called for rows above each target, and only while building
+/// the plan. Painting a frame does not walk them again.
+pub(crate) fn plan_worktree_connector<'a>(
+    len: usize,
+    row_at: impl Fn(usize) -> Option<GraphRow<'a>>,
+    ends: ConnectorEnds,
+) -> UncommittedGraph {
+    let head_index = ends
+        .head_index
+        .filter(|index| *index < len && row_at(*index).is_some());
+    // HEAD on the first row has nothing above it. The circle's own row already
+    // meets that node, and inserting a lane there would move a graph that
+    // already reads as connected.
+    let head_private = head_index
+        .is_some_and(|index| index > 0 && !lane_clear_until(&row_at, index, ends.head_lane));
+
+    let merge = ends
+        .merge
+        .filter(|end| end.index < len && row_at(end.index).is_some());
+    let merge_blocked = merge.is_some_and(|end| !lane_clear_until(&row_at, end.index, end.lane));
+    // Two dashes on one column paint on top of each other. A shared core lane
+    // takes a second private column even when the history itself leaves it
+    // empty between the circle and the nearer target.
+    let merge_collides = merge.is_some_and(|end| {
+        !head_private
+            && head_index.is_some_and(|head| head != end.index)
+            && ends.head_present
+            && end.lane == ends.head_lane
+    });
+    let merge_private = merge.is_some() && (merge_blocked || merge_collides);
+
+    let shift = u16::from(head_private) + u16::from(merge_private);
+    let connector_lane = if ends.head_present {
+        head_index.map(|_| {
+            if head_private {
+                // The worktree circle is the leftmost private lane. A merge
+                // that also needs one sits on the next column.
+                0
+            } else {
+                ends.head_lane.saturating_add(u16::from(merge_private))
+            }
+        })
+    } else {
+        None
+    };
+    let merge_lane = merge.map(|end| {
+        if merge_private {
+            u16::from(head_private)
+        } else {
+            end.lane.saturating_add(shift)
+        }
+    });
+
+    // The uncommitted row's text lines up with HEAD's node column, not only
+    // with the circle: the rows below reserve that column too.
+    let mut lanes = ends
+        .head_lane
+        .saturating_add(shift)
+        .saturating_add(1)
+        .max(1);
+    if let Some(lane) = connector_lane {
+        lanes = lanes.max(lane.saturating_add(1));
+    }
+    if let Some(lane) = merge_lane {
+        lanes = lanes.max(lane.saturating_add(1));
+    }
+
+    UncommittedGraph {
+        head_lane: ends.head_lane,
+        head_color: ends.head_color,
+        has_head_edge: ends.head_present,
+        head_index,
+        merge_target: merge.map(|end| (end.lane, end.color)),
+        merge_target_index: merge.map(|end| end.index),
+        lanes,
+        lane_shift: shift,
+        connector_lane,
+        connector_muted: head_private,
+        merge_lane,
+    }
+}
+
+/// True when `lane` has no node, pass, or edge — including a curve that only
+/// crosses it — on rows `0..until`.
+fn lane_clear_until<'a>(
+    row_at: &impl Fn(usize) -> Option<GraphRow<'a>>,
+    until: usize,
+    lane: u16,
+) -> bool {
+    (0..until).all(|index| row_at(index).is_some_and(|row| !lane_blocked(row, lane)))
+}
+
+/// A curve occupies every lane between its ends. A dash drawn on a lane a
+/// curve merely crosses would still cut through that curve.
+fn lane_blocked(row: GraphRow<'_>, lane: u16) -> bool {
+    if row.node_lane == lane || row.passes.iter().any(|pass| pass.lane == lane) {
+        return true;
+    }
+    row.edges.iter().any(|edge| {
+        let low = edge.from_lane.min(edge.to_lane);
+        let high = edge.from_lane.max(edge.to_lane);
+        (low..=high).contains(&lane)
+    })
 }
 
 impl UncommittedGraph {
+    /// Circle on lane 0 and no connector. Used when the row is shown before a
+    /// snapshot has published a plan.
+    pub fn placeholder() -> Self {
+        Self {
+            head_lane: 0,
+            head_color: 0,
+            has_head_edge: false,
+            head_index: None,
+            merge_target: None,
+            merge_target_index: None,
+            lanes: 1,
+            lane_shift: 0,
+            connector_lane: None,
+            connector_muted: false,
+            merge_lane: None,
+        }
+    }
+
+    /// Painted lane of the hollow circle.
+    pub fn circle_lane(self) -> u16 {
+        self.connector_lane
+            .unwrap_or_else(|| self.head_lane.saturating_add(self.lane_shift))
+    }
+
+    /// Shift and dashed runs for commit row `index`.
+    ///
+    /// Rows below both targets still carry the shift. Their lines continue
+    /// in the core layout and have to stay on the same x as the rows above.
+    pub fn overlay_at(self, index: usize) -> GraphOverlay {
+        GraphOverlay {
+            shift: self.lane_shift,
+            worktree: self.worktree_edge_at(index),
+            merge: self.merge_edge_at(index),
+        }
+    }
+
+    /// The working-tree dash on commit row `index`.
+    ///
+    /// `None` on HEAD's own row when HEAD is the first commit: the circle's
+    /// row already draws the dash up to that boundary, and a second one would
+    /// lengthen a line that already reads as connected. Also `None` when HEAD
+    /// is not loaded.
+    pub fn worktree_edge_at(self, index: usize) -> Option<WorktreeEdge> {
+        let lane = self.connector_lane?;
+        let head_index = self.head_index?;
+        if head_index == 0 || index > head_index {
+            return None;
+        }
+        Some(WorktreeEdge {
+            lane,
+            node_lane: self.head_lane.saturating_add(self.lane_shift),
+            color: self.head_color,
+            muted: self.connector_muted,
+            to_node: index == head_index,
+        })
+    }
+
     /// The dashed run this merge edge contributes to commit row `index`.
     ///
     /// `None` once the target is behind us, or when the graph does not show the
     /// `MERGE_HEAD` commit at all (its branch is hidden), so nothing is drawn
     /// towards a node that is not on screen.
-    pub fn merge_edge_at(&self, index: usize) -> Option<MergeEdge> {
-        let (lane, color) = self.merge_target?;
+    pub fn merge_edge_at(self, index: usize) -> Option<MergeEdge> {
+        let (core_lane, color) = self.merge_target?;
         let target = self.merge_target_index?;
-        (index <= target).then_some(MergeEdge {
-            lane,
+        if index > target {
+            return None;
+        }
+        let node_lane = core_lane.saturating_add(self.lane_shift);
+        Some(MergeEdge {
+            lane: self.merge_lane.unwrap_or(node_lane),
             color,
             to_node: index == target,
+            node_lane,
         })
     }
 }
 
-/// Graph column for the synthetic uncommitted row: a hollow dashed circle on
-/// `HEAD`'s lane, a dashed edge down to `HEAD`, and an optional dashed curve to
-/// `MERGE_HEAD`'s lane while merging.
+/// Graph column for the synthetic uncommitted row: a hollow dashed circle, a
+/// dashed edge down toward `HEAD`, and an optional dashed curve toward
+/// `MERGE_HEAD` while merging.
 pub fn uncommitted_graph_column(
     graph: UncommittedGraph,
     colors: [Hsla; LANES],
     fade: Hsla,
+    muted: Hsla,
     zoom: f32,
 ) -> impl IntoElement {
     let lanes = graph.lanes.max(1);
@@ -219,7 +501,7 @@ pub fn uncommitted_graph_column(
         canvas(
             move |bounds, _window, _cx| bounds,
             move |bounds, _, window, _cx| {
-                paint_uncommitted_row(graph, &colors, fade, zoom, bounds, window)
+                paint_uncommitted_row(graph, &colors, fade, muted, zoom, bounds, window)
             },
         )
         .size_full(),
@@ -230,9 +512,12 @@ struct OwnedRow {
     node_lane: u16,
     node_color: u16,
     lanes: u16,
+    /// Added to every core lane while painting. See [`UncommittedGraph::lane_shift`].
+    shift: u16,
     passes: Vec<PassThrough>,
     edges: Vec<Segment>,
     boundary: bool,
+    worktree: Option<WorktreeEdge>,
     merge_edge: Option<MergeEdge>,
     muted: Hsla,
 }
@@ -299,13 +584,14 @@ fn linework_at(row: &OwnedRow, visible: u16, zoom: f32) -> Linework {
     let mut curves = Vec::with_capacity(capacity);
 
     for pass in &row.passes {
-        if pass.lane >= visible {
+        let lane = pass.lane.saturating_add(row.shift);
+        if lane >= visible {
             continue;
         }
         straight.push((
             slot(pass.color),
             Straight {
-                x: lane_offset_at(pass.lane, zoom),
+                x: lane_offset_at(lane, zoom),
                 from: 0.0,
                 to: 1.0,
             },
@@ -313,18 +599,20 @@ fn linework_at(row: &OwnedRow, visible: u16, zoom: f32) -> Linework {
     }
 
     for segment in &row.edges {
-        if segment.from_lane.min(segment.to_lane) >= visible {
+        let from_lane = segment.from_lane.saturating_add(row.shift);
+        let to_lane = segment.to_lane.saturating_add(row.shift);
+        if from_lane.min(to_lane) >= visible {
             continue;
         }
         let color = slot(segment.color);
-        let from_x = lane_offset_at(segment.from_lane, zoom);
-        let to_x = lane_offset_at(segment.to_lane, zoom);
+        let from_x = lane_offset_at(from_lane, zoom);
+        let to_x = lane_offset_at(to_lane, zoom);
         let (from_y, to_y, control_y) = match segment.half {
             Half::Top => (0.0, 0.5, 0.25),
             Half::Bottom => (0.5, 1.0, 0.75),
         };
 
-        if segment.from_lane == segment.to_lane {
+        if from_lane == to_lane {
             straight.push((
                 color,
                 Straight {
@@ -426,24 +714,35 @@ fn paint_row(
             }
         }
 
-        // The merge edge is dashed and painted over the lanes, because the
-        // branch it points at may not have a line of its own this far up.
-        if let Some(edge) = row.merge_edge
-            && edge.lane < visible
-        {
-            let end = if edge.to_node {
-                // Leave the node itself its solid outline.
-                middle - px((NODE_RADIUS + 1.0) * zoom)
+        // Dashed runs are painted over the lanes. A private column has nothing
+        // under it; a connector that reused an empty lane meets the node with
+        // the same dash the circle's row started.
+        if let Some(edge) = row.worktree {
+            let color = if edge.muted {
+                row.muted
             } else {
-                top + height
+                colors[slot(edge.color)]
             };
-            paint_dashed_vertical(
-                left,
-                top,
-                end,
+            paint_connector(
+                bounds,
                 edge.lane,
+                edge.node_lane,
+                edge.to_node,
+                color,
+                zoom,
+                visible,
+                window,
+            );
+        }
+        if let Some(edge) = row.merge_edge {
+            paint_connector(
+                bounds,
+                edge.lane,
+                edge.node_lane,
+                edge.to_node,
                 colors[slot(edge.color)],
                 zoom,
+                visible,
                 window,
             );
         }
@@ -469,18 +768,20 @@ fn paint_row(
     }
 
     // The node goes on top of the fade: only the lines are clipped, and a
-    // commit dot on the edge lane must stay crisp.
-    let node_x = if row.node_lane < visible {
+    // commit dot on the edge lane must stay crisp. The shift matches the lines
+    // above, so a branch that started higher up still arrives at this dot.
+    let node_lane = row.node_lane.saturating_add(row.shift);
+    let node_x = if node_lane < visible {
         paint_node(
             bounds,
             middle,
-            row.node_lane,
+            node_lane,
             colors[slot(row.node_color)],
             zoom,
             window,
         );
-        Some(lane_offset_at(row.node_lane, zoom))
-    } else if let Some(x) = node_marker_at(row.node_lane, row.lanes, zoom) {
+        Some(lane_offset_at(node_lane, zoom))
+    } else if let Some(x) = node_marker_at(node_lane, row.lanes, zoom) {
         let color = colors[slot(row.node_color)];
         let diameter = marker_radius * 2.0;
         window.paint_quad(
@@ -631,6 +932,7 @@ fn paint_uncommitted_row(
     graph: UncommittedGraph,
     colors: &[Hsla; LANES],
     fade: Hsla,
+    muted: Hsla,
     zoom: f32,
     bounds: Bounds<Pixels>,
     window: &mut Window,
@@ -652,52 +954,64 @@ fn paint_uncommitted_row(
         bounds
     };
 
+    let circle_lane = graph.circle_lane();
     window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
-        if let Some((merge_lane, merge_color)) = graph.merge_target {
-            if merge_lane != graph.head_lane && graph.head_lane.min(merge_lane) < visible {
-                let head_x = lane_offset_at(graph.head_lane, zoom);
-                let merge_x = lane_offset_at(merge_lane, zoom);
+        // The merge fork leaves the circle and lands on the merge column at
+        // the bottom of this row; commit rows carry it the rest of the way.
+        if let Some(merge_lane) = graph.merge_lane {
+            let merge_color = graph
+                .merge_target
+                .map(|(_, color)| colors[slot(color)])
+                .unwrap_or(muted);
+            if merge_lane != circle_lane && circle_lane.min(merge_lane) < visible {
                 let curve = Curve {
-                    from: Pt { x: head_x, y: 0.5 },
-                    control_a: Pt { x: head_x, y: 0.75 },
-                    control_b: Pt {
-                        x: merge_x,
+                    from: Pt {
+                        x: lane_offset_at(circle_lane, zoom),
+                        y: 0.5,
+                    },
+                    control_a: Pt {
+                        x: lane_offset_at(circle_lane, zoom),
                         y: 0.75,
                     },
-                    to: Pt { x: merge_x, y: 1.0 },
+                    control_b: Pt {
+                        x: lane_offset_at(merge_lane, zoom),
+                        y: 0.75,
+                    },
+                    to: Pt {
+                        x: lane_offset_at(merge_lane, zoom),
+                        y: 1.0,
+                    },
                 };
-                let mut builder = PathBuilder::stroke(px(stroke_width));
-                for polyline in dashed_curve_segments(curve) {
-                    if let Some((first, rest)) = polyline.split_first() {
-                        builder.move_to(lane_point(left, top, height, *first));
-                        for pt in rest {
-                            builder.line_to(lane_point(left, top, height, *pt));
-                        }
-                    }
-                }
-                if let Ok(path) = builder.build() {
-                    window.paint_path(path, colors[slot(merge_color)]);
-                }
-            } else if !graph.has_head_edge && merge_lane < visible {
+                paint_dashed_curve(left, top, height, curve, merge_color, zoom, window);
+            } else if graph.connector_lane.is_none() && merge_lane < visible {
                 paint_dashed_vertical(
                     left,
                     middle + px((NODE_RADIUS + 1.0) * zoom),
                     top + height,
                     merge_lane,
-                    colors[slot(merge_color)],
+                    merge_color,
                     zoom,
                     window,
                 );
             }
         }
 
-        if graph.has_head_edge && graph.head_lane < visible {
+        // No dash when HEAD is not loaded: a stub on lane 0 would claim a
+        // connection the list cannot show, then jump once the commit arrives.
+        if let Some(lane) = graph.connector_lane
+            && lane < visible
+        {
+            let color = if graph.connector_muted {
+                muted
+            } else {
+                colors[slot(graph.head_color)]
+            };
             paint_dashed_vertical(
                 left,
                 middle + px((NODE_RADIUS + 1.0) * zoom),
                 top + height,
-                graph.head_lane,
-                colors[slot(graph.head_color)],
+                lane,
+                color,
                 zoom,
                 window,
             );
@@ -720,8 +1034,8 @@ fn paint_uncommitted_row(
     }
 
     let head_color = colors[slot(graph.head_color)];
-    if graph.head_lane < visible {
-        let center_x = lane_offset_at(graph.head_lane, zoom);
+    if circle_lane < visible {
+        let center_x = lane_offset_at(circle_lane, zoom);
         let diameter = node_radius * 2.0;
         // Hollow interior masks the top of any downward edge under the ring.
         window.paint_quad(
@@ -746,7 +1060,7 @@ fn paint_uncommitted_row(
         if let Ok(path) = builder.build() {
             window.paint_path(path, head_color);
         }
-    } else if let Some(x) = node_marker_at(graph.head_lane, graph.lanes, zoom) {
+    } else if let Some(x) = node_marker_at(circle_lane, graph.lanes, zoom) {
         let diameter = marker_radius * 2.0;
         window.paint_quad(
             fill(
@@ -771,6 +1085,81 @@ fn paint_uncommitted_row(
             window.paint_path(path, head_color);
         }
     }
+}
+
+/// Curve from a node at mid-row up to a connector lane at the top edge.
+///
+/// `t = 0` is the node, so the shared dash gaps leave the dot's outline
+/// alone. `t = 1` is the top of the row, where the dash from the row above
+/// ends.
+fn join_curve(node_x: f32, lane_x: f32) -> Curve {
+    Curve {
+        from: Pt { x: node_x, y: 0.5 },
+        control_a: Pt { x: node_x, y: 0.25 },
+        control_b: Pt { x: lane_x, y: 0.25 },
+        to: Pt { x: lane_x, y: 0.0 },
+    }
+}
+
+fn paint_dashed_curve(
+    left: Pixels,
+    top: Pixels,
+    height: Pixels,
+    curve: Curve,
+    color: Hsla,
+    zoom: f32,
+    window: &mut Window,
+) {
+    let mut builder = PathBuilder::stroke(px(STROKE_WIDTH * zoom));
+    for polyline in dashed_curve_segments(curve) {
+        if let Some((first, rest)) = polyline.split_first() {
+            builder.move_to(lane_point(left, top, height, *first));
+            for point in rest {
+                builder.line_to(lane_point(left, top, height, *point));
+            }
+        }
+    }
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, color);
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "paints one dashed connector with its lane, target and clip"
+)]
+fn paint_connector(
+    bounds: Bounds<Pixels>,
+    lane: u16,
+    node_lane: u16,
+    to_node: bool,
+    color: Hsla,
+    zoom: f32,
+    visible: u16,
+    window: &mut Window,
+) {
+    let top = bounds.origin.y;
+    let height = bounds.size.height;
+    let middle = top + height / 2.0;
+    let left = bounds.origin.x;
+    if to_node && lane != node_lane {
+        if lane.min(node_lane) >= visible {
+            return;
+        }
+        let curve = join_curve(lane_offset_at(node_lane, zoom), lane_offset_at(lane, zoom));
+        paint_dashed_curve(left, top, height, curve, color, zoom, window);
+        return;
+    }
+    if lane >= visible {
+        return;
+    }
+    let end = if to_node {
+        // Leave the node itself its solid outline.
+        middle - px((NODE_RADIUS + 1.0) * zoom)
+    } else {
+        top + height
+    };
+    paint_dashed_vertical(left, top, end, lane, color, zoom, window);
 }
 
 #[allow(
@@ -826,9 +1215,11 @@ mod tests {
             node_lane,
             node_color: 0,
             lanes,
+            shift: 0,
             passes: passes.to_vec(),
             edges: edges.to_vec(),
             boundary: false,
+            worktree: None,
             merge_edge: None,
             muted: Hsla::default(),
         }
@@ -1160,9 +1551,14 @@ mod tests {
             head_lane: 0,
             head_color: 0,
             has_head_edge: true,
+            head_index: Some(0),
             merge_target: Some((2, 5)),
             merge_target_index: Some(3),
             lanes: 3,
+            lane_shift: 0,
+            connector_lane: Some(0),
+            connector_muted: false,
+            merge_lane: Some(2),
         };
         for index in 0..3 {
             assert_eq!(
@@ -1171,6 +1567,7 @@ mod tests {
                     lane: 2,
                     color: 5,
                     to_node: false,
+                    node_lane: 2,
                 }),
                 "row {index} is between the uncommitted row and MERGE_HEAD"
             );
@@ -1181,6 +1578,7 @@ mod tests {
                 lane: 2,
                 color: 5,
                 to_node: true,
+                node_lane: 2,
             }),
             "the target row ends the edge at its node"
         );
@@ -1193,9 +1591,14 @@ mod tests {
             head_lane: 0,
             head_color: 0,
             has_head_edge: true,
+            head_index: Some(0),
             merge_target: Some((2, 5)),
             merge_target_index: None,
             lanes: 3,
+            lane_shift: 0,
+            connector_lane: Some(0),
+            connector_muted: false,
+            merge_lane: Some(2),
         };
         assert_eq!(graph.merge_edge_at(0), None);
         assert_eq!(
