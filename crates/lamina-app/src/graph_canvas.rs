@@ -1193,7 +1193,7 @@ fn paint_dashed_vertical(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lamina_core::graph::{Half, Segment};
+    use lamina_core::graph::{GraphRows, Half, Segment};
 
     fn row<'a>(
         node_lane: u16,
@@ -1611,6 +1611,307 @@ mod tests {
             None,
             "a lane without a target row is not drawn either"
         );
+    }
+
+    fn push_row(rows: &mut GraphRows, node: u16, edges: &[(u16, u16)], passes: &[u16]) {
+        let segments: Vec<Segment> = edges
+            .iter()
+            .map(|&(from_lane, to_lane)| Segment {
+                from_lane,
+                to_lane,
+                half: Half::Bottom,
+                color: 0,
+            })
+            .collect();
+        let through: Vec<PassThrough> = passes
+            .iter()
+            .map(|&lane| PassThrough { lane, color: 1 })
+            .collect();
+        let width = segments
+            .iter()
+            .flat_map(|segment| [segment.from_lane, segment.to_lane])
+            .chain(through.iter().map(|pass| pass.lane))
+            .chain([node])
+            .max()
+            .unwrap_or(0)
+            + 1;
+        rows.push_row(node, 0, width, &through, &segments);
+    }
+
+    fn plan(rows: &GraphRows, ends: ConnectorEnds) -> UncommittedGraph {
+        plan_worktree_connector(rows.len(), |index| rows.get(index), ends)
+    }
+
+    /// True when shifting `row` would paint anything on `lane`.
+    fn shifted_uses(row: GraphRow<'_>, shift: u16, lane: u16) -> bool {
+        let occupies = |value: u16| value.saturating_add(shift) == lane;
+        occupies(row.node_lane)
+            || row.passes.iter().any(|pass| occupies(pass.lane))
+            || row
+                .edges
+                .iter()
+                .any(|edge| occupies(edge.from_lane) || occupies(edge.to_lane))
+    }
+
+    #[test]
+    fn head_on_the_first_row_keeps_its_lane_and_skips_the_commit_row() {
+        let mut rows = GraphRows::new();
+        push_row(&mut rows, 0, &[(0, 0)], &[]);
+        // A later row reuses the lane. It is below HEAD, so it must not push
+        // the circle onto a new column.
+        push_row(&mut rows, 0, &[(0, 0)], &[]);
+
+        let graph = plan(
+            &rows,
+            ConnectorEnds {
+                head_index: Some(0),
+                head_lane: 0,
+                head_color: 4,
+                head_present: true,
+                merge: None,
+            },
+        );
+
+        assert_eq!(graph.lane_shift, 0);
+        assert_eq!(graph.connector_lane, Some(0));
+        assert!(!graph.connector_muted);
+        assert_eq!(graph.head_index, Some(0));
+        assert!(
+            graph.worktree_edge_at(0).is_none(),
+            "the circle's row already meets the node directly under it"
+        );
+        assert_eq!(graph.lanes, 1);
+    }
+
+    #[test]
+    fn a_clear_lane_is_reused_down_to_head() {
+        let mut rows = GraphRows::new();
+        push_row(&mut rows, 0, &[(0, 0)], &[]);
+        push_row(&mut rows, 0, &[(0, 0)], &[]);
+        push_row(&mut rows, 1, &[], &[]);
+
+        let graph = plan(
+            &rows,
+            ConnectorEnds {
+                head_index: Some(2),
+                head_lane: 1,
+                head_color: 2,
+                head_present: true,
+                merge: None,
+            },
+        );
+
+        assert_eq!(graph.lane_shift, 0, "lane 1 is empty above HEAD");
+        assert_eq!(graph.connector_lane, Some(1));
+        assert!(!graph.connector_muted);
+        for index in 0..2 {
+            let edge = graph.worktree_edge_at(index).expect("dash");
+            assert_eq!(edge.lane, 1);
+            assert!(!edge.to_node);
+            assert!(!shifted_uses(rows.get(index).unwrap(), 0, 1));
+        }
+        let into = graph.worktree_edge_at(2).expect("HEAD");
+        assert!(into.to_node);
+        assert_eq!(into.lane, into.node_lane);
+        assert!(graph.worktree_edge_at(3).is_none());
+    }
+
+    #[test]
+    fn a_busy_head_lane_gets_a_private_column_no_row_paints_on() {
+        let mut rows = GraphRows::new();
+        push_row(&mut rows, 0, &[(0, 0)], &[]);
+        push_row(&mut rows, 0, &[(0, 2)], &[]);
+        push_row(&mut rows, 0, &[(0, 0)], &[]);
+        push_row(&mut rows, 1, &[], &[]);
+
+        let graph = plan(
+            &rows,
+            ConnectorEnds {
+                head_index: Some(2),
+                head_lane: 0,
+                head_color: 1,
+                head_present: true,
+                merge: None,
+            },
+        );
+
+        assert_eq!(graph.lane_shift, 1);
+        assert_eq!(graph.connector_lane, Some(0));
+        assert!(graph.connector_muted);
+        assert!(graph.lanes >= 2, "HEAD's shifted node still fits");
+        for index in 0..=2 {
+            let edge = graph.worktree_edge_at(index).expect("dash");
+            assert_eq!(edge.lane, 0);
+            assert_eq!(edge.to_node, index == 2);
+            if index == 2 {
+                assert_eq!(edge.node_lane, 1, "the core lane moves right by one");
+                assert_ne!(edge.lane, edge.node_lane);
+            }
+        }
+        assert!(graph.worktree_edge_at(3).is_none());
+        // The shift applies below HEAD too, or the parent line would kink.
+        assert_eq!(graph.overlay_at(3).shift, 1);
+        assert!(graph.overlay_at(3).worktree.is_none());
+        for index in 0..rows.len() {
+            assert!(
+                !shifted_uses(rows.get(index).unwrap(), graph.lane_shift, 0),
+                "row {index} must leave the connector lane empty"
+            );
+        }
+        let painted = column_lanes(rows.get(0).unwrap(), graph.overlay_at(0));
+        assert_eq!(painted, rows.get(0).unwrap().width + 1);
+        assert_eq!(
+            indent(painted),
+            indent(rows.get(0).unwrap().width) + LANE_WIDTH
+        );
+    }
+
+    #[test]
+    fn a_curve_that_only_crosses_head_lane_still_reserves_a_column() {
+        let mut rows = GraphRows::new();
+        // Nothing ends on lane 1, but the curve from 0 to 2 runs across it.
+        push_row(&mut rows, 0, &[(0, 2)], &[]);
+        push_row(&mut rows, 1, &[], &[]);
+
+        let graph = plan(
+            &rows,
+            ConnectorEnds {
+                head_index: Some(1),
+                head_lane: 1,
+                head_color: 0,
+                head_present: true,
+                merge: None,
+            },
+        );
+
+        assert_eq!(graph.lane_shift, 1);
+        assert_eq!(graph.connector_lane, Some(0));
+        assert!(!shifted_uses(rows.get(0).unwrap(), graph.lane_shift, 0));
+    }
+
+    #[test]
+    fn a_missing_head_reserves_nothing_and_draws_no_commit_row() {
+        let graph = plan_worktree_connector(
+            3,
+            |_| None,
+            ConnectorEnds {
+                head_index: Some(5),
+                head_lane: 0,
+                head_color: 0,
+                head_present: true,
+                merge: None,
+            },
+        );
+
+        assert!(graph.has_head_edge);
+        assert_eq!(graph.head_index, None);
+        assert_eq!(graph.connector_lane, None);
+        assert_eq!(graph.lane_shift, 0);
+        assert!(graph.worktree_edge_at(0).is_none());
+        assert_eq!(graph.lanes, 1);
+    }
+
+    #[test]
+    fn head_at_the_top_with_a_free_merge_lane_does_not_shift() {
+        let mut rows = GraphRows::new();
+        push_row(&mut rows, 0, &[(0, 0)], &[]);
+        push_row(&mut rows, 1, &[(1, 0)], &[]);
+
+        let graph = plan(
+            &rows,
+            ConnectorEnds {
+                head_index: Some(0),
+                head_lane: 0,
+                head_color: 0,
+                head_present: true,
+                merge: Some(MergeEnd {
+                    index: 1,
+                    lane: 1,
+                    color: 4,
+                }),
+            },
+        );
+
+        assert_eq!(graph.lane_shift, 0);
+        assert_eq!(graph.connector_lane, Some(0));
+        assert!(!graph.connector_muted);
+        assert_eq!(graph.merge_lane, Some(1));
+        assert!(graph.worktree_edge_at(0).is_none());
+        let edge = graph.merge_edge_at(1).expect("merge target");
+        assert!(edge.to_node);
+        assert_eq!(edge.lane, edge.node_lane);
+    }
+
+    #[test]
+    fn a_merge_beside_a_buried_head_uses_the_next_private_lane() {
+        let mut rows = GraphRows::new();
+        push_row(&mut rows, 0, &[(0, 0)], &[1]);
+        push_row(&mut rows, 0, &[(0, 0)], &[1]);
+        push_row(&mut rows, 0, &[(0, 0)], &[]);
+        push_row(&mut rows, 1, &[(1, 1)], &[]);
+
+        let graph = plan(
+            &rows,
+            ConnectorEnds {
+                head_index: Some(2),
+                head_lane: 0,
+                head_color: 3,
+                head_present: true,
+                merge: Some(MergeEnd {
+                    index: 3,
+                    lane: 1,
+                    color: 5,
+                }),
+            },
+        );
+
+        assert_eq!(graph.lane_shift, 2);
+        assert_eq!(graph.connector_lane, Some(0));
+        assert!(graph.connector_muted);
+        assert_eq!(graph.merge_lane, Some(1));
+        for index in 0..=2 {
+            let edge = graph.worktree_edge_at(index).expect("worktree");
+            assert_eq!(edge.lane, 0);
+            assert_eq!(edge.to_node, index == 2);
+            assert_eq!(edge.node_lane, 2);
+        }
+        assert!(graph.worktree_edge_at(3).is_none());
+        for index in 0..3 {
+            let edge = graph.merge_edge_at(index).expect("merge");
+            assert_eq!(edge.lane, 1);
+            assert!(!edge.to_node);
+            assert_ne!(edge.lane, graph.worktree_edge_at(index).unwrap().lane);
+        }
+        let into = graph.merge_edge_at(3).expect("merge target");
+        assert!(into.to_node);
+        assert_eq!(into.lane, 1);
+        assert_eq!(into.node_lane, 3);
+        assert_ne!(into.lane, into.node_lane);
+        for index in 0..rows.len() {
+            let row = rows.get(index).unwrap();
+            assert!(!shifted_uses(row, graph.lane_shift, 0), "row {index}");
+            assert!(!shifted_uses(row, graph.lane_shift, 1), "row {index}");
+        }
+    }
+
+    #[test]
+    fn a_lane_shift_moves_core_lines_by_one_column() {
+        let passes = [PassThrough { lane: 1, color: 0 }];
+        let mut painted = owned(0, 3, &passes, &[]);
+        painted.shift = 1;
+        let lines = linework(&painted, 4);
+        assert_eq!(lines.straight[0].1.x, lane_offset(2));
+    }
+
+    #[test]
+    fn the_join_curve_leaves_the_node_and_meets_the_connector_at_the_top() {
+        let curve = join_curve(lane_offset(2), lane_offset(0));
+        let dashes = dashed_curve_segments(curve);
+        let first = dashes.first().unwrap().first().unwrap();
+        let last = dashes.last().unwrap().last().unwrap();
+        assert!(first.y < 0.5, "the dash starts clear of the node centre");
+        assert!((last.x - lane_offset(0)).abs() < 1e-4);
+        assert!((last.y - 0.0).abs() < 1e-4);
     }
 
     #[test]

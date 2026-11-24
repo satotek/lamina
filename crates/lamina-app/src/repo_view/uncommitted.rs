@@ -519,4 +519,58 @@ mod tests {
         );
         assert_eq!(graph.merge_lane, Some(feature_row.node_lane));
     }
+
+    #[test]
+    fn a_newer_side_commit_puts_the_worktree_connector_on_its_own_lane() {
+        let repo = TestRepo::new();
+        repo.write("a.txt", "base\n");
+        let head = repo.commit("head");
+        repo.git(&["checkout", "-q", "-b", "side"]);
+        repo.write("a.txt", "side\n");
+        repo.commit("side");
+        repo.git(&["checkout", "-q", "main"]);
+
+        let snap = snapshot_from_repo(&repo);
+        let graph = graph_info(&snap, None);
+        let head_index = snap.commit_index[&head];
+        assert!(head_index > 0, "the newer side commit sorts above HEAD");
+        assert_eq!(graph.head_index, Some(head_index));
+        assert!(graph.lane_shift >= 1);
+        assert_eq!(graph.connector_lane, Some(0));
+        assert!(graph.connector_muted);
+        for index in 0..=head_index {
+            let edge = graph.worktree_edge_at(index).expect("connector");
+            assert_eq!(edge.lane, 0);
+            assert_eq!(edge.to_node, index == head_index);
+        }
+        assert!(graph.worktree_edge_at(head_index + 1).is_none());
+        for index in 0..snap.commits.len() {
+            let (_, row) = snap.commits.get(index).unwrap();
+            let occupies = |lane: u16| lane.saturating_add(graph.lane_shift) == 0;
+            assert!(
+                !occupies(row.node_lane)
+                    && row.passes.iter().all(|pass| !occupies(pass.lane))
+                    && row
+                        .edges
+                        .iter()
+                        .all(|edge| !occupies(edge.from_lane) && !occupies(edge.to_lane)),
+                "row {index} must leave the connector lane empty"
+            );
+        }
+    }
+
+    #[test]
+    fn a_head_that_is_not_loaded_draws_no_connector() {
+        let mut snap = empty_snapshot();
+        snap.head = Some(HeadInfo::Branch {
+            short_name: "main".into(),
+            target: Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".parse().unwrap()),
+        });
+        let graph = graph_info(&snap, None);
+        assert!(graph.has_head_edge);
+        assert_eq!(graph.head_index, None);
+        assert_eq!(graph.connector_lane, None);
+        assert_eq!(graph.lane_shift, 0);
+        assert!(graph.worktree_edge_at(0).is_none());
+    }
 }
