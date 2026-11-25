@@ -6,6 +6,7 @@
 //! awaited by their `OperationFinished` event.
 
 use std::fs;
+#[cfg(unix)]
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
