@@ -250,7 +250,7 @@ impl RepoView {
                 kind: file.kind,
             })
             .collect();
-        self.files = Some(files);
+        self.files = Some(Arc::new(files));
         self.lfs.files = Arc::new(HashMap::new());
         self.files_error = None;
         if comparison.files.is_empty() {

@@ -1,7 +1,7 @@
 //! The commit details column: summary, author, id and parents, the files
 //! summary and the changed-file list.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -15,8 +15,8 @@ use gpui_component::menu::PopupMenuItem;
 use gpui_component::scroll::Scrollbar;
 use gpui_kit_assets::IconName;
 use lamina_core::diff::LineKind;
-use lamina_core::session::{QueryTicket, SelectionRangeMode};
-use lamina_core::{ChangeKind, CommitStat, FileChange, FileStat, HeadInfo, Oid};
+use lamina_core::session::{Comparison, QueryTicket, SelectionRangeMode};
+use lamina_core::{CommitStat, FileChange, FileStat, HeadInfo, Oid};
 
 use super::RepoView;
 use super::commit_selection::{SelectionSummary, summarize};
@@ -64,6 +64,157 @@ impl CommitStatSlot {
 
     fn get(&self) -> Option<&Arc<CommitStat>> {
         self.stat.as_ref()
+    }
+}
+
+/// Cached per-file stat alignment and flat/tree rows for [`RepoView::file_list`].
+///
+/// Both are held behind `Arc` and keyed by the `Arc` identities of their inputs
+/// (plus the tree mode and collapse revision), so frames that only scroll or
+/// hover reuse them in O(1) without cloning paths or re-running tree layout.
+#[derive(Default)]
+pub(super) struct FileListCache {
+    counts: Option<CachedFileCounts>,
+    rows: Option<CachedFileRows>,
+}
+
+struct CachedFileCounts {
+    files: Arc<Vec<FileChange>>,
+    range_active: bool,
+    stat: Option<Arc<CommitStat>>,
+    comparison: Option<Arc<Comparison>>,
+    counts: Arc<Vec<Option<FileStat>>>,
+}
+
+struct CachedFileRows {
+    files: Arc<Vec<FileChange>>,
+    tree_mode: bool,
+    collapsed_rev: u64,
+    rows: Arc<Vec<TreeRow>>,
+}
+
+impl FileListCache {
+    fn counts(
+        &mut self,
+        files: &Arc<Vec<FileChange>>,
+        range_active: bool,
+        stat: Option<&Arc<CommitStat>>,
+        comparison: Option<&Arc<Comparison>>,
+    ) -> Arc<Vec<Option<FileStat>>> {
+        if let Some(cached) = self.counts.as_ref()
+            && Arc::ptr_eq(&cached.files, files)
+            && cached.range_active == range_active
+            && option_arc_ptr_eq(&cached.stat, stat)
+            && option_arc_ptr_eq(&cached.comparison, comparison)
+        {
+            return Arc::clone(&cached.counts);
+        }
+
+        let counts = Arc::new(align_file_counts(files, range_active, stat, comparison));
+        self.counts = Some(CachedFileCounts {
+            files: Arc::clone(files),
+            range_active,
+            stat: stat.cloned(),
+            comparison: comparison.cloned(),
+            counts: Arc::clone(&counts),
+        });
+        counts
+    }
+
+    fn rows(
+        &mut self,
+        files: &Arc<Vec<FileChange>>,
+        tree_mode: bool,
+        collapsed_rev: u64,
+        collapsed: &HashSet<String>,
+    ) -> Arc<Vec<TreeRow>> {
+        if let Some(cached) = self.rows.as_ref()
+            && Arc::ptr_eq(&cached.files, files)
+            && cached.tree_mode == tree_mode
+            && cached.collapsed_rev == collapsed_rev
+        {
+            return Arc::clone(&cached.rows);
+        }
+
+        let rows = Arc::new(build_file_rows(files, tree_mode, collapsed));
+        self.rows = Some(CachedFileRows {
+            files: Arc::clone(files),
+            tree_mode,
+            collapsed_rev,
+            rows: Arc::clone(&rows),
+        });
+        rows
+    }
+}
+
+fn option_arc_ptr_eq<T>(cached: &Option<Arc<T>>, current: Option<&Arc<T>>) -> bool {
+    match (cached, current) {
+        (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+        (None, None) => true,
+        _ => false,
+    }
+}
+
+/// Aligns per-file added/removed counts with `files`'s order in O(N).
+fn align_file_counts(
+    files: &[FileChange],
+    range_active: bool,
+    stat: Option<&Arc<CommitStat>>,
+    comparison: Option<&Arc<Comparison>>,
+) -> Vec<Option<FileStat>> {
+    if range_active {
+        return comparison
+            .map(|comparison| {
+                comparison
+                    .files
+                    .iter()
+                    .map(|file| Some(file.stat.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+
+    let Some(stat) = stat else {
+        return vec![None; files.len()];
+    };
+    let by_path: HashMap<&str, &FileStat> = stat
+        .files
+        .iter()
+        .map(|file| (file.path.as_str(), file))
+        .collect();
+    files
+        .iter()
+        .map(|change| by_path.get(change.path.as_str()).copied().cloned())
+        .collect()
+}
+
+/// Builds the flat or directory-grouped row list for the changed-files pane.
+fn build_file_rows(
+    files: &[FileChange],
+    tree_mode: bool,
+    collapsed: &HashSet<String>,
+) -> Vec<TreeRow> {
+    if tree_mode {
+        let indexed = files
+            .iter()
+            .enumerate()
+            .map(|(index, change)| (index, change.path.as_str()))
+            .collect::<Vec<_>>();
+        file_tree::rows(&indexed, collapsed)
+    } else {
+        files
+            .iter()
+            .enumerate()
+            .map(|(index, change)| {
+                let (name, _) = style::path_parts(&change.path);
+                TreeRow::File {
+                    index,
+                    path: change.path.clone(),
+                    name: name.to_owned(),
+                    depth: 0,
+                }
+            })
+            .collect()
     }
 }
 
@@ -678,7 +829,7 @@ impl RepoView {
     /// selected file's counts stand in until then. The trailing buttons switch
     /// the list below between one row per file and a grouped tree.
     pub(super) fn files_summary(&self, design: &Design, cx: &App) -> AnyElement {
-        let files = self.files.as_ref().map_or(0, Vec::len);
+        let files = self.files.as_ref().map_or(0, |files| files.len());
         let row = div()
             .flex()
             .items_center()
@@ -789,6 +940,7 @@ impl RepoView {
         if !self.file_tree_collapsed.remove(&path) {
             self.file_tree_collapsed.insert(path);
         }
+        self.file_tree_rev = self.file_tree_rev.wrapping_add(1);
         cx.notify();
     }
 
@@ -833,66 +985,24 @@ impl RepoView {
         let work_dir = Arc::new(self.work_dir());
         let lfs = Arc::clone(&self.lfs.files);
         let list_design = design.clone();
-        let entries: Arc<Vec<(String, ChangeKind)>> = Arc::new(
-            files
-                .iter()
-                .map(|change: &FileChange| (change.path.clone(), change.kind))
-                .collect(),
-        );
-        // The stat is keyed by path and sorted, while the file list keeps the
-        // commit's change order, so align the two once per frame. A range gets
-        // its counts from the comparison, which already lists matching files.
-        let counts: Vec<Option<FileStat>> = if range_active {
-            self.selection_diff
-                .comparison()
-                .map(|comparison| {
-                    comparison
-                        .files
-                        .iter()
-                        .map(|file| Some(file.stat.clone()))
-                        .collect()
-                })
-                .unwrap_or_default()
-        } else {
-            files
-                .iter()
-                .map(|change| {
-                    self.stat.get().and_then(|stat| {
-                        stat.files
-                            .iter()
-                            .find(|file| file.path == change.path)
-                            .cloned()
-                    })
-                })
-                .collect()
-        };
-        let counts = Arc::new(counts);
-
         let tree_mode = Settings::get(cx).history.file_list_mode == FileListMode::Tree;
-        // Both modes draw the same rows; the list mode simply has no directory
-        // rows, so the selection stays an index into `files` either way.
-        let rows: Arc<Vec<TreeRow>> = Arc::new(if tree_mode {
-            let indexed = entries
-                .iter()
-                .enumerate()
-                .map(|(index, (path, _))| (index, path.as_str()))
-                .collect::<Vec<_>>();
-            file_tree::rows(&indexed, &self.file_tree_collapsed)
-        } else {
-            entries
-                .iter()
-                .enumerate()
-                .map(|(index, (path, _))| {
-                    let (name, _) = style::path_parts(path);
-                    TreeRow::File {
-                        index,
-                        path: path.clone(),
-                        name: name.to_owned(),
-                        depth: 0,
-                    }
-                })
-                .collect()
-        });
+        let (counts, rows) = {
+            let mut cache = self.file_list_cache.borrow_mut();
+            let counts = cache.counts(
+                files,
+                range_active,
+                self.stat.get(),
+                self.selection_diff.comparison(),
+            );
+            let rows = cache.rows(
+                files,
+                tree_mode,
+                self.file_tree_rev,
+                &self.file_tree_collapsed,
+            );
+            (counts, rows)
+        };
+        let files = Arc::clone(files);
 
         uniform_list("changed-files", rows.len(), move |range, _window, _cx| {
             range
@@ -938,7 +1048,7 @@ impl RepoView {
                     } => {
                         let index = *index;
                         let entity = entity.clone();
-                        let kind = entries[index].1;
+                        let kind = files[index].kind;
                         // The directory trails the name in the flat list only;
                         // in the tree its row already says where the file is.
                         let dir = (!tree_mode).then(|| style::path_parts(path).1).flatten();
@@ -1557,5 +1667,90 @@ mod tests {
             height <= PANE_HEIGHT,
             "an expanded body pushed the details block past its {PANE_HEIGHT} px pane: {height} px"
         );
+    }
+
+    #[test]
+    fn file_list_cache_aligns_stats_and_reuses_unchanged_parts() {
+        use lamina_core::ChangeKind;
+
+        let files = Arc::new(vec![
+            FileChange {
+                path: "b/two.rs".to_owned(),
+                old_path: None,
+                kind: ChangeKind::Modified,
+            },
+            FileChange {
+                path: "a/one.rs".to_owned(),
+                old_path: None,
+                kind: ChangeKind::Added,
+            },
+        ]);
+        let stat = Arc::new(CommitStat {
+            files: vec![
+                FileStat {
+                    path: "a/one.rs".to_owned(),
+                    old_path: None,
+                    added: 10,
+                    removed: 0,
+                    binary: false,
+                },
+                FileStat {
+                    path: "b/two.rs".to_owned(),
+                    old_path: None,
+                    added: 3,
+                    removed: 2,
+                    binary: false,
+                },
+            ],
+            added: 13,
+            removed: 2,
+        });
+
+        let mut cache = FileListCache::default();
+        let collapsed = HashSet::new();
+
+        // Before stat arrives, counts are aligned as None and rows are built once.
+        let initial_counts = cache.counts(&files, false, None, None);
+        assert_eq!(*initial_counts, vec![None, None]);
+        let initial_rows = cache.rows(&files, false, 0, &collapsed);
+        assert_eq!(initial_rows.len(), 2);
+
+        // Same inputs reuse the exact same Arcs on subsequent frames.
+        assert!(Arc::ptr_eq(
+            &initial_counts,
+            &cache.counts(&files, false, None, None)
+        ));
+        assert!(Arc::ptr_eq(
+            &initial_rows,
+            &cache.rows(&files, false, 0, &collapsed)
+        ));
+
+        // When stat arrives, counts align in `files` order while rows stay cached.
+        let stat_counts = cache.counts(&files, false, Some(&stat), None);
+        assert_eq!(
+            stat_counts
+                .iter()
+                .map(|entry| entry.as_ref().map(|file| (file.path.as_str(), file.added)))
+                .collect::<Vec<_>>(),
+            vec![Some(("b/two.rs", 3)), Some(("a/one.rs", 10))]
+        );
+        assert!(Arc::ptr_eq(
+            &initial_rows,
+            &cache.rows(&files, false, 0, &collapsed)
+        ));
+
+        // Toggling tree mode or collapse revision rebuilds rows without touching counts.
+        let tree_rows = cache.rows(&files, true, 0, &collapsed);
+        assert!(!Arc::ptr_eq(&initial_rows, &tree_rows));
+        assert!(Arc::ptr_eq(
+            &stat_counts,
+            &cache.counts(&files, false, Some(&stat), None)
+        ));
+
+        let mut collapsed_b = HashSet::new();
+        collapsed_b.insert("b".to_owned());
+        let collapsed_rows = cache.rows(&files, true, 1, &collapsed_b);
+        assert!(!Arc::ptr_eq(&tree_rows, &collapsed_rows));
+        assert!(collapsed_rows.len() < tree_rows.len());
     }
 }

@@ -182,7 +182,7 @@ impl RepoView {
                 count = row_count
             )
             .to_string(),
-            None => match self.files.as_ref().map_or(0, Vec::len) {
+            None => match self.files.as_ref().map_or(0, |files| files.len()) {
                 0 => String::new(),
                 files => t!("diff.header.changed", count = files).to_string(),
             },

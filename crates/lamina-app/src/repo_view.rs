@@ -506,10 +506,16 @@ pub struct RepoView {
     details_height: Rc<Cell<Option<f32>>>,
     focus: FocusHandle,
 
-    files: Option<Vec<FileChange>>,
+    files: Option<Arc<Vec<FileChange>>>,
     /// Directories the details pane's tree view has collapsed, by path. Kept
     /// across commits so stepping through history keeps the same folders open.
     file_tree_collapsed: std::collections::HashSet<String>,
+    /// Bumped whenever `file_tree_collapsed` changes so the file-list row cache
+    /// rebuilds without comparing the set on every frame.
+    file_tree_rev: u64,
+    /// Cached per-file stat alignment and flat/tree rows for `file_list`, so
+    /// frames that only scroll or hover do not rebuild them for large commits.
+    file_list_cache: RefCell<details::FileListCache>,
     files_epoch: u64,
     files_error: Option<String>,
     selected_file: Option<usize>,
@@ -729,6 +735,8 @@ impl RepoView {
             focus,
             files: None,
             file_tree_collapsed: std::collections::HashSet::new(),
+            file_tree_rev: 0,
+            file_list_cache: RefCell::new(details::FileListCache::default()),
             files_epoch: 0,
             files_error: None,
             selected_file: None,
@@ -2428,7 +2436,7 @@ impl RepoView {
                             .matched_path_for(commit)
                             .and_then(|path| files.iter().position(|file| file.path == path))
                             .unwrap_or(0);
-                        this.files = Some(files);
+                        this.files = Some(Arc::new(files));
                         this.lfs.files = Arc::new(lfs);
                         this.files_error = None;
                         if empty {
