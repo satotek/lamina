@@ -394,8 +394,9 @@ fn closing_the_connection_kills_a_running_write() {
 }
 
 fn conflict_repo() -> TestRepo {
-    let repo = TestRepo::new();
-    identity(&repo);
+    // Sessions read the system config, unlike the fixture's isolated git. Pin
+    // line-ending conversion locally so both resolve to the same worktree bytes.
+    let repo = TestRepo::committing();
     repo.write("conflict.txt", "base\n");
     repo.commit("base");
     repo.git(&["checkout", "-q", "-b", "side"]);
