@@ -38,14 +38,32 @@ pub fn h_scrollbar(
     content: Pixels,
     design: &Design,
 ) -> UiHScrollbar {
+    h_scrollbar_tinted(
+        id,
+        handle,
+        viewport,
+        content,
+        [design.background, design.border, design.muted],
+    )
+}
+
+/// [`h_scrollbar`] for a pane that has its own palette rather than a
+/// [`Design`] (the diff list), with `[track, thumb, thumb_hover]` colours.
+pub fn h_scrollbar_tinted(
+    id: impl Into<ElementId>,
+    handle: &ScrollHandle,
+    viewport: Pixels,
+    content: Pixels,
+    [track, thumb, thumb_hover]: [Hsla; 3],
+) -> UiHScrollbar {
     UiHScrollbar {
         id: id.into(),
         handle: handle.clone(),
         viewport: f32::from(viewport),
         content: f32::from(content),
-        track: design.background,
-        thumb: design.border,
-        thumb_hover: design.muted,
+        track,
+        thumb,
+        thumb_hover,
     }
 }
 

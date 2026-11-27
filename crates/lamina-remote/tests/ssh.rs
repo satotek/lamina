@@ -272,6 +272,8 @@ fn install_on(laid: &LaidOut, host: &str, port: Option<u16>) -> Result<String, l
         helper_dir: opts.helper_dir.take(),
         askpass_program: opts.askpass_program.clone(),
         askpass: opts.askpass.clone(),
+        cancel: None,
+        on_progress: None,
     })
 }
 
@@ -782,4 +784,123 @@ fn a_failed_upload_leaves_no_temp_file_behind() {
         leftovers.is_empty(),
         "a failed transfer must clean up its temp file: {leftovers:?}"
     );
+}
+
+#[test]
+fn upload_uses_ssh_compression_and_reports_progress() {
+    use std::sync::Mutex;
+
+    use lamina_remote_client::UploadProgress;
+
+    let scratch = Scratch::new();
+    let laid = layout(
+        &scratch,
+        &Fake {
+            os: "Linux",
+            arch: "x86_64",
+            lie: Lie::Never,
+            override_path: None,
+            banner: None,
+            fail_upload: false,
+            barrier: None,
+        },
+    );
+    host_helper(&laid.helpers);
+    let helper = laid.helpers.join("lamina-remote-x86_64-unknown-linux-musl");
+    let expected_size = fs::metadata(&helper).expect("helper size").len();
+
+    let updates = Arc::new(Mutex::new(Vec::<UploadProgress>::new()));
+    let record = Arc::clone(&updates);
+    let mut opts = options(&laid);
+    lamina_remote_client::install_helper(&InstallOptions {
+        program: opts.program.clone(),
+        host: "ignored.example".into(),
+        port: None,
+        helper_dir: opts.helper_dir.take(),
+        askpass_program: opts.askpass_program.clone(),
+        askpass: opts.askpass.clone(),
+        cancel: None,
+        on_progress: Some(Arc::new(move |progress| {
+            record.lock().unwrap().push(progress);
+        })),
+    })
+    .expect("upload succeeds");
+
+    let log = fs::read_to_string(&laid.log).expect("ssh log");
+    let upload_line = log
+        .lines()
+        .find(|line| line.starts_with("CMD ") && line.contains("umask 077"))
+        .expect("upload command was logged");
+    assert!(
+        upload_line.contains(" <-C> "),
+        "helper upload must pass -C for ssh compression: {upload_line}"
+    );
+
+    let updates = updates.lock().unwrap();
+    assert!(!updates.is_empty(), "progress callback must fire");
+    assert_eq!(updates.first().unwrap().total, expected_size);
+    assert_eq!(updates.last().unwrap().sent, expected_size);
+    assert_eq!(updates.last().unwrap().total, expected_size);
+    for pair in updates.windows(2) {
+        assert!(pair[0].sent <= pair[1].sent);
+    }
+}
+
+#[test]
+fn cancelling_during_upload_stops_the_install_promptly() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let scratch = Scratch::new();
+    let checks = scratch.root.join("release-checks");
+    let uploads = scratch.root.join("release-uploads");
+    // Release the initial self-check right away; hold the upload at its barrier.
+    fs::write(&checks, b"").expect("release checks");
+    let laid = layout(
+        &scratch,
+        &Fake {
+            os: "Linux",
+            arch: "x86_64",
+            lie: Lie::Never,
+            override_path: None,
+            banner: None,
+            fail_upload: false,
+            barrier: Some(Barrier {
+                checks,
+                uploads: uploads.clone(),
+            }),
+        },
+    );
+    host_helper(&laid.helpers);
+
+    let cancel = Arc::new(AtomicBool::new(false));
+    let handle = {
+        let cancel = Arc::clone(&cancel);
+        let mut opts = options(&laid);
+        std::thread::spawn(move || {
+            lamina_remote_client::install_helper(&InstallOptions {
+                program: opts.program.clone(),
+                host: "ignored.example".into(),
+                port: None,
+                helper_dir: opts.helper_dir.take(),
+                askpass_program: opts.askpass_program.clone(),
+                askpass: opts.askpass.clone(),
+                cancel: Some(cancel),
+                on_progress: None,
+            })
+        })
+    };
+
+    wait_for_lines(&laid.log, "x-cat", 1);
+    cancel.store(true, Ordering::Relaxed);
+
+    let error = handle
+        .join()
+        .expect("install thread did not panic")
+        .expect_err("cancelled install must return an error");
+    assert!(
+        error.to_string().contains("cancelled"),
+        "expected cancelled error, got: {error}"
+    );
+    // Clean up barrier file just in case anything is still winding down.
+    let _ = fs::write(&uploads, b"");
 }

@@ -1029,6 +1029,12 @@ impl RepoView {
                     } else {
                         div().into_any_element()
                     })
+                    .when(history.view.is_some(), |row| {
+                        row.child(crate::diff_view::wrap_toggle(
+                            "history-toggle-wrap-lines",
+                            cx,
+                        ))
+                    })
                     .child(
                         history
                             .view

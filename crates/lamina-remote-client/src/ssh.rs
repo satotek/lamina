@@ -10,9 +10,10 @@ use std::fs::File;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lamina_core::askpass::{Answer, AskpassHost, Prompt};
 use lamina_core::session::SessionEvent;
@@ -191,6 +192,8 @@ impl RemoteSession {
                 helper_dir: options.helper_dir.clone(),
                 askpass_program: None,
                 askpass: None,
+                cancel: None,
+                on_progress: None,
             },
             askpass.as_ref(),
         )?;
@@ -320,9 +323,25 @@ pub(crate) fn spawn_session(
     Ok((stdout, stdin, attach))
 }
 
+/// Chunk size for streaming the helper binary into `ssh` stdin. Small enough
+/// that cancellation and progress updates respond quickly without syscall churn.
+const UPLOAD_CHUNK_SIZE: usize = 64 * 1024;
+
+/// Minimum interval between upload progress callbacks so the UI does not
+/// repaint on every 64 KiB write.
+const UPLOAD_PROGRESS_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Polling interval while waiting for a cancellable `ssh` child to exit.
+const CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+fn is_cancelled(cancel: Option<&AtomicBool>) -> bool {
+    cancel.is_some_and(|flag| flag.load(Ordering::Relaxed))
+}
+
 /// Runs one short remote command. `stdin_file` is streamed when uploading the
 /// helper; stdout and stderr are read on their own threads so a full pipe
 /// cannot stall the upload.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn ssh_run(
     program: &Path,
     port: Option<u16>,
@@ -330,8 +349,14 @@ pub(crate) fn ssh_run(
     remote_args: &[String],
     stdin_file: Option<&Path>,
     askpass: Option<&AskpassSession>,
+    compress: bool,
+    cancel: Option<&AtomicBool>,
+    on_progress: Option<&dyn Fn(u64, u64)>,
 ) -> Result<SshOutput> {
-    let mut child = spawn(program, port, host, remote_args, askpass)?;
+    if is_cancelled(cancel) {
+        return Err(Error::other("cancelled"));
+    }
+    let mut child = spawn_with_options(program, port, host, remote_args, askpass, compress)?;
     let stdout = child
         .stdout
         .take()
@@ -349,13 +374,40 @@ pub(crate) fn ssh_run(
 
     // A remote `mkdir` can fail and close the pipe before `cat` reads. That is
     // the install error; the broken-pipe write is only how we notice it.
+    let mut cancelled = false;
     let copy_result = if let Some(mut pipe) = stdin.take() {
         let result = (|| -> io::Result<()> {
             if let Some(path) = stdin_file {
                 let mut file = File::open(path)?;
-                io::copy(&mut file, &mut pipe)?;
+                let total = file.metadata().map(|meta| meta.len()).unwrap_or(0);
+                if let Some(report) = on_progress {
+                    report(0, total);
+                }
+                let mut buf = vec![0u8; UPLOAD_CHUNK_SIZE];
+                let mut sent: u64 = 0;
+                let mut last_report = Instant::now();
+                loop {
+                    if is_cancelled(cancel) {
+                        cancelled = true;
+                        break;
+                    }
+                    let n = file.read(&mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    pipe.write_all(&buf[..n])?;
+                    sent = sent.saturating_add(n as u64);
+                    if let Some(report) = on_progress
+                        && (last_report.elapsed() >= UPLOAD_PROGRESS_INTERVAL || sent >= total)
+                    {
+                        report(sent, total);
+                        last_report = Instant::now();
+                    }
+                }
             }
-            pipe.flush()?;
+            if !cancelled {
+                pipe.flush()?;
+            }
             Ok(())
         })();
         drop(pipe);
@@ -364,9 +416,36 @@ pub(crate) fn ssh_run(
         Ok(())
     };
 
-    let status = child
-        .wait()
-        .map_err(|error| Error::other(format!("could not wait for ssh: {error}")))?;
+    if cancelled {
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = stdout_thread.join();
+        let _ = stderr_thread.join();
+        return Err(Error::other("cancelled"));
+    }
+
+    let status = if let Some(flag) = cancel {
+        loop {
+            if let Some(status) = child
+                .try_wait()
+                .map_err(|error| Error::other(format!("could not wait for ssh: {error}")))?
+            {
+                break status;
+            }
+            if flag.load(Ordering::Relaxed) {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = stdout_thread.join();
+                let _ = stderr_thread.join();
+                return Err(Error::other("cancelled"));
+            }
+            thread::sleep(CANCEL_POLL_INTERVAL);
+        }
+    } else {
+        child
+            .wait()
+            .map_err(|error| Error::other(format!("could not wait for ssh: {error}")))?
+    };
     let stdout = stdout_thread.join().unwrap_or_else(|_| Vec::new());
     let _ = stderr_thread.join();
     let stderr = String::from_utf8_lossy(&lock(&stderr_buf)).into_owned();
@@ -389,8 +468,19 @@ pub(crate) fn spawn(
     remote_args: &[String],
     askpass: Option<&AskpassSession>,
 ) -> Result<Child> {
+    spawn_with_options(program, port, host, remote_args, askpass, false)
+}
+
+fn spawn_with_options(
+    program: &Path,
+    port: Option<u16>,
+    host: &str,
+    remote_args: &[String],
+    askpass: Option<&AskpassSession>,
+    compress: bool,
+) -> Result<Child> {
     ensure_destination(host)?;
-    let argv = ssh_argv(program, port, host, remote_args);
+    let argv = ssh_argv_options(program, port, host, remote_args, compress);
     let mut command = Command::new(&argv[0]);
     command.args(&argv[1..]);
     command
@@ -408,18 +498,37 @@ pub(crate) fn spawn(
 
 /// Local `ssh` argv. Arguments after `--` are quoted because the remote
 /// `sshd` joins them and runs the result through the user's login shell.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn ssh_argv(
     program: &Path,
     port: Option<u16>,
     host: &str,
     remote_args: &[String],
 ) -> Vec<std::ffi::OsString> {
+    ssh_argv_options(program, port, host, remote_args, false)
+}
+
+fn ssh_argv_options(
+    program: &Path,
+    port: Option<u16>,
+    host: &str,
+    remote_args: &[String],
+    compress: bool,
+) -> Vec<std::ffi::OsString> {
     let quoted: Vec<std::ffi::OsString> = remote_args
         .iter()
         .map(|arg| shell_quote(arg).into())
         .collect();
     let proxy = proxy_for_host(program, host, port);
-    ssh_argv_with(program, port, host, Tty::None, &quoted, proxy.as_deref())
+    ssh_argv_with(
+        program,
+        port,
+        host,
+        Tty::None,
+        compress,
+        &quoted,
+        proxy.as_deref(),
+    )
 }
 
 /// The local `ssh` argv for an interactive login shell in `repo_path`.
@@ -445,6 +554,7 @@ pub fn terminal_argv(
         port,
         host,
         Tty::Interactive,
+        false,
         &[login_command(repo_path).into()],
         proxy.as_deref(),
     ))
@@ -483,15 +593,19 @@ fn ssh_argv_with(
     port: Option<u16>,
     host: &str,
     tty: Tty,
+    compress: bool,
     remote: &[std::ffi::OsString],
     proxy: Option<&str>,
 ) -> Vec<std::ffi::OsString> {
-    let mut argv = Vec::with_capacity(18 + remote.len());
+    let mut argv = Vec::with_capacity(19 + remote.len());
     argv.push(program.as_os_str().to_os_string());
     argv.push(match tty {
         Tty::None => "-T".into(),
         Tty::Interactive => "-t".into(),
     });
+    if compress {
+        argv.push("-C".into());
+    }
     argv.extend([
         "-o".into(),
         format!("ConnectTimeout={}", CONNECT_TIMEOUT.as_secs()).into(),
@@ -863,6 +977,7 @@ mod tests {
             Some(2222),
             "example.test",
             Tty::None,
+            false,
             &["/opt/lamina-remote".into(), "--stdio".into()],
             Some(proxy),
         );

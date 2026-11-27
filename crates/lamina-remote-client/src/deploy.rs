@@ -24,6 +24,8 @@
 
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use lamina_core::{Error, Result};
 use lamina_remote_protocol::PROTOCOL_VERSION;
@@ -53,6 +55,16 @@ const PROBE_SCRIPT: &str = "printf \"lamina-os:%s\\nlamina-arch:%s\\nlamina-help
 /// this attempt's temp file even when `cat` fails partway.
 const UPLOAD_SCRIPT: &str = "set -e; umask 077; mkdir -p -- \"$LAMINA_HELPER_DIR\"; tmp=\"$LAMINA_HELPER_PATH.$$.tmp\"; trap 'rm -f \"$tmp\"' 0; cat > \"$tmp\"; chmod 700 \"$tmp\"; mv -f \"$tmp\" \"$LAMINA_HELPER_PATH\"";
 
+/// Byte progress reported while uploading `lamina-remote` to the remote host.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UploadProgress {
+    pub sent: u64,
+    pub total: u64,
+}
+
+/// Callback that receives [`UploadProgress`] updates during helper upload.
+pub type ProgressHandler = Arc<dyn Fn(UploadProgress) + Send + Sync>;
+
 /// Where to find `ssh`, the host, and the local helper directory.
 #[derive(Clone)]
 pub struct InstallOptions {
@@ -63,6 +75,11 @@ pub struct InstallOptions {
     pub helper_dir: Option<PathBuf>,
     pub askpass_program: Option<PathBuf>,
     pub askpass: Option<AskpassHandler>,
+    /// Checked during `ssh` calls and upload streaming; setting it kills the
+    /// running `ssh` child and stops the install.
+    pub cancel: Option<Arc<AtomicBool>>,
+    /// Receives upload progress updates while streaming the helper binary.
+    pub on_progress: Option<ProgressHandler>,
 }
 
 impl Default for InstallOptions {
@@ -74,6 +91,8 @@ impl Default for InstallOptions {
             helper_dir: None,
             askpass_program: None,
             askpass: None,
+            cancel: None,
+            on_progress: None,
         }
     }
 }
@@ -140,6 +159,9 @@ pub(crate) fn install_with(
         debug!("remote helper: reusing {remote_path} on {}", options.host);
         return Ok(remote_path);
     }
+    if is_cancelled(options) {
+        return Err(Error::other("cancelled"));
+    }
     info!(
         "remote helper: uploading {} to {}:{remote_path}",
         local.display(),
@@ -147,6 +169,9 @@ pub(crate) fn install_with(
     );
     upload(options, askpass, &local, &remote_path)?;
     if verify(options, askpass, &remote_path, false).is_err() {
+        if is_cancelled(options) {
+            return Err(Error::other("cancelled"));
+        }
         // One replacement covers a partial upload. A second failure is
         // reported as-is: retrying again will not change the binary.
         remove_remote(options, askpass, &remote_path)?;
@@ -236,6 +261,13 @@ fn local_binary(options: &InstallOptions, target: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+fn is_cancelled(options: &InstallOptions) -> bool {
+    options
+        .cancel
+        .as_ref()
+        .is_some_and(|flag| flag.load(Ordering::Relaxed))
+}
+
 fn upload(
     options: &InstallOptions,
     askpass: Option<&AskpassSession>,
@@ -243,9 +275,16 @@ fn upload(
     remote_path: &str,
 ) -> Result<()> {
     let dir = parent_dir(remote_path);
-    let output = run(
-        options,
-        askpass,
+    let progress_cb = options.on_progress.as_ref().map(|handler| {
+        let handler = Arc::clone(handler);
+        move |sent: u64, total: u64| handler(UploadProgress { sent, total })
+    });
+    let on_progress: Option<&dyn Fn(u64, u64)> =
+        progress_cb.as_ref().map(|cb| cb as &dyn Fn(u64, u64));
+    let output = ssh::ssh_run(
+        &options.program,
+        options.port,
+        &options.host,
         &[
             "env".to_owned(),
             format!("LAMINA_HELPER_DIR={dir}"),
@@ -255,6 +294,10 @@ fn upload(
             UPLOAD_SCRIPT.to_owned(),
         ],
         Some(local),
+        askpass,
+        true,
+        options.cancel.as_deref(),
+        on_progress,
     )?;
     ensure_success("could not install the remote helper", &output)
 }
@@ -342,6 +385,9 @@ fn run(
         remote_args,
         stdin_file,
         askpass,
+        false,
+        options.cancel.as_deref(),
+        None,
     )
 }
 

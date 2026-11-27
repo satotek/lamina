@@ -5,6 +5,8 @@
 //! The reader callback must not touch GPUI or drop the session: doing either
 //! deadlocks the read loop.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
@@ -45,6 +47,16 @@ pub(super) struct RemoteTab {
     /// Latest idle round trip copied off the session. `None` until a probe is
     /// answered, and while the tab is lost or reconnecting.
     rtt: Option<Duration>,
+    /// Cancels an in-flight helper install when the tab reconnects or closes.
+    cancel: Option<Arc<AtomicBool>>,
+}
+
+impl Drop for RemoteTab {
+    fn drop(&mut self) {
+        if let Some(cancel) = &self.cancel {
+            cancel.store(true, Ordering::Relaxed);
+        }
+    }
 }
 
 /// What a connected remote tab tells the workspace to record.
@@ -84,6 +96,7 @@ impl RepoView {
             pending: Vec::new(),
             error: None,
             rtt: None,
+            cancel: None,
         });
         // No local checkout, so the commit-graph offer and the config viewer
         // have nothing to key off.
@@ -127,6 +140,11 @@ impl RepoView {
         tab.lost = false;
         tab.reconnecting = self.session.is_some();
         tab.rtt = None;
+        if let Some(previous) = tab.cancel.take() {
+            previous.store(true, Ordering::Relaxed);
+        }
+        let cancel = Arc::new(AtomicBool::new(false));
+        tab.cancel = Some(Arc::clone(&cancel));
         let (sender, mut receiver) = futures_mpsc::unbounded();
         if tab.reconnecting {
             info!(
@@ -134,7 +152,7 @@ impl RepoView {
                 tab.spec.host, tab.spec.path
             );
         }
-        spawn_connect(spec, ssh, sender);
+        spawn_connect(spec, ssh, cancel, sender);
         // Replacing the task drops the previous receiver. The old worker's
         // sends then fail, and an unsent `Ready` drops its session on that
         // worker rather than on the UI thread.
@@ -783,6 +801,7 @@ mod tests {
             pending: Vec::new(),
             error: None,
             rtt: None,
+            cancel: None,
         }
     }
 

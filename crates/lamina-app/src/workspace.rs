@@ -1632,24 +1632,25 @@ impl Workspace {
             let footer_picker = picker.clone();
             let clone_footer_picker = picker.clone();
             let init_footer_picker = picker.clone();
+            let remote_footer_picker = picker.clone();
             let new_tab_footer_picker = picker.clone();
             let confirm_picker = picker.clone();
-            // Five buttons outgrow the dialog in longer languages; they wrap
-            // onto a second row instead of spilling past its left edge.
+            // The dialog title already says "Open Repository", so the footer
+            // uses the short tile labels instead of repeating "repository" on
+            // every button. Six buttons can still outgrow the dialog in longer
+            // languages; they wrap onto a second row instead of spilling past
+            // its left edge.
             let footer = DialogFooter::new()
                 .flex_wrap()
                 .child(
-                    crate::ui::button(
-                        "picker-dialog-open",
-                        format!("{}…", t!("picker.open_repository")),
-                    )
-                    .size(crate::ui::ButtonSize::Medium)
-                    .on_click(move |_, window, cx| {
-                        footer_picker.update(cx, |picker, cx| picker.open_native(window, cx));
-                    }),
+                    crate::ui::button("picker-dialog-open", t!("picker.tile.open").to_string())
+                        .size(crate::ui::ButtonSize::Medium)
+                        .on_click(move |_, window, cx| {
+                            footer_picker.update(cx, |picker, cx| picker.open_native(window, cx));
+                        }),
                 )
                 .child(
-                    crate::ui::button("picker-dialog-clone", t!("picker.clone").to_string())
+                    crate::ui::button("picker-dialog-clone", t!("picker.tile.clone").to_string())
                         .kind(crate::ui::ButtonKind::Normal)
                         .size(crate::ui::ButtonSize::Medium)
                         .on_click(move |_, window, cx| {
@@ -1658,12 +1659,21 @@ impl Workspace {
                         }),
                 )
                 .child(
-                    crate::ui::button("picker-dialog-init", t!("picker.new").to_string())
+                    crate::ui::button("picker-dialog-init", t!("picker.tile.new").to_string())
                         .kind(crate::ui::ButtonKind::Normal)
                         .size(crate::ui::ButtonSize::Medium)
                         .on_click(move |_, window, cx| {
                             init_footer_picker
                                 .update(cx, |picker, cx| picker.open_init(window, cx));
+                        }),
+                )
+                .child(
+                    crate::ui::button("picker-dialog-remote", t!("picker.tile.remote").to_string())
+                        .kind(crate::ui::ButtonKind::Normal)
+                        .size(crate::ui::ButtonSize::Medium)
+                        .on_click(move |_, window, cx| {
+                            remote_footer_picker
+                                .update(cx, |picker, cx| picker.open_remote(window, cx));
                         }),
                 )
                 .when(target == OpenTarget::Current && has_open_repo, |footer| {

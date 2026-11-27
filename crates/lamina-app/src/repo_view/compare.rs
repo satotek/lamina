@@ -1316,6 +1316,12 @@ impl RepoView {
                     } else {
                         div().into_any_element()
                     })
+                    .when(compare.view.is_some(), |row| {
+                        row.child(crate::diff_view::wrap_toggle(
+                            "compare-toggle-wrap-lines",
+                            cx,
+                        ))
+                    })
                     .child(
                         compare
                             .view

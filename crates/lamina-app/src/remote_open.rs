@@ -10,6 +10,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -29,7 +30,7 @@ use lamina_core::askpass::{Answer, Prompt};
 use lamina_core::session::{RepositorySession, SessionEvent};
 use lamina_remote_client::{
     InstallOptions, RemoteBrowser, RemoteDirListing, RemoteSession, RemoteTarget, SshOptions,
-    install_helper,
+    UploadProgress, install_helper,
 };
 use log::{info, warn};
 
@@ -94,9 +95,22 @@ pub(crate) struct RemoteLaunch {
 pub(crate) enum ConnectPhase {
     Connecting,
     PreparingHelper,
+    UploadingHelper { sent: u64, total: u64 },
     Opening,
     LoadingHistory,
     Ready,
+}
+
+fn format_upload_parts(sent: u64, total: u64) -> (String, String, u64) {
+    const MIB: f64 = 1024.0 * 1024.0;
+    let sent_mb = format!("{:.1}", sent as f64 / MIB);
+    let total_mb = format!("{:.1}", total as f64 / MIB);
+    let percent = sent
+        .saturating_mul(100)
+        .checked_div(total)
+        .unwrap_or(0)
+        .min(100);
+    (sent_mb, total_mb, percent)
 }
 
 impl ConnectPhase {
@@ -104,6 +118,17 @@ impl ConnectPhase {
         match self {
             Self::Connecting => t!("remote_repo.phase.connecting").to_string(),
             Self::PreparingHelper => t!("remote_repo.phase.helper").to_string(),
+            Self::UploadingHelper { sent, total } if total > 0 => {
+                let (sent, total, percent) = format_upload_parts(sent, total);
+                t!(
+                    "remote_repo.phase.uploading",
+                    sent = sent,
+                    total = total,
+                    percent = percent
+                )
+                .to_string()
+            }
+            Self::UploadingHelper { .. } => t!("remote_repo.phase.helper").to_string(),
             Self::Opening => t!("remote_repo.phase.opening").to_string(),
             Self::LoadingHistory => t!("remote_repo.phase.history").to_string(),
             Self::Ready => t!("remote_repo.phase.ready").to_string(),
@@ -321,10 +346,11 @@ pub(crate) fn resolve_helper_dir() -> Result<PathBuf, String> {
 pub(crate) fn spawn_connect(
     spec: RemoteSpec,
     ssh: Option<SshOverride>,
+    cancel: Arc<AtomicBool>,
     sender: UnboundedSender<ConnectMsg>,
 ) {
     spawn_worker("lamina-remote-connect", sender, move |worker| {
-        connect_worker(spec, ssh, worker)
+        connect_worker(spec, ssh, cancel, worker)
     });
 }
 
@@ -335,10 +361,11 @@ pub(crate) fn spawn_connect(
 pub(crate) fn spawn_browse_open(
     target: BrowseTarget,
     ssh: Option<SshOverride>,
+    cancel: Arc<AtomicBool>,
     sender: UnboundedSender<BrowseMsg>,
 ) {
     spawn_worker("lamina-remote-browse-open", sender, move |worker| {
-        browse_open_worker(target, ssh, worker)
+        browse_open_worker(target, ssh, cancel, worker)
     });
 }
 
@@ -416,6 +443,7 @@ fn prepare_remote_host<M>(
     host: &str,
     port: Option<u16>,
     ssh: Option<&SshOverride>,
+    cancel: Arc<AtomicBool>,
     sender: &UnboundedSender<M>,
 ) -> Option<PreparedHost>
 where
@@ -437,6 +465,16 @@ where
     let askpass_program = std::env::current_exe().ok();
     let askpass = askpass_handler(sender.clone());
     let _ = sender.unbounded_send(WorkerEvent::Phase(ConnectPhase::PreparingHelper).into());
+    let progress_sender = sender.clone();
+    let on_progress = Arc::new(move |progress: UploadProgress| {
+        let _ = progress_sender.unbounded_send(
+            WorkerEvent::Phase(ConnectPhase::UploadingHelper {
+                sent: progress.sent,
+                total: progress.total,
+            })
+            .into(),
+        );
+    });
     let install = InstallOptions {
         program: program.clone(),
         host: host.to_owned(),
@@ -444,6 +482,8 @@ where
         helper_dir: Some(helper_dir.clone()),
         askpass_program: askpass_program.clone(),
         askpass: Some(Arc::clone(&askpass)),
+        cancel: Some(Arc::clone(&cancel)),
+        on_progress: Some(on_progress),
     };
     let helper = match install_helper(&install) {
         Ok(helper) => {
@@ -451,11 +491,18 @@ where
             helper
         }
         Err(error) => {
+            if cancel.load(Ordering::Relaxed) {
+                info!("remote: helper install cancelled for {host}");
+                return None;
+            }
             warn!("remote: helper install failed for {host}: {error}");
             let _ = sender.unbounded_send(WorkerEvent::Failed(error.to_string()).into());
             return None;
         }
     };
+    if cancel.load(Ordering::Relaxed) {
+        return None;
+    }
     let _ = sender.unbounded_send(WorkerEvent::Phase(ConnectPhase::Opening).into());
     let options = SshOptions {
         program,
@@ -474,9 +521,15 @@ where
     })
 }
 
-fn connect_worker(spec: RemoteSpec, ssh: Option<SshOverride>, sender: UnboundedSender<ConnectMsg>) {
+fn connect_worker(
+    spec: RemoteSpec,
+    ssh: Option<SshOverride>,
+    cancel: Arc<AtomicBool>,
+    sender: UnboundedSender<ConnectMsg>,
+) {
     info!("remote: connecting to {} at {}", spec.host, spec.path);
-    let Some(prepared) = prepare_remote_host(&spec.host, spec.port, ssh.as_ref(), &sender) else {
+    let Some(prepared) = prepare_remote_host(&spec.host, spec.port, ssh.as_ref(), cancel, &sender)
+    else {
         return;
     };
     let events = sender.clone();
@@ -506,10 +559,12 @@ fn connect_worker(spec: RemoteSpec, ssh: Option<SshOverride>, sender: UnboundedS
 fn browse_open_worker(
     target: BrowseTarget,
     ssh: Option<SshOverride>,
+    cancel: Arc<AtomicBool>,
     sender: UnboundedSender<BrowseMsg>,
 ) {
     info!("remote: opening folder browser on {}", target.host);
-    let Some(prepared) = prepare_remote_host(&target.host, target.port, ssh.as_ref(), &sender)
+    let Some(prepared) =
+        prepare_remote_host(&target.host, target.port, ssh.as_ref(), cancel, &sender)
     else {
         return;
     };
@@ -747,6 +802,17 @@ fn browse_phase_label(phase: ConnectPhase) -> String {
     match phase {
         ConnectPhase::Connecting => t!("remote_repo.browse.connecting").to_string(),
         ConnectPhase::PreparingHelper => t!("remote_repo.browse.preparing").to_string(),
+        ConnectPhase::UploadingHelper { sent, total } if total > 0 => {
+            let (sent, total, percent) = format_upload_parts(sent, total);
+            t!(
+                "remote_repo.browse.uploading",
+                sent = sent,
+                total = total,
+                percent = percent
+            )
+            .to_string()
+        }
+        ConnectPhase::UploadingHelper { .. } => t!("remote_repo.browse.preparing").to_string(),
         ConnectPhase::Opening => t!("remote_repo.browse.opening").to_string(),
         other => other.label(),
     }
@@ -755,6 +821,9 @@ fn browse_phase_label(phase: ConnectPhase) -> String {
 struct BrowsePanel {
     host: String,
     port: Option<u16>,
+    /// Signals the in-flight helper install worker to kill its `ssh` child when
+    /// the picker closes or is replaced.
+    cancel: Arc<AtomicBool>,
     /// Kept open while the picker is visible so each folder click is one round
     /// trip. Dropped in the background when the picker or dialog closes.
     browser: Option<Arc<RemoteBrowser>>,
@@ -802,6 +871,7 @@ pub(crate) fn open_dialog(workspace: Entity<Workspace>, window: &mut Window, cx:
                 DialogFooter::new()
                     .child(
                         ui::button("remote-repo-cancel", t!("common.cancel").to_string())
+                            .kind(ui::ButtonKind::Normal)
                             .size(ui::ButtonSize::Medium)
                             .on_click(move |_, window, cx| {
                                 window.close_dialog(cx);
@@ -904,8 +974,14 @@ impl RemoteDialog {
 
         self.close_browser_silent();
         let token = self.browse_gate.next();
+        let cancel = Arc::new(AtomicBool::new(false));
         let (sender, mut receiver) = futures_mpsc::unbounded();
-        spawn_browse_open(target.clone(), self.ssh.clone(), sender);
+        spawn_browse_open(
+            target.clone(),
+            self.ssh.clone(),
+            Arc::clone(&cancel),
+            sender,
+        );
         let task = cx.spawn(async move |this, cx| {
             while let Some(message) = receiver.next().await {
                 if this
@@ -919,6 +995,7 @@ impl RemoteDialog {
         self.browse = Some(BrowsePanel {
             host: target.host,
             port: target.port,
+            cancel,
             browser: None,
             connect_phase: Some(ConnectPhase::Connecting),
             loading: false,
@@ -1062,10 +1139,11 @@ impl RemoteDialog {
 
     fn close_browser_silent(&mut self) {
         self.browse_gate.invalidate();
-        if let Some(panel) = self.browse.take()
-            && let Some(browser) = panel.browser
-        {
-            drop_browser_in_background(browser);
+        if let Some(panel) = self.browse.take() {
+            panel.cancel.store(true, Ordering::Relaxed);
+            if let Some(browser) = panel.browser {
+                drop_browser_in_background(browser);
+            }
         }
     }
 
@@ -1103,7 +1181,8 @@ impl RemoteDialog {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if let Some(listing) = &panel.listing {
-            let mut frame = ui::panel(design).header(ui::path_label(listing.path.clone(), design));
+            let mut frame =
+                picker_panel(design).header(ui::path_label(listing.path.clone(), design));
             if listing.repository {
                 frame = frame.header(repository_badge(design));
             }
@@ -1203,11 +1282,9 @@ impl RemoteDialog {
                     "remote-browse-use",
                     t!("remote_repo.browse.use_folder").to_string(),
                 )
-                .kind(if listing.repository {
-                    ui::ButtonKind::Primary
-                } else {
-                    ui::ButtonKind::Normal
-                })
+                // The dialog footer's Connect is the one primary action; a
+                // second filled button inside the picker would compete with it.
+                .kind(ui::ButtonKind::Normal)
                 .size(ui::ButtonSize::Small)
                 .disabled(panel.loading)
                 .on_click(cx.listener(|this, _, window, cx| {
@@ -1218,7 +1295,7 @@ impl RemoteDialog {
         }
 
         if let Some(phase) = panel.connect_phase {
-            return ui::panel(design)
+            return picker_panel(design)
                 .child(
                     div()
                         .flex()
@@ -1261,6 +1338,13 @@ fn close_picker_button(id: &'static str, cx: &mut Context<RemoteDialog>) -> impl
         .on_click(cx.listener(|this, _, _, cx| {
             this.close_browser(cx);
         }))
+}
+
+/// The folder picker's frame. `ui::panel` paints the window background, which
+/// reads as a dark hole inside the dialog card; the input fill keeps the picker
+/// level with the fields above it.
+fn picker_panel(design: &Design) -> ui::Panel {
+    ui::panel(design).bg(design.field)
 }
 
 /// The chip that marks a folder as a Git repository, in a header or a row.

@@ -618,6 +618,14 @@ impl Picker {
         });
     }
 
+    /// Opens the remote repository dialog. A remote session always opens in
+    /// the current tab, so the picker's target does not apply.
+    pub(crate) fn open_remote(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_creator(window, cx, |workspace, _, window, cx| {
+            crate::remote_open::open_dialog(workspace, window, cx);
+        });
+    }
+
     /// Opens the standalone Compare setup dialog on the picker's workspace.
     pub(crate) fn open_compare(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.open_creator(window, cx, |workspace, _, window, cx| {

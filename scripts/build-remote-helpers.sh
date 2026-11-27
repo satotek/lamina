@@ -136,7 +136,8 @@ for target in "$@"; do
         esac
     fi
 
-    cargo zigbuild --release --locked -p lamina-remote --target "$target"
+    CARGO_PROFILE_RELEASE_STRIP=symbols \
+        cargo zigbuild --release --locked -p lamina-remote --target "$target"
     release=$(lamina_release_dir "$root" "$target")
     src=$release/lamina-remote
     if [ ! -f "$src" ]; then

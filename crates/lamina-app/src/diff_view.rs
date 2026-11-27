@@ -21,10 +21,13 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, BorrowAppContext as _, Div, Global, HighlightStyle, Hsla, IntoElement,
-    ListAlignment, ListOffset, ListState, ParentElement, SharedString, Styled, StyledText,
-    UniformListScrollHandle, Window, div, list, prelude::FluentBuilder as _, px, uniform_list,
+    AnyElement, App, BorrowAppContext as _, Div, Font, Global, HighlightStyle, Hsla,
+    InteractiveElement as _, IntoElement, ListAlignment, ListOffset, ListState, ParentElement,
+    Pixels, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled, StyledText,
+    UniformListScrollHandle, Window, canvas, div, list, point, prelude::FluentBuilder as _, px,
+    uniform_list,
 };
+use gpui_component::Selectable as _;
 use gpui_component::scroll::Scrollbar;
 #[cfg(test)]
 use gpui_component::theme::Theme;
@@ -34,6 +37,7 @@ use lamina_core::diff::{
 };
 use lamina_core::highlight::{HighlightKind, LineHighlights};
 use lamina_core::session::DiffView;
+use lamina_core::text::display_width_with_tabs;
 
 use crate::scrollbar::WithScrollbar as _;
 use crate::settings::{DiffLayout, Settings};
@@ -60,6 +64,48 @@ enum RowRole {
     Middle,
     /// The hunk's last line row: the card's bottom edge and rounded corners.
     Tail,
+}
+
+/// How a line that is longer than its column is shown.
+#[derive(Clone, Copy)]
+enum LineFit<'a> {
+    /// The text breaks onto as many visual lines as it needs.
+    Wrap,
+    /// The text runs past the column's edge and is cut off there. Panes that
+    /// have no shared horizontal scroll (the staging pane, stacked diffs) use
+    /// this.
+    Clip,
+    /// The text sits in a strip that pans with every other row of the list.
+    /// `key` tells the strips apart, because each one is its own scroll
+    /// container.
+    Pan { pan: &'a Pan, key: usize },
+}
+
+impl LineFit<'_> {
+    fn wraps(self) -> bool {
+        matches!(self, Self::Wrap)
+    }
+
+    /// The fit for one column of a side-by-side row; both columns pan
+    /// together but need their own strip ids.
+    fn side(self, side: Side) -> Self {
+        match self {
+            Self::Pan { pan, key } => Self::Pan {
+                pan,
+                key: key * 2 + usize::from(side == Side::New),
+            },
+            other => other,
+        }
+    }
+}
+
+/// The shared horizontal scroll of an unwrapped diff list.
+#[derive(Clone)]
+struct Pan {
+    handle: ScrollHandle,
+    /// How wide every strip's content is: the widest line in the diff, so a
+    /// short line never clamps the shared offset.
+    width: Pixels,
 }
 
 /// The role of a row in the unified stream.
@@ -598,7 +644,7 @@ pub fn render_row_with(
     options: RowOptions,
 ) -> AnyElement {
     let highlights = if style.syntax { highlights } else { None };
-    unified_row(row, colors, style, highlights, options, false, None)
+    unified_row(row, colors, style, highlights, options, LineFit::Clip, None)
 }
 
 /// Syntax spans for the old and new sides of a rendered diff list.
@@ -644,7 +690,7 @@ pub(crate) fn render_stacked_rows(
                     colors,
                     style,
                     highlights.as_ref(),
-                    style.wrap,
+                    stacked_fit(style),
                     split_role(&pairs, index),
                     on_gap,
                 )
@@ -668,12 +714,22 @@ pub(crate) fn render_stacked_rows(
                         inset: true,
                         ..RowOptions::default()
                     },
-                    style.wrap,
+                    stacked_fit(style),
                     row_role(rows, index),
                 )
             }
         })
         .collect()
+}
+
+/// Stacked file sections are plain children of one scrolling column, so
+/// there is no shared horizontal scroll to pan them with.
+fn stacked_fit(style: &DiffStyle) -> LineFit<'static> {
+    if style.wrap {
+        LineFit::Wrap
+    } else {
+        LineFit::Clip
+    }
 }
 
 /// The diff pane's list of rows.
@@ -721,29 +777,210 @@ pub fn diff_list_with_highlights(
 ) -> AnyElement {
     let style = DiffStyle::from_settings(cx, &mono);
     let (count, pairs) = list_items(&rows, style.split);
-    let source = Rows {
+    let mut source = Rows {
         rows,
         pairs,
         highlights,
         colors,
         style,
         on_gap,
+        pan: None,
     };
 
     if source.style.wrap {
         return wrapped_list(id, source, count, cx);
     }
 
-    uniform_list(id, count, move |range: Range<usize>, _window, _cx| {
+    let (handle, columns) = pan_state(id, &source.rows, source.style.tab_width, cx);
+    let width = pan_width(columns, code_advance(&source.style, cx), &source.style);
+    // The strips' own bounds are the code viewport. They are known only after
+    // layout, so this frame uses last frame's width and the probe below asks
+    // for another frame when it has moved (first paint, resize, layout switch).
+    let viewport = handle.bounds().size.width;
+    let show_bar = overflows(width, viewport);
+    let bar_colors = [
+        Hsla::transparent_black(),
+        source.colors.border,
+        source.colors.muted,
+    ];
+    source.pan = Some(Pan {
+        handle: handle.clone(),
+        width,
+    });
+
+    let mut list = uniform_list(id, count, move |range: Range<usize>, _window, _cx| {
         range
             .map(|index| source.element(index, false))
             .collect::<Vec<_>>()
     })
-    .track_scroll(scroll)
-    .with_scrollbar(scroll)
-    .flex_1()
-    .min_h_0()
-    .into_any_element()
+    .track_scroll(scroll);
+    // A vertical wheel over a strip must still scroll the rows, and a
+    // horizontal one must pan the strip rather than nudge the list.
+    list.style().restrict_scroll_to_axis = Some(true);
+    let probe_handle = handle.clone();
+
+    div()
+        .relative()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_h_0()
+        .min_w_0()
+        .child(list.with_scrollbar(scroll).flex_1().min_h_0())
+        .when(show_bar, |pane| {
+            pane.child(crate::ui::h_scrollbar_tinted(
+                gpui::ElementId::Name(format!("{id}-hscroll").into()),
+                &handle,
+                viewport,
+                width,
+                bar_colors,
+            ))
+        })
+        .child(
+            canvas(
+                |_, _, _| (),
+                move |_, (), window, cx| {
+                    let now = probe_handle.bounds().size.width;
+                    if (now - viewport).abs() > px(0.5) {
+                        cx.notify(window.current_view());
+                    }
+                },
+            )
+            .absolute()
+            .size_0(),
+        )
+        .into_any_element()
+}
+
+/// Trailing room after the widest line, so its last glyph is not flush with
+/// the pane's edge once panned all the way.
+const PAN_TAIL: f32 = 16.0;
+
+/// The width every strip reserves: the widest line, measured in code cells.
+fn pan_width(columns: usize, advance: Pixels, style: &DiffStyle) -> Pixels {
+    advance * columns as f32 + style.px(PAN_TAIL)
+}
+
+/// Whether the widest line is wider than the strip that shows it. A viewport
+/// that has not been laid out yet never shows the bar.
+fn overflows(content: Pixels, viewport: Pixels) -> bool {
+    viewport > px(0.0) && content > viewport + px(0.5)
+}
+
+/// The advance of one cell of the code font.
+///
+/// The text system caches the resolved face, so this is cheap enough to ask
+/// for every frame; asking means a font or size change reaches the strips at
+/// once.
+fn code_advance(style: &DiffStyle, cx: &App) -> Pixels {
+    let text = cx.text_system();
+    let font = Font {
+        family: style.mono.clone(),
+        fallbacks: Some(crate::style::font_fallbacks()),
+        ..Font::default()
+    };
+    let size = px(style.font_size);
+    text.em_advance(text.resolve_font(&font), size)
+        .unwrap_or(size * 0.6)
+}
+
+/// The widest drawn line of `rows`, in columns once tabs expand.
+fn max_columns(rows: &[Row], tab_width: usize) -> usize {
+    rows.iter()
+        .filter_map(|row| match row {
+            Row::Line(line) | Row::Context(line) => {
+                Some(display_width_with_tabs(&line.content, tab_width))
+            }
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// One horizontal scroll per pane, keyed like [`WrappedLists`].
+///
+/// The panes only hold a vertical handle, and measuring the widest line on
+/// every frame would scale with the file, so the shared handle and the
+/// measured width live here and are only refreshed when the diff changes.
+#[derive(Default)]
+struct PanLists(HashMap<&'static str, PanList>);
+
+impl Global for PanLists {}
+
+struct PanList {
+    handle: ScrollHandle,
+    content: u64,
+    tab_width: usize,
+    columns: usize,
+}
+
+impl PanList {
+    fn new(rows: &[Row], content: u64, tab_width: usize) -> Self {
+        Self {
+            handle: ScrollHandle::new(),
+            content,
+            tab_width,
+            columns: max_columns(rows, tab_width),
+        }
+    }
+
+    /// Re-measures when the rows or the tab width change. Another diff starts
+    /// at its left edge; a new tab width keeps the offset, since it is still
+    /// the same text.
+    fn sync(&mut self, rows: &[Row], content: u64, tab_width: usize) {
+        if self.content == content && self.tab_width == tab_width {
+            return;
+        }
+        if self.content != content {
+            self.handle
+                .set_offset(point(px(0.0), self.handle.offset().y));
+        }
+        self.content = content;
+        self.tab_width = tab_width;
+        self.columns = max_columns(rows, tab_width);
+    }
+}
+
+fn pan_state(
+    id: &'static str,
+    rows: &[Row],
+    tab_width: usize,
+    cx: &mut App,
+) -> (ScrollHandle, usize) {
+    if !cx.has_global::<PanLists>() {
+        cx.set_global(PanLists::default());
+    }
+    let content = rows_fingerprint(rows);
+    cx.update_global::<PanLists, _>(|lists, _| {
+        let entry = lists
+            .0
+            .entry(id)
+            .or_insert_with(|| PanList::new(rows, content, tab_width));
+        entry.sync(rows, content, tab_width);
+        (entry.handle.clone(), entry.columns)
+    })
+}
+
+/// The diff header's toggle for line wrapping.
+///
+/// The preference is global, so flipping it from any pane's header changes
+/// every diff at once, just as the settings page does.
+pub(crate) fn wrap_toggle(id: &'static str, cx: &App) -> crate::ui::UiButton {
+    let active = Settings::get(cx).diff.wrap_lines;
+    crate::ui::button(id, t!("diff.wrap").to_string())
+        .size(crate::ui::ButtonSize::Tiny)
+        .ghost()
+        .selected(active)
+        .tooltip(if active {
+            t!("diff.wrap_disable").to_string()
+        } else {
+            t!("diff.wrap_enable").to_string()
+        })
+        .on_click(|_event, _window, cx| crate::settings::update(cx, toggle_wrap_lines))
+}
+
+fn toggle_wrap_lines(settings: &mut Settings) {
+    settings.diff.wrap_lines = !settings.diff.wrap_lines;
 }
 
 /// Returns the list item indices of hunk headers for next/previous change
@@ -772,6 +1009,8 @@ struct Rows {
     colors: DiffColors,
     style: DiffStyle,
     on_gap: Option<GapHandler>,
+    /// Set for an unwrapped list, whose long lines pan instead of being cut.
+    pan: Option<Pan>,
 }
 
 impl Rows {
@@ -783,7 +1022,13 @@ impl Rows {
             colors,
             style,
             on_gap,
+            pan,
         } = self;
+        let fit = match pan {
+            _ if wrap => LineFit::Wrap,
+            Some(pan) => LineFit::Pan { pan, key: index },
+            None => LineFit::Clip,
+        };
         if let Some(pairs) = pairs.as_deref() {
             return match pairs.get(index) {
                 Some(pair) => split_row(
@@ -792,7 +1037,7 @@ impl Rows {
                     colors,
                     style,
                     highlights.as_ref(),
-                    wrap,
+                    fit,
                     split_role(pairs, index),
                     on_gap.as_ref(),
                 ),
@@ -818,7 +1063,7 @@ impl Rows {
                 inset: true,
                 ..RowOptions::default()
             },
-            wrap,
+            fit,
             row_role(rows, index),
         )
     }
@@ -1046,9 +1291,10 @@ fn unified_row(
     style: &DiffStyle,
     highlights: Option<&LineHighlights>,
     options: RowOptions,
-    wrap: bool,
+    fit: LineFit<'_>,
     role: Option<RowRole>,
 ) -> AnyElement {
+    let wrap = fit.wraps();
     match row {
         Row::HunkHeader {
             old_start,
@@ -1134,7 +1380,7 @@ fn unified_row(
                             .text_color(colors.gutter)
                             .child(marker(line.kind)),
                     )
-                    .child(line_content(line, colors, style, highlights, wrap)),
+                    .child(line_content(line, colors, style, highlights, fit)),
                 )
                 .into_any_element()
         }
@@ -1151,12 +1397,12 @@ fn split_row(
     colors: &DiffColors,
     style: &DiffStyle,
     highlights: Option<&DiffHighlights>,
-    wrap: bool,
+    fit: LineFit<'_>,
     role: Option<RowRole>,
     on_gap: Option<&GapHandler>,
 ) -> AnyElement {
     split_row_scoped(
-        None, pair, rows, colors, style, highlights, wrap, role, on_gap,
+        None, pair, rows, colors, style, highlights, fit, role, on_gap,
     )
 }
 
@@ -1171,10 +1417,11 @@ fn split_row_scoped(
     colors: &DiffColors,
     style: &DiffStyle,
     highlights: Option<&DiffHighlights>,
-    wrap: bool,
+    fit: LineFit<'_>,
     role: Option<RowRole>,
     on_gap: Option<&GapHandler>,
 ) -> AnyElement {
+    let wrap = fit.wraps();
     match pair {
         SplitRow::Header { row } => match rows.get(row) {
             Some(Row::HunkHeader {
@@ -1239,7 +1486,7 @@ fn split_row_scoped(
                         colors,
                         style,
                         old_highlights,
-                        wrap,
+                        fit.side(Side::Old),
                         tail,
                     ))
                     .child(side_cell(
@@ -1248,7 +1495,7 @@ fn split_row_scoped(
                         colors,
                         style,
                         new_highlights,
-                        wrap,
+                        fit.side(Side::New),
                         tail,
                     )),
                 )
@@ -1271,9 +1518,10 @@ fn side_cell(
     colors: &DiffColors,
     style: &DiffStyle,
     highlights: Option<&LineHighlights>,
-    wrap: bool,
+    fit: LineFit<'_>,
     tail: bool,
 ) -> Div {
+    let wrap = fit.wraps();
     let number = line.and_then(|line| match side {
         Side::Old => line.old_lineno,
         Side::New => line.new_lineno,
@@ -1325,7 +1573,7 @@ fn side_cell(
                 .child(marker),
         )
         .when_some(line, |cell, line| {
-            cell.child(line_content(line, colors, style, highlights, wrap))
+            cell.child(line_content(line, colors, style, highlights, fit))
         })
 }
 
@@ -1528,8 +1776,8 @@ fn line_content(
     colors: &DiffColors,
     style: &DiffStyle,
     highlights: Option<&LineHighlights>,
-    wrap: bool,
-) -> Div {
+    fit: LineFit<'_>,
+) -> AnyElement {
     let emphasis_bg = match line.kind {
         LineKind::Added => colors.emphasis_added,
         LineKind::Removed => colors.emphasis_removed,
@@ -1538,16 +1786,44 @@ fn line_content(
     let drawn = display(line, style, highlights);
     let text = styled(drawn, emphasis_bg, colors, style);
 
-    let mut content = div()
+    let content = div()
         .font_family(style.mono.clone())
         .text_size(px(style.font_size))
         .text_color(colors.text);
-    content = if wrap {
-        content.flex_1().min_w_0().whitespace_normal()
-    } else {
-        content.flex_none().whitespace_nowrap()
-    };
-    content.child(text)
+    match fit {
+        LineFit::Wrap => content
+            .flex_1()
+            .min_w_0()
+            .whitespace_normal()
+            .child(text)
+            .into_any_element(),
+        LineFit::Clip => content
+            .flex_none()
+            .whitespace_nowrap()
+            .child(text)
+            .into_any_element(),
+        // Only the code pans; the gutters before it stay put so line numbers
+        // remain readable at any offset. Every strip tracks the same handle,
+        // so the whole list moves as one.
+        LineFit::Pan { pan, key } => div()
+            .id(("diff-pan", key))
+            .flex()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .items_center()
+            .overflow_x_scroll()
+            .restrict_scroll_to_axis()
+            .track_scroll(&pan.handle)
+            .child(
+                content
+                    .flex_none()
+                    .w(pan.width)
+                    .whitespace_nowrap()
+                    .child(text),
+            )
+            .into_any_element(),
+    }
 }
 
 /// One line of code drawn with the diff's display settings: the tab width,
@@ -2084,6 +2360,100 @@ mod tests {
             }),
             "the list ends on the last context row, not on an empty item"
         );
+    }
+
+    #[test]
+    fn the_widest_line_is_measured_with_tabs_and_wide_characters() {
+        let rows = vec![
+            header(),
+            line(LineKind::Context, Some(1), Some(1), "short"),
+            line(LineKind::Added, None, Some(2), "\tx"),
+            line(LineKind::Removed, Some(2), None, "日本語"),
+        ];
+        assert_eq!(max_columns(&rows, 4), 6, "three wide characters");
+        assert_eq!(max_columns(&rows, 8), 9, "a tab to column 8, then one");
+        assert_eq!(max_columns(&[header()], 4), 0, "headers have no code");
+    }
+
+    #[test]
+    fn the_bar_shows_only_when_the_widest_line_overflows() {
+        assert!(overflows(px(500.0), px(300.0)));
+        assert!(!overflows(px(300.0), px(300.0)));
+        assert!(!overflows(px(200.0), px(300.0)));
+        assert!(
+            !overflows(px(500.0), px(0.0)),
+            "a strip not laid out yet has no viewport to overflow"
+        );
+    }
+
+    #[test]
+    fn the_pan_width_scales_with_columns_and_keeps_a_tail() {
+        let style = DiffStyle {
+            mono: SharedString::from("Mono"),
+            font_size: 12.0,
+            zoom: 2.0,
+            tab_width: 4,
+            split: false,
+            wrap: false,
+            syntax: false,
+            show_whitespace: false,
+        };
+        assert_eq!(pan_width(0, px(7.0), &style), px(PAN_TAIL * 2.0));
+        assert_eq!(pan_width(10, px(7.0), &style), px(70.0 + PAN_TAIL * 2.0));
+    }
+
+    #[test]
+    fn another_diff_remeasures_and_returns_to_the_left_edge() {
+        let short = vec![line(LineKind::Context, Some(1), Some(1), "ab")];
+        let long = vec![line(LineKind::Context, Some(1), Some(1), "abcdefgh")];
+        let mut pan = PanList::new(&short, rows_fingerprint(&short), 4);
+        assert_eq!(pan.columns, 2);
+
+        pan.handle.set_offset(point(px(-40.0), px(0.0)));
+        pan.sync(&short, rows_fingerprint(&short), 4);
+        assert_eq!(
+            pan.handle.offset().x,
+            px(-40.0),
+            "same diff keeps its offset"
+        );
+
+        pan.sync(&short, rows_fingerprint(&short), 8);
+        assert_eq!(
+            pan.handle.offset().x,
+            px(-40.0),
+            "a tab change is the same text"
+        );
+
+        pan.sync(&long, rows_fingerprint(&long), 8);
+        assert_eq!(pan.columns, 8);
+        assert_eq!(pan.handle.offset().x, px(0.0));
+    }
+
+    #[test]
+    fn side_by_side_columns_get_their_own_strip_ids() {
+        let pan = Pan {
+            handle: ScrollHandle::new(),
+            width: px(100.0),
+        };
+        let fit = LineFit::Pan { pan: &pan, key: 3 };
+        let key = |fit: LineFit<'_>| match fit {
+            LineFit::Pan { key, .. } => key,
+            _ => unreachable!("a pan stays a pan"),
+        };
+        assert_eq!(key(fit.side(Side::Old)), 6);
+        assert_eq!(key(fit.side(Side::New)), 7);
+        assert!(!fit.wraps());
+        assert!(LineFit::Wrap.side(Side::New).wraps());
+    }
+
+    #[test]
+    fn the_wrap_toggle_flips_the_preference() {
+        let mut settings = Settings::default();
+        let before = settings.diff.wrap_lines;
+        toggle_wrap_lines(&mut settings);
+        assert_eq!(settings.diff.wrap_lines, !before);
+        toggle_wrap_lines(&mut settings);
+        assert_eq!(settings.diff.wrap_lines, before);
     }
 
     #[test]

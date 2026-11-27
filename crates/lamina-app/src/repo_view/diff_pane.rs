@@ -266,6 +266,11 @@ impl RepoView {
                     div().into_any_element()
                 },
             )
+            .when(
+                self.harness.fake.is_none()
+                    && self.diff.view().is_some_and(|view| !view.diff.binary),
+                |header| header.child(crate::diff_view::wrap_toggle("toggle-wrap-lines", cx)),
+            )
             .child(
                 self.diff
                     .view()
