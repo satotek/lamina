@@ -1043,6 +1043,7 @@ impl RepoView {
         window.open_alert_dialog(cx, move |dialog, _, _| {
             let mut footer = DialogFooter::new().child(
                 crate::ui::button("publish-cancel", t!("common.cancel").to_string())
+                    .kind(crate::ui::ButtonKind::Normal)
                     .size(crate::ui::ButtonSize::Medium)
                     .on_click(|_, window, cx| window.close_dialog(cx)),
             );

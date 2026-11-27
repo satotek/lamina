@@ -2447,6 +2447,7 @@ impl RepoView {
                     DialogFooter::new()
                         .child(
                             ui::button("tag-cancel", t!("common.cancel").to_string())
+                                .kind(ui::ButtonKind::Normal)
                                 .size(ui::ButtonSize::Medium)
                                 .on_click(|_, window, cx| window.close_dialog(cx)),
                         )

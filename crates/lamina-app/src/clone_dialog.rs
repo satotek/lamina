@@ -78,6 +78,7 @@ pub(crate) fn open_clone(
                 DialogFooter::new()
                     .child(
                         ui::button("clone-cancel", t!("common.cancel").to_string())
+                            .kind(ui::ButtonKind::Normal)
                             .size(ui::ButtonSize::Medium)
                             .on_click(move |_, window, cx| {
                                 cancel.update(cx, |dialog, cx| {
@@ -133,6 +134,7 @@ pub(crate) fn open_init(
                 DialogFooter::new()
                     .child(
                         ui::button("init-cancel", t!("common.cancel").to_string())
+                            .kind(ui::ButtonKind::Normal)
                             .size(ui::ButtonSize::Medium)
                             .disabled(busy)
                             .on_click(|_, window, cx| window.close_dialog(cx)),

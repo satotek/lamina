@@ -2042,11 +2042,11 @@ impl Conflicts {
     fn marker_warning_bar(&self, entity: Entity<RepoView>, colors: &ConflictColors) -> AnyElement {
         let cancel = {
             let entity = entity.clone();
-            crate::ui::button("marker-cancel", t!("common.cancel").to_string()).on_click(
-                move |_, _, cx| {
+            crate::ui::button("marker-cancel", t!("common.cancel").to_string())
+                .kind(crate::ui::ButtonKind::Normal)
+                .on_click(move |_, _, cx| {
                     entity.update(cx, |this, cx| this.dismiss_marker_warning(cx));
-                },
-            )
+                })
         };
         let resolve = {
             let entity = entity.clone();
